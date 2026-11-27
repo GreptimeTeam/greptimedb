@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{ListMetadataRequest, RegionRequest, RegionRequestHeader};
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadata;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::consts::ReservedColumnId;
+use store_api::storage::{ColumnId, RegionId, TableId};
+use table::metadata::TableInfo;
 
 use crate::ddl::utils::add_peer_context_if_needed;
-use crate::error::{DecodeJsonSnafu, Result};
+use crate::error::{self, DecodeJsonSnafu, Result};
 use crate::node_manager::NodeManagerRef;
 use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
@@ -32,10 +36,117 @@ pub struct RegionMetadataLister {
     node_manager: NodeManagerRef,
 }
 
+/// The ordered tag IDs and names of a sparse Mito region.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct SparseRegionPrimaryKey {
+    columns: Vec<(ColumnId, String)>,
+}
+
+impl SparseRegionPrimaryKey {
+    /// Preserves the current catalog schema, replacing only an obsolete ordering of the same tags.
+    pub fn align_table<'a>(&self, table: &'a TableInfo) -> Result<Cow<'a, TableInfo>> {
+        let meta = &table.meta;
+        let catalog_tag = |index: usize| {
+            let name = meta.schema.column_schemas().get(index)?.name.as_str();
+            Some((*meta.column_ids.get(index)?, name))
+        };
+        let region_tags = self.columns.iter().map(|(id, name)| (*id, name.as_str()));
+        if meta
+            .primary_key_indices
+            .iter()
+            .map(|&i| catalog_tag(i))
+            .eq(region_tags.clone().map(Some))
+        {
+            return Ok(Cow::Borrowed(table));
+        }
+
+        let positions: HashMap<_, _> = meta
+            .primary_key_indices
+            .iter()
+            .filter_map(|&i| Some((catalog_tag(i)?, i)))
+            .collect();
+        let mismatch = || error::InconsistentSparsePrimaryKeySnafu {
+            table_id: table.table_id(),
+        };
+        ensure!(
+            self.columns.len() == meta.primary_key_indices.len(),
+            mismatch()
+        );
+        let indices = region_tags
+            .map(|tag| positions.get(&tag).copied())
+            .collect::<Option<Vec<_>>>()
+            .with_context(mismatch)?;
+        let mut aligned = table.clone();
+        aligned.meta.primary_key_indices = indices;
+        Ok(Cow::Owned(aligned))
+    }
+}
+
 impl RegionMetadataLister {
     /// Creates a new [`RegionMetadataLister`] with the given [`NodeManagerRef`].
     pub fn new(node_manager: NodeManagerRef) -> Self {
         Self { node_manager }
+    }
+
+    /// Reads each destination's physical key. Writes may safely omit a newly added NULL suffix.
+    pub async fn sparse_primary_keys(
+        &self,
+        table_id: TableId,
+        routes: &[RegionRoute],
+        write_schema: Option<&TableInfo>,
+    ) -> Result<HashMap<RegionId, SparseRegionPrimaryKey>> {
+        let regions = self.list(table_id, routes).await?;
+        ensure!(
+            regions.len() == routes.len() && regions.iter().all(Option::is_some),
+            error::NoLeaderSnafu { table_id }
+        );
+        let keys = regions
+            .into_iter()
+            .flatten()
+            .map(|region| {
+                let mismatch = || error::InconsistentSparsePrimaryKeySnafu { table_id };
+                ensure!(
+                    region.primary_key_encoding == PrimaryKeyEncoding::Sparse
+                        && region
+                            .primary_key
+                            .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]),
+                    mismatch()
+                );
+                let mut key = region.primary_key.as_slice();
+                if let Some(table) = write_schema {
+                    let width = table.meta.primary_key_indices.len();
+                    key = region
+                        .sparse_key_prefix_for_write(width)
+                        .context(error::SparseWriteSchemaSnafu)?;
+                    for id in &region.primary_key[width..] {
+                        let column = &region
+                            .column_by_id(*id)
+                            .with_context(mismatch)?
+                            .column_schema;
+                        ensure!(
+                            !table.meta.column_ids.contains(id)
+                                && !table.meta.schema.contains_column(&column.name),
+                            mismatch()
+                        );
+                    }
+                }
+                let columns = key
+                    .iter()
+                    .map(|&id| {
+                        let column = region.column_by_id(id).with_context(mismatch)?;
+                        Ok((id, column.column_schema.name.clone()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((region.region_id, SparseRegionPrimaryKey { columns }))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        ensure!(
+            routes
+                .iter()
+                .all(|route| keys.contains_key(&route.region.id)),
+            error::NoLeaderSnafu { table_id }
+        );
+        Ok(keys)
     }
 
     /// Collects the region metadata from the datanodes.
@@ -241,5 +352,39 @@ mod tests {
         assert_eq!(region_metadatas.len(), 2);
         assert_eq!(region_metadatas[0], None);
         assert_eq!(region_metadatas[1], Some(region_metadata));
+        assert!(matches!(
+            lister.sparse_primary_keys(1024, &region_routes, None).await,
+            Err(crate::error::Error::NoLeader { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_sparse_primary_keys_preserve_each_regions_order() {
+        let mut columns = test_column_metadatas(&["host", "site"]);
+        columns[2].column_schema.data_type =
+            datatypes::prelude::ConcreteDataType::uint32_datatype();
+        columns[3].column_schema.data_type =
+            datatypes::prelude::ConcreteDataType::uint64_datatype();
+        let routes = [0, 1].map(|number| RegionRoute {
+            region: Region::new_test(RegionId::new(1024, number)),
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        });
+        let mut metadata = HashMap::new();
+        for (index, route) in routes.iter().enumerate() {
+            let mut region = build_region_metadata(route.region.id, &columns);
+            region.primary_key_encoding = store_api::codec::PrimaryKeyEncoding::Sparse;
+            if index == 1 {
+                region.primary_key.swap(2, 3);
+            }
+            metadata.insert(region.region_id, Some(region));
+        }
+        let handler = ListMetadataDatanodeHandler::new(metadata);
+        let lister = RegionMetadataLister::new(Arc::new(MockDatanodeManager::new(handler)));
+        let keys = lister
+            .sparse_primary_keys(1024, &routes, None)
+            .await
+            .unwrap();
+        assert_ne!(keys[&routes[0].region.id], keys[&routes[1].region.id]);
     }
 }

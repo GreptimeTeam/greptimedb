@@ -26,6 +26,7 @@ use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::cache::new_table_flownode_set_cache;
+use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::test_util::MockDatanodeManager;
@@ -134,6 +135,7 @@ async fn inserter(requests: &RowInsertRequests) -> Inserter {
     let backend = Arc::new(MemoryKvBackend::default());
     Inserter::new(
         catalog,
+        Arc::new(DummyCacheInvalidator),
         create_partition_rule_manager(backend.clone()).await,
         Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
         Arc::new(new_table_flownode_set_cache(

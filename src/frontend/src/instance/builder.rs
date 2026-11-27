@@ -249,6 +249,7 @@ impl FrontendBuilder {
         let create_inserter = || {
             Inserter::new(
                 self.catalog_manager.clone(),
+                local_cache_invalidator.clone(),
                 partition_manager.clone(),
                 node_manager.clone(),
                 table_flownode_cache.clone(),

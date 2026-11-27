@@ -47,7 +47,7 @@ use store_api::region_request::{
     RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
     StagingPartitionDirective,
 };
-use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, SPARSE_KEY_ORDER};
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
@@ -591,6 +591,12 @@ pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -
     let mut columns = HashMap::with_capacity(batch.num_columns());
     for (field, array) in batch.schema_ref().fields().iter().zip(batch.columns()) {
         let duplicate = if sparse && field.name() == PRIMARY_KEY_COLUMN_NAME {
+            // DDL can advance after frontend key resolution or while a prepared batch is queued.
+            if let Some(order) = field.metadata().get(SPARSE_KEY_ORDER) {
+                metadata
+                    .check_sparse_key_order(order)
+                    .context(crate::error::InvalidRegionRequestSnafu)?;
+            }
             primary_key.replace(array).is_some()
         } else {
             columns

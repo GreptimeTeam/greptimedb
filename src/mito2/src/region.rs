@@ -41,7 +41,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
@@ -49,11 +49,12 @@ use store_api::region_engine::{
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::{self, ManifestSstEntry};
-use store_api::storage::{FileId, RegionId, SequenceNumber};
+use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
 pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CachedSstMeta;
 use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
@@ -74,6 +75,7 @@ use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::{self, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::index_file_path;
+use crate::sst::parquet::metadata::MetadataLoader;
 use crate::time_provider::TimeProviderRef;
 
 /// This is the approximate factor to estimate the size of wal.
@@ -532,6 +534,78 @@ impl MitoRegion {
             RegionLeaderState::Writable,
             RegionRoleState::Leader(RegionLeaderState::Altering),
         )
+    }
+
+    /// Publishes an ALTER after checking that existing SSTs can be read with the new key.
+    pub(crate) async fn update_metadata(
+        &self,
+        change: RegionChange,
+        is_staging: bool,
+    ) -> Result<ManifestVersion> {
+        let ctx = &self.manifest_ctx;
+        let mut manager = ctx
+            .lock_for_manifest_update(RegionLeaderState::Altering)
+            .await?;
+        let manifest = manager.manifest();
+        let proposed_key = &change.metadata.primary_key;
+        if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+            && !proposed_key.starts_with(&manifest.metadata.primary_key)
+            && !manifest.files.is_empty()
+        {
+            // A split could inherit correctly ordered files but install a different region key.
+            drop(manager);
+            let checked = self.check_sst_key_order(&manifest, proposed_key).await;
+            manager = ctx
+                .lock_for_manifest_update(RegionLeaderState::Altering)
+                .await?;
+            ensure!(
+                manager.manifest().manifest_version == manifest.manifest_version,
+                RegionBusySnafu {
+                    region_id: self.region_id
+                }
+            );
+            checked?;
+        }
+
+        let actions = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
+        ctx.update_and_fire(manager, actions, is_staging).await
+    }
+
+    async fn check_sst_key_order(
+        &self,
+        manifest: &RegionManifest,
+        proposed_key: &[ColumnId],
+    ) -> Result<()> {
+        let access = &self.access_layer;
+        for file in manifest.files.values() {
+            ensure!(
+                matches!(file.format, file::FileFormat::Parquet),
+                InvalidRequestSnafu {
+                    region_id: self.region_id,
+                    reason: format!(
+                        "Cannot reorder sparse primary key: SST {} has no recorded key order",
+                        file.file_id
+                    ),
+                }
+            );
+            let path = file.file_path(access.table_dir(), access.path_type());
+            let footer = MetadataLoader::new(access.object_store().clone(), &path, file.file_size)
+                .load(&mut Default::default())
+                .await?;
+            let stored =
+                CachedSstMeta::try_new_with_region_metadata(&path, footer, None)?.region_metadata();
+            ensure!(
+                proposed_key.starts_with(&stored.primary_key),
+                InvalidRequestSnafu {
+                    region_id: self.region_id,
+                    reason: format!(
+                        "Cannot reorder sparse primary key to {proposed_key:?}: SST {} uses key {:?}",
+                        file.file_id, stored.primary_key
+                    ),
+                }
+            );
+        }
+        Ok(())
     }
 
     /// Sets the dropping state.
@@ -1760,40 +1834,45 @@ impl ManifestContext {
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<ManifestVersion> {
-        self.update_manifest_with_state_check(action_list, is_staging, |current_state, region_id| {
-            // If expect_state is not downgrading, the current state must be either `expect_state` or downgrading.
-            //
-            // A downgrading leader rejects user writes but still allows
-            // flushing the memtable and updating the manifest.
-            if expect_state != RegionLeaderState::Downgrading {
-                if current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading) {
-                    info!(
-                        "Region {} is in downgrading leader state, updating manifest. Expect state is {:?}",
-                        region_id, expect_state
-                    );
-                }
-                ensure!(
-                    current_state == RegionRoleState::Leader(expect_state)
-                        || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
-                    UpdateManifestSnafu {
-                        region_id,
-                        state: current_state,
-                    }
-                );
-            } else {
-                ensure!(
-                    current_state == RegionRoleState::Leader(expect_state),
-                    RegionStateSnafu {
-                        region_id,
-                        state: current_state,
-                        expect: RegionRoleState::Leader(expect_state),
-                    }
+        let manager = self.lock_for_manifest_update(expect_state).await?;
+        self.update_manifest_with_edit_checks(manager, action_list, is_staging)
+            .await
+    }
+
+    async fn lock_for_manifest_update(
+        &self,
+        expect_state: RegionLeaderState,
+    ) -> Result<RwLockWriteGuard<'_, RegionManifestManager>> {
+        let manager = self.manifest_manager.write().await;
+        let region_id = manager.manifest().metadata.region_id;
+        let current_state = self.state.load();
+        // A downgrading leader may still finish work started in the expected state.
+        if expect_state != RegionLeaderState::Downgrading {
+            if current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading) {
+                info!(
+                    "Region {} is in downgrading leader state, updating manifest. Expect state is {:?}",
+                    region_id, expect_state
                 );
             }
-
-            Ok(())
-        })
-        .await
+            ensure!(
+                current_state == RegionRoleState::Leader(expect_state)
+                    || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
+                UpdateManifestSnafu {
+                    region_id,
+                    state: current_state
+                }
+            );
+        } else {
+            ensure!(
+                current_state == RegionRoleState::Leader(expect_state),
+                RegionStateSnafu {
+                    region_id,
+                    state: current_state,
+                    expect: RegionRoleState::Leader(expect_state),
+                }
+            );
+        }
+        Ok(manager)
     }
 
     /// Updates the manifest for compaction.
@@ -1814,25 +1893,40 @@ impl ManifestContext {
     /// control until staging exits successfully.
     pub(crate) async fn update_manifest_for_compaction(
         &self,
-        action_list: RegionMetaActionList,
+        output_schema: &RegionMetadata,
+        edit: RegionEdit,
     ) -> Result<ManifestVersion> {
-        self.update_manifest_with_state_check(action_list, false, |current_state, region_id| {
-            ensure!(
-                matches!(
-                    current_state,
-                    RegionRoleState::Leader(RegionLeaderState::Writable)
-                        | RegionRoleState::Leader(RegionLeaderState::Editing)
-                        | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-                ),
-                UpdateManifestSnafu {
-                    region_id,
-                    state: current_state,
-                }
-            );
-
-            Ok(())
-        })
-        .await
+        let manager = self.manifest_manager.write().await;
+        let manifest = manager.manifest();
+        let region_id = manifest.metadata.region_id;
+        let current_state = self.state.load();
+        ensure!(
+            matches!(
+                current_state,
+                RegionRoleState::Leader(RegionLeaderState::Writable)
+                    | RegionRoleState::Leader(RegionLeaderState::Editing)
+                    | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+            ),
+            UpdateManifestSnafu {
+                region_id,
+                state: current_state
+            }
+        );
+        // A compaction started before a repair may still hold the old sparse key order.
+        ensure!(
+            manifest.metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse
+                || manifest
+                    .metadata
+                    .primary_key
+                    .starts_with(&output_schema.primary_key),
+            InvalidRequestSnafu {
+                region_id,
+                reason: "Compaction used a sparse primary key incompatible with the current region",
+            }
+        );
+        let actions = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+        self.update_manifest_with_edit_checks(manager, actions, false)
+            .await
     }
 
     /// Publish against the same truncate boundary and the watermarks used to select inputs.
@@ -2101,7 +2195,7 @@ impl ManifestContext {
     /// Fails an update that is not staged while the region [awaits its Leader
     /// lease](Self::awaits_leader_lease) and is not downgrading. Does not
     /// validate state or edit applicability — the caller must do so while still
-    /// holding the lock (see `update_manifest_with_state_check` and
+    /// holding the lock (see [`Self::update_manifest`] and
     /// `MitoRegion::persist_backfilled_metadata_locked`).
     pub(crate) async fn update_locked(
         &self,
@@ -2299,24 +2393,15 @@ impl ManifestContext {
         version
     }
 
-    async fn update_manifest_with_state_check(
+    async fn update_manifest_with_edit_checks(
         &self,
+        manager: RwLockWriteGuard<'_, RegionManifestManager>,
         action_list: RegionMetaActionList,
         is_staging: bool,
-        check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
-        // Acquires the write lock of the manifest manager.
-        let manager = self.manifest_manager.write().await;
-        // Gets current manifest.
         let manifest = manager.manifest();
-        // Checks state inside the lock. This is to ensure that we won't update the manifest
-        // after `set_readonly_gracefully()` is called.
-        let current_state = self.state.load();
-        check_state(current_state, manifest.metadata.region_id)?;
-
         for action in &action_list.actions {
-            // Checks whether the edit is still applicable.
-            let RegionMetaAction::Edit(edit) = &action else {
+            let RegionMetaAction::Edit(edit) = action else {
                 continue;
             };
 
@@ -3815,7 +3900,7 @@ mod tests {
         region.set_editing(RegionLeaderState::Writable).unwrap();
 
         let file_id = FileId::random();
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+        let edit = RegionEdit {
             files_to_add: vec![crate::sst::file::FileMeta {
                 region_id: region.region_id,
                 file_id,
@@ -3829,11 +3914,11 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             ..Default::default()
-        }));
+        };
 
         region
             .manifest_ctx
-            .update_manifest_for_compaction(action_list)
+            .update_manifest_for_compaction(&region.metadata(), edit)
             .await
             .unwrap();
 

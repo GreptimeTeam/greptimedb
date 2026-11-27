@@ -33,15 +33,17 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::extension::json::align_schema_with_json_array;
 use datatypes::value::ValueRef;
 use datatypes::vectors::{MutableVector, VectorRef};
+use itertools::{Either, Itertools};
 use memory::SPARSE_PK_MIN_ROW_BYTES;
 use mito_codec::row_converter::sparse::SparsePrimaryKeyCodec;
 use mito_codec::row_converter::{SortField, TsidGenerator};
+use partition::partition::RegionMask;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
-use store_api::storage::TableId;
-use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
+use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId, SPARSE_KEY_ORDER};
+use store_api::storage::{ColumnId, TableId};
 use table::metadata::TableInfo;
 
 use crate::error::{self, Result};
@@ -53,9 +55,26 @@ pub(crate) use memory::{
     estimated_sparse_record_batch_bytes,
 };
 
+/// Iterates the original observations in order without copying their values.
+fn selected_rows<'a, T>(
+    rows: &'a [T],
+    mask: Option<&'a RegionMask>,
+) -> impl Iterator<Item = &'a T> {
+    match mask {
+        Some(mask) => Either::Right(
+            mask.array()
+                .values()
+                .set_indices()
+                .map(|index| &rows[index]),
+        ),
+        None => Either::Left(rows.iter()),
+    }
+}
+
 fn validate_row_input_columns<'a>(
     rows: &'a Rows,
     table_info: &TableInfo,
+    mask: Option<&RegionMask>,
 ) -> Result<HashMap<&'a str, usize>> {
     let schema = &table_info.meta.schema;
     let mut source_columns = HashMap::with_capacity(rows.schema.len());
@@ -108,7 +127,7 @@ fn validate_row_input_columns<'a>(
             }
         );
     }
-    for row in &rows.rows {
+    for row in selected_rows(&rows.rows, mask) {
         ensure!(
             row.values.len() == rows.schema.len(),
             error::InvalidInsertRequestSnafu {
@@ -127,10 +146,12 @@ fn build_column_vector(
     rows: &Rows,
     column: &datatypes::schema::ColumnSchema,
     source_index: Option<usize>,
+    mask: Option<&RegionMask>,
 ) -> Result<VectorRef> {
+    let len = mask.map_or(rows.rows.len(), RegionMask::selected_rows);
     if let Some(index) = source_index {
-        let mut builder = column.create_mutable_vector(rows.rows.len());
-        for row in &rows.rows {
+        let mut builder = column.create_mutable_vector(len);
+        for row in selected_rows(&rows.rows, mask) {
             let value = &row.values[index];
             ensure!(
                 value.value_data.is_some() || column.is_nullable(),
@@ -159,7 +180,7 @@ fn build_column_vector(
         Ok(builder.to_vector())
     } else {
         column
-            .create_default_vector(rows.rows.len())
+            .create_default_vector(len)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?
             .with_context(|| error::InvalidInsertRequestSnafu {
@@ -178,24 +199,74 @@ fn build_column_vector(
 ///
 /// Panics if `rows.rows` is empty. Callers must skip empty writes before conversion.
 pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<RecordBatch> {
-    assert!(!rows.rows.is_empty(), "prepared rows must not be empty");
     let schema = &table_info.meta.schema;
-    let source_columns = validate_row_input_columns(rows, table_info)?;
-
-    let mut arrays = Vec::with_capacity(schema.num_columns());
-    for column in schema.column_schemas() {
-        let vector = build_column_vector(
-            rows,
-            column,
-            source_columns.get(column.name.as_str()).copied(),
-        )?;
-        arrays.push(vector.to_arrow_array());
-    }
-    let arrow_schema = align_schema_with_json_array(schema.arrow_schema().clone(), &arrays);
-    RecordBatch::try_new(arrow_schema, arrays).context(error::ComputeArrowSnafu)
+    row_columns_to_batch(
+        rows,
+        table_info,
+        schema.column_schemas().iter(),
+        schema.arrow_schema().clone(),
+    )
 }
 
-/// Encodes the sparse key in catalog primary-key order and emits retained columns in schema order.
+/// Uses the same values and defaults as the sparse encoder to locate the destination regions.
+pub(crate) fn rows_partition_batch(rows: &Rows, table: &TableInfo) -> Result<RecordBatch> {
+    let indices = &table.meta.partition_key_indices;
+    let schema = &table.meta.schema;
+    let projection = schema
+        .arrow_schema()
+        .project(indices)
+        .context(error::ComputeArrowSnafu)?;
+    row_columns_to_batch(
+        rows,
+        table,
+        indices.iter().map(|&i| &schema.column_schemas()[i]),
+        Arc::new(projection),
+    )
+}
+
+fn row_columns_to_batch<'a>(
+    rows: &Rows,
+    table: &TableInfo,
+    columns: impl Iterator<Item = &'a datatypes::schema::ColumnSchema>,
+    schema: Arc<ArrowSchema>,
+) -> Result<RecordBatch> {
+    assert!(!rows.rows.is_empty(), "prepared rows must not be empty");
+    let source = validate_row_input_columns(rows, table, None)?;
+    let mut arrays = Vec::with_capacity(schema.fields().len());
+    for column in columns {
+        let values = build_column_vector(
+            rows,
+            column,
+            source.get(column.name.as_str()).copied(),
+            None,
+        )?;
+        arrays.push(values.to_arrow_array());
+    }
+    let schema = align_schema_with_json_array(schema, &arrays);
+    let options =
+        arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(rows.rows.len()));
+    RecordBatch::try_new_with_options(schema, arrays, &options).context(error::ComputeArrowSnafu)
+}
+
+fn check_sparse_key_buffer_size(current_bytes: usize, key_bytes: usize) -> Result<()> {
+    ensure!(
+        current_bytes.saturating_add(key_bytes) <= i32::MAX as usize,
+        error::InvalidInsertRequestSnafu {
+            reason: "Encoded sparse primary keys exceed Arrow's binary offset limit. Split the insert into smaller batches",
+        }
+    );
+    Ok(())
+}
+
+fn sparse_key_field(mut ids: impl Iterator<Item = ColumnId>) -> Arc<ArrowField> {
+    Arc::new(
+        ArrowField::new(PRIMARY_KEY_COLUMN_NAME, ArrowDataType::Binary, false).with_metadata(
+            std::collections::HashMap::from([(SPARSE_KEY_ORDER.to_string(), ids.join(","))]),
+        ),
+    )
+}
+
+/// Encodes the sparse key in the supplied region primary-key order and emits retained columns in schema order.
 /// Applies pure defaults and nullability checks.
 ///
 /// Retains non-tag columns and any primary-key columns listed in
@@ -205,6 +276,15 @@ pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<Recor
 ///
 /// Panics if `rows.rows` is empty. Callers must skip empty writes before conversion.
 pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<RecordBatch> {
+    sparse_rows_to_batch(rows, table_info, None)
+}
+
+pub(crate) fn sparse_rows_to_batch(
+    rows: &Rows,
+    table_info: &TableInfo,
+    mask: Option<&RegionMask>,
+) -> Result<RecordBatch> {
+    let len = mask.map_or(rows.rows.len(), RegionMask::selected_rows);
     assert!(!rows.rows.is_empty(), "prepared rows must not be empty");
     let schema = &table_info.meta.schema;
     ensure!(
@@ -213,7 +293,7 @@ pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Resul
             reason: format!("Table {} is missing sparse column IDs", table_info.name),
         }
     );
-    let source_columns = validate_row_input_columns(rows, table_info)?;
+    let source_columns = validate_row_input_columns(rows, table_info, mask)?;
     let pk_set: HashSet<usize> = table_info
         .meta
         .primary_key_indices
@@ -297,12 +377,26 @@ pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Resul
         }
     }
 
+    // Sparse readers address the two reserved fields at fixed offsets.
+    ensure!(
+        codec_fields
+            .iter()
+            .map(|(id, _)| *id)
+            .take(2)
+            .eq([ReservedColumnId::table_id(), ReservedColumnId::tsid()]),
+        error::InvalidInsertRequestSnafu {
+            reason: format!(
+                "Sparse primary key for {} must start with (__table_id, __tsid). Reconcile the table metadata with its regions (ADMIN RECONCILE_TABLE in distributed mode), or use a new table with the correct key order",
+                table_info.table_ref()
+            ),
+        }
+    );
+    let key_field = sparse_key_field(codec_fields.iter().map(|(id, _)| *id));
     let codec = SparsePrimaryKeyCodec::with_fields(codec_fields);
-    let mut pk_builder =
-        BinaryBuilder::with_capacity(rows.rows.len(), rows.rows.len() * SPARSE_PK_MIN_ROW_BYTES);
+    let mut pk_builder = BinaryBuilder::with_capacity(len, len * SPARSE_PK_MIN_ROW_BYTES);
     let mut pk_buf = Vec::with_capacity(128);
     let mut row_refs = Vec::with_capacity(pk_inputs.len());
-    for row in &rows.rows {
+    for row in selected_rows(&rows.rows, mask) {
         row_refs.clear();
         for input in &pk_inputs {
             match input {
@@ -349,6 +443,7 @@ pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Resul
             .encode_to_vec(row_refs.iter().cloned(), &mut pk_buf)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
+        check_sparse_key_buffer_size(pk_builder.values_slice().len(), pk_buf.len())?;
         pk_builder.append_value(&pk_buf);
     }
 
@@ -357,11 +452,7 @@ pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Resul
         schema.num_columns() - pk_set.len() + partition_set.intersection(&pk_set).count();
     let mut fields = Vec::with_capacity(retained_len + 1);
     let mut arrays = Vec::with_capacity(retained_len + 1);
-    fields.push(Arc::new(ArrowField::new(
-        PRIMARY_KEY_COLUMN_NAME,
-        ArrowDataType::Binary,
-        false,
-    )));
+    fields.push(key_field);
     arrays.push(Arc::new(pk_builder.finish()) as arrow::array::ArrayRef);
 
     for (idx, column) in schema.column_schemas().iter().enumerate() {
@@ -372,6 +463,7 @@ pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Resul
             rows,
             column,
             source_columns.get(column.name.as_str()).copied(),
+            mask,
         )?;
         fields.push(arrow_schema.fields()[idx].clone());
         arrays.push(vector.to_arrow_array());
@@ -389,7 +481,7 @@ pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Resul
 
 /// Encodes a validated [`ExemplarBatch`] with `__primary_key` first and retained columns in schema order.
 ///
-/// Uses destination `ColumnId`s in catalog `primary_key_indices` order so inherited tag encoding
+/// Uses destination `ColumnId`s in region primary-key order so inherited tag encoding
 /// matches Mito compaction and region splits even after `ALTER ... FIRST/AFTER`. Retains any
 /// primary-key columns listed in `table_info.meta.partition_key_indices` so initial partitioning
 /// needs no key decoding.
@@ -401,6 +493,15 @@ pub fn exemplars_to_sparse_record_batch(
     exemplars: &ExemplarBatch,
     resolved_table_ids: &ahash::HashMap<String, TableId>,
     table_info: &TableInfo,
+) -> Result<RecordBatch> {
+    sparse_exemplars_to_batch(exemplars, resolved_table_ids, table_info, None)
+}
+
+pub(crate) fn sparse_exemplars_to_batch(
+    exemplars: &ExemplarBatch,
+    resolved_table_ids: &ahash::HashMap<String, TableId>,
+    table_info: &TableInfo,
+    mask: Option<&RegionMask>,
 ) -> Result<RecordBatch> {
     assert!(
         !exemplars.is_empty(),
@@ -442,6 +543,7 @@ pub fn exemplars_to_sparse_record_batch(
     let labels_col = &schema.column_schemas()[labels_idx];
 
     let mut metric_col = None;
+    let mut key_order = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
     let mut active_tags = ahash::AHashMap::with_capacity(exemplars.distinct_tags().len());
     for (pk_rank, &idx) in meta.primary_key_indices.iter().enumerate() {
         let col = &schema.column_schemas()[idx];
@@ -459,6 +561,7 @@ pub fn exemplars_to_sparse_record_batch(
                 reason: format!("exemplar tag {} must be STRING", col.name),
             }
         );
+        key_order.push(col_id);
         if col.name == EXEMPLAR_METRIC_COLUMN {
             metric_col = Some((pk_rank, col_id));
         } else if exemplars.distinct_tags().contains(col.name.as_str()) {
@@ -472,17 +575,8 @@ pub fn exemplars_to_sparse_record_batch(
         .fail();
     };
     if active_tags.len() != exemplars.distinct_tags().len() {
-        for tag in exemplars.distinct_tags() {
-            ensure!(
-                active_tags.contains_key(tag.as_str()),
-                error::InvalidInsertRequestSnafu {
-                    reason: format!(
-                        "exemplar destination {} is missing tag {tag}",
-                        table_info.name
-                    ),
-                }
-            );
-        }
+        exemplars
+            .validate_destination_tags(&table_info.name, |tag| active_tags.contains_key(tag))?;
     }
 
     enum ExemplarColumn<'a> {
@@ -497,7 +591,7 @@ pub fn exemplars_to_sparse_record_batch(
         Array(ArrayRef),
     }
 
-    let len = exemplars.len();
+    let len = mask.map_or(exemplars.len(), RegionMask::selected_rows);
     let arrow_schema = schema.arrow_schema();
     let mut seen_partition = HashSet::new();
     let mut columns = Vec::with_capacity(3 + meta.partition_key_indices.len());
@@ -569,7 +663,7 @@ pub fn exemplars_to_sparse_record_batch(
     let mut ordered_tags = Vec::with_capacity(exemplars.distinct_tags().len() + 1);
     let mut prev_series: Option<(&str, &BTreeMap<String, String>, TableId, u64)> = None;
 
-    for exemplar in exemplars.exemplars() {
+    for exemplar in selected_rows(exemplars.exemplars(), mask) {
         let (table_id, tsid) = if let Some((prev_metric, prev_labels, table_id, tsid)) = prev_series
             && prev_metric == exemplar.metric.as_ref()
             && std::ptr::eq(prev_labels, &*exemplar.series_labels)
@@ -618,6 +712,7 @@ pub fn exemplars_to_sparse_record_batch(
             ));
             (table_id, tsid)
         };
+        check_sparse_key_buffer_size(pk_builder.values_slice().len(), pk_buf.len())?;
         pk_builder.append_value(&pk_buf);
 
         let converted_ts = Timestamp::new_nanosecond(exemplar.timestamp)
@@ -697,11 +792,7 @@ pub fn exemplars_to_sparse_record_batch(
     columns.sort_unstable_by_key(|(idx, _)| *idx);
     let mut fields = Vec::with_capacity(1 + columns.len());
     let mut arrays = Vec::with_capacity(1 + columns.len());
-    fields.push(Arc::new(ArrowField::new(
-        PRIMARY_KEY_COLUMN_NAME,
-        ArrowDataType::Binary,
-        false,
-    )));
+    fields.push(sparse_key_field(key_order.into_iter()));
     arrays.push(Arc::new(pk_builder.finish()) as ArrayRef);
     for (idx, output) in columns {
         fields.push(arrow_schema.fields()[idx].clone());
@@ -1388,6 +1479,70 @@ mod tests {
     }
 
     #[test]
+    fn test_sparse_key_buffer_size_at_arrow_offset_limit() {
+        let limit = i32::MAX as usize;
+        assert!(check_sparse_key_buffer_size(limit - 1, 1).is_ok());
+        assert!(check_sparse_key_buffer_size(limit, 1).is_err());
+        assert!(check_sparse_key_buffer_size(1, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn test_sparse_rows_reject_legacy_first_tag_key_order() {
+        use api::v1::helper::{tag_column_schema, time_index_column_schema};
+
+        let mut table = table_info(Schema::new(vec![
+            ColumnSchema::new("env", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        table.meta.column_ids = vec![3, ReservedColumnId::table_id(), ReservedColumnId::tsid(), 2];
+        table.meta.options.extra_options.insert(
+            store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.into(),
+            "sparse".into(),
+        );
+        // Before #10591, ADD COLUMN env ... FIRST saved the catalog key in schema order.
+        table.meta.primary_key_indices = vec![0, 1, 2];
+        let rows = Rows {
+            schema: vec![
+                tag_column_schema("env", ColumnDataType::String),
+                tag_column_schema(DATA_SCHEMA_TABLE_ID_COLUMN_NAME, ColumnDataType::Uint32),
+                tag_column_schema(DATA_SCHEMA_TSID_COLUMN_NAME, ColumnDataType::Uint64),
+                time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+            ],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::StringValue("prod".into()).into(),
+                    ValueData::U32Value(1).into(),
+                    ValueData::U64Value(2).into(),
+                    ValueData::TimestampMillisecondValue(3).into(),
+                ],
+            }],
+        };
+        let error = sparse_rows_to_record_batch(&rows, &table).unwrap_err();
+        assert!(
+            error.to_string().contains("Reconcile the table metadata"),
+            "{error}"
+        );
+
+        table.meta.primary_key_indices = vec![1, 2, 0];
+        assert!(sparse_rows_to_record_batch(&rows, &table).is_ok());
+    }
+
+    #[test]
     fn test_sparse_rows_to_record_batch_defaults_nulls_and_pk_order() {
         use arrow::array::{Array, BinaryArray, Float64Array};
         use mito_codec::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
@@ -1876,6 +2031,15 @@ mod tests {
         let resolved = ahash::HashMap::from_iter([("cpu".into(), 100), ("mem".into(), 200)]);
         let record_batch =
             exemplars_to_sparse_record_batch(&batch_input, &resolved, &info).unwrap();
+        let mask = RegionMask::from(arrow::array::BooleanArray::from(vec![
+            true, false, false, true,
+        ]));
+        let selected =
+            sparse_exemplars_to_batch(&batch_input, &resolved, &info, Some(&mask)).unwrap();
+        assert_eq!(
+            selected,
+            arrow::compute::filter_record_batch(&record_batch, mask.array()).unwrap()
+        );
         let pk_array = record_batch
             .column(0)
             .as_any()

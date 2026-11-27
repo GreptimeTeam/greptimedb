@@ -16,7 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, MITO2_ENGINE,
+};
 use common_macro::ToMetaBuilder;
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
@@ -29,7 +31,10 @@ use datatypes::schema::{
 use derive_builder::Builder;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    PRIMARY_KEY_ENCODING,
+};
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
     COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY,
@@ -1474,6 +1479,41 @@ impl TableInfo {
             .options
             .extra_options
             .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
+
+    /// Ordinary Mito tables accept sparse keys directly. The metric engine encodes its own keys.
+    pub fn is_sparse_mito_table(&self) -> bool {
+        matches!(self.meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE)
+            && self.has_sparse_primary_key_option()
+    }
+
+    /// Whether the table explicitly selects sparse primary-key encoding.
+    pub fn has_sparse_primary_key_option(&self) -> bool {
+        self.meta
+            .options
+            .extra_options
+            .get(PRIMARY_KEY_ENCODING)
+            .is_some_and(|encoding| encoding.eq_ignore_ascii_case("sparse"))
+    }
+
+    /// Older ALTERs could save sparse tags in column order instead of the region's key order.
+    pub fn needs_sparse_key_order_lookup(&self) -> bool {
+        if !self.is_sparse_mito_table()
+            || (self.ident.version == 0 && self.meta.schema.version() == Schema::INITIAL_VERSION)
+        {
+            return false;
+        }
+        // Once the reserved prefix is correct, a single user tag has only one possible order.
+        self.meta.primary_key_indices.len() > 3
+            || !self
+                .meta
+                .row_key_column_names()
+                .take(2)
+                .map(String::as_str)
+                .eq([
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                ])
     }
 
     /// Return true if the table's TTL is `instant`.

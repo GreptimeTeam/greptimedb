@@ -25,15 +25,18 @@ use api::v1::SemanticType;
 use api::v1::column_def::try_as_column_schema;
 use api::v1::region::RegionColumnDef;
 use common_base::hash::partition_expr_version;
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::extension::json::json2_metadata_with_updated_settings;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SchemaRef,
+};
 use datatypes::types::TimestampType;
+use datatypes::value::Value;
 use itertools::Itertools;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -323,6 +326,50 @@ impl RegionMetadata {
         self.schema
             .column_index_by_name(name)
             .map(|index| &self.column_metadatas[index])
+    }
+
+    /// ALTER appends tags. A writer using the earlier key can omit only a NULL-default suffix.
+    pub fn sparse_key_prefix_for_write(&self, width: usize) -> Result<&[ColumnId]> {
+        let changed = || SparseKeySchemaChangedSnafu {
+            region_id: self.region_id,
+            write_width: width,
+            region_width: self.primary_key.len(),
+        };
+        let (known, added) = self
+            .primary_key
+            .split_at_checked(width)
+            .with_context(changed)?;
+        ensure!(
+            added
+                .iter()
+                .all(|&id| self.column_by_id(id).is_some_and(|col| {
+                    let schema = &col.column_schema;
+                    schema.is_nullable()
+                        && matches!(
+                            schema.default_constraint(),
+                            None | Some(ColumnDefaultConstraint::Value(Value::Null))
+                        )
+                })),
+            changed()
+        );
+        Ok(known)
+    }
+
+    /// Checks the writer's key order again at the destination, including after a routing retry.
+    pub fn check_sparse_key_order(&self, order: &str) -> Result<()> {
+        let ids = order.split(',');
+        let width = ids.clone().count();
+        let known = self.sparse_key_prefix_for_write(width)?;
+        ensure!(
+            ids.map(|id| id.parse::<ColumnId>().ok())
+                .eq(known.iter().copied().map(Some)),
+            SparseKeySchemaChangedSnafu {
+                region_id: self.region_id,
+                write_width: width,
+                region_width: self.primary_key.len(),
+            }
+        );
+        Ok(())
     }
 
     /// Returns all primary key columns.
@@ -1126,6 +1173,16 @@ impl SkippedFields {
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum MetadataError {
+    #[snafu(display(
+        "Sparse key columns changed for region {region_id} (write has {write_width}, region has {region_width}). Retry with the current schema"
+    ))]
+    SparseKeySchemaChanged {
+        region_id: RegionId,
+        write_width: usize,
+        region_width: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Invalid schema"))]
     InvalidSchema {
         source: datatypes::error::Error,
@@ -1313,7 +1370,15 @@ impl ErrorExt for MetadataError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::SqlCommon { source, .. } => source.status_code(),
+            Self::SparseKeySchemaChanged { .. } => StatusCode::TableUnavailable,
             _ => StatusCode::InvalidArguments,
+        }
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Self::SparseKeySchemaChanged { .. } => RetryHint::Retryable,
+            _ => RetryHint::NonRetryable,
         }
     }
 
@@ -1472,6 +1537,15 @@ mod test {
             1,
         ]);
         let metadata = builder.build().unwrap();
+        let table_id = ReservedColumnId::table_id();
+        let tsid = ReservedColumnId::tsid();
+        metadata
+            .check_sparse_key_order(&format!("{table_id},{tsid},1"))
+            .unwrap();
+        let mismatch = metadata
+            .check_sparse_key_order(&format!("{table_id},1,{tsid}"))
+            .unwrap_err();
+        assert_eq!(mismatch.retry_hint(), RetryHint::Retryable);
         let json = serde_json::to_string(&metadata).unwrap();
         assert_eq!(
             metadata,

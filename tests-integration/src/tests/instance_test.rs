@@ -6413,6 +6413,31 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
     );
     let source = get_table(frontend, "concurrent").await.table_info();
     assert!(source.meta.primary_key_indices.is_empty());
+
+    execute_sql(
+        frontend,
+        "ALTER TABLE concurrent ADD COLUMN host STRING PRIMARY KEY",
+    )
+    .await;
+    execute_sql(frontend, &definition).await;
+    for instant in [false, true] {
+        if instant {
+            execute_sql(
+                frontend,
+                &format!("ALTER TABLE {METRICS_EXEMPLARS_TABLE} SET ttl = 'instant'"),
+            )
+            .await;
+        }
+        let error = frontend
+            .write_exemplars_prepared(request("host".into(), 0), QueryContext::arc())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert!(
+            error.output_msg().contains("is missing tag host"),
+            "{error}"
+        );
+    }
 }
 
 #[rstest]

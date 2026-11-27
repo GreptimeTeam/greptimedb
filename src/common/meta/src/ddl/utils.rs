@@ -13,8 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod raw_table_info;
-#[allow(dead_code)]
-pub(crate) mod region_metadata_lister;
+pub mod region_metadata_lister;
 pub(crate) mod table_id;
 pub(crate) mod table_info;
 

@@ -951,13 +951,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
-            let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
-
-            let result = region
-                .manifest_ctx
-                .update_manifest(RegionLeaderState::Altering, action_list, is_staging)
-                .await
-                .map(|_| ());
+            let result = region.update_metadata(change, is_staging).await.map(|_| ());
             let notify = WorkerRequest::Background {
                 region_id: region.region_id,
                 notify: BackgroundNotify::RegionChange(RegionChangeResult {

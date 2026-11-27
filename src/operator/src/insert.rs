@@ -18,6 +18,7 @@ mod otlp;
 pub use exemplar::{Exemplar, ExemplarBatch};
 pub use otlp::MetricInsertPreflight;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -51,7 +52,12 @@ use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
+use common_meta::ddl::utils::region_metadata_lister::{
+    RegionMetadataLister, SparseRegionPrimaryKey,
+};
+use common_meta::instruction::CacheIdent;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::TriggerReason;
@@ -71,6 +77,7 @@ use futures_util::{StreamExt, TryStreamExt, future, stream};
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
+use partition::partition::RegionMask;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use snafu::prelude::*;
@@ -86,7 +93,7 @@ use store_api::mito_engine_options::{
     COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
 };
 use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::TableRef;
 use table::metadata::{TableInfo, TableInfoRef};
 use table::requests::{
@@ -105,20 +112,21 @@ use crate::error::{
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
+use crate::req_convert::TablePartitioner;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     ColumnToRow, ImpureDefaultFiller, RowToRegion, StatementToRegion, TableToRegion,
     estimated_exemplar_record_batch_bytes, estimated_sparse_record_batch_bytes,
-    exemplars_to_sparse_record_batch, fill_reqs_with_impure_default, rows_to_record_batch,
-    sparse_rows_to_record_batch,
+    exemplars_to_sparse_record_batch, fill_reqs_with_impure_default, rows_partition_batch,
+    rows_to_record_batch, sparse_exemplars_to_batch, sparse_rows_to_batch,
 };
-use crate::req_convert::{TablePartitioner, is_sparse_mito_table};
 use crate::statement::StatementExecutor;
 use crate::statement::ddl::is_retention_ttl;
 use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
 
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
+    cache_invalidator: CacheInvalidatorRef,
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
     pub(crate) write_dispatcher: WriteDispatcherRef,
@@ -134,6 +142,7 @@ pub struct Inserter {
     auto_create_physical_table_timestamp_unit: TimeUnit,
     pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
     conversion_memory_limiter: Option<Arc<dyn ConversionMemoryLimiter>>,
+    sparse_key_orders: moka::future::Cache<SparseWriteRegions, Arc<SparseKeyOrders>>,
     /// Rows handed to detached flow mirror tasks that have not finished yet.
     /// Bounds how much row data in-flight mirror writes may keep alive, see
     /// [`MAX_MIRROR_PENDING_ROWS`].
@@ -141,6 +150,17 @@ pub struct Inserter {
 }
 
 pub type InserterRef = Arc<Inserter>;
+
+type SparseKeyOrders = HashMap<SparseRegionPrimaryKey, Vec<RegionNumber>>;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct SparseWriteRegions {
+    table_id: TableId,
+    table_version: u64,
+    schema_version: u32,
+    route_version: u64,
+    regions: Vec<RegionNumber>,
+}
 
 /// Hint for the table type to create automatically.
 #[derive(Clone)]
@@ -340,6 +360,7 @@ impl Inserter {
     /// Creates a row inserter with the default write dispatcher.
     pub fn new(
         catalog_manager: CatalogManagerRef,
+        cache_invalidator: CacheInvalidatorRef,
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
@@ -351,6 +372,7 @@ impl Inserter {
                 partition_manager.clone(),
             )),
             catalog_manager,
+            cache_invalidator,
             partition_manager,
             node_manager,
             table_flownode_set_cache,
@@ -358,6 +380,7 @@ impl Inserter {
             auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             pending_rows_batcher: None,
             conversion_memory_limiter: None,
+            sparse_key_orders: moka::future::Cache::new(256),
             mirror_pending_rows: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -715,6 +738,9 @@ impl Inserter {
         let has_flow = self.table_has_flow(destination.table_id()).await;
 
         if is_instant {
+            exemplars.validate_destination_tags(&destination.name, |tag| {
+                destination.meta.schema.contains_column(tag)
+            })?;
             if !has_flow {
                 exemplars.validate_for_destination(&resolved_table_ids, &destination)?;
             }
@@ -734,6 +760,35 @@ impl Inserter {
             ));
         }
 
+        let prepare_batches = async |table: TableInfoRef| {
+            let mut candidate = None;
+            let layouts = self
+                .sparse_write_schemas(&table, || {
+                    let batch =
+                        exemplars_to_sparse_record_batch(&exemplars, &resolved_table_ids, &table)?;
+                    candidate = Some(batch.clone());
+                    Ok(batch)
+                })
+                .await?;
+            if let [(schema, None)] = layouts.as_slice()
+                && Arc::ptr_eq(schema, &table)
+                && let Some(batch) = candidate.take()
+            {
+                return Ok(vec![batch]);
+            }
+            drop(candidate);
+            layouts
+                .into_iter()
+                .map(|(schema, mask)| {
+                    sparse_exemplars_to_batch(
+                        &exemplars,
+                        &resolved_table_ids,
+                        &schema,
+                        mask.as_ref(),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()
+        };
         if !has_flow && let Some(batcher) = self.table_batcher(&destination, &ctx) {
             let estimated_bytes = if batcher.memory_limit_bytes() != 0 {
                 estimated_exemplar_record_batch_bytes(&exemplars, &destination)
@@ -746,8 +801,9 @@ impl Inserter {
                     ctx.held_memory_bytes(),
                 )
                 .await?;
-            let batch =
-                exemplars_to_sparse_record_batch(&exemplars, &resolved_table_ids, &destination)?;
+            let (destination, batches) = self
+                .prepare_sparse_batches(&destination, prepare_batches)
+                .await?;
             let write_cost = self
                 .meter_and_mirror_exemplars(
                     &exemplars,
@@ -759,27 +815,29 @@ impl Inserter {
                 )
                 .await?;
 
-            if batch.num_rows() == 0 {
-                return Ok(Output::new(
-                    OutputData::AffectedRows(0),
-                    OutputMeta::new_with_cost(write_cost as _),
-                ));
-            }
             let mut target_ctx = ctx.fork();
             target_ctx.set_current_catalog(&destination.catalog_name);
             target_ctx.set_current_schema(&destination.schema_name);
-            let result = batcher
-                .submit(destination, batch, Arc::new(target_ctx), permit)
-                .await;
-            return collect_batcher_outputs(vec![result], write_cost as _, &ctx).await;
+            let target_ctx = Arc::new(target_ctx);
+            let results = future::join_all(batches.into_iter().map(|batch| {
+                batcher.submit(
+                    destination.clone(),
+                    batch,
+                    target_ctx.clone(),
+                    permit.clone(),
+                )
+            }))
+            .await;
+            return collect_batcher_outputs(results, write_cost as _, &ctx).await;
         }
 
         let permit = self.reserve_conversion_memory_with(
             || estimated_exemplar_record_batch_bytes(&exemplars, &destination),
             &ctx,
         )?;
-        let batch =
-            exemplars_to_sparse_record_batch(&exemplars, &resolved_table_ids, &destination)?;
+        let (destination, batches) = self
+            .prepare_sparse_batches(&destination, prepare_batches)
+            .await?;
         let write_cost = self
             .meter_and_mirror_exemplars(
                 &exemplars,
@@ -791,9 +849,9 @@ impl Inserter {
             )
             .await?;
 
-        self.dispatch_sparse_bulk_batch(
+        self.dispatch_sparse_bulk_batches(
             &destination,
-            batch,
+            batches,
             &ctx,
             ctx.skip_wal(),
             write_cost as _,
@@ -917,7 +975,7 @@ impl Inserter {
                 .await;
         }
 
-        if table_infos.values().any(|info| is_sparse_mito_table(info)) {
+        if table_infos.values().any(|info| info.is_sparse_mito_table()) {
             return self
                 .dispatch_direct_sparse_row_inserts(
                     requests,
@@ -977,7 +1035,7 @@ impl Inserter {
             };
             ImpureDefaultFiller::new((*table_info).clone())?.fill_rows(rows);
             if batcher.memory_limit_bytes() != 0 {
-                let item_bytes = if is_sparse_mito_table(table_info) {
+                let item_bytes = if table_info.is_sparse_mito_table() {
                     estimated_sparse_record_batch_bytes(rows, table_info)
                 } else {
                     crate::req_convert::insert::estimated_record_batch_bytes(rows, table_info)
@@ -1003,12 +1061,12 @@ impl Inserter {
         for request in &requests.inserts {
             let table_info = by_name[request.table_name.as_str()];
             if let Some(rows) = &request.rows {
-                let batch = if is_sparse_mito_table(table_info) {
-                    sparse_rows_to_record_batch(rows, table_info)?
+                if table_info.is_sparse_mito_table() {
+                    let (table_info, batches) = self.sparse_row_batches(table_info, rows).await?;
+                    prepared.extend(batches.into_iter().map(|batch| (table_info.clone(), batch)));
                 } else {
-                    rows_to_record_batch(rows, table_info)?
-                };
-                prepared.push((table_info.clone(), batch));
+                    prepared.push((table_info.clone(), rows_to_record_batch(rows, table_info)?));
+                }
             }
         }
         // Preserve the existing meter input and original request boundary. These
@@ -1203,6 +1261,187 @@ impl Inserter {
             .await
     }
 
+    /// A missed DDL notification can leave either the routes or the partition projection stale.
+    /// Retry preparation only; metering, mirroring, and submission must happen at most once.
+    async fn prepare_sparse_batches<F: Future<Output = Result<Vec<RecordBatch>>> + Send>(
+        &self,
+        initial: &TableInfoRef,
+        prepare: impl Fn(TableInfoRef) -> F,
+    ) -> Result<(TableInfoRef, Vec<RecordBatch>)> {
+        use crate::error::Error;
+        use common_meta::error::Error as MetaError;
+
+        let mut table = initial.clone();
+        let mut refreshed = false;
+        loop {
+            let error = match prepare(table.clone()).await {
+                Ok(batches) => return Ok((table, batches)),
+                Err(error) => error,
+            };
+            let retry = match &error {
+                Error::ResolveSparsePrimaryKey { source, .. } => match source.as_ref() {
+                    MetaError::NoLeader { .. } if !refreshed => true,
+                    // The region may be ahead of the catalog during ALTER. Let the client
+                    // prepare a new request (including column defaults) on its next attempt.
+                    MetaError::SparseWriteSchema { .. } => false,
+                    _ => return Err(error),
+                },
+                Error::SplitInsert { source, .. } if !refreshed && source.is_missing_column() => {
+                    true
+                }
+                _ => return Err(error),
+            };
+            self.cache_invalidator
+                .invalidate(
+                    &Default::default(),
+                    &[
+                        CacheIdent::TableId(table.table_id()),
+                        CacheIdent::TableName(table.table_ref().into()),
+                    ],
+                )
+                .await
+                .context(crate::error::InvalidateTableCacheSnafu)?;
+            if !retry {
+                return Err(error);
+            }
+
+            let current = self
+                .get_table(&table.catalog_name, &table.schema_name, &table.name)
+                .await?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: table.table_ref().to_string(),
+                })?
+                .table_info();
+            // Rows and admission may already be bound to this table's columns, defaults and TTL.
+            ensure!(
+                current.table_id() == table.table_id()
+                    && current.meta.schema == table.meta.schema
+                    && current.meta.options == table.meta.options,
+                crate::error::SparseWriteTableChangedSnafu {
+                    table_name: table.table_ref().to_string()
+                }
+            );
+            table = current;
+            refreshed = true;
+        }
+    }
+
+    /// Older ALTERs rebuilt the catalog key in column order. Existing rows use region order.
+    async fn sparse_write_schemas(
+        &self,
+        table: &TableInfoRef,
+        partition_batch: impl FnOnce() -> Result<RecordBatch>,
+    ) -> Result<Vec<(TableInfoRef, Option<RegionMask>)>> {
+        if !table.needs_sparse_key_order_lookup() {
+            return Ok(vec![(table.clone(), None)]);
+        }
+        let table_id = table.table_id();
+        let route = self
+            .partition_manager
+            .find_physical_table_route(table_id)
+            .await
+            .with_context(|_| crate::error::FindTablePartitionRuleSnafu {
+                table_name: table.table_ref().to_string(),
+            })?;
+        let mut masks = std::collections::HashMap::new();
+        let mut regions = if let [only] = route.region_routes.as_slice() {
+            vec![only.region.id.region_number()]
+        } else {
+            let (rule, _) = self
+                .partition_manager
+                .find_table_partition_rule(table)
+                .await
+                .with_context(|_| crate::error::FindTablePartitionRuleSnafu {
+                    table_name: table.table_ref().to_string(),
+                })?;
+            masks = rule
+                .split_record_batch(&partition_batch()?)
+                .context(crate::error::SplitInsertSnafu)?;
+            masks.retain(|_, mask| !mask.select_none());
+            masks.keys().copied().collect()
+        };
+        regions.sort_unstable();
+        let key = SparseWriteRegions {
+            table_id,
+            table_version: table.ident.version,
+            schema_version: table.meta.schema.version(),
+            route_version: route.version(),
+            regions,
+        };
+        let orders = self
+            .sparse_key_orders
+            .try_get_with(key.clone(), async {
+                let routes = route
+                    .region_routes
+                    .iter()
+                    .filter(|route| {
+                        key.regions
+                            .binary_search(&route.region.id.region_number())
+                            .is_ok()
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                ensure!(
+                    routes.len() == key.regions.len(),
+                    common_meta::error::NoLeaderSnafu { table_id }
+                );
+                let keys = RegionMetadataLister::new(self.node_manager.clone())
+                    .sparse_primary_keys(table_id, &routes, Some(table))
+                    .await?;
+                let mut groups = HashMap::new();
+                for (region, order) in keys {
+                    groups
+                        .entry(order)
+                        .or_insert_with(Vec::new)
+                        .push(region.region_number());
+                }
+                Ok(Arc::new(groups))
+            })
+            .await
+            .with_context(|_| crate::error::ResolveSparsePrimaryKeySnafu {
+                table_name: table.table_ref().to_string(),
+            })?;
+        let mut layouts = Vec::new();
+        for (order, regions) in orders.iter() {
+            let schema = match order.align_table(table) {
+                Ok(Cow::Borrowed(_)) => table.clone(),
+                Ok(Cow::Owned(aligned)) => Arc::new(aligned),
+                Err(error) => {
+                    // Reconciliation can change column metadata without bumping the schema version.
+                    self.sparse_key_orders.invalidate(&key).await;
+                    return Err(error).context(crate::error::TableMetadataManagerSnafu);
+                }
+            };
+            if orders.len() == 1 {
+                return Ok(vec![(schema, None)]);
+            }
+            for region in regions {
+                let mask = masks
+                    .remove(region)
+                    .context(crate::error::UnexpectedSnafu {
+                        violated: "Missing row selection for sparse region",
+                    })?;
+                layouts.push((schema.clone(), Some(mask)));
+            }
+        }
+        Ok(layouts)
+    }
+
+    async fn sparse_row_batches(
+        &self,
+        table: &TableInfoRef,
+        rows: &Rows,
+    ) -> Result<(TableInfoRef, Vec<RecordBatch>)> {
+        self.prepare_sparse_batches(table, |table| async move {
+            self.sparse_write_schemas(&table, || rows_partition_batch(rows, &table))
+                .await?
+                .into_iter()
+                .map(|(schema, mask)| sparse_rows_to_batch(rows, &schema, mask.as_ref()))
+                .collect()
+        })
+        .await
+    }
+
     async fn eligible_table_batcher(
         &self,
         table_info: &TableInfoRef,
@@ -1292,20 +1531,21 @@ impl Inserter {
             .values()
             .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
+        let is_instant_table = |info: &TableInfo| {
+            instant_table_ids.contains(&info.table_id()) || info.is_ttl_instant_table()
+        };
         for request in &mut requests.inserts {
             let info = by_name
                 .get(&request.table_name)
                 .context(TableNotFoundSnafu {
                     table_name: &request.table_name,
                 })?;
-            if let Some(rows) = &mut request.rows {
+            if !is_instant_table(info)
+                && let Some(rows) = &mut request.rows
+            {
                 ImpureDefaultFiller::new(info.clone())?.fill_rows(rows);
             }
         }
-
-        let is_instant_table = |info: &TableInfo| {
-            instant_table_ids.contains(&info.table_id()) || info.is_ttl_instant_table()
-        };
 
         let permit = self.reserve_conversion_memory_with(
             || {
@@ -1313,7 +1553,7 @@ impl Inserter {
                 for request in &requests.inserts {
                     let info = by_name.get(&request.table_name)?;
                     if !is_instant_table(info)
-                        && is_sparse_mito_table(info)
+                        && info.is_sparse_mito_table()
                         && let Some(rows) = &request.rows
                     {
                         total =
@@ -1334,10 +1574,9 @@ impl Inserter {
                 continue;
             };
             let is_instant = is_instant_table(info);
-            if is_sparse_mito_table(info) {
+            if info.is_sparse_mito_table() {
                 if !is_instant {
-                    let batch = sparse_rows_to_record_batch(&rows, info)?;
-                    sparse_batches.push((info.clone(), batch));
+                    sparse_batches.push(self.sparse_row_batches(info, &rows).await?);
                 }
                 let region_req = RegionInsertRequest {
                     region_id: RegionId::new(info.table_id(), 0).as_u64(),
@@ -1401,14 +1640,20 @@ impl Inserter {
         dense_inserts.requests.truncate(dense_request_count);
 
         let mut results = Vec::new();
-        for (info, batch) in sparse_batches {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            results.push(
-                self.dispatch_sparse_bulk_batch(&info, batch, ctx, skip_wal, 0, permit.clone())
+        for (info, batches) in sparse_batches {
+            if !batches.is_empty() {
+                results.push(
+                    self.dispatch_sparse_bulk_batches(
+                        &info,
+                        batches,
+                        ctx,
+                        skip_wal,
+                        0,
+                        permit.clone(),
+                    )
                     .await,
-            );
+                );
+            }
         }
         if !dense_inserts.requests.is_empty() {
             results.push(
@@ -1419,10 +1664,10 @@ impl Inserter {
         collect_batcher_outputs(results, write_cost as usize, ctx).await
     }
 
-    async fn dispatch_sparse_bulk_batch(
+    async fn dispatch_sparse_bulk_batches(
         &self,
         table_info: &TableInfoRef,
-        batch: RecordBatch,
+        batches: Vec<RecordBatch>,
         ctx: &QueryContextRef,
         skip_wal: bool,
         write_cost: usize,
@@ -1439,22 +1684,24 @@ impl Inserter {
         let dispatcher = self.write_dispatcher.clone();
 
         if ctx.confirmed_writes() {
-            let num_rows = batch.num_rows();
-            let partitioned = partitioner.partition_tracked_bulk_insert_requests(
-                batch,
-                vec![0; num_rows],
-                skip_wal,
-            )?;
-            let writes = partitioned
-                .into_iter()
-                .map(|(request, owners)| crate::write_dispatcher::TrackedWrite {
-                    request: RegionRequest {
-                        header: header.clone(),
-                        body: Some(api::v1::region::region_request::Body::BulkInsert(request)),
-                    },
-                    owners,
-                })
-                .collect();
+            let mut writes = Vec::new();
+            for batch in batches {
+                let num_rows = batch.num_rows();
+                let partitioned = partitioner.partition_tracked_bulk_insert_requests(
+                    batch,
+                    vec![0; num_rows],
+                    skip_wal,
+                )?;
+                writes.extend(partitioned.into_iter().map(|(request, owners)| {
+                    crate::write_dispatcher::TrackedWrite {
+                        request: RegionRequest {
+                            header: header.clone(),
+                            body: Some(api::v1::region::region_request::Body::BulkInsert(request)),
+                        },
+                        owners,
+                    }
+                }));
+            }
             let (writes, progress) = dispatcher.prepare_tracked(writes, 1).await;
             let cancellation = CancellationToken::new();
             let _guard = cancellation.clone().drop_guard();
@@ -1491,14 +1738,14 @@ impl Inserter {
             return Ok(Output::new(OutputData::AffectedRows(rows), meta));
         }
 
-        let partitioned = partitioner.partition_bulk_insert_requests(batch, None, skip_wal)?;
-        let requests = partitioned
-            .into_iter()
-            .map(|request| RegionRequest {
+        let mut requests = Vec::new();
+        for batch in batches {
+            let partitioned = partitioner.partition_bulk_insert_requests(batch, None, skip_wal)?;
+            requests.extend(partitioned.into_iter().map(|request| RegionRequest {
                 header: header.clone(),
                 body: Some(api::v1::region::region_request::Body::BulkInsert(request)),
-            })
-            .collect();
+            }));
+        }
         let writes = dispatcher.prepare(requests).await?;
         let cancellation = CancellationToken::new();
         let _guard = cancellation.clone().drop_guard();
@@ -1544,7 +1791,7 @@ impl Inserter {
                 .submit_table_rows(rows, table_info, skip_wal, ctx, batcher)
                 .await;
         }
-        if is_sparse_mito_table(&table_info) {
+        if table_info.is_sparse_mito_table() {
             return self
                 .dispatch_single_sparse_table_rows(rows, table_info, skip_wal, &ctx)
                 .await;
@@ -1569,7 +1816,7 @@ impl Inserter {
                 .submit_table_rows(rows, table_info, ctx.skip_wal(), ctx.clone(), batcher)
                 .await;
         }
-        if is_sparse_mito_table(&table_info) {
+        if table_info.is_sparse_mito_table() {
             return self
                 .dispatch_single_sparse_table_rows(rows, table_info, ctx.skip_wal(), ctx)
                 .await;
@@ -3870,6 +4117,7 @@ mod tests {
         let kv_backend = prepare_mocked_backend().await;
         let inserter = Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
             create_partition_rule_manager(kv_backend.clone()).await,
             Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
             Arc::new(new_table_flownode_set_cache(
@@ -4304,6 +4552,7 @@ mod tests {
         });
         let inserter = Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
             partition_manager,
             Arc::new(MockDatanodeManager::new(watcher)),
             Arc::new(new_table_flownode_set_cache(
@@ -5267,6 +5516,7 @@ mod tests {
         let kv_backend = prepare_mocked_backend().await;
         Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
             create_partition_rule_manager(kv_backend.clone()).await,
             Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
             Arc::new(new_table_flownode_set_cache(
@@ -5503,7 +5753,7 @@ mod tests {
     #[derive(Clone)]
     struct RecordingNodeManager {
         datanode_dispatch: tokio::sync::mpsc::UnboundedSender<usize>,
-        flownode_dispatch: tokio::sync::mpsc::UnboundedSender<Peer>,
+        flownode_dispatch: mpsc::UnboundedSender<(Peer, RegionInsertRequests)>,
         gates: Arc<std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Semaphore>>>>,
         fail_flownode: bool,
     }
@@ -5584,9 +5834,12 @@ mod tests {
 
         async fn handle_inserts(
             &self,
-            _request: api::v1::region::InsertRequests,
+            request: api::v1::region::InsertRequests,
         ) -> common_meta::error::Result<FlowResponse> {
-            let _ = self.manager.flownode_dispatch.send(self.peer.clone());
+            let _ = self
+                .manager
+                .flownode_dispatch
+                .send((self.peer.clone(), request));
             if self.manager.fail_flownode {
                 return Err(common_meta::error::UnexpectedSnafu {
                     err_msg: "test flownode failure".to_string(),
@@ -5663,6 +5916,7 @@ mod tests {
         let flow_cache_backend = prepare_mocked_backend().await;
         let inserter = Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
             partition_manager,
             node_manager,
             Arc::new(new_table_flownode_set_cache(
@@ -5889,6 +6143,7 @@ mod tests {
         let inserter_with_cache = |flow_cache| {
             Inserter::new(
                 catalog::memory::MemoryCatalogManager::new(),
+                Arc::new(DummyCacheInvalidator),
                 partition_manager.clone(),
                 Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
                 flow_cache,
@@ -6126,11 +6381,11 @@ mod tests {
         let task = FlowMirrorTask { requests };
         task.detach(node_manager.clone(), pending.clone(), false)
             .unwrap();
-        let first = tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+        let (first, _) = tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
             .await
             .unwrap()
             .unwrap();
-        let second = tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+        let (second, _) = tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
             .await
             .unwrap()
             .unwrap();
@@ -6195,14 +6450,11 @@ mod tests {
         }
         .detach(node_manager, pending.clone(), false)
         .unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            flownode_peer().id
-        );
+        let (peer, _) = tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer.id, flownode_peer().id);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while pending.load(Ordering::Relaxed) != 0
             || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
@@ -6308,6 +6560,142 @@ mod tests {
         assert!(concurrent.events.swap(0, Ordering::Relaxed) + winners[0] == 8);
     }
 
+    async fn recording_inserter(
+        kv_backend: &common_meta::kv_backend::KvBackendRef,
+    ) -> (
+        Inserter,
+        mpsc::UnboundedReceiver<usize>,
+        mpsc::UnboundedReceiver<(Peer, RegionInsertRequests)>,
+    ) {
+        let partition_manager = create_partition_rule_manager(kv_backend.clone()).await;
+        let (datanode_tx, datanode_rx) = mpsc::unbounded_channel();
+        let (flownode_tx, flownode_rx) = mpsc::unbounded_channel();
+        let node_manager = Arc::new(RecordingNodeManager {
+            datanode_dispatch: datanode_tx,
+            flownode_dispatch: flownode_tx,
+            gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            fail_flownode: false,
+        });
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
+            partition_manager,
+            node_manager,
+            Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                Cache::new(10),
+                kv_backend.clone(),
+            )),
+            true,
+        );
+        cache_test_flow(
+            &inserter.table_flownode_set_cache,
+            CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![10, 11],
+                partition_to_peer_mapping: vec![(0, flownode_peer())],
+            },
+        )
+        .await;
+        (inserter, datanode_rx, flownode_rx)
+    }
+
+    #[tokio::test]
+    async fn test_mixed_sparse_write_preserves_instant_flow_default() {
+        use api::v1::helper::tag_column_schema;
+        use common_time::ttl::TimeToLive;
+        use datatypes::schema::{ColumnDefaultConstraint, Schema};
+
+        let _guard = lock_mirror_metrics().await;
+        let kv_backend = prepare_mocked_backend().await;
+        let (inserter, mut datanode_rx, mut flownode_rx) = recording_inserter(&kv_backend).await;
+        let mut stored = new_test_table_info(10, "stored", std::iter::empty());
+        stored.meta.engine = default_engine().into();
+        stored.meta.schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Function("now()".into())))
+            .unwrap(),
+        ]));
+        stored.meta.column_ids = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 2];
+        stored.meta.primary_key_indices = vec![0, 1];
+        stored.meta.partition_key_indices.clear();
+        let mut instant = stored.clone();
+        instant.ident.table_id = 11;
+        instant.name = "instant".into();
+        instant.meta.options.ttl = Some(TimeToLive::Instant);
+        stored.meta.options.extra_options.insert(
+            store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.into(),
+            "sparse".into(),
+        );
+        let mut infos = HashMap::new();
+        let mut requests = RowInsertRequests::default();
+        for table in [stored, instant] {
+            register_unpartitioned_table_route(&kv_backend, &table).await;
+            requests.inserts.push(RowInsertRequest {
+                table_name: table.name.clone(),
+                rows: Some(Rows {
+                    schema: vec![
+                        tag_column_schema(DATA_SCHEMA_TABLE_ID_COLUMN_NAME, ColumnDataType::Uint32),
+                        tag_column_schema(DATA_SCHEMA_TSID_COLUMN_NAME, ColumnDataType::Uint64),
+                    ],
+                    rows: vec![Row {
+                        values: vec![ValueData::U32Value(1).into(), ValueData::U64Value(2).into()],
+                    }],
+                }),
+            });
+            infos.insert(table.table_id(), Arc::new(table));
+        }
+        let output = inserter
+            .dispatch_direct_sparse_row_inserts(
+                requests,
+                infos,
+                HashSet::new(),
+                false,
+                &QueryContext::arc(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+        assert_eq!(datanode_rx.try_recv().unwrap(), 1);
+        let (_, mirrored) = tokio::time::timeout(Duration::from_secs(5), flownode_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let timestamps = mirrored
+            .requests
+            .into_iter()
+            .map(|request| {
+                let table_id = RegionId::from(request.region_id).table_id();
+                let rows = request.rows.unwrap();
+                let has_timestamp = rows.schema.iter().any(|column| column.column_name == "ts");
+                (table_id, has_timestamp)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(timestamps, BTreeMap::from([(10, true), (11, false)]));
+        drop(inserter);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), flownode_rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn test_exemplar_flow_mirror_and_instant_ttl_bypass() {
         use common_query::prelude::greptime_exemplar_labels;
@@ -6317,42 +6705,10 @@ mod tests {
 
         let _guard = lock_mirror_metrics().await;
         let kv_backend = prepare_mocked_backend().await;
-        let partition_manager = create_partition_rule_manager(kv_backend.clone()).await;
-        let (datanode_tx, mut datanode_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
-        let node_manager = Arc::new(RecordingNodeManager {
-            datanode_dispatch: datanode_tx,
-            flownode_dispatch: flownode_tx,
-            gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            fail_flownode: false,
-        });
-        let flow_cache = Cache::new(10);
-        let flow_cache_backend = prepare_mocked_backend().await;
-        let inserter = Inserter::new(
-            catalog::memory::MemoryCatalogManager::new(),
-            partition_manager,
-            node_manager,
-            Arc::new(new_table_flownode_set_cache(
-                String::new(),
-                flow_cache,
-                flow_cache_backend,
-            )),
-            true,
-        )
-        .with_pending_rows_batcher(Some(Arc::new(UnexpectedBatcher {
+        let (inserter, mut datanode_rx, mut flownode_rx) = recording_inserter(&kv_backend).await;
+        let inserter = inserter.with_pending_rows_batcher(Some(Arc::new(UnexpectedBatcher {
             allow_acquire: false,
         })));
-
-        let peer = flownode_peer();
-        cache_test_flow(
-            &inserter.table_flownode_set_cache,
-            CreateFlow {
-                flow_id: 1,
-                source_table_ids: vec![10, 11],
-                partition_to_peer_mapping: vec![(0, peer)],
-            },
-        )
-        .await;
 
         let make_exemplar_table = |id: TableId, instant: bool| {
             let mut labels_col = ColumnSchema::new(
@@ -6443,10 +6799,10 @@ mod tests {
         ctx.set_batching_enabled(true);
         let ctx = Arc::new(ctx);
         let resolved = HashMap::from_iter([("cpu".to_string(), 100)]);
-        let batch = || {
+        let batch = |tag: &str| {
             ExemplarBatch::try_new(vec![Exemplar {
                 metric: "cpu".into(),
-                series_labels: BTreeMap::from([("job".into(), "api".into())]).into(),
+                series_labels: BTreeMap::from([(tag.into(), "api".into())]).into(),
                 timestamp: 1_000,
                 value: 1.5,
                 labels: BTreeMap::from([("trace_id".into(), "abc".into())]),
@@ -6454,11 +6810,33 @@ mod tests {
             .unwrap()
         };
 
+        // An unreconciled destination rejects the same missing tag with and without a Flow.
+        for id in [11, 12] {
+            let error = inserter
+                .execute_exemplar_write(
+                    batch("host"),
+                    resolved.clone(),
+                    make_exemplar_table(id, true),
+                    true,
+                    ctx.clone(),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("is missing tag host"), "{error}");
+        }
+        assert!(flownode_rx.try_recv().is_err());
+
         // Normal subscribed exemplar table bypasses batcher, mirrors to flownode, and writes datanode.
         let normal_dest = make_exemplar_table(10, false);
         register_unpartitioned_table_route(&kv_backend, &normal_dest).await;
         let output = inserter
-            .execute_exemplar_write(batch(), resolved.clone(), normal_dest, false, ctx.clone())
+            .execute_exemplar_write(
+                batch("job"),
+                resolved.clone(),
+                normal_dest,
+                false,
+                ctx.clone(),
+            )
             .await
             .unwrap();
         assert!(matches!(output.data, OutputData::AffectedRows(1)));
@@ -6472,7 +6850,7 @@ mod tests {
         let instant_dest = make_exemplar_table(11, true);
         register_unpartitioned_table_route(&kv_backend, &instant_dest).await;
         let output = inserter
-            .execute_exemplar_write(batch(), resolved, instant_dest, true, ctx)
+            .execute_exemplar_write(batch("job"), resolved, instant_dest, true, ctx)
             .await
             .unwrap();
         assert!(matches!(output.data, OutputData::AffectedRows(0)));
@@ -6482,11 +6860,12 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let pending = inserter.mirror_pending_rows.clone();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while pending.load(Ordering::Relaxed) != 0 {
-            assert!(std::time::Instant::now() < deadline);
-            tokio::task::yield_now().await;
-        }
+        drop(inserter);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), flownode_rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

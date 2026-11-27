@@ -26,7 +26,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::error::{self, Result};
-use crate::procedure::repartition::allocate_region::AllocateRegion;
+use crate::procedure::repartition::allocate_region::{AllocateRegion, sparse_source_schema};
 use crate::procedure::repartition::plan::{AllocationPlanEntry, SourceRegionDescriptor};
 use crate::procedure::repartition::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::update_partition_metadata::{
@@ -201,6 +201,21 @@ impl State for RepartitionStart {
             return Ok((Box::new(RepartitionEnd), Status::done()));
         }
         Self::ensure_no_pending_tails(ctx, &plans)?;
+        if plans.iter().any(|plan| plan.source_regions.len() > 1) {
+            let table = ctx.get_table_info_value().await?.table_info;
+            if table.needs_sparse_key_order_lookup() {
+                for plan in plans.iter().filter(|plan| plan.source_regions.len() > 1) {
+                    sparse_source_schema(
+                        &ctx.node_manager,
+                        &table,
+                        &table_route.region_routes,
+                        &plan.source_regions,
+                    )
+                    .await?;
+                }
+            }
+        }
+        ctx.volatile_ctx.sparse_sources_checked = true;
 
         if ctx.persistent_ctx.partition_metadata_update.is_some() {
             Ok((

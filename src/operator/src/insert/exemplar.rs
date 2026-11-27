@@ -173,6 +173,22 @@ impl ExemplarBatch {
         Ok(schema)
     }
 
+    pub(crate) fn validate_destination_tags(
+        &self,
+        table_name: &str,
+        has_tag: impl Fn(&str) -> bool,
+    ) -> Result<()> {
+        for tag in &self.distinct_tags {
+            ensure!(
+                has_tag(tag),
+                InvalidInsertRequestSnafu {
+                    reason: format!("exemplar destination {table_name} is missing tag {tag}"),
+                }
+            );
+        }
+        Ok(())
+    }
+
     /// Validates exemplar source IDs and timestamp precision without building protobuf rows.
     pub(crate) fn validate_for_destination(
         &self,

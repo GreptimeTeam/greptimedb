@@ -1,0 +1,9 @@
+name = "sparse_upsert_key_order"
+reason = "Overwriting a sparse Mito row after an upgrade must use the same key bytes as the original write."
+introduced_by = "PR #10625"
+topologies = ["standalone", "distributed"]
+# The November 23 binary reports the same product version as older, incompatible builds.
+from_range = [">=v1.4.0+git.8787551393019eb6377d3a457c8faff4cde30106"]
+to_range = [">=v1.4.0+git.8787551393019eb6377d3a457c8faff4cde30106"]
+features = ["sparse", "table", "write"]
+owner = "mito2"

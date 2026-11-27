@@ -26,7 +26,8 @@ pub(crate) use fill_impure_default::ImpureDefaultFiller;
 pub use fill_impure_default::fill_reqs_with_impure_default;
 pub(crate) use row_to_batch::{
     estimated_exemplar_record_batch_bytes, estimated_record_batch_bytes,
-    estimated_sparse_record_batch_bytes, value_matches_type,
+    estimated_sparse_record_batch_bytes, rows_partition_batch, sparse_exemplars_to_batch,
+    sparse_rows_to_batch, value_matches_type,
 };
 pub use row_to_batch::{
     exemplars_to_sparse_record_batch, rows_to_record_batch, sparse_rows_to_record_batch,

@@ -18,9 +18,7 @@ use serde::{Deserialize, Serialize};
 use store_api::metadata::ColumnMetadata;
 use tonic::async_trait;
 
-use crate::cache_invalidator::Context as CacheContext;
 use crate::error::Result;
-use crate::instruction::CacheIdent;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
 use crate::reconciliation::reconcile_table::reconciliation_end::ReconciliationEnd;
@@ -32,16 +30,21 @@ use crate::rpc::router::region_distribution;
 pub struct UpdateTableInfo {
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     column_metadatas: Vec<ColumnMetadata>,
+    /// A region repair must retire the old write layouts even if the catalog schema is identical.
+    #[serde(default)]
+    refresh_sparse_keys: bool,
 }
 
 impl UpdateTableInfo {
     pub fn new(
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         column_metadatas: Vec<ColumnMetadata>,
+        refresh_sparse_keys: bool,
     ) -> Self {
         Self {
             table_info_value,
             column_metadatas,
+            refresh_sparse_keys,
         }
     }
 }
@@ -67,13 +70,7 @@ impl State for UpdateTableInfo {
             .region_routes;
         let region_distribution = region_distribution(region_routes);
         let current_table_info_value = ctx.persistent_ctx.table_info_value.as_ref().unwrap();
-        let new_table_info = {
-            let mut new_table_info = current_table_info_value.table_info.clone();
-            new_table_info.meta = new_table_meta;
-            new_table_info
-        };
-
-        if new_table_info.meta == current_table_info_value.table_info.meta {
+        if new_table_meta == current_table_info_value.table_info.meta && !self.refresh_sparse_keys {
             info!(
                 "Table info is already up to date for table: {}, table_id: {}",
                 ctx.table_name(),
@@ -85,6 +82,8 @@ impl State for UpdateTableInfo {
             return Ok((Box::new(ReconciliationEnd), Status::executing(true)));
         }
 
+        let mut new_table_info = current_table_info_value.table_info.clone();
+        new_table_info.meta = new_table_meta;
         info!(
             "Updating table info for table: {}, table_id: {}. new table meta: {:?}, current table meta: {:?}",
             ctx.table_name(),
@@ -92,35 +91,8 @@ impl State for UpdateTableInfo {
             new_table_info.meta,
             current_table_info_value.table_info.meta,
         );
-        ctx.table_metadata_manager
-            .update_table_info(
-                current_table_info_value,
-                Some(region_distribution),
-                new_table_info,
-            )
+        ctx.publish_table_info(new_table_info, Some(region_distribution))
             .await?;
-        ctx.volatile_ctx.result_summary.mark_table_info_updated();
-
-        let table_ref = ctx.table_name().table_ref();
-        let table_id = ctx.table_id();
-        let cache_ctx = CacheContext {
-            subject: Some(format!(
-                "Invalidate table cache by reconciling table {}, table_id: {}",
-                table_ref, table_id,
-            )),
-        };
-        ctx.cache_invalidator
-            .invalidate(
-                &cache_ctx,
-                &[
-                    CacheIdent::TableName(table_ref.into()),
-                    CacheIdent::TableId(table_id),
-                ],
-            )
-            .await?;
-        // Update metrics.
-        let metrics = ctx.mut_metrics();
-        metrics.update_table_info = true;
         ctx.volatile_ctx
             .result_summary
             .mark_table_info_phase_completed();

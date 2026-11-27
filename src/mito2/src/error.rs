@@ -1926,6 +1926,11 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            // A frontend that missed reconciliation must refresh the table before encoding a new write.
+            InvalidRegionRequest {
+                source: store_api::metadata::MetadataError::SparseKeySchemaChanged { .. },
+                ..
+            } => RetryHint::RetryAfterRouteRefresh,
             PartitionExprVersionMismatch { .. }
             | RegionNotFound { .. }
             | RegionClosed { .. }

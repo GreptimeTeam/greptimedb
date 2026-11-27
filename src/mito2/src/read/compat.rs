@@ -55,18 +55,10 @@ pub(crate) fn has_same_columns_and_pk_encoding(
 ) -> bool {
     let left = projection_mapper.metadata();
     let right = read_format.metadata();
-    if left.primary_key_encoding != right.primary_key_encoding {
-        return false;
-    }
-
-    // The compat reader cannot reorder a key: it can only append missing tags or
-    // rewrite the encoding. A reordered dense key is therefore rejected instead of
-    // being re-encoded, and readers must not merge keys encoded in another order, even
-    // if the projected schema hides the difference. Only `Dense` encodes key columns
-    // positionally; sparse keys are canonicalized (labels are encoded in label-name
-    // order), so their declared order carries no encoded meaning.
-    if left.primary_key_encoding == PrimaryKeyEncoding::Dense
-        && left.primary_key != right.primary_key
+    // A projection can hide a key order change. Raw Mito writes use the declared order
+    // for both dense and sparse keys, and the compat reader cannot reorder them.
+    if left.primary_key_encoding != right.primary_key_encoding
+        || left.primary_key != right.primary_key
     {
         return false;
     }
@@ -247,6 +239,8 @@ impl FlatCompatBatch {
                 err_msg: "Flat format doesn't support converting sparse encoding back to dense encoding"
             }
         );
+        // Compaction copies the encoded keys into an SST that advertises the region's key order.
+        is_primary_key_same(mapper.metadata(), actual)?;
 
         // Encoded sparse tags are not materialized during compaction. Preserve
         // the projected JSON2 types: metadata only describes their logical shape.
@@ -760,6 +754,33 @@ mod tests {
             .primary_key(primary_key)
             .primary_key_encoding(PrimaryKeyEncoding::Sparse);
         builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_sparse_key_reorder_with_identical_columns() -> Result<()> {
+        let stored = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let mut current = stored.as_ref().clone();
+        current.primary_key.swap(2, 3);
+        let mapper = FlatProjectionMapper::all(&Arc::new(current))?;
+        let columns = ReadColumns::new(
+            stored
+                .column_metadatas
+                .iter()
+                .map(|column| column.column_id),
+        );
+        let format = FlatReadFormat::new(stored, columns, None, "test", false)?;
+        for compaction in [false, true] {
+            assert!(!has_same_columns_and_pk_encoding(
+                &mapper, &format, compaction
+            ));
+            assert!(matches!(
+                FlatCompatBatch::try_new(&mapper, &format, compaction),
+                Err(crate::error::Error::CompatReader { .. })
+            ));
+        }
+        Ok(())
     }
 
     /// Encode primary key.

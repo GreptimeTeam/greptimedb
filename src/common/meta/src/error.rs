@@ -1001,6 +1001,23 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Sparse write schema no longer matches the region"))]
+    SparseWriteSchema {
+        #[snafu(source(from(store_api::metadata::MetadataError, Box::new)))]
+        source: Box<store_api::metadata::MetadataError>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Inconsistent sparse primary key for table {table_id}. Reconcile the table metadata with its regions before writing"
+    ))]
+    InconsistentSparsePrimaryKey {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Procedure poison key already exists with a different value, key: {}, value: {}",
         key,
@@ -1387,6 +1404,7 @@ impl ErrorExt for Error {
             AuthorityRejected { .. } => StatusCode::IllegalState,
             AuthorityWriteSeqMismatch { .. } => StatusCode::RequestOutdated,
             NoLeader { .. } => StatusCode::TableUnavailable,
+            SparseWriteSchema { source, .. } => source.status_code(),
             ValueNotExist { .. }
             | ProcedurePoisonConflict { .. }
             | ProcedureStateReceiverNotFound { .. }
@@ -1460,7 +1478,8 @@ impl ErrorExt for Error {
             | InvalidFlowRequestBody { .. }
             | InvalidFilePath { .. }
             | ConflictingSchemaOptions { .. }
-            | PartitionExprIncompatible { .. } => StatusCode::InvalidArguments,
+            | PartitionExprIncompatible { .. }
+            | InconsistentSparsePrimaryKey { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {
@@ -1543,6 +1562,7 @@ impl ErrorExt for Error {
         match self {
             Error::PartialRegion { .. } => RetryHint::Retryable,
             Error::BatchRequest { source } => source.retry_hint(),
+            SparseWriteSchema { source, .. } => source.retry_hint(),
             RetryLater { source, .. } => match source.retry_hint() {
                 RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
                 RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,

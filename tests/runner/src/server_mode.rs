@@ -46,13 +46,8 @@ impl GrpcArgStyle {
     /// Unknown versions are treated as current/development binaries and use the
     /// official `grpc-*` names.
     pub(crate) fn for_version(version: Option<&Version>) -> Self {
-        const GRPC_ARG_RENAME_VERSION: Version = Version {
-            major: 1,
-            minor: 1,
-            patch: 0,
-        };
-
-        if version.is_some_and(|version| version < &GRPC_ARG_RENAME_VERSION) {
+        const GRPC_ARG_RENAME_VERSION: (u64, u64, u64) = (1, 1, 0);
+        if version.is_some_and(|version| version.core() < GRPC_ARG_RENAME_VERSION) {
             GrpcArgStyle::Rpc
         } else {
             GrpcArgStyle::Grpc

@@ -1,0 +1,41 @@
+INSERT INTO positioned_tag (__table_id, __tsid, host, site, ts, val)
+VALUES (1, 7, 'host-a', 'east', 1000, 2);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('positioned_tag');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('positioned_tag') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+SELECT host, site, val FROM positioned_tag ORDER BY val;
+
++--------+------+-----+
+| host   | site | val |
++--------+------+-----+
+| host-a | east | 2   |
++--------+------+-----+
+
+INSERT INTO declared_key (__table_id, __tsid, host, site, ts, val)
+VALUES (1, 7, 'host-a', 'east', 1000, 2);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('declared_key');
+
++-----------------------------------+
+| ADMIN FLUSH_TABLE('declared_key') |
++-----------------------------------+
+| 0                                 |
++-----------------------------------+
+
+SELECT host, site, val FROM declared_key ORDER BY val;
+
++--------+------+-----+
+| host   | site | val |
++--------+------+-----+
+| host-a | east | 2   |
++--------+------+-----+

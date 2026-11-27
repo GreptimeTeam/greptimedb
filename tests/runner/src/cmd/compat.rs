@@ -22,7 +22,7 @@ use sqlness::interceptor::template::DELIMITER as TEMPLATE_DELIMITER;
 use sqlness::interceptor::{InterceptorRef, Registry};
 
 use crate::cmd::bare::ServerAddr;
-use crate::cmd::compat_case::{self, CompatCase, try_infer_version, version_matches_range};
+use crate::cmd::compat_case::{self, CompatCase, version_matches_range};
 use crate::cmd::datanode_overlay::{
     DatanodeOverlay, DatanodeProtectionPolicy, PreparedDatanodeOverlay,
 };
@@ -194,102 +194,24 @@ impl CompatCommand {
         compat_case::validate_case_namespaces(&cases).unwrap_or_else(|e| panic!("{e}"));
 
         // ---- 4. Resolve "from" and "to" versions ----
-        let (from_bins_dir, from_version, from_ver_parsed, to_bins_dir, to_version, to_ver_parsed) =
+        let bins_dir = async |dir: Option<&PathBuf>, version: Option<&str>| {
             if dry_run {
-                // Dry-run: resolve versions without panicking on missing binaries.
-                // try_infer_version returns None gracefully when the binary is absent.
-                let dry_run_from_bins_dir = self
-                    .from_bins_dir
-                    .clone()
-                    .unwrap_or_else(|| util::get_binary_dir("debug"));
-                let from_ver_str = self
-                    .from_version
-                    .as_deref()
-                    .and_then(|v| {
-                        if v == "current" {
-                            None
-                        } else {
-                            Some(v.to_string())
-                        }
-                    })
-                    .or_else(|| try_infer_version(&dry_run_from_bins_dir).map(|v| v.to_string()));
-                let from_ver_parsed = from_ver_str
-                    .as_deref()
-                    .and_then(|s| compat_case::Version::parse(s).ok());
-
-                let dry_run_to_bins_dir = self.to_bins_dir.clone().unwrap_or_else(|| {
-                    self.to_version
-                        .as_deref()
-                        .filter(|version| *version != "current")
-                        .map(|version| PathBuf::from(util::get_workspace_root()).join(version))
+                dir.cloned().unwrap_or_else(|| {
+                    version
+                        .filter(|v| *v != "current")
+                        .map(|v| PathBuf::from(util::get_workspace_root()).join(v))
                         .unwrap_or_else(|| util::get_binary_dir("debug"))
-                });
-                let to_ver_str = self
-                    .to_version
-                    .as_deref()
-                    .filter(|version| *version != "current")
-                    .map(str::to_string)
-                    .or_else(|| try_infer_version(&dry_run_to_bins_dir).map(|v| v.to_string()));
-                let to_ver_parsed = to_ver_str
-                    .as_deref()
-                    .and_then(|s| compat_case::Version::parse(s).ok());
-
-                (
-                    Some(dry_run_from_bins_dir),
-                    from_ver_str,
-                    from_ver_parsed,
-                    Some(dry_run_to_bins_dir),
-                    to_ver_str,
-                    to_ver_parsed,
-                )
+                })
             } else {
-                // Normal path: resolve bins (may panic if binary not found).
-                let from_bins_dir = resolve_bins(
-                    self.from_bins_dir.as_ref(),
-                    self.from_version.as_deref(),
-                    self.pull_version_on_need,
-                )
-                .await;
-
-                let from_version = if let Some(ref ver) = self.from_version {
-                    if ver != "current" {
-                        Some(ver.clone())
-                    } else {
-                        try_infer_version(&from_bins_dir).map(|v| v.to_string())
-                    }
-                } else {
-                    try_infer_version(&from_bins_dir).map(|v| v.to_string())
-                };
-
-                let from_ver_parsed = from_version
-                    .as_deref()
-                    .and_then(|s| compat_case::Version::parse(s).ok());
-
-                let to_bins_dir = resolve_bins(
-                    self.to_bins_dir.as_ref(),
-                    self.to_version.as_deref(),
-                    self.pull_version_on_need,
-                )
-                .await;
-                let to_version = self
-                    .to_version
-                    .as_deref()
-                    .filter(|version| *version != "current")
-                    .map(str::to_string)
-                    .or_else(|| try_infer_version(&to_bins_dir).map(|v| v.to_string()));
-                let to_ver_parsed = to_version
-                    .as_deref()
-                    .and_then(|s| compat_case::Version::parse(s).ok());
-
-                (
-                    Some(from_bins_dir),
-                    from_version,
-                    from_ver_parsed,
-                    Some(to_bins_dir),
-                    to_version,
-                    to_ver_parsed,
-                )
-            };
+                resolve_bins(dir, version, self.pull_version_on_need).await
+            }
+        };
+        let from_bins_dir =
+            bins_dir(self.from_bins_dir.as_ref(), self.from_version.as_deref()).await;
+        let to_bins_dir = bins_dir(self.to_bins_dir.as_ref(), self.to_version.as_deref()).await;
+        let from_ver_parsed =
+            compat_case::Version::resolve(self.from_version.as_deref(), &from_bins_dir);
+        let to_ver_parsed = compat_case::Version::resolve(self.to_version.as_deref(), &to_bins_dir);
 
         // ---- 5b. Filter by version range ----
         let pre_filter_count = cases.len();
@@ -366,13 +288,19 @@ impl CompatCommand {
             println!("  topology:     {}", topology.as_str());
             println!(
                 "  from version: {}",
-                from_version.as_deref().unwrap_or(
-                    "unknown (use --from-version, --from-bins-dir, or build debug binary)"
-                )
+                from_ver_parsed
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref()
+                    .unwrap_or(
+                        "unknown (use --from-version, --from-bins-dir, or build debug binary)"
+                    )
             );
             println!(
                 "  to version:   {}",
-                to_version
+                to_ver_parsed
+                    .as_ref()
+                    .map(ToString::to_string)
                     .as_deref()
                     .unwrap_or("unknown (use --to-bins-dir or build debug binary)")
             );
@@ -419,10 +347,9 @@ impl CompatCommand {
 
         // ---- 6. Build interceptor registry ----
         let interceptor_registry = create_interceptor_registry();
-        let to_bins_dir = to_bins_dir.expect("to_bins_dir must be resolved in non-dry-run mode");
         let profile_config = ProfileRunConfig {
             interceptor_registry: &interceptor_registry,
-            from_bins_dir,
+            from_bins_dir: Some(from_bins_dir),
             to_bins_dir,
             pull_version_on_need: self.pull_version_on_need,
             setup_etcd: self.setup_etcd,

@@ -278,6 +278,7 @@ mod tests {
     use common_catalog::consts::default_engine;
     use common_grpc::flight::FlightDecoder;
     use common_memory_manager::OnExhaustedPolicy;
+    use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::error::Result as MetaResult;
     use common_meta::peer::Peer;
     use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
@@ -374,6 +375,7 @@ mod tests {
                 }));
                 let inserter = Arc::new(Inserter::new(
                     MemoryCatalogManager::new(),
+                    Arc::new(DummyCacheInvalidator),
                     create_partition_rule_manager(backend).await,
                     nodes,
                     mock_table_flownode_cache(1, vec![]).await,
@@ -567,6 +569,7 @@ mod tests {
         }));
         let inserter = Arc::new(Inserter::new(
             MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
             partitions.clone(),
             nodes.clone(),
             mock_table_flownode_cache(1, vec![]).await,
@@ -632,6 +635,7 @@ mod tests {
                 opentsdb_ctx.set_skip_wal(!skip_wal);
                 let inserter = Inserter::new(
                     MemoryCatalogManager::new_with_table(DistTable::table(table.clone())),
+                    Arc::new(DummyCacheInvalidator),
                     partitions,
                     nodes,
                     mock_table_flownode_cache(1, vec![]).await,
@@ -793,6 +797,7 @@ mod tests {
             let partitions = create_partition_rule_manager(prepare_mocked_backend().await).await;
             let inserter = Arc::new(Inserter::new(
                 MemoryCatalogManager::new(),
+                Arc::new(DummyCacheInvalidator),
                 partitions,
                 Arc::new(MockDatanodeManager::new(PartialHandler)),
                 mock_table_flownode_cache(1, vec![]).await,
@@ -924,6 +929,7 @@ mod tests {
                     .unwrap();
             let inserter = Arc::new(Inserter::new(
                 MemoryCatalogManager::new(),
+                Arc::new(DummyCacheInvalidator),
                 partitions,
                 nodes,
                 cache,

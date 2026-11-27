@@ -34,6 +34,7 @@ use common_meta::key::datanode_table::{DatanodeTableValue, RegionInfo};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -45,6 +46,7 @@ use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
+use table::metadata::TableInfoRef;
 use uuid::Uuid;
 
 use crate::error::{self, Result};
@@ -164,7 +166,11 @@ struct RepartitionGroupDataOwned {
 impl RepartitionGroupProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::RepartitionGroup";
 
-    pub fn new(persistent_context: PersistentContext, context: &repartition::Context) -> Self {
+    pub fn new(
+        persistent_context: PersistentContext,
+        context: &repartition::Context,
+        unchecked_sparse_table: Option<TableInfoRef>,
+    ) -> Self {
         let state = Box::new(RepartitionStart);
 
         Self {
@@ -176,7 +182,11 @@ impl RepartitionGroupProcedure {
                 mailbox: context.mailbox.clone(),
                 server_addr: context.server_addr.clone(),
                 start_time: Instant::now(),
-                volatile_ctx: VolatileContext::default(),
+                volatile_ctx: VolatileContext {
+                    sparse_source_check: unchecked_sparse_table
+                        .map(|table| (context.node_manager.clone(), table)),
+                    ..Default::default()
+                },
             },
         }
     }
@@ -292,9 +302,10 @@ pub struct Context {
     pub volatile_ctx: VolatileContext,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct VolatileContext {
     pub metrics: Metrics,
+    sparse_source_check: Option<(NodeManagerRef, TableInfoRef)>,
 }
 
 impl Context {

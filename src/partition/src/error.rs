@@ -17,7 +17,7 @@ use std::any::Any;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use datafusion_common::ScalarValue;
+use datafusion_common::{DataFusionError, ScalarValue, SchemaError};
 use datatypes::arrow;
 use datatypes::prelude::Value;
 use snafu::{Location, Snafu};
@@ -256,6 +256,26 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+}
+
+impl Error {
+    /// Whether the partition expression refers to a column absent from the routing batch.
+    pub fn is_missing_column(&self) -> bool {
+        match self {
+            Self::UndefinedColumn { .. } => true,
+            Self::CoercePartitionExpr {
+                error: DataFusionError::SchemaError(error, _),
+                ..
+            }
+            | Self::CreatePhysicalExpr {
+                error: DataFusionError::SchemaError(error, _),
+                ..
+            } => {
+                matches!(error.as_ref(), SchemaError::FieldNotFound { .. })
+            }
+            _ => false,
+        }
+    }
 }
 
 impl ErrorExt for Error {

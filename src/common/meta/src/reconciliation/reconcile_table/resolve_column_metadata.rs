@@ -81,15 +81,7 @@ impl State for ResolveColumnMetadata {
         let table_id = ctx.persistent_ctx.table_id;
         let table_name = &ctx.persistent_ctx.table_name;
 
-        let table_info_value = ctx
-            .table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
-            .await?
-            .with_context(|| error::TableNotFoundSnafu {
-                table_name: table_name.to_string(),
-            })?;
-        ctx.persistent_ctx.table_info_value = Some(table_info_value);
+        ctx.persistent_ctx.table_info_value = Some(ctx.read_table_info().await?);
 
         if let Some(column_metadatas) = check_column_metadatas_consistent(&self.region_metadata) {
             // The consistent regions share their key: order the tags as the regions keep them, which
@@ -114,7 +106,11 @@ impl State for ResolveColumnMetadata {
             ctx.mut_metrics().resolve_column_metadata_result =
                 Some(ResolveColumnMetadataResult::Consistent);
             return Ok((
-                Box::new(UpdateTableInfo::new(table_info_value, column_metadatas)),
+                Box::new(UpdateTableInfo::new(
+                    table_info_value,
+                    column_metadatas,
+                    false,
+                )),
                 Status::executing(false),
             ));
         };

@@ -29,6 +29,7 @@ use common_wal::config::DatanodeWalConfig;
 use datatypes::arrow::array::AsArray;
 use datatypes::value::Value;
 use frontend::instance::Instance;
+use frontend::service_config::BatcherOptions;
 use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
 use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
@@ -386,6 +387,13 @@ async fn test_repartition_append_count_memtable_file() {
 }
 
 async fn repartition_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
+    repartition_cluster_with_batcher(name, BatcherOptions::default()).await
+}
+
+async fn repartition_cluster_with_batcher(
+    name: &str,
+    batcher: BatcherOptions,
+) -> (GreptimeDbCluster, Arc<TempDir>) {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
     let home_dir = Arc::new(create_temp_dir(name));
@@ -403,6 +411,7 @@ async fn repartition_cluster(name: &str) -> (GreptimeDbCluster, Arc<TempDir>) {
             enable: true,
             ..Default::default()
         })
+        .with_table_batcher(batcher)
         .build(true)
         .await;
     (cluster, home_dir)
@@ -577,6 +586,969 @@ async fn test_exemplar_sparse_repartition_compaction() {
     check_output_stream(
         output.data,
         "+----------+\n| count(*) |\n+----------+\n| 4        |\n+----------+",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_legacy_sparse_upserts_after_split() {
+    let (cluster, _home_guard) = repartition_cluster("legacy_sparse_upsert").await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    for sql in [
+        "CREATE TABLE legacy_sparse (
+            __table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL,
+            host STRING, ts TIMESTAMP TIME INDEX, val INT,
+            PRIMARY KEY (__table_id, __tsid, host)
+         ) PARTITION ON COLUMNS(host) (host < 'm', host >= 'm')
+         WITH ('primary_key_encoding'='sparse', 'append_mode'='false')",
+        "ALTER TABLE legacy_sparse ADD COLUMN site STRING PRIMARY KEY AFTER __tsid",
+        "INSERT INTO legacy_sparse (__table_id, __tsid, host, site, ts, val)
+         VALUES (1, 7, 'b', 'east', 1000, 1), (1, 8, 'h', 'west', 1000, 1)",
+        "ADMIN FLUSH_TABLE('legacy_sparse')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+
+    // Older ALTERs saved the catalog key in column order while regions appended the new tag.
+    let manager = cluster.metasrv.table_metadata_manager();
+    let table_id = get_table_id(&cluster.metasrv, "legacy_sparse").await;
+    let stored = manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut legacy = stored.table_info.clone();
+    legacy.meta.primary_key_indices.sort_unstable();
+    assert_ne!(
+        legacy.meta.primary_key_indices,
+        stored.table_info.meta.primary_key_indices
+    );
+    manager
+        .update_table_info(&stored, None, legacy)
+        .await
+        .unwrap();
+    instance.cache_invalidator().invalidate_all().unwrap();
+
+    run_sql(
+        instance,
+        "ALTER TABLE legacy_sparse SPLIT PARTITION (host < 'm')
+        INTO (host < 'g', host >= 'g' AND host < 'm')",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    instance.cache_invalidator().invalidate_all().unwrap();
+    for sql in [
+        "INSERT INTO legacy_sparse (__table_id, __tsid, host, site, ts, val)
+         VALUES (1, 7, 'b', 'east', 1000, 2), (1, 8, 'h', 'west', 1000, 2)",
+        "ADMIN FLUSH_TABLE('legacy_sparse')",
+        "ADMIN COMPACT_TABLE('legacy_sparse', 'swcs', '3600')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+    let output = run_sql(
+        instance,
+        "SELECT host, val FROM legacy_sparse ORDER BY host, val",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+------+-----+\n\
+         | host | val |\n\
+         +------+-----+\n\
+         | b    | 2   |\n\
+         | h    | 2   |\n\
+         +------+-----+",
+    )
+    .await;
+}
+
+async fn create_sparse_write_table(
+    cluster: &GreptimeDbCluster,
+) -> (table::metadata::TableInfoRef, [RegionId; 2]) {
+    create_partitioned_sparse_write_table(cluster, "host < 'm', host >= 'm'").await
+}
+
+async fn create_partitioned_sparse_write_table(
+    cluster: &GreptimeDbCluster,
+    partitions: &str,
+) -> (table::metadata::TableInfoRef, [RegionId; 2]) {
+    let instance = cluster.fe_instance();
+    for sql in [
+        &format!(
+            "CREATE TABLE sparse_writes (
+            __table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL,
+            host STRING DEFAULT 'a', site STRING, ts TIMESTAMP TIME INDEX, val INT,
+            PRIMARY KEY (__table_id, __tsid, site, host)
+         ) PARTITION ON COLUMNS(host) ({partitions})
+         WITH ('primary_key_encoding'='sparse', 'append_mode'='false')"
+        ),
+        "ALTER TABLE sparse_writes ADD COLUMN note INT",
+    ] {
+        run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    }
+    let table = instance
+        .catalog_manager()
+        .table("greptime", "public", "sparse_writes", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    let (rule, _) = instance
+        .partition_manager()
+        .find_table_partition_rule(&table)
+        .await
+        .unwrap();
+    let ids = ["a", "z"].map(|host| {
+        RegionId::new(
+            table.table_id(),
+            rule.find_region(&[Value::from(host)]).unwrap(),
+        )
+    });
+    assert_ne!(ids[0], ids[1]);
+    (table, ids)
+}
+
+async fn seed_legacy_sparse_key_order(cluster: &GreptimeDbCluster, region: RegionId) {
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::{AlterKind, RegionAlterRequest, RegionRequest};
+
+    let leader = cluster
+        .fe_instance()
+        .partition_manager()
+        .find_region_leader(region)
+        .await
+        .unwrap();
+    let mito = cluster.datanode_instances[&leader.id]
+        .region_server()
+        .mito_engine()
+        .unwrap();
+    // A pre-upgrade split could create an empty region whose tag order differed from the source.
+    let metadata = RegionEngine::get_metadata(&mito, region).await.unwrap();
+    let mut columns = metadata.column_metadatas.clone();
+    columns.sort_by_key(|column| match column.column_schema.name.as_str() {
+        "__table_id" => 1,
+        "__tsid" => 2,
+        "host" => 3,
+        "site" => 4,
+        _ => 0,
+    });
+    mito.handle_request(
+        region,
+        RegionRequest::Alter(RegionAlterRequest {
+            kind: AlterKind::SyncColumns {
+                column_metadatas: columns,
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    let changed = RegionEngine::get_metadata(&mito, region).await.unwrap();
+    assert_ne!(metadata.primary_key, changed.primary_key);
+}
+
+async fn reconcile_sparse_writes(cluster: &GreptimeDbCluster) -> common_procedure::Result<()> {
+    let ctx = QueryContext::arc();
+    run_sql(
+        cluster.fe_instance(),
+        "ADMIN RECONCILE_TABLE('sparse_writes','UseMetasrv')",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let id = ctx.last_procedure_id().unwrap().parse().unwrap();
+    let mut watcher = cluster
+        .metasrv
+        .procedure_manager()
+        .procedure_watcher(id)
+        .unwrap();
+    watcher::wait(&mut watcher).await.map(|_| ())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sparse_upsert_after_reconciliation() {
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+
+    let (cluster, _home) = repartition_cluster("sparse_upsert_after_reconciliation").await;
+    let (_, [_, right]) = create_sparse_write_table(&cluster).await;
+    seed_legacy_sparse_key_order(&cluster, right).await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    let insert = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+                  VALUES (1,7,'z','west',1000,1)";
+    let output = run_sql(instance, insert, ctx.clone()).await.unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(1)));
+    run_sql(instance, "ADMIN FLUSH_TABLE('sparse_writes')", ctx.clone())
+        .await
+        .unwrap();
+    let error = reconcile_sparse_writes(&cluster).await.unwrap_err();
+    let message = error.output_msg();
+    assert!(
+        message.contains("Cannot reorder sparse primary key"),
+        "{message}"
+    );
+
+    let check_row = async |value: i32| {
+        let output = run_sql(
+            instance,
+            "SELECT host, site, val FROM sparse_writes",
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        check_output_stream(
+            output.data,
+            &format!("+------+------+-----+\n| host | site | val |\n+------+------+-----+\n| z    | west | {value}   |\n+------+------+-----+"),
+        )
+        .await;
+    };
+    check_row(1).await;
+    run_sql(
+        instance,
+        "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+         VALUES (1,7,'z','west',1000,2)",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_row(2).await;
+
+    // Keep the frontend's cached layout while giving the repair an empty region to reorder.
+    run_sql(instance, "TRUNCATE TABLE sparse_writes", ctx.clone())
+        .await
+        .unwrap();
+    reconcile_sparse_writes(&cluster).await.unwrap();
+
+    // The procedure may finish before this frontend receives its cache invalidation.
+    let output = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match run_sql(instance, insert, ctx.clone()).await {
+                Err(error) if error.status_code() == StatusCode::TableUnavailable => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                result => return result.unwrap(),
+            }
+        }
+    })
+    .await
+    .expect("the same frontend must accept the insert after reconciliation");
+    assert!(matches!(output.data, OutputData::AffectedRows(1)));
+    let output = run_sql(instance, "SELECT host, site FROM sparse_writes", ctx)
+        .await
+        .unwrap();
+    check_output_stream(
+        output.data,
+        "+------+------+\n| host | site |\n+------+------+\n| z    | west |\n+------+------+",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sparse_upsert_after_missed_reconciliation_notification() {
+    use common_error::ext::{ErrorExt, RetryHint};
+
+    let (cluster, _home) = repartition_cluster("sparse_missed_notification").await;
+    let (table, [_, right]) = create_sparse_write_table(&cluster).await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    let insert = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+                  VALUES (1,7,'z','west',1000,2)";
+    run_sql(instance, insert, ctx.clone()).await.unwrap();
+    run_sql(instance, "TRUNCATE TABLE sparse_writes", ctx.clone())
+        .await
+        .unwrap();
+    seed_legacy_sparse_key_order(&cluster, right).await;
+
+    // Publish the same version bump as a repair, without delivering its cache notification.
+    let manager = cluster.metasrv.table_metadata_manager();
+    let stored = manager
+        .table_info_manager()
+        .get(table.table_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut updated = stored.table_info.clone();
+    updated.ident.version += 1;
+    manager
+        .update_table_info(&stored, None, updated)
+        .await
+        .unwrap();
+
+    let error = run_sql(instance, insert, ctx.clone()).await.unwrap_err();
+    assert_eq!(
+        error.retry_hint(),
+        RetryHint::RetryAfterRouteRefresh,
+        "{error}"
+    );
+    let output = run_sql(instance, insert, ctx.clone()).await.unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(1)));
+    let output = run_sql(instance, "SELECT host, site, val FROM sparse_writes", ctx)
+        .await
+        .unwrap();
+    check_output_stream(output.data, "+------+------+-----+\n| host | site | val |\n+------+------+-----+\n| z    | west | 2   |\n+------+------+-----+").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sparse_upsert_after_partial_reconciliation() {
+    use common_error::ext::ErrorExt;
+    use common_meta::ddl::utils::region_metadata_lister::RegionMetadataLister;
+
+    let (cluster, _home) = repartition_cluster("sparse_upsert_after_partial_reconciliation").await;
+    let (_, [empty, persisted]) = create_partitioned_sparse_write_table(
+        &cluster,
+        "host < 'g', host >= 'g' AND host < 'm', host >= 'm'",
+    )
+    .await;
+    // The middle region already has the catalog's key order.
+    for region in [empty, persisted] {
+        seed_legacy_sparse_key_order(&cluster, region).await;
+    }
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    let insert = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+                  VALUES (1,7,'a','east',1000,1)";
+    for sql in [
+        insert,
+        "TRUNCATE TABLE sparse_writes",
+        "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+         VALUES (1,8,'z','west',1000,2)",
+        "ADMIN FLUSH_TABLE('sparse_writes')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+
+    let table_info = async || {
+        instance
+            .catalog_manager()
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "sparse_writes",
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .table_info()
+    };
+    let table = table_info().await;
+    let error = reconcile_sparse_writes(&cluster)
+        .await
+        .unwrap_err()
+        .output_msg();
+    assert!(
+        error.contains("Cannot reorder sparse primary key"),
+        "{error}"
+    );
+    let route = instance
+        .partition_manager()
+        .find_physical_table_route(table.table_id())
+        .await
+        .unwrap();
+    let regions = RegionMetadataLister::new(instance.node_manager().clone())
+        .list(table.table_id(), &route.region_routes)
+        .await
+        .unwrap();
+    for (id, expected) in [
+        (empty, ["__table_id", "__tsid", "site", "host"]),
+        (persisted, ["__table_id", "__tsid", "host", "site"]),
+    ] {
+        let region = regions
+            .iter()
+            .flatten()
+            .find(|r| r.region_id == id)
+            .unwrap();
+        let key = region
+            .primary_key_columns()
+            .map(|c| c.column_schema.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(key, expected);
+    }
+
+    // Wait for the real frontend invalidation before issuing the same single-region insert.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let info = table_info().await;
+            if info.ident.version > table.ident.version {
+                assert_eq!(info.meta, table.meta);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a failed repair must retire cached layouts for regions that changed");
+    let output = run_sql(instance, insert, ctx.clone()).await.unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(1)));
+    let output = run_sql(
+        instance,
+        "SELECT host, site, val FROM sparse_writes ORDER BY host",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+------+------+-----+\n| host | site | val |\n+------+------+-----+\n| a    | east | 1   |\n| z    | west | 2   |\n+------+------+-----+").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mixed_legacy_sparse_partitions() {
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use servers::batcher::BatchingProtocol;
+
+    let (cluster, _home) = repartition_cluster_with_batcher(
+        "mixed_legacy_sparse_partitions",
+        BatcherOptions {
+            protocols: vec![BatchingProtocol::Mysql],
+            pending_rows_flush_interval: Duration::from_millis(1),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (table, [_, right]) = create_sparse_write_table(&cluster).await;
+    seed_legacy_sparse_key_order(&cluster, right).await;
+    let instance = cluster.fe_instance();
+
+    for (batching, value) in [(false, 1), (true, 2)] {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_batching_enabled(batching);
+        let sql = format!(
+            "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+            VALUES (1,7,'a','east',1000,{value}), (1,7,'z','west',1000,{value}),
+                   (1,7,'b','west',1000,{value})"
+        );
+        let output = run_sql(instance, &sql, Arc::new(ctx)).await.unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(3)));
+        run_sql(
+            instance,
+            "ADMIN FLUSH_TABLE('sparse_writes')",
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+    }
+    let split = "ALTER TABLE sparse_writes SPLIT PARTITION (host >= 'm') INTO (host >= 'm' AND host < 's', host >= 's')";
+    run_sql(instance, split, QueryContext::arc()).await.unwrap();
+    instance.cache_invalidator().invalidate_all().unwrap();
+    let three_regions = run_sql(
+        instance,
+        "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+         VALUES (1,7,'z','west',1000,3), (1,7,'a','east',1000,3), (1,7,'n','east',1000,3)",
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(three_regions.data, OutputData::AffectedRows(3)));
+    let routes = cluster
+        .metasrv
+        .table_metadata_manager()
+        .table_route_manager();
+    let before = routes
+        .get_physical_table_route(table.table_id())
+        .await
+        .unwrap()
+        .1;
+    let error = run_sql(
+        instance,
+        "ALTER TABLE sparse_writes MERGE PARTITION (host < 'm', host >= 'm' AND host < 's')",
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+    let message = error.output_msg();
+    assert!(
+        message.contains("different sparse primary key orders"),
+        "{message}"
+    );
+    let after = routes
+        .get_physical_table_route(table.table_id())
+        .await
+        .unwrap()
+        .1;
+    assert_eq!(before.region_routes, after.region_routes);
+
+    // The other key order elsewhere in the table must not block a split and merge within one layout.
+    for sql in [
+        "ALTER TABLE sparse_writes MERGE PARTITION (host >= 'm' AND host < 's', host >= 's')",
+        "ADMIN COMPACT_TABLE('sparse_writes', 'swcs', '3600')",
+    ] {
+        run_sql(instance, sql, QueryContext::arc()).await.unwrap();
+    }
+    let output = run_sql(
+        instance,
+        "SELECT host, site, val FROM sparse_writes ORDER BY host",
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+------+------+-----+\n| host | site | val |\n+------+------+-----+\n| a    | east | 3   |\n| b    | west | 2   |\n| n    | east | 3   |\n| z    | west | 3   |\n+------+------+-----+").await;
+}
+
+#[rstest::rstest]
+#[case::mixed_keys(true)]
+#[case::matching_keys(false)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_recovered_sparse_merge(#[case] mixed_keys: bool) {
+    use common_procedure::Procedure;
+    use common_procedure_test::execute_procedure_once;
+    use meta_srv::procedure::repartition::repartition_start::RepartitionFrom;
+    use meta_srv::procedure::repartition::{Context, PersistentContext, RepartitionProcedure};
+    use partition::expr::col;
+
+    let (cluster, _home) = repartition_cluster("recovered_sparse_merge").await;
+    let (table, [_, right]) = create_partitioned_sparse_write_table(
+        &cluster,
+        "host < 'g', host >= 'g' AND host < 'm', host >= 'm'",
+    )
+    .await;
+    let meta = &cluster.metasrv;
+    let context = |persistent| {
+        Context::new(
+            &meta.ddl_manager().create_context(),
+            meta.mailbox().clone(),
+            meta.options().grpc.server_addr.clone(),
+            persistent,
+        )
+    };
+    let target = col("host").gt_eq(Value::from("g"));
+    let mut merge = RepartitionProcedure::new(
+        RepartitionFrom::Partitioned {
+            exprs: vec![
+                target.clone().and(col("host").lt(Value::from("m"))),
+                col("host").gt_eq(Value::from("m")),
+            ],
+            target_partition_columns: None,
+        },
+        vec![target],
+        context(PersistentContext::new(
+            table.table_ref().into(),
+            table.table_id(),
+            None,
+        )),
+    );
+    // Capture a real pre-staging checkpoint, before introducing the historical key order.
+    let id = ProcedureId::random();
+    for _ in 0..2 {
+        execute_procedure_once(id, Default::default(), &mut merge).await;
+    }
+    let checkpoint = merge.dump().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap()["state"]["repartition_state"],
+        "Dispatch"
+    );
+    drop(merge);
+
+    if mixed_keys {
+        seed_legacy_sparse_key_order(&cluster, right).await;
+    }
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    for sql in [
+        "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+         VALUES (1,7,'h','east',1000,11),(1,8,'z','west',1000,22)",
+        "ADMIN FLUSH_TABLE('sparse_writes')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+    let routes = meta.table_metadata_manager().table_route_manager();
+    let before = routes
+        .get_physical_table_route(table.table_id())
+        .await
+        .unwrap()
+        .1;
+    let recovered = RepartitionProcedure::from_json(&checkpoint, context).unwrap();
+    let mut watcher = meta
+        .procedure_manager()
+        .submit(ProcedureWithId {
+            id,
+            procedure: Box::new(recovered),
+            context: Default::default(),
+        })
+        .await
+        .unwrap();
+    let result = watcher::wait(&mut watcher).await;
+    let after = routes
+        .get_physical_table_route(table.table_id())
+        .await
+        .unwrap()
+        .1;
+    if mixed_keys {
+        result.unwrap_err();
+        assert_eq!(
+            before, after,
+            "the group must fail before staging its routes"
+        );
+    } else {
+        result.unwrap();
+        assert_eq!(after.region_routes.len(), 2);
+    }
+    let output = run_sql(
+        instance,
+        "SELECT host, site, val FROM sparse_writes ORDER BY host",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+------+------+-----+\n| host | site | val |\n+------+------+-----+\n| h    | east | 11  |\n| z    | west | 22  |\n+------+------+-----+").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sparse_write_with_an_unavailable_partition() {
+    let (mut cluster, _home) = repartition_cluster("sparse_write_partition_outage").await;
+    let (_, [left, right]) = create_sparse_write_table(&cluster).await;
+    let instance = cluster.fe_instance().clone();
+    let routes = instance.partition_manager();
+    let healthy = routes.find_region_leader(left).await.unwrap().id;
+    let unavailable = routes.find_region_leader(right).await.unwrap().id;
+    assert_ne!(healthy, unavailable);
+    cluster
+        .datanode_instances
+        .get_mut(&unavailable)
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+
+    // The first key lookup is cold. The omitted partition column defaults to 'a'.
+    for value in [1, 2] {
+        let sql = format!(
+            "INSERT INTO sparse_writes (__table_id,__tsid,site,ts,val) VALUES (1,7,'east',1000,{value})"
+        );
+        run_sql(&instance, &sql, QueryContext::arc()).await.unwrap();
+    }
+    let output = run_sql(
+        &instance,
+        "SELECT val FROM sparse_writes WHERE host='a'",
+        QueryContext::arc(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+-----+\n| val |\n+-----+\n| 2   |\n+-----+").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cold_sparse_write_after_region_migration() {
+    let (cluster, _home) = repartition_cluster("cold_sparse_write_after_migration").await;
+    let (_, [left, right]) = create_sparse_write_table(&cluster).await;
+    seed_legacy_sparse_key_order(&cluster, left).await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    let insert = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val) VALUES";
+    run_sql(
+        instance,
+        &format!("{insert} (1,7,'a','west',1000,1)"),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(instance, "ADMIN FLUSH_TABLE('sparse_writes')", ctx.clone())
+        .await
+        .unwrap();
+
+    // Miss the migration announcement while retaining the old route, but not a two-region layout.
+    cluster
+        .frontend
+        .heartbeat_task
+        .as_ref()
+        .unwrap()
+        .shutdown()
+        .await;
+    let routes = instance.partition_manager();
+    let from = routes.find_region_leader(left).await.unwrap().id;
+    let to = routes.find_region_leader(right).await.unwrap().id;
+    assert_ne!(from, to);
+    let migrate = format!("ADMIN MIGRATE_REGION({}, {from}, {to})", left.as_u64());
+    run_sql(instance, &migrate, ctx.clone()).await.unwrap();
+    let id = ctx.last_procedure_id().unwrap().parse().unwrap();
+    let mut watcher = cluster
+        .metasrv
+        .procedure_manager()
+        .procedure_watcher(id)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), watcher::wait(&mut watcher))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let output = run_sql(
+        instance,
+        &format!("{insert} (1,7,'a','west',1000,9),(1,8,'z','east',1000,7)"),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(2)));
+    let output = run_sql(
+        instance,
+        "SELECT host, val FROM sparse_writes ORDER BY host",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+------+-----+\n| host | val |\n+------+-----+\n| a    | 9   |\n| z    | 7   |\n+------+-----+").await;
+}
+
+#[rstest::rstest]
+#[case::direct_with_stale_routes(false)]
+#[case::batched_with_refreshed_routes(true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cold_sparse_write_after_partition_column_change(#[case] batch_with_new_routes: bool) {
+    use common_meta::instruction::CacheIdent;
+    use servers::batcher::BatchingProtocol;
+
+    let (cluster, _home) = repartition_cluster_with_batcher(
+        "cold_sparse_write_after_repartition",
+        BatcherOptions {
+            protocols: vec![BatchingProtocol::Mysql],
+            pending_rows_flush_interval: Duration::from_millis(1),
+            ..Default::default()
+        },
+    )
+    .await;
+    let partitions = "host < 'g', host >= 'g' AND host < 'm', host >= 'm'";
+    let (table, _) = create_partitioned_sparse_write_table(&cluster, partitions).await;
+    let instance = cluster.fe_instance();
+    let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+    ctx.set_batching_enabled(batch_with_new_routes);
+    let ctx = Arc::new(ctx);
+    cluster
+        .frontend
+        .heartbeat_task
+        .as_ref()
+        .unwrap()
+        .shutdown()
+        .await;
+    // wait=false also skips invalidation on the submitting frontend. Wait at metasrv instead.
+    let ddl = format!(
+        "ALTER TABLE sparse_writes REPARTITION ({partitions}) ON COLUMNS(site)
+                       INTO (site < 'm', site >= 'm') WITH (wait=false)"
+    );
+    run_sql(instance, &ddl, ctx.clone()).await.unwrap();
+    let id = ctx.last_procedure_id().unwrap().parse().unwrap();
+    let mut watcher = cluster
+        .metasrv
+        .procedure_manager()
+        .procedure_watcher(id)
+        .unwrap();
+    watcher::wait(&mut watcher).await.unwrap();
+    if batch_with_new_routes {
+        // A route refresh alone leaves the name-keyed TableInfo projecting host, not site.
+        instance
+            .cache_invalidator()
+            .invalidate(
+                &Default::default(),
+                &[CacheIdent::TableId(table.table_id())],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Hit every old partition, including the retired one, and reverse the ordering by site.
+    let insert = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+                  VALUES (1,7,'a','west',1000,1),(1,8,'h','east',1000,2),(1,9,'z','east',1000,3)";
+    let output = run_sql(instance, insert, ctx.clone()).await.unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(3)));
+    for completion in output.meta.write_completions {
+        completion.wait().await.unwrap();
+    }
+    let output = run_sql(
+        instance,
+        "SELECT host, val FROM sparse_writes WHERE site='east' ORDER BY host",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+------+-----+\n| host | val |\n+------+-----+\n| h    | 2   |\n| z    | 3   |\n+------+-----+").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cold_sparse_write_after_missed_tag_addition() {
+    use api::v1::{
+        AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, SemanticType,
+        alter_table_expr::Kind,
+    };
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::status_code::StatusCode;
+    use common_meta::procedure_executor::ExecutorContext;
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
+    use datatypes::schema::ColumnDefaultConstraint;
+
+    let (cluster, _home) = repartition_cluster("cold_sparse_write_after_tag_addition").await;
+    let (table, _) = create_sparse_write_table(&cluster).await;
+    let instance = cluster.fe_instance();
+    cluster
+        .frontend
+        .heartbeat_task
+        .as_ref()
+        .unwrap()
+        .shutdown()
+        .await;
+    // Submit at metasrv so this frontend retains the old table after the DDL completes.
+    cluster
+        .metasrv
+        .ddl_manager()
+        .submit_ddl_task(
+            ExecutorContext {
+                query_context: Some(Default::default()),
+                ..Default::default()
+            },
+            SubmitDdlTaskRequest::new(DdlTask::new_alter_table(AlterTableExpr {
+                catalog_name: table.catalog_name.clone(),
+                schema_name: table.schema_name.clone(),
+                table_name: table.name.clone(),
+                kind: Some(Kind::AddColumns(AddColumns {
+                    add_columns: vec![AddColumn {
+                        column_def: Some(ColumnDef {
+                            name: "zone".into(),
+                            data_type: ColumnDataType::String as _,
+                            semantic_type: SemanticType::Tag as _,
+                            is_nullable: true,
+                            default_constraint: ColumnDefaultConstraint::Value(Value::from(
+                                "local",
+                            ))
+                            .try_into()
+                            .unwrap(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                })),
+            })),
+        )
+        .await
+        .unwrap();
+    let ctx = QueryContext::arc();
+    let insert = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val) VALUES (1,7,'a','west',1000,1),(1,8,'z','east',1000,2)";
+    let error = run_sql(instance, insert, ctx.clone()).await.unwrap_err();
+    assert_eq!(error.status_code(), StatusCode::TableUnavailable, "{error}");
+    assert_eq!(error.retry_hint(), RetryHint::Retryable, "{error}");
+    let output = run_sql(instance, insert, ctx.clone()).await.unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(2)));
+    let output = run_sql(
+        instance,
+        "SELECT zone, val FROM sparse_writes ORDER BY val",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+-------+-----+\n| zone  | val |\n+-------+-----+\n| local | 1   |\n| local | 2   |\n+-------+-----+").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sparse_write_during_tag_addition() {
+    use api::v1::SemanticType;
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::status_code::StatusCode;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::{AddColumn, AlterKind, RegionAlterRequest, RegionRequest};
+
+    let (cluster, _home) = repartition_cluster("sparse_write_tag_addition").await;
+    let (table, [left, _]) = create_sparse_write_table(&cluster).await;
+    let instance = cluster.fe_instance();
+    let leader = instance
+        .partition_manager()
+        .find_region_leader(left)
+        .await
+        .unwrap();
+    let mito = cluster.datanode_instances[&leader.id]
+        .region_server()
+        .mito_engine()
+        .unwrap();
+    // Hold ALTER between the first region update and catalog publication without relying on timing.
+    let add_tag = |column_id, column_schema| {
+        let request = RegionRequest::Alter(RegionAlterRequest {
+            kind: AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata: ColumnMetadata {
+                        column_id,
+                        column_schema,
+                        semantic_type: SemanticType::Tag,
+                    },
+                    location: None,
+                }],
+            },
+        });
+        mito.handle_request(left, request)
+    };
+    let rack = ColumnSchema::new("rack", ConcreteDataType::string_datatype(), true);
+    add_tag(table.meta.next_column_id, rack).await.unwrap();
+    let ctx = QueryContext::arc();
+    let left_write = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val) VALUES (1,7,'a','east',1000,2)";
+    run_sql(
+        instance,
+        "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val)
+                       VALUES (1,7,'a','east',1000,1),(1,8,'z','west',1000,3)",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(instance, left_write, ctx.clone()).await.unwrap();
+    run_sql(
+        instance,
+        "ALTER TABLE sparse_writes ADD COLUMN rack STRING PRIMARY KEY",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let output = run_sql(
+        instance,
+        "SELECT val FROM sparse_writes WHERE rack IS NULL ORDER BY val",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+-----+\n| val |\n+-----+\n| 2   |\n| 3   |\n+-----+",
+    )
+    .await;
+
+    // Warm the new catalog generation, then advance its region again before dispatch.
+    run_sql(instance, left_write, ctx.clone()).await.unwrap();
+    let zone = ColumnSchema::new("zone", ConcreteDataType::string_datatype(), true)
+        .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from("local"))))
+        .unwrap();
+    add_tag(table.meta.next_column_id + 1, zone).await.unwrap();
+    let write = "INSERT INTO sparse_writes (__table_id,__tsid,host,site,ts,val) VALUES (1,7,'a','east',2000,4)";
+    // The single-region order is cached. The two-region lookup is cold.
+    for (sql, hint) in [
+        (write.to_owned(), RetryHint::RetryAfterRouteRefresh),
+        (
+            format!("{write}, (1,8,'z','west',2000,5)"),
+            RetryHint::Retryable,
+        ),
+    ] {
+        let error = run_sql(instance, &sql, ctx.clone()).await.unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::TableUnavailable, "{error}");
+        assert_eq!(error.retry_hint(), hint, "{error}");
+    }
+    run_sql(
+        instance,
+        "ALTER TABLE sparse_writes ADD COLUMN zone STRING DEFAULT 'local' PRIMARY KEY",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(instance, write, ctx.clone()).await.unwrap();
+    let output = run_sql(
+        instance,
+        "SELECT zone, val FROM sparse_writes WHERE ts=to_timestamp_millis(2000)",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+-------+-----+\n| zone  | val |\n+-------+-----+\n| local | 4   |\n+-------+-----+",
     )
     .await;
 }
