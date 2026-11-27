@@ -4,6 +4,9 @@ server_addr = "{addrs.grpc_addr}"
 
 [query]
 parallelism = 4
+{{ if enable_native_promql }}
+experimental_native_promql = true
+{{ endif }}
 
 [event_recorder]
 event_types = []

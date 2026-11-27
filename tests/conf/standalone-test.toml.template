@@ -4,6 +4,9 @@ require_lease_before_startup = true
 
 [query]
 parallelism = 4
+{{ if enable_native_promql }}
+experimental_native_promql = true
+{{ endif }}
 
 [[region_engine]]
 [region_engine.mito]

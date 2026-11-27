@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/fused_multi_standalone.sql

@@ -1,0 +1,1 @@
+../../../../cases/standalone/common/promql/delta_temporality.sql
