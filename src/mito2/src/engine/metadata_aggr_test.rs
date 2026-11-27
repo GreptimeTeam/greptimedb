@@ -1078,8 +1078,10 @@ async fn test_metadata_aggr_fourteen_day_workload(
         .await
         .unwrap();
     scanner
-        .prepare(store_api::region_engine::PrepareRequest::default()
-            .with_distinguish_partition_range(true))
+        .prepare(
+            store_api::region_engine::PrepareRequest::default()
+                .with_distinguish_partition_range(true),
+        )
         .unwrap();
     assert!(scanner.take_statistics_split().is_none());
 
