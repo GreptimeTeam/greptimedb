@@ -25,12 +25,9 @@ use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema}
 
 use crate::grid_series::{label_set, render_label_set};
 
-/// Rebuilds one raw series from every piece of one complete physical identity, reporting each
-/// allocation before it happens.
-///
-/// Reconstruction holds three intermediate vectors whose sizes depend on how the pieces interleave,
-/// so what it needs cannot be known up front. The caller charges `reserve` as the work grows
-/// instead of reserving a worst case it may never reach.
+/// Rebuilds one raw series from every piece of one complete physical identity. Calls `reserve`
+/// before each allocation, since the sizes depend on how the pieces interleave, and `shrink` once
+/// the transient workspaces are freed.
 pub(crate) fn merge_raw_identity_charging(
     schema: &SeriesSchema,
     chunks: &[RawSeriesChunk],
@@ -209,7 +206,6 @@ pub(crate) fn merge_raw_identity_charging(
         true,
     )
     .map_err(|error| DataFusionError::External(Box::new(error)))?;
-    // Only the general merge path allocates transient row-index workspaces.
     shrink(transient_workspace_bytes);
     Ok(result)
 }

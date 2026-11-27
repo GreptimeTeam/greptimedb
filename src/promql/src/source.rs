@@ -34,13 +34,9 @@ use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSerie
 
 /// Materializes complete metric labels from a raw-series frame stream.
 ///
-/// The labels are decoded from the stream's own label decode description, so a consumer that holds
-/// only the frame needs no scan-bound binding; a stream that carries complete labels already, and
-/// so declares no description, needs no decoder and is forwarded as supplied. Adjacent-chunk
-/// pack/unpack validation remains the caller's responsibility, and nonadjacent key recurrence is
-/// governed by the producer contract. Explicit labels are retained as supplied; their completeness
-/// cannot be inferred from the schema. No authorization or cross-stream completion is performed
-/// here.
+/// Labels are decoded with the stream's own label decode description; a stream without one already
+/// carries complete labels and is forwarded as supplied. Explicit labels are kept as supplied.
+/// Adjacent-chunk pack/unpack validation stays with the caller.
 pub fn materialize_raw_labels(
     source: SendableRawSeriesStream,
 ) -> Result<SendableRawSeriesStream, BoxedError> {
