@@ -405,6 +405,13 @@ impl PromPlanner {
             }
             None => match &input {
                 LogicalPlan::TableScan(scan) => scan.clone(),
+                // A second-precision time index is read through a projection that casts it to
+                // milliseconds. Only a row source reads that projection; the engine check below
+                // declines it for any other engine.
+                LogicalPlan::Projection(projection) => match projection.input.as_ref() {
+                    LogicalPlan::TableScan(scan) => scan.clone(),
+                    _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
+                },
                 _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
             },
         };
@@ -444,8 +451,13 @@ impl PromPlanner {
             .schema
             .timestamp_column()
             .map(|column| &column.data_type);
-        if time_index_type
-            != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
+        // A row source reads a second-precision time index as the milliseconds it is exactly.
+        let readable_time_index = time_index_type
+            == Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
+            || (reads_rows
+                && time_index_type
+                    == Some(&datatypes::prelude::ConcreteDataType::timestamp_second_datatype()));
+        if !readable_time_index
             || table_meta
                 .options
                 .extra_options
@@ -517,7 +529,7 @@ impl PromPlanner {
         // The row filter is the selector's own: the time range is added after compiling,
         // because only the compiler knows whether this occurrence reads a window or one
         // instant.
-        if !matches!(input, LogicalPlan::TableScan(_)) {
+        if !reads_rows && !matches!(input, LogicalPlan::TableScan(_)) {
             return Ok(declined("selector_plan_is_not_a_table_scan"));
         }
         if reads_rows {
@@ -2277,8 +2289,8 @@ fn row_source_input(
 
 /// Binds the selector's time range to a row source.
 ///
-/// The range filters the source's rows. It is also pushed into the scan, where the file engine uses
-/// it to prune files and row groups.
+/// The range filters the source's rows. It is also pushed into a scan whose time index is already
+/// in milliseconds, where the file engine uses it to prune files and row groups.
 fn bind_row_source_filters(
     source: &RowSeriesSource,
     time_filter: DfExpr,

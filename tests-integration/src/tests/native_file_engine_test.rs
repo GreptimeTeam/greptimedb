@@ -15,7 +15,8 @@
 //! Native PromQL over file-engine tables.
 //!
 //! `fe_metric` reads two CSV files whose rows are in no particular order, and one sample of series
-//! `{job="api", instance="a"}` is present in both files with different values. `fe_labels` holds a tag that is `NULL` on some
+//! `{job="api", instance="a"}` is present in both files with different values; `fe_metric_s` reads
+//! the same files with a second-precision time index. `fe_labels` holds a tag that is `NULL` on some
 //! rows and `''` on others, and an integer tag. `fe_histogram` mirrors the sqlness case
 //! `promql/delta_exponential_histogram`. Expected answers are worked out by hand from Prometheus
 //! semantics, which keep one sample per timestamp per series, read an empty label as an absent one
@@ -338,7 +339,7 @@ async fn create_tables(instance: &Arc<Instance>, dir: &std::path::Path) {
     std::fs::create_dir(&metric_dir).unwrap();
     write_csv(&metric_dir.join("a.csv"), FILE_A);
     write_csv(&metric_dir.join("b.csv"), FILE_B);
-    for (table, precision) in [("fe_metric", 3)] {
+    for (table, precision) in [("fe_metric", 3), ("fe_metric_s", 0)] {
         execute(
             instance,
             &format!(
@@ -523,6 +524,7 @@ fn same_rows(actual: &[Row], expected: &[Row]) -> bool {
 async fn check_native_answers(instance: &Arc<Instance>, observer: &PlanObserver) {
     let cases = metric_cases("fe_metric")
         .into_iter()
+        .chain(metric_cases("fe_metric_s"))
         .chain(label_cases())
         .chain(histogram_cases());
     let mut failures = Vec::new();
