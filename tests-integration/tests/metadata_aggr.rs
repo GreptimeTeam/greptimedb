@@ -150,8 +150,8 @@ async fn test_metadata_count_distributed_with_filter_and_memtables(#[case] enabl
     assert!(plan.contains("__count_state"), "{plan}");
     assert!(plan.contains("SeqScan:"), "{plan}");
     assert_eq!(
-        plan.contains("MetadataAggrExec: exact_rows=2"),
-        enabled,
+        plan.matches("MetadataAggrExec").count(),
+        if enabled { 2 } else { 0 },
         "{plan}"
     );
 }
@@ -160,7 +160,7 @@ async fn execute_sql(frontend: &Instance, sql: &str) -> Output {
     SqlQueryHandler::do_query(frontend, sql, QueryContext::arc())
         .await
         .remove(0)
-        .unwrap_or_else(|err| panic!("{sql}: {err}"))
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
 }
 
 async fn assert_count_and_scan(frontend: &Instance, expected: i64, expect_scan: bool) {
