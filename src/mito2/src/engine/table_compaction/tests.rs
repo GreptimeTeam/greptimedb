@@ -37,7 +37,7 @@ use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::region_hook::{RegionHook, RegionHookRef, VerifiedSstFileInfo};
 use crate::error::Error;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::region::MitoRegionRef;
+use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::sst::location;
 use crate::test_util::sst_util::new_sparse_primary_key;
@@ -925,6 +925,29 @@ async fn test_empty_target_replacement_preserves_other_shared_reference() {
 }
 
 #[tokio::test]
+async fn test_snapshot_during_edit_and_alter() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (expected, _) = seed(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+
+    region.set_editing(RegionLeaderState::Writable).unwrap();
+    assert_eq!(
+        expected.inputs,
+        engine.table_compaction_snapshot(region_id).unwrap().inputs
+    );
+    region.switch_state_to_writable(RegionLeaderState::Editing);
+
+    region.set_altering().unwrap();
+    assert_eq!(
+        expected.inputs,
+        engine.table_compaction_snapshot(region_id).unwrap().inputs
+    );
+    region.switch_state_to_writable(RegionLeaderState::Altering);
+}
+
+#[tokio::test]
 async fn test_staging_rejects_publication_without_changing_files() {
     use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
     let mut env = TestEnv::new().await;
@@ -949,6 +972,12 @@ async fn test_staging_rejects_publication_without_changing_files() {
             .is_err()
     );
     assert!(region.is_staging());
+    region.set_editing(RegionLeaderState::Staging).unwrap();
+    assert!(matches!(
+        engine.table_compaction_snapshot(region_id),
+        Err(Error::RegionBusy { .. })
+    ));
+    region.switch_state_to_staging(RegionLeaderState::Editing);
     assert_eq!(version, region.manifest_ctx.manifest_version().await);
     assert_eq!(
         1,
