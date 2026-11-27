@@ -3613,6 +3613,46 @@ async fn test_handover_refused_while_tail_replay_runs(#[case] in_commit: bool) {
     region.listener.hold_from(0);
 }
 
+/// A follower opened after a close hands over while the closed instance's tail replay has not
+/// reported its end: that replay's edit cannot reach the new instance.
+#[tokio::test]
+async fn test_reopened_follower_hands_over_during_old_tail_replay() {
+    let region = TestRegion::new("handover-old-replay", true, None).await;
+    let last = region.write_handed_over_remote_rows().await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    // The replay commits its edit and waits before it tells the worker.
+    region.listener.hold_commit_end(true);
+    region.promote_with_lease();
+    wait_until(|| region.listener.commit_ends() == 1).await;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        region.reopen().await;
+        region
+            .catchup_from(last, Some(REMOTE_NODE_ID))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("the reopen or the handover waited for the old tail replay");
+    assert_eq!(
+        0,
+        region.listener.ended(),
+        "the old replay reported its end before the handover"
+    );
+
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    assert!(mito_region.is_writable());
+    assert_eq!(
+        vec![remote_tail(region.entries[1], last, UptoKind::Reported)],
+        region.version().pending_tails
+    );
+    region.listener.hold_commit_end(false);
+    region.wait_until_replayed().await;
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+}
+
 /// A handover whose commit conflicts with a version another writer published fails retryably
 /// and records nothing; the retry reopens the region from that version and hands it over.
 #[tokio::test]

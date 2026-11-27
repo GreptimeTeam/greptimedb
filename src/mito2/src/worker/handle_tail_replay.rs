@@ -40,7 +40,8 @@ use crate::worker::RegionWorkerLoop;
 use crate::worker::handle_reload::notify_if_fenced;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Starts replaying the pending tails of the region, unless a replay of it still runs.
+    /// Starts replaying the pending tails of the region, unless a replay of the region, of this or
+    /// an earlier instance, has not reported its end.
     pub(crate) fn maybe_replay_tails(&mut self, region_id: RegionId) {
         let Some(region) = self.regions.get_region(region_id) else {
             return;
@@ -50,6 +51,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         info!("Replaying the pending WAL tails of region {region_id}");
         let state = CancellableTaskState::new();
+        self.tail_replays
+            .insert(region_id, (region.clone(), state.clone()));
         let task = TailReplayTask {
             sst_writer: self.tail_replay_limits.new_sst_writer(
                 &region,
@@ -62,15 +65,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             listener: self.listener.clone(),
             request_sender: self.sender.clone(),
             limits: self.tail_replay_limits.clone(),
-            state: state.clone(),
+            state,
         };
-        self.tail_replays.insert(region_id, state);
         common_runtime::spawn_global(task.run());
     }
 
     /// Cancels the tail replay of the region. The replay still reports its end.
     pub(crate) fn cancel_tail_replay(&self, region_id: RegionId) {
-        if let Some(state) = self.tail_replays.get(&region_id) {
+        if let Some((_, state)) = self.tail_replays.get(&region_id) {
             let _ = state.request_cancel();
         }
     }

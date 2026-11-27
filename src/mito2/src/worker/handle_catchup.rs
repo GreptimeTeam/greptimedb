@@ -109,12 +109,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             None
         };
-        // A tail replay that has not reported its end may still have a committed edit for the
-        // worker to apply. A handover's edit applied first changes the version's pending tails,
-        // so the worker would skip the replay's edit and leave its SSTs out of the version.
+        // A tail replay of this instance that has not reported its end may still have a
+        // committed edit for the worker to apply. A handover's edit applied first changes the
+        // version's pending tails, so the worker would skip the replay's edit and leave its SSTs
+        // out of the version. The edit of a replay of an earlier instance never applies to this
+        // one (`apply_tails_edit` checks the instance), so only a replay of this instance refuses
+        // the handover.
         if handover.is_some()
             && (!region.version().memtables.is_empty()
-                || self.tail_replays.contains_key(&region_id))
+                || self
+                    .tail_replays
+                    .get(&region_id)
+                    .is_some_and(|(owner, _)| Arc::ptr_eq(owner, &region)))
         {
             warn!(
                 "Region {region_id} has rows in its memtable or a running tail replay, refusing to hand it over"

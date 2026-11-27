@@ -177,7 +177,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - A catchup with `set_writable` and the source's last entry, of a region whose manifest is
   published conditionally and that does not await its Leader lease, hands the region over
   without replaying: see `hand_over` and `HANDOVER_SEQUENCE_GAP` in `region/catchup.rs`. It
-  refuses a region with rows in its memtable or a tail replay that has not reported its end;
+  refuses a region with rows in its memtable or a tail replay of the same instance that has not
+  reported its end;
   the worker applies the committed edit (`handle_handed_over`). A manifest sync and a
   follower's skip-WAL change are refused while the instance is in a catchup, or is fenced while
   the worker holds a catchup or reload registration for the region (`is_catching_up_or_reloading`);
