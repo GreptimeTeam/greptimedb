@@ -18,7 +18,7 @@
 //! [`RowSeriesSourceExec`] requires its input hash-partitioned by the tags and sorted by
 //! `(tags, time index, fields)`, which the physical optimizer provides with a `RepartitionExec`
 //! and a `SortExec` that spills under memory pressure, and cuts the sorted rows into series chunks
-//! that carry their complete labels.
+//! that carry their complete labels and `Float64` values.
 //!
 //! A raw series holds one sample per timestamp, as Prometheus storage does. Rows that share
 //! labels and a timestamp are reduced to the first one in that order: the row whose field values,
@@ -246,23 +246,7 @@ impl RowColumns {
         };
         let tags = tags
             .iter()
-            .map(|tag| {
-                let index = index_of(tag)?;
-                match schema.field(index).data_type() {
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Ok(index),
-                    DataType::Dictionary(_, value)
-                        if matches!(
-                            value.as_ref(),
-                            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                        ) =>
-                    {
-                        Ok(index)
-                    }
-                    other => Err(DataFusionError::Plan(format!(
-                        "RowSeriesSource tag {tag:?} is {other}, not a string"
-                    ))),
-                }
-            })
+            .map(|tag| index_of(tag))
             .collect::<DataFusionResult<Vec<_>>>()?;
         let time = index_of(time_index)?;
         if !matches!(
@@ -467,8 +451,8 @@ impl ExecutionPlan for RowSeriesSourceExec {
 
 /// The series the stream is cutting.
 struct OpenSeries {
-    /// The tag values of the series; `None` is a null, which carries no label.
-    values: Vec<Option<String>>,
+    /// The tag values of the series, in tag order.
+    values: Vec<String>,
     primary_key: Buffer,
     labels: SeriesLabels,
     last_time: Option<i64>,
@@ -486,29 +470,21 @@ impl OpenSeries {
     ) -> DataFusionResult<Self> {
         let values = tags
             .iter()
-            .map(|tag| tag.is_valid(row).then(|| tag.value(row).to_string()))
+            .map(|tag| tag.value(row).to_string())
             .collect::<Vec<_>>();
-        // A null and an empty string are two stored series, as they are for a primary key; the
-        // key keeps them apart even though neither yields a non-empty label.
         let mut key = Vec::new();
         for value in &values {
-            match value {
-                None => key.push(0),
-                Some(value) => {
-                    key.push(1);
-                    key.extend_from_slice(&(value.len() as u64).to_le_bytes());
-                    key.extend_from_slice(value.as_bytes());
-                }
-            }
+            key.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            key.extend_from_slice(value.as_bytes());
         }
+        // An empty label value is an absent label in Prometheus.
         let labels = tag_names
             .iter()
             .zip(&values)
-            .filter_map(|(name, value)| {
-                value.as_ref().map(|value| Label {
-                    name: Arc::clone(name),
-                    value: Arc::from(value.as_str()),
-                })
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(name, value)| Label {
+                name: Arc::clone(name),
+                value: Arc::from(value.as_str()),
             })
             .collect();
         let labels = SeriesLabels::try_new(Some(Arc::clone(metric_name)), labels)
@@ -526,11 +502,7 @@ impl OpenSeries {
         self.values
             .iter()
             .zip(tags)
-            .all(|(value, tag)| match (value, tag.is_valid(row)) {
-                (None, valid) => !valid,
-                (Some(value), true) => value == tag.value(row),
-                (Some(_), false) => false,
-            })
+            .all(|(value, tag)| value == tag.value(row))
     }
 }
 
@@ -555,9 +527,16 @@ impl RowSeriesStream {
             .tags
             .iter()
             .map(|index| {
-                Ok(cast(batch.column(*index), &DataType::Utf8)?
+                let tag = cast(batch.column(*index), &DataType::Utf8)?
                     .as_string::<i32>()
-                    .clone())
+                    .clone();
+                // The planner reads a null tag as `''`; both are one series and must sort together.
+                if tag.null_count() > 0 {
+                    return Err(DataFusionError::Execution(
+                        "RowSeriesSource tag holds a null".into(),
+                    ));
+                }
+                Ok(tag)
             })
             .collect::<DataFusionResult<Vec<StringArray>>>()?;
         let time = batch
@@ -837,20 +816,6 @@ mod tests {
                 (host("a"), vec![3], vec![30.0], true),
                 (host("b"), vec![1], vec![5.0], false),
                 (host("b"), vec![2], vec![6.0], true),
-            ]
-        );
-    }
-
-    /// A null tag carries no label and an empty one does, so they are two series, as two primary
-    /// keys are; neither merges into the other.
-    #[tokio::test]
-    async fn null_and_empty_tags_are_distinct_series() {
-        let chunks = cut(vec![vec![(None, 1, 1.0), (Some(""), 1, 2.0)]]).await;
-        assert_eq!(
-            chunks,
-            vec![
-                (vec![], vec![1], vec![1.0], true),
-                (host(""), vec![1], vec![2.0], true),
             ]
         );
     }

@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Native PromQL over a file-engine table.
+//! Native PromQL over file-engine tables.
 //!
-//! The table reads two CSV files whose rows are in no particular order, and one sample of series
-//! `{job="api", instance="a"}` is present in both files with different values. Expected answers are
-//! worked out by hand from Prometheus semantics, which keep one sample per timestamp per series.
+//! `fe_metric` reads two CSV files whose rows are in no particular order, and one sample of series
+//! `{job="api", instance="a"}` is present in both files with different values. `fe_labels` holds a tag that is `NULL` on some
+//! rows and `''` on others, and an integer tag. Expected answers are worked out by hand from Prometheus
+//! semantics, which keep one sample per timestamp per series, read an empty label as an absent one
+//! and compare label values as strings.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -41,7 +43,6 @@ use crate::cluster::GreptimeDbClusterBuilder;
 use crate::standalone::GreptimeDbStandaloneBuilder;
 use crate::tests::test_util::{create_local_file_test_dir, prepare_path};
 
-const TABLE: &str = "fe_metric";
 const BASE_SECS: i64 = 1_700_000_000;
 const RELATIVE_TOLERANCE: f64 = 1e-9;
 
@@ -104,30 +105,40 @@ impl PhysicalPlanWrapper for PlanObserver {
 type Row = (i64, String, f64);
 
 struct Case {
-    promql: &'static str,
+    promql: String,
+    /// Evaluation range, in seconds since the epoch.
     start: i64,
     end: i64,
     expected: Vec<Row>,
-    /// Whether the answer reads the duplicated sample, which the existing planner does not reduce
-    /// by a fixed rule: it answers whichever row its sort happens to leave last.
-    reads_duplicate: bool,
+    /// Whether the existing planner answers this case differently: it keeps whichever duplicated
+    /// sample its sort leaves last, keeps `NULL` and `''` apart, and fails on an integer tag
+    /// (`Unsupported tag column type: Int64`).
+    legacy_differs: bool,
 }
 
 fn row(offset_secs: i64, labels: &str, value: f64) -> Row {
     ((BASE_SECS + offset_secs) * 1000, labels.to_string(), value)
 }
 
-fn instant(promql: &'static str, at: i64, expected: Vec<Row>) -> Case {
+fn instant(promql: impl Into<String>, offset_secs: i64, expected: Vec<Row>) -> Case {
     Case {
-        promql,
-        start: at,
-        end: at,
+        promql: promql.into(),
+        start: BASE_SECS + offset_secs,
+        end: BASE_SECS + offset_secs,
         expected,
-        reads_duplicate: false,
+        legacy_differs: false,
     }
 }
 
-fn cases() -> Vec<Case> {
+fn differs(case: Case) -> Case {
+    Case {
+        legacy_differs: true,
+        ..case
+    }
+}
+
+fn metric_cases(table: &str) -> Vec<Case> {
+    let q = |promql: &str| promql.replace("fe_metric", table);
     let a = "instance=a,job=api";
     let b = "instance=b,job=api";
     let c = "instance=c,job=db";
@@ -154,17 +165,18 @@ fn cases() -> Vec<Case> {
     }
     vec![
         instant(
-            TABLE,
+            q("fe_metric"),
             240,
             vec![row(240, a, 240.0), row(240, b, 130.0), row(240, c, 340.0)],
         ),
         // The duplicated sample: the smaller of the two values is the one kept.
-        Case {
-            reads_duplicate: true,
-            ..instant("fe_metric{instance=\"a\"}", 120, vec![row(120, a, 120.0)])
-        },
+        differs(instant(
+            q("fe_metric{instance=\"a\"}"),
+            120,
+            vec![row(120, a, 120.0)],
+        )),
         instant(
-            "rate(fe_metric[5m])",
+            q("rate(fe_metric[5m])"),
             240,
             vec![
                 row(240, a, rate_a),
@@ -173,7 +185,7 @@ fn cases() -> Vec<Case> {
             ],
         ),
         instant(
-            "sum by (job) (rate(fe_metric[5m]))",
+            q("sum by (job) (rate(fe_metric[5m]))"),
             240,
             vec![
                 row(240, "job=api", rate_a + rate_b),
@@ -181,7 +193,7 @@ fn cases() -> Vec<Case> {
             ],
         ),
         instant(
-            "rate(fe_metric[5m]) * 60",
+            q("rate(fe_metric[5m]) * 60"),
             240,
             vec![
                 row(240, a, rate_a * 60.0),
@@ -190,24 +202,64 @@ fn cases() -> Vec<Case> {
             ],
         ),
         instant(
-            "fe_metric / fe_metric",
+            q("fe_metric / fe_metric"),
             240,
             vec![row(240, a, 1.0), row(240, b, 1.0), row(240, c, 1.0)],
         ),
         Case {
-            promql: TABLE,
-            start: 0,
-            end: 240,
+            promql: q("fe_metric"),
+            start: BASE_SECS,
+            end: BASE_SECS + 240,
             expected: range_selector,
-            reads_duplicate: true,
+            legacy_differs: true,
         },
         Case {
-            promql: "sum by (job) (fe_metric)",
-            start: 0,
-            end: 240,
+            promql: q("sum by (job) (fe_metric)"),
+            start: BASE_SECS,
+            end: BASE_SECS + 240,
             expected: range_sum,
-            reads_duplicate: true,
+            legacy_differs: true,
         },
+    ]
+}
+
+/// `fe_labels`: `{code="200"}` holds 1 at offset 0 with `instance` NULL, 2 at 60 with `instance`
+/// `''`, and at 120 both a NULL row (3) and a `''` row (4); `{code="500", instance="x"}` holds 10,
+/// 20, 30. The first is one series without an `instance` label, whose sample at 120 is 3.
+fn label_cases() -> Vec<Case> {
+    let ok = "code=200";
+    let err = "code=500,instance=x";
+    vec![
+        Case {
+            promql: "fe_labels{code=\"200\"}".to_string(),
+            start: BASE_SECS,
+            end: BASE_SECS + 120,
+            expected: vec![row(0, ok, 1.0), row(60, ok, 2.0), row(120, ok, 3.0)],
+            legacy_differs: true,
+        },
+        differs(instant("count(fe_labels)", 120, vec![row(120, "", 2.0)])),
+        differs(instant(
+            "fe_labels{instance=\"\"}",
+            120,
+            vec![row(120, ok, 3.0)],
+        )),
+        differs(instant(
+            "sum by (code) (fe_labels)",
+            120,
+            vec![row(120, "code=200", 3.0), row(120, "code=500", 30.0)],
+        )),
+        // Label values are strings: "0200" is not "200".
+        differs(instant("fe_labels{code=\"0200\"}", 120, vec![])),
+        differs(instant(
+            "fe_labels{code=\"500\"}",
+            120,
+            vec![row(120, err, 30.0)],
+        )),
+        differs(instant(
+            "fe_labels{code=~\"5..\"}",
+            120,
+            vec![row(120, err, 30.0)],
+        )),
     ]
 }
 
@@ -223,32 +275,79 @@ fn write_csv(path: &std::path::Path, rows: &[(i64, &str, &str, f64)]) {
     std::fs::write(path, text).unwrap();
 }
 
-async fn create_table(instance: &Arc<Instance>, dir: &std::path::Path) {
-    write_csv(&dir.join("a.csv"), FILE_A);
-    write_csv(&dir.join("b.csv"), FILE_B);
-    let location = prepare_path(&format!("{}/", dir.display()));
-    let sql = format!(
-        "CREATE EXTERNAL TABLE {TABLE} (
-            ts TIMESTAMP(3) TIME INDEX,
-            job STRING,
-            instance STRING,
-            val DOUBLE,
-            PRIMARY KEY (job, instance)
-        ) WITH (location = '{location}', format = 'csv')"
-    );
+async fn execute(instance: &Arc<Instance>, sql: &str) {
     instance
-        .do_query(&sql, QueryContext::arc())
+        .do_query(sql, QueryContext::arc())
         .await
         .remove(0)
-        .unwrap();
+        .unwrap_or_else(|error| panic!("`{sql}` failed: {error:?}"));
 }
 
-async fn run(instance: &Arc<Instance>, case: &Case, native: bool) -> Vec<Row> {
+fn location(dir: &std::path::Path) -> String {
+    prepare_path(&format!("{}/", dir.display()))
+}
+
+async fn create_tables(instance: &Arc<Instance>, dir: &std::path::Path) {
+    let metric_dir = dir.join("metric");
+    std::fs::create_dir(&metric_dir).unwrap();
+    write_csv(&metric_dir.join("a.csv"), FILE_A);
+    write_csv(&metric_dir.join("b.csv"), FILE_B);
+    for (table, precision) in [("fe_metric", 3)] {
+        execute(
+            instance,
+            &format!(
+                "CREATE EXTERNAL TABLE {table} (
+                    ts TIMESTAMP({precision}) TIME INDEX,
+                    job STRING,
+                    instance STRING,
+                    val DOUBLE,
+                    PRIMARY KEY (job, instance)
+                ) WITH (location = '{}', format = 'csv')",
+                location(&metric_dir)
+            ),
+        )
+        .await;
+    }
+
+    let labels_dir = dir.join("labels");
+    std::fs::create_dir(&labels_dir).unwrap();
+    let mut lines = String::new();
+    for (offset, instance, code, value) in [
+        (0, "null", 200, 1.0),
+        (60, "\"\"", 200, 2.0),
+        (120, "\"\"", 200, 4.0),
+        (120, "null", 200, 3.0),
+        (0, "\"x\"", 500, 10.0),
+        (60, "\"x\"", 500, 20.0),
+        (120, "\"x\"", 500, 30.0),
+    ] {
+        let ts = chrono::DateTime::from_timestamp(BASE_SECS + offset, 0).unwrap();
+        lines.push_str(&format!(
+            "{{\"ts\":\"{}\",\"instance\":{instance},\"code\":{code},\"val\":{value}}}\n",
+            ts.format("%Y-%m-%dT%H:%M:%S%.3f")
+        ));
+    }
+    std::fs::write(labels_dir.join("rows.json"), lines).unwrap();
+    execute(
+        instance,
+        &format!(
+            "CREATE EXTERNAL TABLE fe_labels (
+                ts TIMESTAMP(3) TIME INDEX,
+                instance STRING NULL,
+                code BIGINT NULL,
+                val DOUBLE,
+                PRIMARY KEY (instance, code)
+            ) WITH (location = '{}', format = 'json')",
+            location(&labels_dir)
+        ),
+    )
+    .await;
+}
+
+async fn run(instance: &Arc<Instance>, case: &Case, native: bool) -> Result<Vec<Row>, String> {
     let sql = format!(
         "TQL EVAL ({}, {}, '60s') {}",
-        BASE_SECS + case.start,
-        BASE_SECS + case.end,
-        case.promql
+        case.start, case.end, case.promql
     );
     let mut ctx = QueryContext::with_db_name(None);
     ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
@@ -256,9 +355,11 @@ async fn run(instance: &Arc<Instance>, case: &Case, native: bool) -> Vec<Row> {
         .do_query(&sql, Arc::new(ctx))
         .await
         .remove(0)
-        .unwrap_or_else(|error| panic!("`{sql}` (native={native}) failed: {error:?}"));
+        .map_err(|error| format!("`{sql}` (native={native}) failed: {error:?}"))?;
     let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::Stream(stream) => collect_batches(stream)
+            .await
+            .map_err(|error| format!("`{sql}` (native={native}) failed: {error:?}"))?,
         OutputData::RecordBatches(batches) => batches,
         other => panic!("`{sql}` returned {other:?}"),
     };
@@ -292,8 +393,7 @@ async fn run(instance: &Arc<Instance>, case: &Case, native: bool) -> Vec<Row> {
                 .iter()
                 .filter_map(|(name, values)| {
                     let values = values.as_any().downcast_ref::<StringArray>().unwrap();
-                    values
-                        .is_valid(index)
+                    (values.is_valid(index) && !values.value(index).is_empty())
                         .then(|| format!("{name}={}", values.value(index)))
                 })
                 .collect::<Vec<_>>()
@@ -302,7 +402,7 @@ async fn run(instance: &Arc<Instance>, case: &Case, native: bool) -> Vec<Row> {
         }
     }
     rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-    rows
+    Ok(rows)
 }
 
 fn same_rows(actual: &[Row], expected: &[Row]) -> bool {
@@ -315,38 +415,53 @@ fn same_rows(actual: &[Row], expected: &[Row]) -> bool {
         })
 }
 
+/// Runs every case and reports all failures together, so one run shows which shapes miss.
 async fn check_native_answers(instance: &Arc<Instance>, observer: &PlanObserver) {
-    for case in cases() {
+    let cases = metric_cases("fe_metric").into_iter().chain(label_cases());
+    let mut failures = Vec::new();
+    for case in cases {
         observer.take_node_names();
         let native = run(instance, &case, true).await;
         let nodes = observer.take_node_names();
-        assert!(
-            nodes.iter().any(|node| node == "FusedSeriesExec")
-                && nodes.iter().any(|node| node == "RowSeriesSourceExec"),
-            "`{}` did not run on the native route: {nodes:?}",
-            case.promql
-        );
-        assert!(
-            same_rows(&native, &case.expected),
-            "`{}` native answer {native:?}, expected {:?}",
-            case.promql,
-            case.expected
-        );
+        let native = match native {
+            Ok(native) => native,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        if !(nodes.iter().any(|node| node == "FusedSeriesExec")
+            && nodes.iter().any(|node| node == "RowSeriesSourceExec"))
+        {
+            failures.push(format!(
+                "`{}` did not run on the native route: {nodes:?}",
+                case.promql
+            ));
+            continue;
+        }
+        if !same_rows(&native, &case.expected) {
+            failures.push(format!(
+                "`{}` native answer {native:?}, expected {:?}",
+                case.promql, case.expected
+            ));
+        }
         let legacy = run(instance, &case, false).await;
-        if case.reads_duplicate {
+        if case.legacy_differs {
             common_telemetry::info!(
                 "`{}`: legacy answer {legacy:?}, native answer {native:?}",
                 case.promql
             );
-        } else {
-            assert!(
-                same_rows(&legacy, &case.expected),
+        } else if !legacy
+            .as_ref()
+            .is_ok_and(|legacy| same_rows(legacy, &case.expected))
+        {
+            failures.push(format!(
                 "`{}` legacy answer {legacy:?}, expected {:?}",
-                case.promql,
-                case.expected
-            );
+                case.promql, case.expected
+            ));
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 fn observer_plugins() -> (Arc<PlanObserver>, Plugins) {
@@ -374,7 +489,7 @@ async fn native_promql_over_file_engine_standalone() {
         .await;
     let instance = Arc::clone(standalone.fe_instance());
     let dir = create_local_file_test_dir("native_promql_file_engine");
-    create_table(&instance, dir.path()).await;
+    create_tables(&instance, dir.path()).await;
     check_native_answers(&instance, &observer).await;
 }
 
@@ -391,6 +506,6 @@ async fn native_promql_over_file_engine_distributed() {
         .await;
     let instance = Arc::clone(cluster.fe_instance());
     let dir = create_local_file_test_dir("native_promql_file_engine_distributed");
-    create_table(&instance, dir.path()).await;
+    create_tables(&instance, dir.path()).await;
     check_native_answers(&instance, &observer).await;
 }

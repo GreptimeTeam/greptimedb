@@ -4945,8 +4945,9 @@ async fn native_fused_metric_table_without_logical_metadata_falls_back() {
 /// A file-engine table has no raw-series scanner, so each selector reads it through a
 /// `RowSeriesSource`, which sorts the table's rows into series.
 ///
-/// The file engine's scan filters only prune, so the source reads its rows through a `Filter`
-/// that holds the selector's matchers and time range, as the existing planner applies them.
+/// The source reads every tag as text with `NULL` as `''`, as Prometheus labels are, and applies the
+/// matchers and the time range to those rows itself: a file-engine scan only prunes with its
+/// filters. The time range is also pushed into the scan for that pruning.
 #[tokio::test]
 async fn native_fused_file_engine_reads_through_a_row_source() {
     let native = build_native_fused_plan_with_provider(
@@ -4974,16 +4975,35 @@ async fn native_fused_file_engine_reads_through_a_row_source() {
         .as_any()
         .downcast_ref::<promql::extension_plan::RowSeriesSource>()
         .unwrap_or_else(|| panic!("expected a RowSeriesSource: {native}"));
-    let LogicalPlan::Filter(filter) = source.input() else {
-        panic!("the row source must filter its rows: {native}");
+    let LogicalPlan::Filter(time) = source.input() else {
+        panic!("the row source must filter its rows by time: {native}");
     };
-    let predicate = filter.predicate.to_string();
-    assert!(predicate.contains("tag_0 = Utf8(\"a\")"), "{predicate}");
-    assert!(predicate.contains("timestamp <="), "{predicate}");
     assert!(
-        matches!(filter.input.as_ref(), LogicalPlan::TableScan(_)),
+        time.predicate.to_string().contains("timestamp <="),
         "{native}"
     );
+    let LogicalPlan::Filter(matchers) = time.input.as_ref() else {
+        panic!("the row source must filter its rows by the matchers: {native}");
+    };
+    assert!(
+        matchers
+            .predicate
+            .to_string()
+            .contains("tag_0 = Utf8(\"a\")"),
+        "{native}"
+    );
+    let LogicalPlan::Projection(labels) = matchers.input.as_ref() else {
+        panic!("the row source must read its tags as label values: {native}");
+    };
+    assert!(
+        labels.expr[0].to_string().starts_with("coalesce("),
+        "{}",
+        labels.expr[0]
+    );
+    let LogicalPlan::TableScan(scan) = labels.input.as_ref() else {
+        panic!("{native}");
+    };
+    assert_eq!(scan.filters.len(), 1, "only the time range prunes the scan");
 }
 
 /// The plan `query` gets, or `None` when the planner refuses it.
