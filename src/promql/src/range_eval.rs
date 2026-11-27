@@ -178,7 +178,7 @@ pub struct RangeEvaluator {
     window: RangeWindow,
     replay: Replay,
     kernel: WindowKernel,
-    /// The kernel of `rate` or `increase` over a raw series marked as OTLP delta temporality, which
+    /// The kernel of `rate` or `increase` over a series marked as OTLP delta temporality, which
     /// the existing plan picks per series: the sum of the window's increments, over the range for
     /// `rate`. `None` for every other function.
     delta_kernel: Option<WindowKernel>,
@@ -915,6 +915,10 @@ impl RangeEvaluator {
         match &mut self.series {
             None => {
                 self.output.begin_series();
+                // The existing plan reads the marker off whatever series reaches the window, so
+                // an evaluated series that kept it - a float derived from a delta histogram,
+                // say - is summed too.
+                let delta = self.delta_kernel.is_some() && is_delta_temporality(&series.metric);
                 self.series = Some(SeriesState {
                     primary_key: None,
                     metric: series.metric.clone(),
@@ -922,7 +926,7 @@ impl RangeEvaluator {
                     cursor: 0,
                     closing: false,
                     emitted_end: 0,
-                    delta: false,
+                    delta,
                 });
             }
             Some(state) => {

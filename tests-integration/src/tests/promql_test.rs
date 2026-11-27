@@ -2870,7 +2870,8 @@ async fn native_promql_delta_temporality_corpus_matches_legacy() {
 ///
 /// OTLP ingest stores each delta point as a gauge-hinted native histogram whose start timestamp is
 /// the previous point's end, with the series marked `otlp_aggregation_temporality="delta"`. Both
-/// routes rate those histograms the same way whatever the marker says.
+/// routes rate those histograms the same way whatever the marker says, and sum a float derived
+/// from them that keeps the marker.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_otlp_delta_histogram_rates_match_legacy() {
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -2936,6 +2937,8 @@ async fn native_promql_otlp_delta_histogram_rates_match_legacy() {
         "TQL EVAL (240, 240, '1m') histogram_sum(increase(otlp_delta_h[3m]))",
         "TQL EVAL (180, 240, '1m') histogram_count(increase(otlp_delta_h[2m]))",
         "TQL EVAL (240, 240, '1m') histogram_count(rate(otlp_delta_h[2m] offset 1m))",
+        "TQL EVAL (240, 240, '1m') increase(histogram_count(otlp_delta_h)[2m:1m])",
+        "TQL EVAL (240, 240, '1m') rate(histogram_sum(otlp_delta_h)[3m:1m])",
     ] {
         observer.clear();
         let output = native_tql_output(&instance, sql, true).await;
