@@ -2744,9 +2744,7 @@ impl PromPlanner {
         field_columns: &[String],
     ) -> Result<Vec<String>> {
         let col_set = field_columns.iter().collect::<HashSet<_>>();
-        // opt-in set
         let mut result_set = HashSet::new();
-        // opt-out set
         let mut reverse_set = HashSet::new();
         for matcher in field_matchers {
             match &matcher.op {
@@ -2786,7 +2784,6 @@ impl PromPlanner {
                 }
             }
         }
-        // merge two set
         if result_set.is_empty() {
             result_set = col_set.into_iter().cloned().collect();
         }
