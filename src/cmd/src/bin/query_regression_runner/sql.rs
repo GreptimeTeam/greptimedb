@@ -14,10 +14,33 @@
 
 use std::time::Instant;
 
-use reqwest::Client;
+use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
+use reqwest::{Client, RequestBuilder};
 use serde_json::{Value, json};
 
 use crate::query_regression_runner::Result;
+use crate::query_regression_runner::model::Query;
+
+/// Header that carries per-request query hints.
+///
+/// The name is a literal because it lives in the `session` crate
+/// (`session::hints::HINTS_KEY`), which this runner does not depend on.
+const HINTS_HEADER: &str = "x-greptime-hints";
+
+/// The hints value that asks the frontend to plan a PromQL statement on the
+/// native fused-series route, built from the option key the planner reads.
+pub(super) fn native_promql_hint() -> String {
+    format!("{NATIVE_PROMQL_EXTENSION_KEY}=true")
+}
+
+/// The value of the hints header one query needs, or [`None`] when the query
+/// declares no requirement.
+///
+/// A query without [`Query::require_native`] keeps sending exactly the request it
+/// sent before this header existed.
+pub(super) fn required_hints(query: &Query) -> Option<String> {
+    query.require_native.then(native_promql_hint)
+}
 
 pub(super) fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
@@ -93,6 +116,28 @@ pub(super) fn value_text(value: &Value) -> String {
     }
 }
 
+/// The plan trees of a `TQL ANALYZE ... FORMAT JSON` response body.
+///
+/// `format=json` answers `data` as one object per row keyed by column name, and
+/// `FORMAT JSON` puts a plan tree into a row's `plan` cell: a node names itself in
+/// `name`, carries the rest of its plan line in `param`, and hangs its sub-nodes
+/// from `children`. The analyze result also carries a plain-text `Total rows: N`
+/// cell, so only the cells that are JSON objects or arrays are kept; a text cell
+/// never contributes evidence.
+///
+/// [`None`] means the body held no plan tree at all, which proves no node.
+pub(super) fn plan_trees_from_response(body: &Value) -> Option<Vec<Value>> {
+    let trees = body
+        .get("data")?
+        .as_array()?
+        .iter()
+        .filter_map(|row| row.get("plan")?.as_str())
+        .filter_map(|cell| serde_json::from_str::<Value>(cell).ok())
+        .filter(|tree| tree.is_object() || tree.is_array())
+        .collect::<Vec<_>>();
+    (!trees.is_empty()).then_some(trees)
+}
+
 pub(super) fn extract_count_value(result: &Value) -> Option<u64> {
     let row = result
         .get("response")?
@@ -117,10 +162,23 @@ pub(super) fn value_f64(value: Option<&Value>) -> Option<f64> {
 }
 
 pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &str) -> Value {
+    http_post_sql_with_hints(client, port, sql, db, None).await
+}
+
+/// Posts one SQL statement, carrying `hints` in the request hints header when the
+/// caller states any.
+pub(super) async fn http_post_sql_with_hints(
+    client: &Client,
+    port: u16,
+    sql: &str,
+    db: &str,
+    hints: Option<&str>,
+) -> Value {
     let mut sample = post_form(
         client,
         format!("http://127.0.0.1:{port}/v1/sql"),
         &[("sql", sql), ("db", db), ("format", "json")],
+        hints,
     )
     .await;
     sample
@@ -130,34 +188,36 @@ pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &st
     sample
 }
 
-/// Posts a Prometheus HTTP API range query (`/v1/prometheus/api/v1/query_range`)
-/// and measures the full request-to-body latency. This exercises the Prometheus
-/// JSON response building path (`PrometheusJsonResponse::record_batches_to_data`)
-/// that `/v1/sql` (including `TQL ANALYZE`) does not go through.
+/// Posts the Prometheus HTTP API range query (`/v1/prometheus/api/v1/query_range`)
+/// one configured query declares, and measures the full request-to-body latency.
+/// This exercises the Prometheus JSON response building path
+/// (`PrometheusJsonResponse::record_batches_to_data`) that `/v1/sql` (including
+/// `TQL ANALYZE`) does not go through.
+///
+/// `hints` carries the request hints header when the caller states any.
 pub(super) async fn http_post_prom_range_query(
     client: &Client,
     port: u16,
-    query: &str,
-    start: Option<&str>,
-    end: Option<&str>,
-    step: Option<&str>,
+    query: &Query,
     db: &str,
+    hints: Option<&str>,
 ) -> Value {
     let mut sample = post_form(
         client,
         prom_range_query_url(port, db),
         &[
-            ("query", query),
-            ("start", start.unwrap_or_default()),
-            ("end", end.unwrap_or_default()),
-            ("step", step.unwrap_or_default()),
+            ("query", &query.query),
+            ("start", query.start.as_deref().unwrap_or_default()),
+            ("end", query.end.as_deref().unwrap_or_default()),
+            ("step", query.step.as_deref().unwrap_or_default()),
         ],
+        hints,
     )
     .await;
     sample
         .as_object_mut()
         .expect("HTTP samples are objects")
-        .insert("query".to_string(), Value::String(query.to_string()));
+        .insert("query".to_string(), Value::String(query.query.clone()));
     sample
 }
 
@@ -170,9 +230,14 @@ fn prom_range_query_url(port: u16, db: &str) -> String {
     url.into()
 }
 
-async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value {
+async fn post_form(
+    client: &Client,
+    url: String,
+    form: &[(&str, &str)],
+    hints: Option<&str>,
+) -> Value {
     let started = Instant::now();
-    let request = client.post(url).form(form);
+    let request = build_form_request(client, url, form, hints);
     match request.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
@@ -208,6 +273,21 @@ async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value
             "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
             "error": error.to_string(),
         }),
+    }
+}
+
+/// Builds one form-encoded POST, attaching the hints header only when the query
+/// states one, so an unflagged query's request stays what it was.
+fn build_form_request(
+    client: &Client,
+    url: String,
+    form: &[(&str, &str)],
+    hints: Option<&str>,
+) -> RequestBuilder {
+    let request = client.post(url).form(form);
+    match hints {
+        Some(hints) => request.header(HINTS_HEADER, hints),
+        None => request,
     }
 }
 
@@ -256,6 +336,117 @@ pub(super) fn sql_ident(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query(require_native: bool) -> Query {
+        Query {
+            name: Some("native_range".to_string()),
+            kind: Some("sql".to_string()),
+            query: "TQL ANALYZE (0, 10, '5s') some_metric".to_string(),
+            start: None,
+            end: None,
+            step: None,
+            warmup: 0,
+            iterations: 1,
+            thresholds: serde_json::Map::new(),
+            require_native,
+        }
+    }
+
+    fn request_headers(query: &Query) -> reqwest::header::HeaderMap {
+        let client = Client::new();
+        build_form_request(
+            &client,
+            "http://127.0.0.1:4000/v1/sql".to_string(),
+            &[("sql", "SELECT 1"), ("format", "json")],
+            required_hints(query).as_deref(),
+        )
+        .build()
+        .expect("request must build without a network")
+        .headers()
+        .clone()
+    }
+
+    #[test]
+    fn native_route_query_states_the_hint_and_an_unflagged_query_does_not() {
+        let native = request_headers(&query(true));
+        assert_eq!(
+            native
+                .get(HINTS_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("query.experimental_native_promql=true")
+        );
+
+        let plain = request_headers(&query(false));
+        assert!(plain.get(HINTS_HEADER).is_none());
+        // The unflagged request keeps the headers it sent before the hint existed.
+        let baseline = Client::new()
+            .post("http://127.0.0.1:4000/v1/sql")
+            .form(&[("sql", "SELECT 1"), ("format", "json")])
+            .build()
+            .expect("request must build without a network")
+            .headers()
+            .clone();
+        assert_eq!(plain, baseline);
+    }
+
+    #[test]
+    fn plan_trees_read_only_the_plan_column_of_the_json_data_shape() {
+        // `format=json` answers `data` as one object per row keyed by column name,
+        // and `FORMAT JSON` puts one plan tree into the `plan` cell.
+        let analyze = json!({
+            "data": [
+                {
+                    "stage": 0,
+                    "node": 0,
+                    "plan": json!({
+                        "name": "CooperativeExec",
+                        "param": "",
+                        "children": [{"name": "FusedSeriesExec", "param": "metric=m", "children": []}],
+                    })
+                    .to_string(),
+                },
+                {
+                    "stage": 1,
+                    "node": 0,
+                    "plan": json!({"name": "SeriesScan", "param": "region=0", "children": []})
+                        .to_string(),
+                },
+            ],
+            "execution_time_ms": 3,
+        });
+        let trees = plan_trees_from_response(&analyze).unwrap();
+        assert_eq!(trees.len(), 2);
+        assert_eq!(trees[0]["name"], "CooperativeExec");
+        assert_eq!(trees[0]["children"][0]["name"], "FusedSeriesExec");
+        assert_eq!(trees[1]["name"], "SeriesScan");
+
+        // The analyze result always ends with a plain-text `Total rows` cell, which
+        // is ignored rather than treated as a malformed tree.
+        let with_total = json!({
+            "data": [
+                {"plan": json!({"name": "FusedSeriesExec", "param": "metric=m", "children": []})
+                    .to_string()},
+                {"plan": "Total rows: 580"},
+            ],
+        });
+        assert_eq!(plan_trees_from_response(&with_total).unwrap().len(), 1);
+
+        // A `plan` column of text cells, an empty cell, and a result without a
+        // `plan` column all hold no tree, even when a cell spells the marker.
+        assert!(
+            plan_trees_from_response(&json!({"data": [{"plan": "CooperativeExec"}]})).is_none()
+        );
+        assert!(plan_trees_from_response(&json!({"data": [{"plan": "Total rows: 1"}]})).is_none());
+        assert!(
+            plan_trees_from_response(&json!({"data": [{"plan": "\"FusedSeries\""}]})).is_none()
+        );
+        assert!(plan_trees_from_response(&json!({"data": [{"stage": 0, "plan": ""}]})).is_none());
+        assert!(plan_trees_from_response(&json!({"data": [{"note": "FusedSeries"}]})).is_none());
+        assert!(plan_trees_from_response(&json!({"data": []})).is_none());
+        assert!(
+            plan_trees_from_response(&json!({"output": [{"rows": [["FusedSeries"]]}]})).is_none()
+        );
+    }
 
     #[test]
     fn prom_range_query_url_places_database_in_query_parameters() {

@@ -12876,6 +12876,33 @@ async fn a_histogram_sum_over_stable_keys_keeps_its_split() {
     }
 }
 
+/// A float function above a split histogram fold publishes a float column: the state crossing the
+/// boundary is a histogram, but the statement's value columns follow its root.
+#[tokio::test]
+async fn a_float_function_over_a_split_histogram_fold_publishes_floats() {
+    for query in [
+        "histogram_count(sum(some_metric))",
+        "histogram_quantile(0.9, sum(rate(some_metric[2m])))",
+    ] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let final_node = find_final_split(&plan)
+            .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
+        assert!(
+            partial_below(final_node).is_some(),
+            "{query} lost the partial half of its split: {display}"
+        );
+        let field = native_value_field(final_node, query);
+        assert_eq!(
+            &ArrowDataType::Float64,
+            field.data_type(),
+            "{query}: {display}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
     // A bare scan drops nothing, and `last_over_time` keeps the metric name, so neither hands out a
