@@ -202,7 +202,6 @@ impl StatementExecutor {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn copy_to_file_managed(
         &self,
         format: &Format,

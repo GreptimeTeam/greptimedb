@@ -18,6 +18,7 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{Field, Schema, UInt32Type};
 use bytes::Bytes;
+use common_datasource::object_store::RemoteStorageAccess;
 use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatch as GreptimeRecordBatch, RecordBatches};
 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
