@@ -603,6 +603,10 @@ impl ScanRegion {
     /// kept whole (the sample over-shoots) and counted. Files whose stored
     /// statistics need a schema alignment are rejected, because their stored key
     /// bytes would not compare with the row-level test.
+    ///
+    /// Fails closed when no candidate file carries key statistics: without a key
+    /// order there is no interval to choose, and silently reading every row would
+    /// return more than the requested fraction without telling the caller.
     fn plan_pk_sample(&self, files: &[FileHandle]) -> Result<Option<PkSampleInterval>> {
         let Some(sample) = self.request.pk_sample else {
             return Ok(None);
@@ -647,6 +651,7 @@ impl ScanRegion {
             });
         }
 
+        let files_ordered = stats.len();
         let plan = crate::read::pk_sample::plan_from_stats(
             stats,
             sample.num,
@@ -660,6 +665,27 @@ impl ScanRegion {
         );
         crate::read::pk_sample::inc("files_without_stats", plan.files_without_stats as u64);
         let Some(interval) = plan.interval.clone() else {
+            // No interval means nothing could be ordered by key. Candidate files that
+            // all lack key statistics leave the region without a key order to sample,
+            // so the scan could only read every row: report it instead of returning
+            // more rows than the request asked for. An empty candidate set (no file in
+            // range, or the key predicate excluding them all) and a zero-row key order
+            // stay legitimate empty samples.
+            ensure!(
+                files_ordered > 0 || plan.files_without_stats == 0,
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "primary-key sample {sample} of region {region_id} cannot be planned: \
+                         {} candidate files, {} of them without encoded primary-key statistics, \
+                         {} rows in the key order; without a file whose key range is known the \
+                         sample would have to read every row",
+                        files.len(),
+                        plan.files_without_stats,
+                        plan.rows_total
+                    ),
+                }
+            );
             warn!(
                 "Primary-key sample {sample} has no key statistics to order in region {}: \
                  {} files outside the key predicate, {} files without statistics, {} rows in \

@@ -79,7 +79,8 @@ impl PkSampleInterval {
 /// Result of planning a sample over the files a scan would read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PkSamplePlan {
-    /// The chosen interval, or `None` if no file carries key statistics.
+    /// The chosen interval, or `None` if no file carries key statistics, which the
+    /// scan rejects unless there is nothing to sample at all.
     pub interval: Option<PkSampleInterval>,
     /// In-range files without primary-key statistics. They cannot be ordered by
     /// key, so the scan keeps them whole (over-sampling) and counts them.
@@ -163,7 +164,8 @@ pub(crate) fn choose_interval(
 ///
 /// `files_without_stats` counts the in-range files that carry no key statistics;
 /// they cannot be ordered by key, so the scan keeps them whole and only counts
-/// them.
+/// them. When no file carries statistics at all, `interval` is `None` and the
+/// caller must reject the request instead of reading every row.
 pub(crate) fn plan_from_stats(
     stats: Vec<PkSampleFileStat>,
     num: u32,
@@ -374,7 +376,8 @@ mod tests {
         assert_eq!(10, plan.rows_covered);
         assert!(plan.interval.is_some());
 
-        // Only a file without statistics: nothing to order, and the scan keeps it whole.
+        // Only a file without statistics: nothing can be ordered, so there is no
+        // interval and the scan rejects the request instead of reading every row.
         let plan = plan_from_stats(vec![], 1, 2, 1);
         assert_eq!(1, plan.files_without_stats);
         assert!(plan.interval.is_none());

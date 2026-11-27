@@ -19,20 +19,31 @@
 //! row groups instead of only filtering rows after they are read.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use api::v1::Rows;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use common_recordbatch::RecordBatches;
 use datafusion_expr::{Expr, col, lit};
-use datatypes::arrow::array::{StringArray, TimestampMillisecondArray};
+use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
+use mito_codec::row_converter::build_primary_key_codec;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{PkSample, RegionId, ScanRequest};
 
+use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::manifest::action::RegionEdit;
+use crate::memtable::bulk::part::{BulkPart, convert_bulk_part};
 use crate::metrics::PK_SAMPLE_STATS;
+use crate::sst::file::FileMeta;
+use crate::sst::parquet::WriteOptions;
+use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
+use crate::test_util::sst_util::new_flat_source_from_record_batches;
 use crate::test_util::{CreateRequestBuilder, TestEnv, flush_region, put_rows, rows_schema};
 
 /// Rows per row group, so a flushed file is split into many row groups and the
@@ -539,4 +550,342 @@ async fn test_pk_sample_without_key_predicate_is_unchanged() {
             "the interval must not depend on a filter that keeps every file"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Failing closed: a fraction the region cannot order is an error, not a full read.
+// ---------------------------------------------------------------------------
+
+/// Creates an empty classic region and returns the schema of its rows.
+async fn create_empty_region(
+    engine: &MitoEngine,
+    region_id: RegionId,
+) -> Vec<api::v1::ColumnSchema> {
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    schema
+}
+
+/// Writes one SST holding `keys` at `ts` into `region_id` and publishes it **without
+/// encoded-key statistics**.
+///
+/// The SST data is written by the production writer, so the rows are readable and
+/// their row groups carry column statistics; only the manifest entry leaves
+/// `primary_key_min`/`primary_key_max` unset, which is what a file whose key range
+/// was never recorded (a legacy or externally written SST) looks like. The write
+/// path itself is untouched: this test composes a manifest entry, it does not change
+/// how mito2 records statistics.
+async fn publish_file_without_key_stats(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    keys: std::ops::Range<usize>,
+    ts: u64,
+) {
+    let region = engine.get_region(region_id).unwrap();
+    let metadata = region.version().metadata.clone();
+    let num_rows = keys.len();
+    let ts = ts as i64;
+
+    // The rows as a writer receives them, in the region's own schema.
+    let tag = Arc::new(StringArray::from_iter_values(
+        keys.clone().map(|i| format!("t{i:04}")),
+    )) as ArrayRef;
+    let field = Arc::new(Float64Array::from_iter_values(keys.map(|i| i as f64))) as ArrayRef;
+    let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+        std::iter::repeat_n(ts, num_rows),
+    )) as ArrayRef;
+    let rows = DfRecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("tag_0", DataType::Utf8, true),
+            Field::new("field_0", DataType::Float64, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ])),
+        vec![tag, field, timestamps],
+    )
+    .unwrap();
+
+    // Encodes the primary key of every row, exactly like the bulk write path does.
+    let part = convert_bulk_part(
+        BulkPart {
+            batch: rows,
+            max_timestamp: ts,
+            min_timestamp: ts,
+            sequence: 1,
+            min_sequence: 1,
+            // `ts` is the third column of the batch above.
+            timestamp_index: 2,
+            raw_data: None,
+        },
+        &metadata,
+        build_primary_key_codec(&metadata),
+        to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        ),
+        true,
+    )
+    .unwrap()
+    .expect("the part holds rows");
+
+    let info = region
+        .access_layer
+        .write_sst(
+            SstWriteRequest {
+                index_build_inputs: None,
+                op_type: OperationType::Flush,
+                metadata,
+                source: new_flat_source_from_record_batches(vec![part.batch]),
+                cache_manager: Default::default(),
+                max_sequence: Some(1),
+                // The layout the region's own flush writes by default.
+                sst_write_format: FormatType::Flat,
+                preserve_row_sequence: false,
+                index_options: Default::default(),
+                index_config: Default::default(),
+                inverted_index_config: Default::default(),
+                fulltext_index_config: Default::default(),
+                bloom_filter_index_config: Default::default(),
+            },
+            &WriteOptions::default(),
+            &mut Metrics::new(WriteType::Flush),
+        )
+        .await
+        .unwrap()
+        .remove(0);
+
+    let file = FileMeta {
+        region_id,
+        file_id: info.file_id,
+        time_range: info.time_range,
+        level: 0,
+        file_size: info.file_size,
+        max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        max_row_group_decoded_size: info.max_row_group_decoded_size,
+        num_rows: info.num_rows as u64,
+        num_row_groups: info.num_row_groups,
+        num_series: info.num_series,
+        // `primary_key_min`/`primary_key_max` stay `None`: no key statistics.
+        ..Default::default()
+    };
+    // Guards the fixture: `FileHandle::primary_key_range` reports exactly this as
+    // unknown bounds, so the sampler cannot place the file on the key axis.
+    assert_eq!(
+        None,
+        file.primary_key_range(),
+        "the published manifest entry must carry no encoded-key statistics"
+    );
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![file],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Guards the fixture: the handle the next scan sees reports unknown key bounds,
+    // which is exactly the state the sampler must count as "no statistics".
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let handle = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .find(|handle| handle.meta_ref().file_id == info.file_id)
+        .expect("the published file must be visible in the region");
+    assert_eq!(
+        None,
+        handle.raw_primary_key_range(),
+        "the region must not know the key range of the published file"
+    );
+}
+
+/// A region whose candidate files all lack encoded-key statistics cannot honor a
+/// sample fraction: the scan fails instead of returning every row.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The rejection message is this test's evidence; report it.
+async fn test_pk_sample_without_key_statistics_is_rejected() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+    let region_id = RegionId::new(1024, 6);
+    create_empty_region(&engine, region_id).await;
+    publish_file_without_key_stats(&engine, region_id, 0..KEYS_PER_FILE, 1000).await;
+    publish_file_without_key_stats(&engine, region_id, KEYS_PER_FILE..2 * KEYS_PER_FILE, 2000)
+        .await;
+
+    let before = counters();
+    // `scanner` builds the scan input, which is where the sample is planned: the
+    // rejection happens before any SST reader exists, so no row can be read.
+    let err = engine
+        .scanner(region_id, quarter_sample(vec![]))
+        .await
+        .err()
+        .expect("a sample over files without key statistics must be rejected");
+    let after = counters();
+
+    // Failing closed means failing before the read: planning the interval rejects the
+    // scan, so no SST reader is built and no row is scanned, filtered or returned.
+    assert_eq!(
+        0,
+        delta(&before, &after, "row_groups_checked"),
+        "the rejected scan must not read any row group"
+    );
+    assert_eq!(0, delta(&before, &after, "rows_filtered"));
+    assert_eq!(0, delta(&before, &after, "files_pruned"));
+    // The sampler reached its decision over the two files, both without statistics.
+    assert_eq!(2, delta(&before, &after, "files_without_stats"));
+
+    assert!(
+        matches!(err, crate::error::Error::InvalidRequest { .. }),
+        "the sample must be rejected as an invalid request, got: {err}"
+    );
+    let message = err.to_string();
+    println!("rejected sample: {message}");
+    assert!(
+        message.contains(&region_id.to_string()),
+        "the error must name the region: {message}"
+    );
+    assert!(
+        message.contains("1/4"),
+        "the error must name the requested fraction: {message}"
+    );
+    assert!(
+        message.contains("2 candidate files"),
+        "the error must name the candidate files: {message}"
+    );
+    assert!(
+        message.contains("2 of them without encoded primary-key statistics"),
+        "the error must name how many files lack statistics: {message}"
+    );
+    assert!(
+        message.contains("0 rows in the key order"),
+        "the error must report how many rows entered the key order: {message}"
+    );
+}
+
+/// A file without key statistics is still scanned: the sample keeps its rows while it
+/// samples the files it can order, and only counts the unknown file.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
+async fn test_pk_sample_keeps_rows_of_files_without_key_statistics() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+    let region_id = RegionId::new(1024, 7);
+    let schema = create_empty_region(&engine, region_id).await;
+
+    // Two files with statistics: `t0000`..`t0099` and `t0100`..`t0199`.
+    for file in 0..2 {
+        let start = file * KEYS_PER_FILE;
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: key_rows(start..start + KEYS_PER_FILE, ((file + 1) * 1000) as i64),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, Some(ROW_GROUP_ROWS)).await;
+    }
+    // A third file with keys inside the interval the two known files plan but no
+    // statistics of its own: `t0020`..`t0029` at timestamp 3000.
+    publish_file_without_key_stats(&engine, region_id, 20..30, 3000).await;
+
+    let full = read_keys(&engine, region_id, ScanRequest::default()).await;
+    let full_rows: usize = full.values().map(|timestamps| timestamps.len()).sum();
+    // The published SST is readable and its rows are part of the full scan, so a
+    // missing row below can only come from the sample, not from the fixture.
+    assert_eq!(
+        2 * KEYS_PER_FILE + 10,
+        full_rows,
+        "the full scan reads both flushed files and the file without statistics"
+    );
+
+    let before = counters();
+    let sampled = read_keys(&engine, region_id, quarter_sample(vec![])).await;
+    let after = counters();
+
+    let files_without_stats = delta(&before, &after, "files_without_stats");
+    let files_pruned = delta(&before, &after, "files_pruned");
+    let sampled_rows: usize = sampled.values().map(|ts| ts.len()).sum();
+    println!(
+        "mixed statistics with a quarter sample: {sampled_rows}/{full_rows} rows, \
+         files without statistics {files_without_stats}, files pruned by the sample {files_pruned}"
+    );
+
+    // A quarter of the 200 rows with statistics is 50, so the interval is the first
+    // file: keys `t0000`..=`t0099`. The unknown file cannot be ordered, so it is never
+    // pruned and all of its rows are kept.
+    assert_eq!(
+        fixture_keys(0..KEYS_PER_FILE),
+        sampled.keys().cloned().collect::<BTreeSet<_>>(),
+        "the interval covers the first known file and the whole unknown file"
+    );
+    assert_eq!(
+        vec![1000i64, 3000],
+        sampled["t0020"],
+        "the row of the file without statistics must reach the result"
+    );
+    assert_eq!(KEYS_PER_FILE + 10, sampled_rows, "no row is lost");
+    assert_eq!(1, files_without_stats, "the unknown file is only counted");
+    // Only the known file above the interval is pruned; the unknown file cannot be.
+    assert_eq!(1, files_pruned);
+    assert!(
+        sampled.keys().all(|key| full.contains_key(key)),
+        "a sampled scan must return a subset of the full scan"
+    );
+}
+
+/// An empty region, and a key predicate that excludes every file, read no row and are
+/// not errors: there is nothing to sample in either case.
+#[tokio::test]
+async fn test_pk_sample_of_nothing_is_not_an_error() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+
+    // A region without any candidate file.
+    let empty_region = RegionId::new(1024, 8);
+    create_empty_region(&engine, empty_region).await;
+    let before = counters();
+    let rows = read_keys(&engine, empty_region, quarter_sample(vec![])).await;
+    let after = counters();
+    assert!(rows.is_empty(), "an empty region has no row to sample");
+    assert_eq!(0, delta(&before, &after, "files_in_range"));
+    assert_eq!(0, delta(&before, &after, "files_without_stats"));
+
+    // Candidates exist but the key predicate excludes every one of them.
+    let filtered_region = RegionId::new(1024, 9);
+    create_key_disjoint_files(&engine, filtered_region).await;
+    let before = counters();
+    let rows = read_keys(
+        &engine,
+        filtered_region,
+        quarter_sample(vec![col("tag_0").eq(lit("zzz"))]),
+    )
+    .await;
+    let after = counters();
+    assert!(
+        rows.is_empty(),
+        "a predicate without a matching key reads nothing"
+    );
+    assert_eq!(
+        FILES,
+        delta(&before, &after, "files_outside_key_predicate") as usize
+    );
+    assert_eq!(
+        0,
+        delta(&before, &after, "files_without_stats"),
+        "the excluded files carry statistics, they are simply out of range"
+    );
 }
