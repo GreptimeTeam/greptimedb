@@ -593,6 +593,12 @@ impl ScanRegion {
 
     /// Plans the primary-key sample over the files this scan would read.
     ///
+    /// The step function is built from the files the request's key predicate can
+    /// still match, so the fraction is a fraction of the rows *this query* reads.
+    /// Building it over the whole key axis and intersecting later would select an
+    /// interval the predicate never reads, and the scan would then return no row
+    /// at all.
+    ///
     /// Files without key statistics cannot be placed on the key axis: they are
     /// kept whole (the sample over-shoots) and counted. Files whose stored
     /// statistics need a schema alignment are rejected, because their stored key
@@ -601,11 +607,23 @@ impl ScanRegion {
         let Some(sample) = self.request.pk_sample else {
             return Ok(None);
         };
-        let region_id = self.version.metadata.region_id;
+        let metadata = &self.version.metadata;
+        let region_id = metadata.region_id;
         let mapper = self.version.ssts.primary_key_mapper();
+        let key_predicate = self.key_predicate();
         let mut stats = Vec::with_capacity(files.len());
         let mut files_without_stats = 0;
+        let mut files_outside_key_predicate = 0;
         for file in files {
+            // A file the key predicate excludes contributes no row to this query,
+            // so it must not enter the step function either.
+            if let Some(predicate) = &key_predicate
+                && let Some(stats) = file_level_pruning_stats(metadata, &mapper, file)
+                && prunes_by_file_level_stats(&stats, predicate, metadata)
+            {
+                files_outside_key_predicate += 1;
+                continue;
+            }
             let Some((min, max)) = file.primary_key_range(&mapper) else {
                 files_without_stats += 1;
                 continue;
@@ -636,27 +654,63 @@ impl ScanRegion {
             files_without_stats,
         );
         crate::read::pk_sample::inc("files_in_range", files.len() as u64);
+        crate::read::pk_sample::inc(
+            "files_outside_key_predicate",
+            files_outside_key_predicate as u64,
+        );
         crate::read::pk_sample::inc("files_without_stats", plan.files_without_stats as u64);
         let Some(interval) = plan.interval.clone() else {
             warn!(
                 "Primary-key sample {sample} has no key statistics to order in region {}: \
-                 {} files without statistics, {} rows in the step function",
-                region_id, plan.files_without_stats, plan.rows_total
+                 {} files outside the key predicate, {} files without statistics, {} rows in \
+                 the step function",
+                region_id, files_outside_key_predicate, plan.files_without_stats, plan.rows_total
             );
             return Ok(None);
         };
         debug!(
             "Primary-key sample {sample} of region {}: keys {:?}..{:?} cover about {}/{} rows \
-             (target {}), files without statistics {}",
+             (target {}), files outside the key predicate {}, files without statistics {}",
             region_id,
             interval.lo,
             interval.hi,
             plan.rows_covered,
             plan.rows_total,
             plan.rows_target,
+            files_outside_key_predicate,
             plan.files_without_stats
         );
         Ok(Some(interval))
+    }
+
+    /// Returns the filters that constrain the primary key.
+    ///
+    /// A primary-key sample keeps `num/den` of the rows the request reads, so its
+    /// step function must only count the files a key filter can still match. A
+    /// filter on a value column does not narrow which keys the request reads, so
+    /// it stays out of the predicate: a request without a key filter plans exactly
+    /// the same interval as before.
+    fn key_predicate(&self) -> Option<Predicate> {
+        let metadata = &self.version.metadata;
+        let mut columns = HashSet::new();
+        let mut key_filters = Vec::new();
+        for expr in &self.request.filters {
+            columns.clear();
+            // `expr_to_columns` won't return error for a filter the request carries.
+            if expr_to_columns(expr, &mut columns).is_err() {
+                continue;
+            }
+            let constrains_key = columns.iter().any(|column| {
+                metadata
+                    .column_by_name(&column.name)
+                    .is_some_and(|meta| metadata.primary_key.contains(&meta.column_id))
+            });
+            if constrains_key {
+                key_filters.push(expr.clone());
+            }
+        }
+
+        (!key_filters.is_empty()).then(|| Predicate::new(key_filters))
     }
 
     /// Creates a scan input.
@@ -1780,64 +1834,7 @@ impl ScanInput {
         &'a self,
         file: &'a FileHandle,
     ) -> Option<FileLevelPruningStats<'a>> {
-        let (ts_min, ts_max) = file.time_range();
-        let time_index = self.mapper.metadata().time_index_column();
-        let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
-
-        // Convert file timestamps to the time index column's unit. Use `convert_to_ceil` for
-        // the upper bound to avoid accidentally shrinking the manifest range.
-        let min_ts = ts_min.convert_to(time_index_unit)?;
-        let max_ts = ts_max.convert_to_ceil(time_index_unit)?;
-
-        Some(FileLevelPruningStats {
-            min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
-            max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
-            time_index_col_name: time_index.column_schema.name.clone(),
-            first_primary_key: self.first_primary_key_stats(file),
-        })
-    }
-
-    /// Returns the first primary key column of `file`. Its range is decoded only when pruning
-    /// asks for the column.
-    fn first_primary_key_stats<'a>(
-        &'a self,
-        file: &'a FileHandle,
-    ) -> Option<FirstPrimaryKeyStats<'a>> {
-        let metadata = self.mapper.metadata();
-        let column = metadata.column_by_id(*metadata.primary_key.first()?)?;
-        Some(FirstPrimaryKeyStats {
-            input: self,
-            file,
-            column,
-            range: OnceLock::new(),
-        })
-    }
-
-    /// Decodes the min and max of `column`, the first primary key column, from the primary key
-    /// range of `file`.
-    fn decode_first_primary_key_range(
-        &self,
-        file: &FileHandle,
-        column: &ColumnMetadata,
-    ) -> Option<(ArrayRef, ArrayRef)> {
-        use datatypes::data_type::DataType as _;
-
-        let metadata = self.mapper.metadata();
-        let (min, max) = file.primary_key_range(self.primary_key_mapper())?;
-        let codec = build_primary_key_codec_with_fields(
-            metadata.primary_key_encoding,
-            std::iter::once((
-                column.column_id,
-                SortField::new(column.column_schema.data_type.clone()),
-            )),
-        );
-        let to_array = |bytes: &[u8]| -> Option<ArrayRef> {
-            let value = codec.decode_leftmost(bytes).ok()??;
-            let mut builder = column.column_schema.data_type.create_mutable_vector(1);
-            builder.try_push_value_ref(&value.as_value_ref()).ok()?;
-            Some(builder.to_vector().to_arrow_array())
-        };
-        Some((to_array(&min)?, to_array(&max)?))
+        file_level_pruning_stats(self.mapper.metadata(), self.primary_key_mapper(), file)
     }
 
     /// Checks whether a file can be definitively pruned using only its manifest-level
@@ -1876,18 +1873,13 @@ impl ScanInput {
         if self.pk_sample_prunes_file(file) {
             return true;
         }
-        if let Some(pred) = predicate
-            && !pred.is_empty()
-            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
-        {
-            let pruning_results = pred.prune_with_stats(
-                &file_level_stats,
-                self.mapper.metadata().schema.arrow_schema(),
-            );
-            pruning_results.first() == Some(&false)
-        } else {
-            false
-        }
+        let Some(pred) = predicate.filter(|pred| !pred.is_empty()) else {
+            return false;
+        };
+        let Some(stats) = self.try_file_level_pruning_stats(file) else {
+            return false;
+        };
+        prunes_by_file_level_stats(&stats, pred, self.mapper.metadata())
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
@@ -2195,6 +2187,93 @@ impl ScanInput {
     }
 }
 
+/// Builds file-level pruning statistics from the time range and primary key range the
+/// [FileHandle]'s manifest entry records, without reading any parquet metadata.
+///
+/// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
+fn file_level_pruning_stats<'a>(
+    metadata: &'a RegionMetadata,
+    mapper: &'a PrimaryKeyRangeMapper,
+    file: &'a FileHandle,
+) -> Option<FileLevelPruningStats<'a>> {
+    let (ts_min, ts_max) = file.time_range();
+    let time_index = metadata.time_index_column();
+    let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
+
+    // Convert file timestamps to the time index column's unit. Use `convert_to_ceil` for
+    // the upper bound to avoid accidentally shrinking the manifest range.
+    let min_ts = ts_min.convert_to(time_index_unit)?;
+    let max_ts = ts_max.convert_to_ceil(time_index_unit)?;
+
+    Some(FileLevelPruningStats {
+        min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
+        max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
+        time_index_col_name: time_index.column_schema.name.clone(),
+        first_primary_key: first_primary_key_stats(metadata, mapper, file),
+    })
+}
+
+/// Returns the first primary key column of `file`. Its range is decoded only when pruning
+/// asks for the column.
+fn first_primary_key_stats<'a>(
+    metadata: &'a RegionMetadata,
+    mapper: &'a PrimaryKeyRangeMapper,
+    file: &'a FileHandle,
+) -> Option<FirstPrimaryKeyStats<'a>> {
+    let column = metadata.column_by_id(*metadata.primary_key.first()?)?;
+    Some(FirstPrimaryKeyStats {
+        metadata,
+        mapper,
+        file,
+        column,
+        range: OnceLock::new(),
+    })
+}
+
+/// Decodes the min and max of `column`, the first primary key column, from the primary key
+/// range of `file`.
+fn decode_first_primary_key_range(
+    metadata: &RegionMetadata,
+    mapper: &PrimaryKeyRangeMapper,
+    file: &FileHandle,
+    column: &ColumnMetadata,
+) -> Option<(ArrayRef, ArrayRef)> {
+    use datatypes::data_type::DataType as _;
+
+    let (min, max) = file.primary_key_range(mapper)?;
+    let codec = build_primary_key_codec_with_fields(
+        metadata.primary_key_encoding,
+        std::iter::once((
+            column.column_id,
+            SortField::new(column.column_schema.data_type.clone()),
+        )),
+    );
+    let to_array = |bytes: &[u8]| -> Option<ArrayRef> {
+        let value = codec.decode_leftmost(bytes).ok()??;
+        let mut builder = column.column_schema.data_type.create_mutable_vector(1);
+        builder.try_push_value_ref(&value.as_value_ref()).ok()?;
+        Some(builder.to_vector().to_arrow_array())
+    };
+    Some((to_array(&min)?, to_array(&max)?))
+}
+
+/// Returns whether `predicate` proves that the file described by `stats` cannot contain a
+/// matching row.
+///
+/// The proof only uses the time range and the first primary key range recorded in the
+/// manifest, so it never reads parquet metadata. A predicate on a column those statistics
+/// do not cover is never proven false, so the file is kept.
+fn prunes_by_file_level_stats(
+    stats: &FileLevelPruningStats<'_>,
+    predicate: &Predicate,
+    metadata: &RegionMetadata,
+) -> bool {
+    predicate
+        .prune_with_stats(stats, metadata.schema.arrow_schema())
+        .first()
+        == Some(&false)
+}
+
 /// Lightweight [PruningStatistics] that only uses the time range and first primary key range
 /// known by the file handle, avoiding any parquet metadata reads. Used for early file-level
 /// pruning before accessing row-group-level statistics.
@@ -2212,7 +2291,8 @@ pub(crate) struct FileLevelPruningStats<'a> {
 /// Min and max of the first primary key column of a file, decoded from the file's primary key
 /// range on first use. Predicates that do not reference the column skip the decoding.
 pub(crate) struct FirstPrimaryKeyStats<'a> {
-    input: &'a ScanInput,
+    metadata: &'a RegionMetadata,
+    mapper: &'a PrimaryKeyRangeMapper,
     file: &'a FileHandle,
     column: &'a ColumnMetadata,
     range: OnceLock<Option<(ArrayRef, ArrayRef)>>,
@@ -2225,8 +2305,7 @@ impl FirstPrimaryKeyStats<'_> {
         }
         self.range
             .get_or_init(|| {
-                self.input
-                    .decode_first_primary_key_range(self.file, self.column)
+                decode_first_primary_key_range(self.metadata, self.mapper, self.file, self.column)
             })
             .as_ref()
     }

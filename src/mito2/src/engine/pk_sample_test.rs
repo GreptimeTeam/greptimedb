@@ -18,12 +18,13 @@
 //! encoded primary key, which is what lets a *range* predicate prune files and
 //! row groups instead of only filtering rows after they are read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use api::v1::Rows;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use common_recordbatch::RecordBatches;
+use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::{StringArray, TimestampMillisecondArray};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
@@ -39,8 +40,9 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, flush_region, put_rows, ro
 const ROW_GROUP_ROWS: usize = 20;
 
 /// Counter kinds recorded by the primary-key sampler.
-const STAT_KINDS: [&str; 6] = [
+const STAT_KINDS: [&str; 7] = [
     "files_in_range",
+    "files_outside_key_predicate",
     "files_without_stats",
     "files_pruned",
     "row_groups_checked",
@@ -275,4 +277,266 @@ async fn test_pk_sample_rejects_invalid_fraction() {
     };
     let keys = read_keys(&engine, region_id, request).await;
     assert!(!keys.is_empty());
+}
+
+/// Files per fixture region, each holding [`KEYS_PER_FILE`] key-disjoint keys.
+const FILES: usize = 4;
+/// Keys per fixture file, so the key axis has `FILES * KEYS_PER_FILE` keys.
+const KEYS_PER_FILE: usize = 100;
+/// Row groups the whole fixture region holds at [`ROW_GROUP_ROWS`] rows per group.
+const FIXTURE_ROW_GROUPS: u64 = (FILES * KEYS_PER_FILE / ROW_GROUP_ROWS) as u64;
+
+/// Returns an engine config that keeps one file per flush.
+///
+/// Compaction would merge the key-disjoint files of a fixture into one file whose
+/// range covers the whole key axis, which is exactly the shape these tests exclude.
+fn one_file_per_flush_config() -> MitoConfig {
+    MitoConfig {
+        min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    }
+}
+
+/// Creates a classic region whose files have key-disjoint manifest ranges: file
+/// `i` holds the keys `t{i}000` .. `t{i}099` at timestamp `(i + 1) * 1000`, one row
+/// per key. A key filter therefore selects whole files by their statistics.
+async fn create_key_disjoint_files(engine: &MitoEngine, region_id: RegionId) {
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    for file in 0..FILES {
+        let start = file * KEYS_PER_FILE;
+        let ts = ((file + 1) * 1000) as i64;
+        put_rows(
+            engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: key_rows(start..start + KEYS_PER_FILE, ts),
+            },
+        )
+        .await;
+        flush_region(engine, region_id, Some(ROW_GROUP_ROWS)).await;
+    }
+}
+
+/// The fixture keys `range` as strings, which is how a scan returns them.
+fn fixture_keys(range: std::ops::Range<usize>) -> BTreeSet<String> {
+    range.map(|i| format!("t{i:04}")).collect()
+}
+
+/// A quarter sample with the given filters.
+fn quarter_sample(filters: Vec<Expr>) -> ScanRequest {
+    ScanRequest {
+        filters,
+        pk_sample: Some(PkSample { num: 1, den: 4 }),
+        ..Default::default()
+    }
+}
+
+/// An equality predicate restricts the step function to the file it reads, so the
+/// sample can no longer pick an interval the predicate never reads and return no
+/// row at all.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
+async fn test_pk_sample_with_equality_predicate_keeps_the_key_it_reads() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+    let region_id = RegionId::new(1024, 2);
+    create_key_disjoint_files(&engine, region_id).await;
+
+    // `t0200` is the first key of the third file: a sample over the whole key axis
+    // would keep the first quarter of the axis, which holds no row of it.
+    let before = counters();
+    let sampled = read_keys(
+        &engine,
+        region_id,
+        quarter_sample(vec![col("tag_0").eq(lit("t0200"))]),
+    )
+    .await;
+    let after = counters();
+
+    let files_outside = delta(&before, &after, "files_outside_key_predicate");
+    let files_pruned = delta(&before, &after, "files_pruned");
+    let row_groups_checked = delta(&before, &after, "row_groups_checked");
+    println!(
+        "key equality with a quarter sample: {} rows, files outside the predicate \
+         {files_outside}, files pruned by the sample {files_pruned}, row groups checked \
+         {row_groups_checked}/{FIXTURE_ROW_GROUPS}",
+        sampled.values().map(|ts| ts.len()).sum::<usize>()
+    );
+
+    // The predicate reads the third file only: the other three never enter the
+    // step function, and the interval of the third file prunes them as well.
+    assert_eq!(
+        BTreeSet::from(["t0200".to_string()]),
+        sampled.keys().cloned().collect::<BTreeSet<_>>(),
+        "the sampled scan must return the rows of the key predicate"
+    );
+    assert_eq!(vec![3000i64], sampled["t0200"], "with all of its columns");
+    assert_eq!(FILES - 1, files_outside as usize);
+    assert_eq!(FILES - 1, files_pruned as usize);
+    assert!(
+        row_groups_checked < FIXTURE_ROW_GROUPS,
+        "the sample must read less than the whole table: {row_groups_checked}/{FIXTURE_ROW_GROUPS}"
+    );
+    // The sample still covers at most the requested fraction of the table.
+    assert!(sampled.len() <= FILES * KEYS_PER_FILE / 4);
+}
+
+/// A range predicate that spans two files keeps pruning: only the files it reads
+/// enter the step function, and the interval it picks still drops whole files.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
+async fn test_pk_sample_with_range_predicate_prunes_files_it_does_not_read() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+    let region_id = RegionId::new(1024, 3);
+    create_key_disjoint_files(&engine, region_id).await;
+
+    // Keys `t0050`..=`t0250` live in the first three files.
+    let filters = vec![
+        col("tag_0")
+            .gt_eq(lit("t0050"))
+            .and(col("tag_0").lt_eq(lit("t0250"))),
+    ];
+    let before = counters();
+    let sampled = read_keys(&engine, region_id, quarter_sample(filters)).await;
+    let after = counters();
+
+    let files_outside = delta(&before, &after, "files_outside_key_predicate");
+    let files_pruned = delta(&before, &after, "files_pruned");
+    let row_groups_checked = delta(&before, &after, "row_groups_checked");
+    let query_rows = 250 - 50 + 1;
+    let ratio = sampled.len() as f64 / query_rows as f64;
+    println!(
+        "key range with a quarter sample: {} rows of {query_rows} the predicate reads \
+         (ratio {ratio:.3}), files outside the predicate {files_outside}, files pruned by the \
+         sample {files_pruned}, row groups checked {row_groups_checked}/{FIXTURE_ROW_GROUPS}",
+        sampled.len()
+    );
+
+    // The three files the predicate reads hold 300 rows, a quarter of them is 75,
+    // so the interval is the first of those files: keys `t0000`..`t0099`.
+    assert_eq!(
+        fixture_keys(50..100),
+        sampled.keys().cloned().collect::<BTreeSet<_>>(),
+        "the interval starts at the first file the predicate reads"
+    );
+    // The fourth file is excluded twice over: by the predicate and by the interval.
+    // Only the file the interval starts in survives, so every other file is pruned.
+    assert_eq!(1, files_outside);
+    assert_eq!(FILES - 1, files_pruned as usize);
+    assert!(
+        row_groups_checked < FIXTURE_ROW_GROUPS,
+        "the sample must read less than the whole table: {row_groups_checked}/{FIXTURE_ROW_GROUPS}"
+    );
+    // The fraction is measured against the rows the query reads, not against the
+    // whole table.
+    assert!(
+        (0.15..=0.38).contains(&ratio),
+        "the sample must cover about a quarter of the rows the predicate reads: {ratio}"
+    );
+}
+
+/// A predicate that matches no file returns no row instead of an error.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
+async fn test_pk_sample_with_key_predicate_outside_every_file_returns_no_rows() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+    let region_id = RegionId::new(1024, 4);
+    create_key_disjoint_files(&engine, region_id).await;
+
+    let before = counters();
+    let sampled = read_keys(
+        &engine,
+        region_id,
+        quarter_sample(vec![col("tag_0").eq(lit("zzz"))]),
+    )
+    .await;
+    let after = counters();
+
+    let files_outside = delta(&before, &after, "files_outside_key_predicate");
+    let files_pruned = delta(&before, &after, "files_pruned");
+    println!(
+        "empty key predicate with a quarter sample: {} rows, files outside the predicate \
+         {files_outside}, files pruned by the sample {files_pruned}",
+        sampled.len()
+    );
+
+    // No row matches, so no row is returned and no error is raised.
+    assert!(
+        sampled.is_empty(),
+        "a predicate without a matching key reads nothing"
+    );
+    // Every file is excluded by the predicate, so the sampler plans no interval and
+    // leaves the pruning to the predicate itself.
+    assert_eq!(FILES, files_outside as usize);
+    assert_eq!(0, files_pruned);
+}
+
+/// Without a key predicate the step function is the whole key axis, exactly as
+/// before the key predicate was taken into account.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
+async fn test_pk_sample_without_key_predicate_is_unchanged() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+    let region_id = RegionId::new(1024, 5);
+    create_key_disjoint_files(&engine, region_id).await;
+
+    let before = counters();
+    let sampled = read_keys(&engine, region_id, quarter_sample(vec![])).await;
+    let after = counters();
+
+    let files_outside = delta(&before, &after, "files_outside_key_predicate");
+    let row_groups_checked = delta(&before, &after, "row_groups_checked");
+    let ratio = sampled.len() as f64 / (FILES * KEYS_PER_FILE) as f64;
+    println!(
+        "no key predicate with a quarter sample: {} rows of {} (ratio {ratio:.3}), files outside \
+         the predicate {files_outside}, row groups checked {row_groups_checked}/{FIXTURE_ROW_GROUPS}",
+        sampled.len(),
+        FILES * KEYS_PER_FILE
+    );
+
+    // The four files hold 400 rows in key order, so a quarter sample (100 rows)
+    // keeps the first file and nothing else.
+    let expected = fixture_keys(0..KEYS_PER_FILE);
+    assert_eq!(
+        expected,
+        sampled.keys().cloned().collect::<BTreeSet<_>>(),
+        "the interval is the first quarter of the key axis, as before"
+    );
+    assert_eq!(0, files_outside, "no key filter excludes a file");
+    assert!(
+        (0.15..=0.38).contains(&ratio),
+        "about a quarter of the table: {ratio}"
+    );
+
+    // An empty filter list and a key filter that keeps every file plan the same
+    // interval, so both are equivalent to no predicate at all.
+    for filters in [
+        vec![col("tag_0").gt_eq(lit("t0000"))],
+        vec![col("field_0").gt_eq(lit(0.0))],
+    ] {
+        let before = counters();
+        let filtered = read_keys(&engine, region_id, quarter_sample(filters)).await;
+        let after = counters();
+        assert_eq!(
+            0,
+            delta(&before, &after, "files_outside_key_predicate"),
+            "a filter that keeps every file must not narrow the step function"
+        );
+        assert_eq!(
+            expected,
+            filtered.keys().cloned().collect::<BTreeSet<_>>(),
+            "the interval must not depend on a filter that keeps every file"
+        );
+    }
 }
