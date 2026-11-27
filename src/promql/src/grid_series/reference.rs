@@ -35,9 +35,6 @@ use crate::histogram_eval::float_histogram::FloatHistogram;
 pub(crate) type Dense = Vec<Vec<Option<f64>>>;
 
 /// Expands a grid series to a dense matrix over its whole grid.
-///
-/// The axis names the absolute position of every row, so a series of several runs expands to the
-/// same matrix a dense one would.
 pub(crate) fn expand(series: &Series) -> Dense {
     let Some(grid) = series.time.grid() else {
         panic!("expected a grid series, got {:?}", series.time);
@@ -111,9 +108,6 @@ fn assert_series_matches(
     let Some(grid) = actual.time.grid() else {
         panic!("expected a grid series, got {:?}", actual.time);
     };
-    // Trimmed means: the carried rows start at the first valid position and end at the last, and
-    // there is one row per valid position. A series of several runs satisfies both only when it
-    // carries the same positions.
     assert_eq!(
         (actual.time.first_position(), actual.time.last_position()),
         (Some(first), Some(last)),
@@ -135,12 +129,8 @@ fn assert_series_matches(
     assert_eq!(bits(&expand(actual)), bits(expected), "{context}");
 }
 
-/// Stitches the pieces of one series back into a dense matrix over the whole grid.
-///
-/// A result only carries the positions holding a value, and a stream may hand it out as several
-/// pieces, so comparing against a dense expectation means putting them back together. Two pieces
-/// covering one position would be a protocol violation, so it fails here rather than silently
-/// overwriting.
+/// Stitches the pieces of one series back into a dense matrix over the whole grid; panics when two
+/// pieces cover one position.
 pub(crate) fn stitch(pieces: &[Series]) -> Dense {
     let mut dense: Option<Dense> = None;
     for piece in pieces {
@@ -174,9 +164,6 @@ pub(crate) fn stitch(pieces: &[Series]) -> Dense {
 }
 
 /// The `(start, len)` of every run of one series, in grid order.
-///
-/// A series names the rows it carries through its axis, so a result of several runs reports one
-/// entry per run and never the envelope: the positions between two runs hold no row.
 pub(crate) fn run_ranges(series: &Series) -> Vec<(usize, usize)> {
     if series.time.grid().is_none() {
         panic!("expected a grid series, got {:?}", series.time);
@@ -194,11 +181,8 @@ pub(crate) fn piece_ranges(pieces: &[Series]) -> Vec<(usize, usize)> {
     pieces.iter().flat_map(run_ranges).collect()
 }
 
-/// Asserts `actual` -- one series, or none -- reproduces `expected` over the grid.
-///
-/// A result carries only the positions that hold a value, so its rows may form several runs: the
-/// comparison expands it over the grid and checks it covers exactly the valued positions. `None`
-/// means no row survived, which is only right when `expected` holds no value either.
+/// Asserts `actual` covers exactly the valued positions of `expected` with the same values; `None`
+/// matches an `expected` without values.
 pub(crate) fn assert_result_eq(actual: Option<&Series>, expected: &Dense, metric: &SeriesLabels) {
     match actual {
         Some(actual) => assert_pieces_eq(std::slice::from_ref(actual), expected, metric),
@@ -219,7 +203,6 @@ pub(crate) fn assert_pieces_eq(pieces: &[Series], expected: &Dense, metric: &Ser
         .map(|(index, _)| index)
         .collect();
     if valued.is_empty() {
-        // Nothing holds a value anywhere, so there is no piece at all -- not one piece of nulls.
         assert!(
             pieces.is_empty(),
             "expected no pieces, got {}",
@@ -246,11 +229,7 @@ pub(crate) fn assert_pieces_eq(pieces: &[Series], expected: &Dense, metric: &Ser
     );
 }
 
-/// The points of each label set of `pieces`, folded back into one dense point map first.
-///
-/// An operator hands out one series per logical output, and a stream may hand one of them over as
-/// several chunks, while a fixture pins dense points, so the pieces of a label set are joined
-/// before comparing.
+/// The points of each label set of `pieces`, joining the chunks of one label set.
 pub(crate) fn points_by_labels(pieces: Vec<Series>) -> std::collections::BTreeMap<Labels, Points> {
     crate::golden::fold_pieces(pieces)
         .iter()
@@ -414,10 +393,8 @@ pub(crate) fn labels_of(metric: &SeriesLabels) -> Labels {
     labels
 }
 
-/// A single-field series of `schema` holding `points`; `None` without points.
-///
-/// Built directly rather than through the builder: this is an *input* to an operator, so a hole
-/// stays a null inside one series instead of cutting it into pieces.
+/// A single-field dense series of `schema` holding `points`, holes as nulls; `None` without
+/// points.
 pub(crate) fn series_of(
     schema: &Arc<SeriesSchema>,
     labels: &Labels,
@@ -440,13 +417,8 @@ pub(crate) fn series_of(
     )
 }
 
-/// A single-field series of `schema` holding `points` on an axis that skips the positions between
-/// them: one run per maximal stretch of consecutive keys.
-///
-/// This is a series of several grid runs, the shape an input can already have; it is built by hand
-/// here because the builder is the thing under test. The field holds one row per key, in key
-/// order, so a consumer that forgets to read the axis will read the wrong values rather than
-/// merely a shorter series.
+/// A single-field series of `schema` holding `points` on a sparse axis, one run per stretch of
+/// consecutive keys. Built by hand because the builder is under test.
 pub(crate) fn sparse_series(
     schema: &Arc<SeriesSchema>,
     labels: &Labels,
@@ -471,8 +443,6 @@ pub(crate) fn sparse_series(
         Series::try_new(
             schema,
             metric_of(labels),
-            // A one-run axis is the dense fast path, so a sparse fixture of one run is the same
-            // series either shape would build.
             time,
             SeriesFields::one(Samples::from_float(values)),
         )

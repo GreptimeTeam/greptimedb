@@ -136,11 +136,8 @@ pub(crate) struct FloatWindows<'a> {
 }
 
 impl FloatWindows<'_> {
-    /// The resets inside window `index`.
-    ///
-    /// `windows` index the retained arrays as they stand in this batch, not absolutely: each
-    /// span is relative to `timestamps` and `values`, which is why `base` plus a span start is
-    /// the absolute position of the sample the span starts at.
+    /// The resets inside window `index`. Spans are relative to this batch's retained arrays, so
+    /// `base + span.start` is the absolute position of the span's first sample.
     pub(crate) fn resets_of(&self, index: usize) -> &[CounterReset] {
         let span = &self.windows[index];
         resets_between(
@@ -158,19 +155,14 @@ pub(crate) type BatchKernel = Box<dyn FnMut(&FloatWindows<'_>, &mut Vec<Option<f
 /// column buffers in cache while staying large enough to amortise the call.
 const EVALUATION_BATCH: usize = 512;
 
-/// Evaluates range windows over raw series, one series at a time, handing out its results as they
-/// become final.
+/// Evaluates range windows over series pushed one at a time, chunk by chunk.
 ///
-/// Each series is pushed as its chunks in order. A push evaluates the grid points whose windows
-/// the pushed samples complete, and hands them out as one [`EvaluatedChunk`], so a consumer can
-/// stream a long series instead of waiting for its last chunk. One chunk may hold several runs of
-/// positions, separated by stretches holding no value, and the axis names them. The series closes
-/// on a chunk marked `is_last`, which is handed out even when it holds no position.
+/// Each push hands out the grid points its samples completed as one [`EvaluatedChunk`]. A series
+/// closes exactly once, on a chunk marked `is_last`, which is handed out even when empty.
 ///
-/// Fields are evaluated independently over their own valid samples; a row holding a stale
-/// marker in any field is dropped, as the ordinary range selector does. Only the samples later
-/// windows can still use are retained. Native histogram samples need a [`RangeFunction`]; an
-/// evaluator built from a bare kernel rejects them.
+/// Fields are evaluated independently over their own valid samples; a raw row holding a stale
+/// marker in any field is dropped. Native histogram samples need a [`RangeFunction`]; an evaluator
+/// built from a bare kernel rejects them.
 pub struct RangeEvaluator {
     grid: Arc<EvalGrid>,
     /// The window with `offset_ms` replaced by the offset samples are shifted by.
@@ -190,8 +182,6 @@ pub struct RangeEvaluator {
     drops_metric_name: bool,
     /// Raised by the first non-empty window, where Prometheus validates function arguments.
     window_error: Option<String>,
-    /// Chunks appended by the bulk path, so a test can prove that path is reached rather than
-    /// only that the output is right, which the per-sample path would also produce.
     #[cfg(test)]
     bulk_ingests: usize,
     /// The batch form of `function`, when it has one and the input allows it. Present only for
@@ -200,11 +190,8 @@ pub struct RangeEvaluator {
     batch: Option<BatchKernel>,
     /// Windows accumulated for the next batch call.
     pending: PendingBatch,
-    /// Buffers the bulk ingest shifts and compacts a chunk into, kept between chunks so a series
-    /// that needs them does not allocate per push.
+    /// Kept between chunks so the bulk ingest does not allocate per push.
     bulk_scratch: BulkScratch,
-    /// Batch kernel calls made so far. Test-only: both dispatch shapes produce the same output,
-    /// so a test comparing only output could not tell which one ran.
     #[cfg(test)]
     batch_calls: usize,
 }
@@ -351,8 +338,6 @@ fn flush_batch(
     if pending.is_empty() {
         return Ok(());
     }
-    // Counted here rather than at the call site, so the number a test reads is by construction
-    // the number of kernel calls that happened.
     #[cfg(test)]
     {
         *batch_calls += 1;
@@ -399,11 +384,8 @@ struct SeriesState {
 impl SeriesState {
     /// The bytes this series' identity holds, which the rows handed out do not cover.
     fn identity_bytes(&self) -> usize {
-        // A scan slices the primary key out of a decoded buffer, so the bytes the key shows are not
-        // the bytes it keeps: a key of a few bytes pins the allocation it was sliced out of.
-        // Charging the slice length instead would show a handful of bytes for an allocation the
-        // size of a decoded batch. One evaluator holds one series at a time, and an evaluated input
-        // holds no key at all, so there is no second slice of the same allocation to dedupe.
+        // The key is sliced out of a decoded scan buffer and pins that whole allocation, so charge
+        // its capacity. One series is held at a time, so no other slice shares the allocation.
         let primary_key = self
             .primary_key
             .as_ref()
@@ -444,24 +426,16 @@ struct FieldSamples {
     /// Histograms before `histogram_head` are behind every remaining window; their payloads are
     /// released by [`advance_histograms`](Self::advance_histograms).
     histogram_head: usize,
-    /// Estimated payload of the histograms this field still holds: the bucket lists and other
-    /// buffers the samples own, which no `size_of` of a slot shows.
-    ///
-    /// Measured for a histogram when it is admitted and released with it, so a retained sample is
-    /// not walked again on every push. A histogram is never modified once admitted, so the payload
-    /// its release subtracts is the one its admission added. Samples already behind every window
-    /// keep their payload in the figure until the drain releases them.
+    /// Heap payload of the histograms in `histograms`, behind `histogram_head` included. Added on
+    /// admission and subtracted on drain; a histogram is never modified in between, so both
+    /// measurements agree.
     histogram_bytes: usize,
-    /// Sequence number of `values[0]`. Absolute and monotonic across the series this evaluator
-    /// evaluates, so a reset keeps its position when `head` samples are dropped instead of every
-    /// index being renumbered. An empty field holds the number of samples already dropped, which
-    /// keeps positions increasing when the next series starts.
+    /// Absolute sequence number of `values[0]`, monotonic across series, so dropping samples
+    /// does not renumber the reset positions.
     base: u64,
-    /// Resets between consecutive retained samples, ascending by position: exactly the ones a
-    /// window over these samples can still contain. Maintained only for the counter-correcting
-    /// functions, and released as the samples they reach back to are dropped.
+    /// Resets between consecutive retained samples, ascending by position. Maintained only when
+    /// `index_resets` is set.
     resets: Vec<CounterReset>,
-    /// Whether `resets` is maintained for this field.
     index_resets: bool,
 }
 
@@ -504,16 +478,12 @@ impl FieldSamples {
         }
     }
 
-    /// Appends one valid sample, recording a counter reset when it dropped below the sample
-    /// before it.
+    /// Appends one valid sample, recording a counter reset when it dropped below the previous
+    /// float.
     ///
-    /// "Before it" means the previous entry of `values`, which leaves native histogram samples
-    /// out. A drop across an intervening histogram is therefore recorded as a reset of two
-    /// samples that are not neighbours. That is unobservable: a window holding both floats also
-    /// holds the histogram between them, so it is a mixed window, whose counter functions report
-    /// nothing; and a window starting after the earlier float excludes a reset on its first
-    /// sample. Should the mixed-window rules ever start reading the float resets, this has to
-    /// compare timestamps instead.
+    /// The previous float may sit before an intervening native histogram. That is unobservable:
+    /// a window holding both floats also holds the histogram, and counter functions report
+    /// nothing for a mixed window.
     fn push(&mut self, timestamp: i64, value: f64) {
         if self.index_resets
             && let Some(&previous_value) = self.values.last()
@@ -528,11 +498,7 @@ impl FieldSamples {
         self.values.push(value);
     }
 
-    /// Appends samples that are all present, in bulk.
-    ///
-    /// Same result as calling [`push`](Self::push) once per sample, including the reset scan,
-    /// which stays per-sample for a field that maintains the index; the two appends become two
-    /// `memcpy`s.
+    /// Same as calling [`push`](Self::push) once per sample.
     fn push_bulk(&mut self, timestamps: &[i64], values: &[f64]) {
         debug_assert_eq!(timestamps.len(), values.len());
         if self.index_resets {
@@ -571,9 +537,6 @@ impl FieldSamples {
     }
 
     /// Drops the histograms before `histogram_head`, releasing the payload they held.
-    ///
-    /// The dropped samples are measured as they go, which costs one measurement per dropped
-    /// histogram in total: the retained ones are never scanned again.
     fn advance_histograms(&mut self) {
         let head = std::mem::take(&mut self.histogram_head);
         if head == 0 {
@@ -594,12 +557,8 @@ impl FieldSamples {
     }
 }
 
-/// The bytes the histograms a row holds box, beyond the slots they sit in.
-///
-/// A slot is an `Option<GridSample>`: a pointer and a tag. A result that is a native histogram
-/// points at a [`FloatHistogram`] on the heap, which owns its bucket lists in turn, and both stay
-/// alive between pushes. Only slots the last evaluated point left in place are counted: a push
-/// clears the row.
+/// The heap bytes of the histograms boxed in `row`, beyond the slots themselves. The row survives
+/// between pushes holding the last evaluated point.
 fn boxed_bytes(row: &[Option<GridSample>]) -> usize {
     row.iter()
         .flatten()
@@ -716,24 +675,20 @@ impl RangeEvaluator {
         })
     }
 
-    /// The evaluation grid this evaluator decides points of.
-    ///
-    /// Every window ends at a point of it and is read at that point's timestamp, so a caller
-    /// reserving for what the evaluator is about to allocate reserves this grid's timestamps.
+    /// The evaluation grid the output is addressed on.
     pub fn grid(&self) -> &Arc<EvalGrid> {
         &self.grid
     }
 
-    /// Chunks appended without the per-sample loop. Test-only: both paths produce the same
-    /// output by construction, so a test that only compared output could not tell whether the
-    /// bulk path ran at all.
+    /// Chunks taken by the bulk path. Both paths produce the same output, so only this shows
+    /// which one ran.
     #[cfg(test)]
     pub(crate) fn bulk_ingest_count(&self) -> usize {
         self.bulk_ingests
     }
 
-    /// Batch kernel calls made so far. Test-only: both dispatch shapes produce the same output,
-    /// so a test comparing only output could not tell which one ran.
+    /// Batch kernel calls made so far; like [`Self::bulk_ingest_count`], output alone cannot
+    /// show which dispatch ran.
     #[cfg(test)]
     pub(crate) fn batch_call_count(&self) -> usize {
         self.batch_calls
@@ -744,23 +699,10 @@ impl RangeEvaluator {
         self.annotations = collector;
     }
 
-    /// An estimate of the bytes this evaluator keeps between pushes.
-    ///
-    /// Counted by capacity, so it is what the storage holds rather than what it uses: the retained
-    /// samples per field (timestamps, values, the reset index and the native histograms with the
-    /// payload each of them owns), the row a push fills with the histograms it boxes, the identity
-    /// of the open series, the pending batch's own vectors and the buffers the bulk ingest shifts
-    /// and compacts into. Left out are the kernel's scratch buffers, this struct's `Vec` headers
-    /// and the grid, which every chunk addressed on it shares.
-    ///
-    /// The figure is an estimate, not a ledger of every allocation: a histogram's payload is
-    /// measured once when it is admitted and released with it, so neither the retained samples nor
-    /// the transient allocations of a push are walked again.
-    ///
-    /// A push is the only caller that also holds the incoming chunk, and it charges that itself for
-    /// as long as the call runs. The figure must not be per-chunk either: charging every chunk
-    /// consumed would make the charge grow with the chunk count, so a fixed window over a long
-    /// series would read as an allocation failure even though the window holds no more samples.
+    /// An estimate, by capacity, of the bytes this evaluator keeps between pushes: retained
+    /// samples and histograms, the output row, the open series' identity, the pending batch and
+    /// the bulk scratch. Excludes kernel scratch, the shared grid and the incoming chunk, which
+    /// the caller charges for the duration of a push.
     pub(crate) fn retained_bytes(&self) -> usize {
         let fields: usize = self.fields.iter().map(FieldSamples::bytes).sum();
         let row = self.row.capacity() * std::mem::size_of::<Option<GridSample>>();
@@ -775,11 +717,8 @@ impl RangeEvaluator {
     /// An upper bound of the rows the next push hands out, for input whose last sample is at
     /// `last_ts` (`None` when it holds none) and which closes its series when `last`.
     ///
-    /// A push writes at most one row per point it decides, from the series' cursor -- the first
-    /// point for a series not started yet. Unless the series closes, it decides no point past the
-    /// time the input has reached; and a point holds a row only while its window still reaches the
-    /// latest sample, so the points after that one's window are decided empty. A replayed `@`
-    /// result fills every grid point from the one window it evaluates first.
+    /// Points past the window of the latest sample are empty, and unless the series closes no
+    /// point past the input time is decided. A replayed `@` result fills the whole grid at once.
     pub(crate) fn output_rows_bound(&self, last_ts: Option<i64>, last: bool) -> usize {
         let spec = self.grid.spec();
         let len = usize::try_from(spec.len).unwrap_or(usize::MAX);
@@ -860,20 +799,11 @@ impl RangeEvaluator {
         self.close_series()
     }
 
-    /// Evaluates one run of an evaluated series, such as the inner result of a subquery: the
-    /// value at each grid point is a sample at that time. Stale markers are kept as values,
-    /// since the input is computed.
+    /// Evaluates one delivery of an evaluated series, such as the inner result of a subquery.
+    /// Stale markers are kept as values, since the input is computed.
     ///
-    /// `last` says whether this delivery closes its series. A stream hands over the same logical
-    /// series more than once -- a prefix now, its closing chunk later -- and the windows of a later
-    /// delivery read the samples of the earlier ones, so the state a series retains lives on across
-    /// them: only the `last` call ends it. Handing the deliveries over without saying which is last
-    /// would close the series early and lose exactly the samples a window across the boundary
-    /// needs.
-    ///
-    /// One delivery may hold several runs of positions, separated by stretches holding no value;
-    /// they all reach the caller in one chunk, addressed by the axis. A delivery that holds no
-    /// position at all is a legal close when it is `last`, and an error otherwise.
+    /// A series may arrive in several deliveries; retained samples carry across them and only the
+    /// `last` one closes it. An empty delivery is legal only when it is `last`.
     pub fn push_series(&mut self, series: &Series, last: bool) -> Result<Option<EvaluatedChunk>> {
         let time = &series.time;
         let Some(grid) = time.grid() else {
@@ -889,13 +819,9 @@ impl RangeEvaluator {
                 "evaluated series does not match the input schema".into(),
             ));
         }
-        // The input may skip positions: it is ingested by the positions it carries, and the points
-        // it skips hold no sample, which is exactly what a hole means.
         let timestamps = time.timestamps().map_err(external)?;
         let last_ts = timestamps.last().copied();
         if !last && last_ts.is_none() {
-            // An empty delivery inside a series decides nothing: it is indistinguishable from a
-            // stall, so only the closing `is_last` one is a legal close.
             return Err(DataFusionError::Execution(
                 "evaluated range input holds no position before its last run".into(),
             ));
@@ -913,7 +839,6 @@ impl RangeEvaluator {
                 });
             }
             Some(state) => {
-                // A run continues its series; the earlier runs' samples stay retained for it.
                 if state.primary_key.is_some() {
                     return Err(DataFusionError::Execution(
                         "evaluated series pushed inside a raw series".into(),
@@ -948,24 +873,17 @@ impl RangeEvaluator {
                 return self.close_series();
             }
             // Later runs only hold samples after `last_ts`, so every point up to it is decided.
-            // The samples are shifted onto the evaluation timeline by the selector offset, so the
-            // ready point is on that timeline too.
             self.evaluate(Some(
                 i128::from(last_ts) + i128::from(self.window.offset_ms),
             ))?;
             return self.emit();
         }
-        // A closing chunk holding no position: there is nothing to ingest, but the samples the
-        // earlier deliveries left retained still decide the windows that follow them, so the close
-        // finishes them rather than ending the series on the spot.
+        // An empty close still has to evaluate the windows over earlier deliveries' samples.
         debug_assert!(last, "an empty chunk that is not last is rejected above");
         self.close_series()
     }
 
-    /// Evaluates the rest of the series of the last input chunk and closes it.
-    ///
-    /// The rows still buffered are handed out here as one chunk, and the chunk that sees nothing
-    /// behind it carries `is_last`.
+    /// Evaluates the rest of the current series and hands out its closing chunk.
     fn close_series(&mut self) -> Result<Option<EvaluatedChunk>> {
         self.evaluate(None)?;
         self.series
@@ -975,14 +893,8 @@ impl RangeEvaluator {
         self.emit()
     }
 
-    /// Hands out the rows buffered so far as one chunk, and closes the series when nothing is left.
-    ///
-    /// The chunk holds every row decided since the last hand-out, in one go and in one [`Series`]:
-    /// several runs of positions may sit inside it, separated by stretches holding no value, and
-    /// the axis names them. A position decided to hold none costs no row, so it lies between the
-    /// runs rather than inside one. `is_last` closes the series, and a series always closes exactly
-    /// once: on the chunk that carries its last rows, or on an empty chunk after it when no row is
-    /// left.
+    /// Hands out the rows buffered since the last hand-out as one chunk. When the series is
+    /// closing, that chunk carries `is_last`, and is empty if no row is left.
     fn emit(&mut self) -> Result<Option<EvaluatedChunk>> {
         let Some(state) = self.series.as_ref() else {
             return Ok(None);
@@ -1000,8 +912,6 @@ impl RangeEvaluator {
                 Ok(None)
             };
         };
-        // The builder addresses every position it hands out, so the chunk's bounds come from the
-        // axis itself: `first_position` is where it starts, and `last_position` where it ends.
         let start = series
             .time
             .first_position()
@@ -1009,7 +919,6 @@ impl RangeEvaluator {
         let end = series.time.last_position().map_or(start, |last| last + 1);
         debug_assert!(start >= emitted_end, "a chunk never goes back");
         if closing {
-            // The buffer was drained into this chunk, so nothing of the series is left behind it.
             self.series = None;
             EvaluatedChunk::try_new(series, true).map(Some)
         } else {
@@ -1101,25 +1010,15 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    /// Appends the chunk in bulk when every field is an entirely present float column.
-    ///
-    /// Returns `false` when a condition of the per-sample path applies, so the caller can run it.
-    /// Only the shapes that path alone can read do: a field holding native histogram samples or
-    /// mixed floats and histograms -- `dense()` reports [`DenseSamplesRef::Mixed`] for the latter,
-    /// keeping its windows on the histogram path where the mixed-window rules decide the result --
-    /// and a column with missing samples, which are absent rows rather than values.
-    ///
-    /// A selector offset and a stale marker do not: the shift and the rows the marker drops are
-    /// applied here, over the columns, instead of handing the chunk to the per-sample loop. The
-    /// search for a marker is one short-circuiting pass, the same pass the loop would have made.
+    /// Appends the chunk in bulk when every field is a float column without missing samples.
+    /// Returns `false`, appending nothing, when the per-sample path has to run instead: a field
+    /// holds histograms (including [`DenseSamplesRef::Mixed`]) or missing samples.
     fn ingest_in_bulk(
         &mut self,
         timestamps: &[i64],
         fields: &SeriesFields,
         drop_stale: bool,
     ) -> Result<bool> {
-        // Lengths are checked by `check_chunk` for raw input and by `push_series` for evaluated
-        // input, so only the shape of the columns is decided here.
         let mut columns = Vec::with_capacity(fields.len());
         for field in fields.iter() {
             let Some(DenseSamplesRef::Float(values)) = field.dense() else {
@@ -1130,9 +1029,7 @@ impl RangeEvaluator {
             }
             columns.push(values.values().as_ref());
         }
-        // A stale marker drops its whole row, so which rows go is decided before anything is
-        // retained. A chunk holding none -- the common case -- is judged by one scan that stops at
-        // the first marker and then leaves the columns as they are.
+        // A stale marker in any field drops its whole row.
         let stale_rows = if drop_stale
             && columns
                 .iter()
@@ -1156,11 +1053,8 @@ impl RangeEvaluator {
         Ok(true)
     }
 
-    /// Retains one chunk of entirely present float columns.
-    ///
-    /// `stale` marks the rows a stale marker drops, `None` when the chunk holds none. The retained
-    /// samples are the chunk's rows less those, on the evaluation timeline: the selector offset
-    /// shifts them, and only a chunk that needs neither keeps the incoming timestamps as they are.
+    /// Retains one chunk of entirely present float columns, shifted by the selector offset and
+    /// without the rows `stale` marks.
     fn append_float_chunk(
         &mut self,
         timestamps: &[i64],
@@ -1169,9 +1063,6 @@ impl RangeEvaluator {
     ) -> Result<()> {
         let offset_ms = self.window.offset_ms;
         if offset_ms == 0 && stale.is_none() {
-            // The source timestamps, which `RawTimestamps` already validated as increasing and
-            // which the frame widened into this array without narrowing: nothing to shift, nothing
-            // to check, and the two appends become two `memcpy`s.
             for (field, values) in self.fields.iter_mut().zip(columns) {
                 field.push_bulk(timestamps, values);
             }
@@ -1187,8 +1078,7 @@ impl RangeEvaluator {
             if stale.is_some_and(|stale| stale[row]) {
                 continue;
             }
-            // Like RangeManipulate, any kept sample whose shifted time leaves i64 fails the series,
-            // whichever path retains it.
+            // Like RangeManipulate, any kept sample whose shifted time leaves i64 fails the series.
             let Some(shifted_timestamp) = timestamp.checked_add(offset_ms) else {
                 self.bulk_scratch = BulkScratch {
                     timestamps: shifted,
@@ -1306,9 +1196,8 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    /// Whether a sample at `timestamp` on the evaluation timeline lies in the window of a point
-    /// this evaluator decides: a window ending at `E` reads `(E - range - before, E + after]`, and
-    /// only the first point's window is read when the result is replayed.
+    /// Whether a sample at `timestamp` on the evaluation timeline lies in the window of a grid
+    /// point this evaluator reads: a window ending at `E` reads `(E - range - before, E + after]`.
     fn decided_window_reads(&self, timestamp: i64) -> bool {
         let (before, after) = self.window.modifier.map_or((0, 0), |modifier| {
             (
@@ -1322,8 +1211,6 @@ impl RangeEvaluator {
             Replay::Once | Replay::EveryPoint => 1,
         };
         let (start, step) = (i128::from(spec.start_ms), i128::from(spec.step_ms));
-        // The window ends that read the sample are those in `[timestamp - after, timestamp +
-        // range + before)`; the first grid point at or after the lower bound decides.
         let lowest = i128::from(timestamp) - after;
         let highest = i128::from(timestamp) + i128::from(self.window.range_ms) + before;
         let first = if lowest <= start {
@@ -1341,16 +1228,13 @@ impl RangeEvaluator {
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
         let grid = self.grid.timestamps().map_err(external)?;
-        // A modifier also reads samples up to the lookback ahead of the window start, so they are
-        // kept that much longer.
         let before = self
             .window
             .modifier
             .map_or(0, |modifier| i128::from(modifier.before_ms()));
-        // `smoothed` interpolates the window end with the first sample at or after it, which can
-        // arrive up to the lookback later. A point is decided once every field holds a sample at
-        // or after it, or once the lookback past it has arrived. The input's last row does not say
-        // that alone: a stale row is dropped, and a field can hold no value in it.
+        // `smoothed` interpolates the window end with the first sample at or after it, so a point
+        // is ready once every field holds such a sample or the input is a lookback past it. The
+        // input's last row alone does not tell: a stale row is dropped and a field may be missing.
         let ready = match (ready, self.window.modifier) {
             (Some(ready), Some(RangeModifier::Smoothed { lookback_ms })) => {
                 let held = self
@@ -1394,16 +1278,14 @@ impl RangeEvaluator {
             if ready.is_some_and(|ready| i128::from(eval_ts) > ready) {
                 break;
             }
-            // No retained sample: every point from here on is decided too. A sample that still
-            // has to arrive lies beyond the window of every one of them, so none can gain a value.
+            // No retained sample: no later point can gain a value either.
             let Some(earliest) = earliest else {
                 empty_tail = true;
                 break;
             };
             if earliest > eval_ts {
                 // Skip the points whose windows end before the earliest sample. A smoothed window
-                // reads past its end, but without a sample at or before its end it has no result,
-                // as Prometheus returns nothing when the first sample is after the end.
+                // has no result then either: Prometheus needs a sample at or before its end.
                 let step = i128::from(spec.step_ms);
                 let steps = (i128::from(earliest) - i128::from(spec.start_ms) + step - 1) / step;
                 state.cursor = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
@@ -1424,14 +1306,9 @@ impl RangeEvaluator {
             };
             match self.replay {
                 Replay::PerPoint => {
-                    // A window holding a native histogram is decided by the mixed-window rules,
-                    // which the batch kernel -- reading floats alone -- cannot reproduce. Flush
-                    // what is pending and decide this point on the per-window path.
-                    //
-                    // Histograms are retained in time order, so the first one still ahead of the
-                    // window head decides: a later one cannot be inside this window if this one
-                    // is not. The check runs only when a batch kernel is set, so a function
-                    // without one never pays for it.
+                    // The batch kernel reads floats only, so a window holding a native histogram
+                    // flushes the batch and goes through the per-window path. Histograms are in
+                    // time order, so checking the first one past the head is enough.
                     let histogram_window = self.batch.is_some()
                         && self.fields.iter().any(|field| {
                             field.histograms.get(field.histogram_head).is_some_and(
@@ -1499,11 +1376,8 @@ impl RangeEvaluator {
                 &mut self.batch_calls,
             )?;
         }
-        // A point is decided once it has been evaluated, once its window can no longer gain a
-        // sample, or -- at the end of the series or of what the input has reached -- once no
-        // retained sample reaches it. The last case is what keeps a long empty stretch cheap: the
-        // loop stops at the first such point instead of walking the rest of the grid, and none of
-        // the points behind it can gain a value, so the cursor skips them.
+        // With nothing retained, the ready points after the cursor are all empty; skip them
+        // instead of walking the grid.
         if empty_tail && matches!(self.replay, Replay::PerPoint) {
             let mut decided = state.cursor;
             if let Some(ready) = ready {
@@ -1522,9 +1396,8 @@ impl RangeEvaluator {
         );
         let mut drains_samples = false;
         for field in &mut self.fields {
-            // After the last window, samples are still ingested so that the overflow and
-            // histogram checks do not depend on how the series is chunked, but none are kept.
-            // An anchored selector can skip past the one point it reads.
+            // Past the last window read, samples are still ingested so the overflow and
+            // histogram checks do not depend on chunking, but none are kept.
             if state.cursor >= points_read {
                 field.head = field.timestamps.len();
                 field.histogram_head = field.histograms.len();
@@ -1604,13 +1477,9 @@ impl RowEvaluator<'_> {
     }
 }
 
-/// Rejects a modifier on a function Prometheus does not allow it with, as Prometheus rejects the
-/// query (`AnchoredSafeFunctions`, `SmoothedSafeFunctions`), and on evaluated input, which reads
-/// no raw samples around its windows.
-///
-/// `pub(crate)` because it is a rule about the input's schema and the window alone, so the native
-/// route's admission predicate (`native_tree_supported`) asks it rather than a second copy of it,
-/// the way it asks [`fold_offset`].
+/// Rejects a modifier on a function Prometheus does not allow it with
+/// (`AnchoredSafeFunctions`, `SmoothedSafeFunctions`), and on evaluated input. Shared with the
+/// native admission predicate.
 pub(crate) fn check_modifier(
     input: &SeriesSchema,
     modifier: RangeModifier,
@@ -1656,10 +1525,7 @@ pub(crate) fn check_modifier(
 }
 
 /// The offset samples are shifted by: the selector offset, or for `@` the offset that places
-/// the anchored window at the first grid point.
-///
-/// `pub(crate)` because whether it fits is decided from the grid and the window alone, so the
-/// native route's admission predicate asks the same arithmetic rather than a second copy of it.
+/// the anchored window at the first grid point. Shared with the native admission predicate.
 pub(crate) fn fold_offset(grid: GridSpec, window: RangeWindow) -> Result<i64> {
     let Some(anchor) = window.anchor_ms else {
         return Ok(window.offset_ms);
@@ -1675,18 +1541,9 @@ pub(crate) fn fold_offset(grid: GridSpec, window: RangeWindow) -> Result<i64> {
         })
 }
 
-/// Checks that `predict_linear` can read the instant of every point of `grid` once shifted by
-/// `fold_offset`.
-///
-/// Unlike every other range function, which reads the window a grid point opens alone,
-/// `predict_linear` reads the instant it reports as well, and reports it shifted by the fold
-/// offset. The first and the last point are the ones checked: the shift is the same at every point
-/// and the grid's points are ordered, so what fits at both ends fits between them.
-///
-/// The refusal is arithmetic rather than shape, but it is decided by the grid and the window alone,
-/// which is why the native route's admission predicate reaches it too
-/// (`native_tree_supported`): a query refused only here has to keep the plan it had instead of
-/// failing while its runtime is built.
+/// Checks that every evaluation instant of `grid`, shifted by `fold_offset`, fits in i64;
+/// `predict_linear` reads it. Checking both ends suffices. Shared with the native admission
+/// predicate, so a query refused here keeps its legacy plan instead of failing at runtime.
 pub(crate) fn predict_linear_instants(grid: GridSpec, fold_offset: i64) -> Result<()> {
     let last = i128::from(grid.start_ms) + i128::from(grid.step_ms) * (i128::from(grid.len) - 1);
     for eval_ts in [i128::from(grid.start_ms), last] {

@@ -50,15 +50,11 @@ use crate::map_time::DateFunction;
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MathOp {
-    /// Absolute value.
     Abs,
-    /// Rounds towards positive infinity.
     Ceil,
-    /// Rounds towards negative infinity.
     Floor,
-    /// IEEE square root, returning NaN for negative input.
     Sqrt,
-    /// Rounds to a constant multiple; use `1.0` for PromQL's default argument.
+    /// Rounds to a multiple of `nearest`; PromQL's default is `1.0`.
     Round {
         nearest: f64,
     },
@@ -108,8 +104,7 @@ pub enum ArithmeticOp {
 }
 
 impl std::fmt::Display for ArithmeticOp {
-    /// The operator as the query wrote it, which is how the existing planner names it in the info
-    /// it records for a dropped histogram sample.
+    /// The operator as written in the query, which names it in the dropped-histogram info.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Add => "+",
@@ -133,27 +128,15 @@ pub enum ScalarOperand {
 /// Applies float math to every field of one evaluated series and drops the metric name, like
 /// Prometheus' `simpleFloatFunc`.
 ///
-/// Transcendental functions use Rust's platform math library. Results can differ from Prometheus
-/// for subnormals, overflow boundaries, large trigonometric inputs, and rounding-sensitive inputs.
+/// Requires an evaluated grid axis; missingness is validity, not a NaN payload, so raw staleness
+/// must be resolved before. Missing samples stay missing and NaNs stay values. Histogram samples
+/// are skipped: their points have no result. Returns `None` for `clamp` with `max < min`, which
+/// yields no series in Prometheus, or when a series with histograms has no float result left.
 ///
-/// The explicit schema and actual grid range are preserved. Fields are processed in their own
-/// chunk boundaries, without expanding to the full grid or densifying chunked samples. Missing
-/// samples stay missing; ordinary NaNs remain values. An empty or all-missing input is valid.
+/// Transcendental functions use the platform math library and can differ from Go in the last bits.
 ///
-/// Eval must resolve raw staleness before calling this kernel. Evaluated samples use validity,
-/// not NaN payloads, for missingness: arithmetic can produce the reserved stale bit pattern too.
-/// Raw time axes are rejected.
-///
-/// Native histogram samples are skipped, as Prometheus' math functions process only float
-/// samples: a point holding a histogram has no result in that field, and a series with no float
-/// sample left has none at all. Float-only fields keep their chunks; a field with histograms is
-/// rebuilt point by point.
-///
-/// Returns `None` for `clamp` with `max < min`, which yields no series in Prometheus.
-///
-/// Distinct inputs can share a label set once the name is dropped. Merging them, or failing
-/// when both have a value at one step, is left to the caller (Prometheus
-/// `mergeSeriesWithSameLabelset`).
+/// Distinct inputs can share a label set once the name is dropped; merging them is left to the
+/// caller (Prometheus `mergeSeriesWithSameLabelset`).
 pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Option<Series>> {
     if op.is_empty_clamp() {
         validate_grid_series(schema, series)?;
@@ -188,8 +171,7 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 
 /// Applies arithmetic against a constant scalar to every field and drops the metric name.
 ///
-/// Shares the evaluated-grid, missingness, unsupported-type and same-labelset contract of
-/// [`map_math`]. Arithmetic uses [`ArithmeticOp::calculate`], including its platform math behavior.
+/// Same contract as [`map_math`], except that histogram samples are rejected.
 pub fn map_arithmetic(
     schema: &SeriesSchema,
     series: &Series,
@@ -201,13 +183,9 @@ pub fn map_arithmetic(
     Ok(output)
 }
 
-/// Applies literal scalar arithmetic to float and histogram samples. Float-only series retain the
-/// original kernel unchanged; histogram-capable fields are traversed sample-by-sample.
-///
-/// The second element of the answer reports whether a histogram sample was dropped because the
-/// operation has no histogram form — `2 / h`, or `h + 1`, which Prometheus answers by dropping the
-/// sample rather than failing the query. The caller records the info; this kernel is also used on
-/// paths that hold no collector.
+/// Applies literal scalar arithmetic to float and histogram samples. Histograms support only
+/// `h * s`, `s * h` and `h / s`; under any other operator (`2 / h`, `h + 1`) the sample is dropped,
+/// as in Prometheus, and the second element reports that one was.
 pub(crate) fn map_arithmetic_literal(
     schema: &SeriesSchema,
     series: &Series,
@@ -247,8 +225,6 @@ pub(crate) fn map_arithmetic_literal(
     Ok((output, dropped_histogram))
 }
 
-/// Applies one literal scalar operation to one run of samples, reporting whether any histogram
-/// position had no answer.
 fn map_arithmetic_segment(
     samples: &Samples,
     op: ArithmeticOp,
@@ -310,9 +286,7 @@ fn map_arithmetic_segment(
     Ok((samples, dropped_histogram))
 }
 
-/// Produces an unlabelled scalar over exactly the requested evaluated range.
-///
-/// Scalar results require a single-field schema. No points outside `range` are allocated.
+/// An unlabelled constant over exactly `range`; the schema must have one field.
 pub fn constant_series(schema: &SeriesSchema, range: GridRange, scalar: f64) -> Result<Series> {
     let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
         scalar;
@@ -327,7 +301,7 @@ pub fn constant_series(schema: &SeriesSchema, range: GridRange, scalar: f64) -> 
     .map_err(series_error)
 }
 
-/// Evaluates `pi()` without a vector input, preserving the requested short grid range.
+/// `pi()` over `range`.
 pub fn map_pi(schema: &SeriesSchema, range: GridRange) -> Result<Series> {
     constant_series(schema, range, PI)
 }
@@ -348,9 +322,9 @@ fn map_float_fields(
         .map_err(series_error)
 }
 
-/// Prometheus `DropReserved(schema.IsMetadataLabel)` drops the type and unit labels with the
-/// name. Empty values are dropped too: Prometheus has no empty labels, and keeping them would
-/// hide a same-labelset collision from the caller.
+/// Drops `__name__`, `__type__` and `__unit__`, as Prometheus `DropReserved(schema.IsMetadataLabel)`
+/// does. Empty values are dropped too: Prometheus has no empty labels, and keeping them would hide
+/// a same-labelset collision from the caller.
 pub(crate) fn drop_metric_name(metric: &SeriesLabels) -> Result<SeriesLabels> {
     let tags = metric.tags();
     let reject = |label: &Label| {
@@ -378,7 +352,6 @@ pub(crate) fn drop_empty_labels(metric: &SeriesLabels) -> Result<SeriesLabels> {
     rebuild_labels(metric, name, |_| true)
 }
 
-/// One rebuild: removing labels one by one copies the label array each time.
 fn rebuild_labels(
     metric: &SeriesLabels,
     name: Option<Arc<str>>,
@@ -398,7 +371,6 @@ impl MathOp {
         floats.unary(|sample| self.calculate(sample))
     }
 
-    /// The function applied to one sample.
     pub(crate) fn calculate(self, v: f64) -> f64 {
         match self {
             Self::Exp => v.exp(),
@@ -482,9 +454,8 @@ fn go_min(x: f64, y: f64) -> f64 {
 }
 
 impl ArithmeticOp {
-    /// Evaluates two floats using Rust arithmetic and platform math, also used by constant folding.
-    /// `^` can differ from Prometheus for subnormal bases or large exponents; `atan2` can differ
-    /// when both operands are negative and their ratio underflows to zero.
+    /// Evaluates `left op right`; constant folding uses it too. `^` and `atan2` use the platform
+    /// math library and can differ from Go for subnormal or extreme operands.
     #[inline]
     pub fn calculate(self, left: f64, right: f64) -> f64 {
         match self {
@@ -532,10 +503,8 @@ fn series_error(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
 }
 
-/// Checks an evaluated float series up front, so no segment of another type yields a result.
-///
-/// Returns the validated axis: it is addressed on a grid, so the caller reads the rows it carries
-/// with the axis traversal rather than assuming a contiguous range.
+/// Checks `series` against `schema` and its grid, and rejects any non-float sample. Returns the
+/// axis, which may skip positions, so callers traverse it rather than assume a contiguous range.
 pub(crate) fn validate_float_series<'a>(
     schema: &SeriesSchema,
     series: &'a Series,
@@ -550,7 +519,6 @@ pub(crate) fn validate_float_series<'a>(
     Ok(time)
 }
 
-/// Whether every field of `series` holds float samples only.
 pub(crate) fn is_float_series(series: &Series) -> bool {
     series.fields.iter().all(|field| {
         field

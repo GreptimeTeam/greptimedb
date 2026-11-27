@@ -20,8 +20,6 @@
 mod aggregate;
 mod bounds;
 mod classic;
-// `sub`, `copy_to_schema`, `detect_reset` and `equals` are for the native histogram range
-// functions and binary operators, which build on other branches.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod float_histogram;
 pub(crate) mod legacy_bridge;
@@ -50,8 +48,9 @@ use crate::map::validate_grid_series;
 
 pub(crate) const BUCKET_LABEL: &str = "le";
 
-/// Histogram inputs that can produce the same output must meet at one partition. The kernel
-/// still groups by metadata before removing it, so distinct histograms are not mixed together.
+/// Labels left out of the routing key, so histogram inputs that can produce the same output meet
+/// at one partition. The kernel still groups by the metadata labels before dropping them; `le` is
+/// removed before grouping.
 pub(crate) const HISTOGRAM_ROUTING_EXCLUDED_LABELS: [&str; 4] =
     [BUCKET_LABEL, "__name__", "__type__", "__unit__"];
 
@@ -68,10 +67,7 @@ pub enum HistogramFunction {
 /// `q`, each result labelled with `label` set to `q` as Prometheus' `FormatOpenMetricsFloat`
 /// writes it. Results that then share a label set merge as [`merge_same_labelset`] does, so a
 /// repeated `q`, or a `label` that overwrites the label telling two histograms apart, fails at a
-/// point both hold.
-///
-/// Each `q` is a constant. Prometheus evaluates the quantile arguments at every step, so a
-/// quantile that varies over time is not this kernel's to evaluate.
+/// point both hold. Each `q` is a constant; a per-step quantile is not supported here.
 pub fn histogram_quantiles(
     label: &str,
     quantiles: &[f64],
@@ -125,8 +121,7 @@ pub(crate) fn evaluate_histograms_with_annotations(
     parameters: Option<HistogramParameters<'_>>,
     collector: Option<&PromqlAnnotationCollector>,
 ) -> Result<Vec<Series>> {
-    // The groups in the order their first member arrived, so the result is in one order on every
-    // run, as `merge_same_labelset` keeps it.
+    // Groups keep first-arrival order so the output order is deterministic.
     let mut index: HashMap<LabelSet, usize> = HashMap::new();
     let mut groups: Vec<Group<'_>> = Vec::new();
     let mut group_of = |metric: SeriesLabels| {
@@ -156,8 +151,6 @@ pub(crate) fn evaluate_histograms_with_annotations(
         match upper_bound {
             Some(upper_bound) => group.classic.push((upper_bound, series)),
             None => {
-                // A label set carries at most one native histogram series: a second one would
-                // overwrite the first and drop it from the result.
                 debug_assert!(
                     group.native.is_none(),
                     "one label set carries at most one native histogram series; a second one for \
@@ -175,18 +168,15 @@ pub(crate) fn evaluate_histograms_with_annotations(
     let mut native_buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
     for mut group in groups {
-        // One builder serves every group, so each result series starts explicitly.
         builder.begin_series();
-        // The positions any member carries, merged once: the holes no member holds are never
-        // visited, so a group of sparse series costs its rows and not its envelope.
+        // Visit only positions some member holds, so sparse groups cost their rows, not their
+        // envelope.
         let axes = group
             .classic
             .iter()
             .map(|member| &member.1.time)
             .chain(group.native.map(|native| &native.time));
-        // One forward cursor per member and field. The merged positions only increase, so each
-        // member's rows do too: reading them costs one pass over the field, not a chunk scan per
-        // row. The classic members come first, then the native one.
+        // One forward cursor per member and field: classic members first, then the native one.
         let members = group
             .classic
             .iter()
@@ -252,7 +242,6 @@ pub(crate) fn evaluate_histograms_with_annotations(
                         HistogramFunction::Fraction { lower, upper }
                     }
                 };
-                // A native histogram and classic buckets of one label set conflict.
                 *value = match (native, classic_buckets.is_empty()) {
                     (Some(_), false) => {
                         if let Some(collector) = collector {
@@ -308,7 +297,7 @@ impl Group<'_> {
     }
 }
 
-/// Checks that `series` is addressed on a grid, which is what a position lookup needs.
+/// Errors unless `series` is on a grid axis.
 fn grid_axis(series: &Series) -> Result<&TimeAxis> {
     if series.time.grid().is_none() {
         return Err(DataFusionError::Execution(
@@ -344,13 +333,8 @@ pub enum NativeHistogramFunction {
 }
 
 /// Applies `function` to the native histogram samples of `series`; float samples are dropped and
-/// so is `__name__`. `None` when the series has no histogram sample.
-///
-/// Histogram samples may leave holes, but the holes only skip positions: the result is one series
-/// over the runs of consecutive positions that hold a value.
-///
-/// Series that share a label set once their names are dropped must then go through
-/// [`merge_same_labelset`].
+/// so is `__name__`. `None` when the series has no histogram sample. Series that share a label
+/// set once their names are dropped must then go through [`merge_same_labelset`].
 pub fn map_native_histogram(
     function: NativeHistogramFunction,
     schema: &Arc<SeriesSchema>,
@@ -360,8 +344,6 @@ pub fn map_native_histogram(
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
-    // One cursor per field, driven by the positions the axis carries: a series of several runs
-    // costs its rows, and the positions it skips are never visited.
     let mut cursors = series
         .fields
         .iter()
@@ -386,7 +368,6 @@ pub fn map_native_histogram(
 }
 
 impl NativeHistogramFunction {
-    /// The PromQL name of the function.
     pub fn name(self) -> &'static str {
         match self {
             Self::Count => "histogram_count",
