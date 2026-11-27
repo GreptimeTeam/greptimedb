@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -740,25 +740,39 @@ pub struct RecordBatchMetrics {
     pub foreign_file_row_creators: Option<Vec<u64>>,
 }
 
-/// The terminal creator answers of one region scan's partition streams, i.e. of a plan node
-/// that reads a region on several partitions of DataFusion parallelism.
+/// What one region scan's partition streams stated when they ended, i.e. what a plan node that
+/// reads a region on several partitions of DataFusion parallelism can answer about its own read.
 ///
-/// Each partition's stream states, when it ends, which other regions' files it delivered rows
-/// from ([`RecordBatchMetrics::foreign_file_row_creators`]). The node as a whole states an
-/// answer only when every partition it planned to run ended and stated one: a partition that
-/// is still running, that never ran, or that ended without an answer leaves the node's answer
-/// unknown, because the partitions that did answer cover only part of the read.
+/// Each partition's stream states three facts when it ends, and this node keeps them because
+/// DataFusion's own metrics keep figures only: the other regions' files it delivered rows from
+/// ([`RecordBatchMetrics::foreign_file_row_creators`]), the time ranges of the rows it
+/// substituted ([`RecordBatchMetrics::substituted_row_ranges`]) and the
+/// `(region, partition expression)` slices it read ([`RecordBatchMetrics::observed_slices`]).
+/// A [`crate::RecordBatchStreamAdapter`] rebuilt from a plan's figures states none of them, so a
+/// plan-level collector reads them here instead.
+///
+/// The three facts merge like the read they describe. The node states a creator answer only
+/// when every partition it planned to run ended and stated one: a partition that is still
+/// running, that never ran, or that ended without an answer leaves that answer unknown,
+/// because the partitions that did answer cover only part of the read. The substituted ranges
+/// and the observed slices of every partition union instead: a range or slice two partitions
+/// both name is one range or slice, because it states what was substituted or read, not how
+/// often, and a partition that substituted or read nothing adds nothing.
 #[derive(Debug, Default)]
-pub struct ForeignFileRowCreatorReports {
-    state: Mutex<ForeignFileRowCreatorReportsState>,
+pub struct TerminalScanReports {
+    state: Mutex<TerminalScanReportsState>,
 }
 
 #[derive(Debug, Default)]
-struct ForeignFileRowCreatorReportsState {
+struct TerminalScanReportsState {
     /// The partitions whose stream ended and stated an answer.
     reported: BTreeSet<usize>,
     /// The creator regions those partitions named.
     creators: BTreeSet<u64>,
+    /// The row timestamp ranges those partitions substituted, per region.
+    substituted: BTreeMap<u64, BTreeSet<(i64, i64)>>,
+    /// The `(region, partition expression)` pairs those partitions read.
+    observed: BTreeSet<ObservedPartitionExpr>,
     /// A partition ended without stating an answer, so no set of partitions can answer for
     /// the node.
     unknown: bool,
@@ -766,32 +780,55 @@ struct ForeignFileRowCreatorReportsState {
     partitions: usize,
 }
 
-impl ForeignFileRowCreatorReports {
+impl TerminalScanReports {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Records the answer the stream of `partition` stated when it ended, `partitions` being
-    /// how many partitions the node runs.
+    /// Records what the stream of `partition` stated when it ended, `partitions` being how many
+    /// partitions the node runs, and `answer` the stream's terminal metrics.
     ///
     /// The count travels with the answer rather than with the node: a node whose partition
     /// ranges are re-assigned before it runs reports the count it actually ran with, and a
     /// report left by an earlier assignment only ever widens the answer, never narrows it.
-    pub fn record(&self, partition: usize, partitions: usize, answer: Option<Vec<u64>>) {
+    ///
+    /// A stream that states no metrics at all states no answer: the node's creator answer stays
+    /// unknown and it adds no range or slice, because a read that stated nothing must not be
+    /// read as a read that substituted and observed nothing.
+    pub fn record(&self, partition: usize, partitions: usize, answer: Option<&RecordBatchMetrics>) {
         let mut state = self.lock();
         state.partitions = partitions;
-        match answer {
-            Some(creators) => {
-                state.reported.insert(partition);
-                state.creators.extend(creators);
-            }
+        let Some(answer) = answer else {
+            state.unknown = true;
+            return;
+        };
+        state.reported.insert(partition);
+        // Of the three facts only the creator answer can be unknown on its own: the other two
+        // state "nothing" by being empty.
+        match &answer.foreign_file_row_creators {
+            Some(creators) => state.creators.extend(creators.iter().copied()),
             None => state.unknown = true,
         }
+        for entry in &answer.substituted_row_ranges {
+            state
+                .substituted
+                .entry(entry.region_id)
+                .or_default()
+                .extend(
+                    entry
+                        .ranges
+                        .iter()
+                        .map(|range| (range.start_millis, range.end_millis)),
+                );
+        }
+        state
+            .observed
+            .extend(answer.observed_slices.iter().cloned());
     }
 
     /// The creators every partition reported together, or `None` when the partitions do not
     /// state such an answer (yet).
-    pub fn answer(&self) -> Option<Vec<u64>> {
+    pub fn foreign_file_row_creators(&self) -> Option<Vec<u64>> {
         let state = self.lock();
         // A node with no partition to report from answers nothing: nothing was read, so
         // "delivered none" would be a claim about a read that never happened.
@@ -801,9 +838,60 @@ impl ForeignFileRowCreatorReports {
         Some(state.creators.iter().copied().collect())
     }
 
+    /// The time ranges of the rows the partitions substituted, per region, or `None` when no
+    /// partition stated an answer (yet).
+    ///
+    /// Ranges are unioned per region, so a row substituted by two partitions is reported once.
+    /// An answer of `Some(vec![])` says the read substituted nothing, which is what a caller
+    /// that recomputes the windows of substituted rows needs to tell apart from a read that has
+    /// not finished. A range a partition stated is reported even when another partition ended
+    /// without stating anything: the known windows still have to be recomputed, and dropping
+    /// them would read as "substituted nothing" for rows that were substituted.
+    pub fn substituted_row_ranges(&self) -> Option<Vec<SubstitutedRowRanges>> {
+        let state = self.lock();
+        if state.reported.is_empty() {
+            return None;
+        }
+        Some(
+            state
+                .substituted
+                .iter()
+                .map(|(region_id, ranges)| SubstitutedRowRanges {
+                    region_id: *region_id,
+                    ranges: ranges
+                        .iter()
+                        .map(|(start_millis, end_millis)| SubstitutedRange {
+                            start_millis: *start_millis,
+                            end_millis: *end_millis,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        )
+    }
+
+    /// The `(region, partition expression)` pairs the partitions read, or `None` when no
+    /// partition stated an answer (yet).
+    ///
+    /// Deduplicated and sorted: a slice two partitions both read is one slice, and a slice a
+    /// partition stated is reported even when another partition ended without stating one.
+    pub fn observed_slices(&self) -> Option<Vec<ObservedPartitionExpr>> {
+        let state = self.lock();
+        if state.reported.is_empty() {
+            return None;
+        }
+        Some(state.observed.iter().cloned().collect())
+    }
+
+    /// Clears every fact an earlier run stated, so a reused plan cannot report what the run
+    /// before it read.
+    pub fn reset(&self) {
+        *self.lock() = TerminalScanReportsState::default();
+    }
+
     /// A panic while the state is held cannot leave it inconsistent (an insert is the only
     /// mutation), so a poisoned lock is recovered instead of failing the caller.
-    fn lock(&self) -> std::sync::MutexGuard<'_, ForeignFileRowCreatorReportsState> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, TerminalScanReportsState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -2023,35 +2111,153 @@ mod test {
     /// The partitions of a region scan answer together: their reports union, and a partition
     /// that did not state an answer keeps the node's answer unknown.
     #[test]
-    fn test_foreign_file_row_creator_reports_answer_for_all_partitions() {
-        let reports = ForeignFileRowCreatorReports::new();
-        assert_eq!(None, reports.answer(), "no partition reported yet");
+    fn test_terminal_scan_reports_answer_for_all_partitions() {
+        // The terminal metrics one partition states when its stream ends.
+        fn stated(creators: Option<Vec<u64>>) -> RecordBatchMetrics {
+            RecordBatchMetrics {
+                foreign_file_row_creators: creators,
+                ..Default::default()
+            }
+        }
 
-        reports.record(0, 2, Some(vec![7, 9]));
+        let reports = TerminalScanReports::new();
         assert_eq!(
             None,
-            reports.answer(),
+            reports.foreign_file_row_creators(),
+            "no partition reported yet"
+        );
+
+        reports.record(0, 2, Some(&stated(Some(vec![7, 9]))));
+        assert_eq!(
+            None,
+            reports.foreign_file_row_creators(),
             "one partition answered and another has not"
         );
 
-        reports.record(1, 2, Some(vec![9]));
+        reports.record(1, 2, Some(&stated(Some(vec![9]))));
         assert_eq!(
             Some(vec![7, 9]),
-            reports.answer(),
+            reports.foreign_file_row_creators(),
             "the delivered creators are the union of what the partitions reported"
         );
 
         // A partition that ended without an answer covers part of the read, so no set of
         // reported partitions can answer for the node.
-        let reports = ForeignFileRowCreatorReports::new();
-        reports.record(0, 2, Some(vec![7]));
+        let reports = TerminalScanReports::new();
+        reports.record(0, 2, Some(&stated(Some(vec![7]))));
         reports.record(1, 2, None);
-        assert_eq!(None, reports.answer());
+        assert_eq!(None, reports.foreign_file_row_creators());
 
         // An answer of "delivered none" from every partition is still an answer.
-        let reports = ForeignFileRowCreatorReports::new();
-        reports.record(0, 1, Some(vec![]));
-        assert_eq!(Some(vec![]), reports.answer());
+        let reports = TerminalScanReports::new();
+        reports.record(0, 1, Some(&stated(Some(vec![]))));
+        assert_eq!(Some(vec![]), reports.foreign_file_row_creators());
+    }
+
+    /// The substituted ranges and the observed slices union across partitions, and a reset
+    /// leaves nothing a later run could mistake for its own read.
+    #[test]
+    fn test_terminal_scan_reports_merge_ranges_and_slices_and_reset() {
+        let reports = TerminalScanReports::new();
+        assert_eq!(None, reports.substituted_row_ranges());
+        assert_eq!(None, reports.observed_slices());
+
+        let first = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![]),
+            substituted_row_ranges: vec![SubstitutedRowRanges {
+                region_id: 7,
+                ranges: vec![SubstitutedRange {
+                    start_millis: 10,
+                    end_millis: 20,
+                }],
+            }],
+            observed_slices: vec![ObservedPartitionExpr::whole_domain(7)],
+            ..Default::default()
+        };
+        let second = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![]),
+            substituted_row_ranges: vec![
+                // The same range one more partition substituted is one range.
+                SubstitutedRowRanges {
+                    region_id: 7,
+                    ranges: vec![SubstitutedRange {
+                        start_millis: 10,
+                        end_millis: 20,
+                    }],
+                },
+                SubstitutedRowRanges {
+                    region_id: 8,
+                    ranges: vec![SubstitutedRange {
+                        start_millis: 30,
+                        end_millis: 40,
+                    }],
+                },
+            ],
+            observed_slices: vec![
+                ObservedPartitionExpr::whole_domain(7),
+                ObservedPartitionExpr::new(8, Some("k0 < 10".to_string())),
+            ],
+            ..Default::default()
+        };
+
+        reports.record(0, 2, Some(&first));
+        reports.record(1, 2, Some(&second));
+
+        assert_eq!(
+            Some(vec![
+                SubstitutedRowRanges {
+                    region_id: 7,
+                    ranges: vec![SubstitutedRange {
+                        start_millis: 10,
+                        end_millis: 20,
+                    }],
+                },
+                SubstitutedRowRanges {
+                    region_id: 8,
+                    ranges: vec![SubstitutedRange {
+                        start_millis: 30,
+                        end_millis: 40,
+                    }],
+                },
+            ]),
+            reports.substituted_row_ranges()
+        );
+        assert_eq!(
+            Some(vec![
+                ObservedPartitionExpr::whole_domain(7),
+                ObservedPartitionExpr::new(8, Some("k0 < 10".to_string())),
+            ]),
+            reports.observed_slices()
+        );
+
+        reports.reset();
+        assert_eq!(None, reports.foreign_file_row_creators());
+        assert_eq!(None, reports.substituted_row_ranges());
+        assert_eq!(None, reports.observed_slices());
+
+        // A partition that states ranges without a creator answer still states its ranges: only
+        // the creator answer becomes unknown, because only it has an "unknown" of its own.
+        let ranges_only = RecordBatchMetrics {
+            substituted_row_ranges: first.substituted_row_ranges.clone(),
+            ..Default::default()
+        };
+        let reports = TerminalScanReports::new();
+        reports.record(0, 1, Some(&ranges_only));
+        assert_eq!(
+            Some(vec![SubstitutedRowRanges {
+                region_id: 7,
+                ranges: vec![SubstitutedRange {
+                    start_millis: 10,
+                    end_millis: 20,
+                }],
+            }]),
+            reports.substituted_row_ranges()
+        );
+        assert_eq!(
+            None,
+            reports.foreign_file_row_creators(),
+            "no creator answer was stated, so that one is unknown"
+        );
     }
 
     /// An affirmative answer of "delivered none" is written as an empty array and read back as

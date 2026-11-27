@@ -46,7 +46,9 @@ use common_grpc::flight::{
     FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage, SNAPSHOT_SEQS_METADATA_KEY,
 };
 use common_query::Output;
-use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_recordbatch::adapter::{
+    ObservedPartitionExpr, RecordBatchMetrics, RegionWatermarkEntry, SubstitutedRowRanges,
+};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, RecordBatchStreamWrapper};
 use common_telemetry::tracing::Span;
@@ -261,6 +263,37 @@ impl OutputMetrics {
                 .collect::<std::collections::BTreeSet<_>>(),
         )
     }
+
+    /// Returns the time ranges of the rows the read substituted, one entry per region,
+    /// ordered by region id with each region's ranges sorted and non-overlapping.
+    ///
+    /// An empty list is the protocol's "substituted nothing", never "unknown": a caller
+    /// that recomputes the windows of substituted rows reads it as "nothing to recompute".
+    /// `None` means the terminal metrics themselves are not available (yet).
+    pub fn substituted_row_ranges(&self) -> Option<Vec<SubstitutedRowRanges>> {
+        Some(self.get()?.substituted_row_ranges)
+    }
+
+    /// Returns the `(region, partition expression)` pairs the read observed, deduplicated
+    /// and sorted.
+    ///
+    /// This is what the owner of a `(region, slice)` cursor advances: exactly the slices the
+    /// read stated it read. An empty list reads as "nothing was read", and `None` as "the
+    /// terminal metrics are not available (yet)".
+    pub fn observed_slices(&self) -> Option<Vec<ObservedPartitionExpr>> {
+        Some(self.get()?.observed_slices)
+    }
+
+    /// Returns the creators of the adopted files the read **delivered rows** from.
+    ///
+    /// `Some(creators)` — possibly empty — is an answer: `Some(vec![])` says the read delivered
+    /// no row of another region's file. `None` states nothing: either the read did not state an
+    /// answer (a build that predates the field, a stream that never ended, a region that never
+    /// reported) or the terminal metrics are not available (yet), and a consumer that must not
+    /// count a row above its creator's proved watermark has to read it as "could have".
+    pub fn foreign_file_row_creators(&self) -> Option<Vec<u64>> {
+        self.get()?.foreign_file_row_creators
+    }
 }
 
 /// Query output together with a handle for its terminal metrics.
@@ -304,6 +337,27 @@ impl OutputWithMetrics {
     /// Returns all regions participating in terminal metric collection.
     pub fn participating_regions(&self) -> Option<std::collections::BTreeSet<u64>> {
         self.metrics.participating_regions()
+    }
+
+    /// Returns the time ranges of the rows the read substituted.
+    ///
+    /// See [`OutputMetrics::substituted_row_ranges`].
+    pub fn substituted_row_ranges(&self) -> Option<Vec<SubstitutedRowRanges>> {
+        self.metrics.substituted_row_ranges()
+    }
+
+    /// Returns the `(region, partition expression)` pairs the read observed.
+    ///
+    /// See [`OutputMetrics::observed_slices`].
+    pub fn observed_slices(&self) -> Option<Vec<ObservedPartitionExpr>> {
+        self.metrics.observed_slices()
+    }
+
+    /// Returns the creators of the adopted files the read delivered rows from.
+    ///
+    /// See [`OutputMetrics::foreign_file_row_creators`].
+    pub fn foreign_file_row_creators(&self) -> Option<Vec<u64>> {
+        self.metrics.foreign_file_row_creators()
     }
 
     /// Drops the terminal metrics handle and returns the original output.
@@ -1516,6 +1570,42 @@ mod tests {
             output.metrics.region_watermark_map(),
             Some(std::collections::HashMap::from([(7, 42)]))
         );
+    }
+
+    /// The three facts a scan states about its own read arrive in the terminal metrics message
+    /// and are read back from the handle: the ranges a read substituted and the slices it
+    /// observed must not arrive as "nothing" merely because they are not figures.
+    #[tokio::test]
+    async fn test_affected_rows_inline_metrics_carry_the_scan_facts() {
+        let ranges = vec![SubstitutedRowRanges {
+            region_id: 7,
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 1_000,
+                end_millis: 2_000,
+            }],
+        }];
+        let slices = vec![ObservedPartitionExpr::new(7, Some("k0 < 10".to_string()))];
+        let metrics_json = serde_json::to_string(&RecordBatchMetrics {
+            substituted_row_ranges: ranges.clone(),
+            observed_slices: slices.clone(),
+            foreign_file_row_creators: Some(vec![9]),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
+                rows: 3,
+                metrics: Some(metrics_json),
+            })] as Vec<Result<FlightMessage>>),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(Some(ranges), output.substituted_row_ranges());
+        assert_eq!(Some(slices), output.observed_slices());
+        assert_eq!(Some(vec![9]), output.foreign_file_row_creators());
     }
 
     #[tokio::test]
