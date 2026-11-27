@@ -872,21 +872,37 @@ impl ColumnarPreparedSource {
         let field_column_start = self.merge_field_start;
         let dedup_append_raw = self.dedup_append_raw;
         let sample_partition = self.sample_partition.clone();
-        let filters =
-            if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
-                predicate_conjuncts(context.input.predicate_group().predicate())
-                    .into_iter()
-                    .map(|expr| {
-                        Predicate::to_physical_expr(
-                            expr,
-                            &context.input.mapper.input_arrow_schema(false),
-                        )
-                        .map_err(|error| invalid(error.to_string()))
-                    })
-                    .collect::<Result<Vec<_>>>()?
-            } else {
-                Vec::new()
-            };
+        // Time-only conjuncts drop every version of a (series, time) key alike, so they
+        // commute with dedup and must run before the merge: a row selector inside the
+        // merge would otherwise pick a row they reject. Other conjuncts may depend on
+        // which version dedup keeps and stay after the merge. Volatile conjuncts never get
+        // here: DataFusion's `PushDownFilter` keeps them in the `Filter` above the scan.
+        let mut time_filters = Vec::new();
+        let mut filters = Vec::new();
+        if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
+            // Batch output keeps this schema before and after the merge.
+            let schema = context.input.mapper.input_arrow_schema(false);
+            let time_index = &context
+                .input
+                .region_metadata()
+                .time_index_column()
+                .column_schema
+                .name;
+            for expr in predicate_conjuncts(context.input.predicate_group().predicate()) {
+                let filter = Predicate::to_physical_expr(expr, &schema)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if expr
+                    .column_refs()
+                    .iter()
+                    .all(|column| &column.name == time_index)
+                {
+                    time_filters.push(filter);
+                } else {
+                    filters.push(filter);
+                }
+            }
+        }
+        let time_filters = Arc::new(time_filters);
         let stream = async_stream::try_stream! {
             let _reservation = reservation;
             if range.is_empty() { return; }
@@ -899,6 +915,7 @@ impl ColumnarPreparedSource {
                 let sample_schema = sample_schema.clone();
                 let scan_pool = scan_pool.clone();
                 let sample_partition = sample_partition.clone();
+                let time_filters = time_filters.clone();
                 sources.push(Box::pin(async_stream::try_stream! {
                     let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&scan_pool);
                     // Account for the selection retained by the samples reader, including
@@ -962,7 +979,11 @@ impl ColumnarPreparedSource {
                             Some(filter) => filter.filter(flat, &candidates[ordinal])?,
                             None => flat,
                         };
-                        let flat = filter_visibility(flat, &context)?;
+                        let mut flat = filter_visibility(flat, &context)?;
+                        for filter in time_filters.iter() {
+                            flat = common_recordbatch::filter::batch_filter(&flat, filter)
+                                .map_err(|error| invalid(error.to_string()))?;
+                        }
                         stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
                         if flat.num_rows() == 0 { continue; }
                         let bytes = flat.get_array_memory_size();
