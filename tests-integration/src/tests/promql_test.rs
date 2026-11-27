@@ -2838,6 +2838,152 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
         .unwrap();
 }
 
+/// A native TQL flow keeps writing a sink an earlier build auto-created from the native plan's own
+/// columns: the time index, the value named by the native route, the labels and `__name__`.
+///
+/// `__name__` is part of the primary key there, so the flow has to write what it wrote before: the
+/// metric name for a selector, and null where PromQL drops the name, as `rate` and an aggregate do.
+#[test]
+fn native_promql_tql_flow_keeps_writing_a_sink_with_the_name_column() {
+    // Flushing a flow overflows the default test stack in a debug build.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(native_promql_tql_flow_keeps_writing_a_sink_with_the_name_column_impl())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn native_promql_tql_flow_keeps_writing_a_sink_with_the_name_column_impl() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_tql_flow_name",
+    ))
+    .await;
+    // `ADMIN FLUSH_FLOW` syncs with this task.
+    standalone
+        .flow_engine
+        .start_flow_consistent_check_task()
+        .await
+        .unwrap();
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE old_flow_src (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO old_flow_src VALUES \
+             (20, now() - '90s'::interval, 's1', 'A'), (25, now() - '30s'::interval, 's1', 'A'), \
+             (10, now() - '90s'::interval, 's2', 'A'), (10, now() - '30s'::interval, 's2', 'A')",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The sink tables are the ones the native route auto-created before TQL flows were planned
+    // with the existing planner's columns.
+    for (name, query, labels, expected) in [
+        (
+            "selector",
+            "old_flow_src",
+            ["sensor", "loc"].as_slice(),
+            "+--------------+--------+-----+--------------+\n\
+             | old_flow_src | sensor | loc | __name__     |\n\
+             +--------------+--------+-----+--------------+\n\
+             | 20.0         | s1     | A   | old_flow_src |\n\
+             | 25.0         | s1     | A   | old_flow_src |\n\
+             | 10.0         | s2     | A   | old_flow_src |\n\
+             | 10.0         | s2     | A   | old_flow_src |\n\
+             +--------------+--------+-----+--------------+",
+        ),
+        (
+            "rate",
+            "rate(old_flow_src[2m])",
+            ["sensor", "loc"].as_slice(),
+            "+------------------------+--------+-----+----------+\n\
+             | rate(old_flow_src[2m]) | sensor | loc | __name__ |\n\
+             +------------------------+--------+-----+----------+\n\
+             | 0.08333333333333333    | s1     | A   | NULL     |\n\
+             | 0.0                    | s2     | A   | NULL     |\n\
+             +------------------------+--------+-----+----------+",
+        ),
+        (
+            "sum",
+            "sum by (sensor) (old_flow_src)",
+            ["sensor"].as_slice(),
+            "+--------------------------------+--------+----------+\n\
+             | sum by (sensor) (old_flow_src) | sensor | __name__ |\n\
+             +--------------------------------+--------+----------+\n\
+             | 20.0                           | s1     | NULL     |\n\
+             | 25.0                           | s1     | NULL     |\n\
+             | 10.0                           | s2     | NULL     |\n\
+             | 10.0                           | s2     | NULL     |\n\
+             +--------------------------------+--------+----------+",
+        ),
+    ] {
+        let flow = format!("old_native_flow_{name}");
+        let label_columns = labels
+            .iter()
+            .map(|label| format!("\"{label}\" STRING NULL, "))
+            .collect::<String>();
+        let keys = labels
+            .iter()
+            .chain(&["__name__"])
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {flow}_sink (\"ts\" TIMESTAMP(3) NOT NULL, \"{query}\" DOUBLE NULL, \
+                     {label_columns}\"__name__\" STRING NULL, TIME INDEX (\"ts\"), \
+                     PRIMARY KEY ({keys}))"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE FLOW {flow} SINK TO {flow}_sink EVAL INTERVAL '1m' AS \
+                 TQL EVAL (now() - '1m'::interval, now(), '1m') {query}"
+            ),
+            native_query_context(true, 4),
+        )
+        .await;
+        execute_all(
+            &instance,
+            &format!("ADMIN FLUSH_FLOW('{flow}')"),
+            QueryContext::arc(),
+        )
+        .await;
+        let columns = labels.join(", ");
+        let output = instance
+            .do_query(
+                &format!(
+                    "SELECT \"{query}\", {columns}, coalesce(__name__, 'NULL') AS __name__ \
+                     FROM {flow}_sink \
+                     ORDER BY {columns}, ts"
+                ),
+                QueryContext::arc(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!(expected, native_output_text(output).await, "{name}");
+    }
+    standalone
+        .flow_engine
+        .stop_flow_consistent_check_task()
+        .await
+        .unwrap();
+}
+
 /// A `__field__` selection that matches no metric table answers the empty vector.
 ///
 /// The matcher decides which of a scan's field columns a selection keeps, and no table matched this
