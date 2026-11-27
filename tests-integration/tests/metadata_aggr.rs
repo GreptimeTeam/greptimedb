@@ -144,7 +144,7 @@ async fn test_metadata_count_distributed_with_filter_and_memtables(#[case] enabl
     )
     .await;
 
-    let sql = "SELECT count(*) FROM split_count WHERE ts >= TIMESTAMP '1970-01-01 00:00:01'";
+    let sql = "SELECT count(*) FROM split_count WHERE ts >= 1000";
     assert_count(frontend, sql, 6).await;
     let plan = explain_count(frontend, sql).await;
     assert!(plan.contains("__count_state"), "{plan}");
