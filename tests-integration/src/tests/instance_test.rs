@@ -3731,6 +3731,148 @@ async fn test_execute_copy_from_json_decimal_empty_string(instance: Arc<dyn Mock
     check_output_stream(output, expected).await;
 }
 
+// A csv number loads into a BIGINT UNSIGNED column with every digit, in plain or scientific
+// notation, also when a `Float64` or an `Int64` can't hold it.
+#[apply(standalone_instance_case)]
+async fn test_execute_copy_from_csv_uint64_notation(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    let filepath = find_testing_resource("/tests/data/csv/uint64_notation.csv");
+    for (table_name, options) in [
+        ("csv_uint64_notation", "FORMAT='csv'"),
+        (
+            "csv_uint64_notation_skip",
+            "FORMAT='csv', skip_bad_records='true'",
+        ),
+    ] {
+        assert!(matches!(
+            execute_sql(
+                &instance,
+                &format!(
+                    "create table {table_name}(k string, n bigint unsigned, ts timestamp time index, primary key(k));"
+                ),
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(0)
+        ));
+
+        let output = execute_sql(
+            &instance,
+            &format!("copy {table_name} from '{filepath}' WITH({options});"),
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(6)));
+
+        let output = execute_sql(
+            &instance,
+            &format!("select k, n from {table_name} order by k;"),
+        )
+        .await
+        .data;
+        let expected = r#"+---+----------------------+
+| k | n                    |
++---+----------------------+
+| a | 9007199254740993     |
+| b | 18446744073709551615 |
+| c | 18446744073709551615 |
+| d | 9007199254740993     |
+| e | 7                    |
+| f |                      |
++---+----------------------+"#;
+        check_output_stream(output, expected).await;
+    }
+}
+
+// With skip_bad_records, DECIMAL and BIGINT UNSIGNED values load as they do without it, and
+// only the records whose number can't be parsed or is out of range are skipped.
+#[apply(standalone_instance_case)]
+async fn test_copy_from_csv_skip_bad_records_numbers(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table csv_skip_bad_numbers(k string, price decimal(38, 2), n bigint unsigned, ts timestamp time index, primary key(k));",
+        )
+        .await
+        .data,
+        OutputData::AffectedRows(0)
+    ));
+
+    let filepath = find_testing_resource("/tests/data/csv/skip_bad_numbers.csv");
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "copy csv_skip_bad_numbers from '{filepath}' WITH(FORMAT='csv', skip_bad_records='true');"
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(4)));
+
+    let output = execute_sql(
+        &instance,
+        "select k, price, n from csv_skip_bad_numbers order by k;",
+    )
+    .await
+    .data;
+    let expected = r#"+---+-------+----------------------+
+| k | price | n                    |
++---+-------+----------------------+
+| a | 1.25  | 9007199254740993     |
+| b | 0.00  | 18446744073709551615 |
+| c | 1.01  | 7                    |
+| g |       |                      |
++---+-------+----------------------+"#;
+    check_output_stream(output, expected).await;
+}
+
+// With skip_bad_records, the numbers of a column are parsed for its table type, whatever type
+// the column was inferred as. Here the first record makes the unsigned column a boolean.
+#[apply(standalone_instance_case)]
+async fn test_copy_from_csv_skip_bad_records_late_numbers(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table csv_skip_bad_numbers_late(k string, n bigint unsigned, price decimal(38, 2), ts timestamp time index, primary key(k));",
+        )
+        .await
+        .data,
+        OutputData::AffectedRows(0)
+    ));
+
+    let filepath = find_testing_resource("/tests/data/csv/skip_bad_numbers_late.csv");
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "copy csv_skip_bad_numbers_late from '{filepath}' WITH(FORMAT='csv', skip_bad_records='true', schema_infer_max_record=1);"
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
+
+    let output = execute_sql(
+        &instance,
+        "select k, n, price from csv_skip_bad_numbers_late order by k;",
+    )
+    .await
+    .data;
+    let expected = r#"+---+------------------+-------+
+| k | n                | price |
++---+------------------+-------+
+| b | 9007199254740993 | 1.01  |
++---+------------------+-------+"#;
+    check_output_stream(output, expected).await;
+}
+
 #[apply(standalone_instance_case)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();

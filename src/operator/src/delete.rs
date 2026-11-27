@@ -206,10 +206,11 @@ impl Deleter {
             .name
             .clone();
 
-        let key_column_names = table
-            .table_info()
+        let table_info = table.table_info();
+        let key_column_names = table_info
             .meta
             .row_key_column_names()
+            .chain(table_info.meta.partition_column_names())
             .cloned()
             .chain(iter::once(time_index))
             .collect();
@@ -247,4 +248,193 @@ fn validate_column_count_match(requests: &RowDeleteRequests) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::helper::{field_column_schema, tag_column_schema, time_index_column_schema};
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, Row, RowDeleteRequest, RowDeleteRequests, Rows, Value};
+    use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+    use common_meta::test_util::MockDatanodeManager;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, SchemaBuilder};
+    use session::context::QueryContext;
+    use table::Table;
+    use table::dist_table::DummyDataSource;
+    use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
+
+    use super::*;
+    use crate::test_util::{create_partition_rule_manager, prepare_mocked_backend};
+
+    #[tokio::test]
+    async fn test_trim_columns_retains_non_key_partition_column_and_aligns_rows() {
+        let schema = SchemaBuilder::try_from(vec![
+            ColumnSchema::new("k1", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("k2", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("part_val", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("extra_field", ConcreteDataType::int64_datatype(), true),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![0, 1])
+            .value_indices(vec![3, 4])
+            .partition_key_indices(vec![3])
+            .engine("mito")
+            .next_column_id(5)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .table_id(1)
+            .table_version(1)
+            .name("val_part_table")
+            .meta(meta)
+            .build()
+            .unwrap();
+
+        let catalog = MemoryCatalogManager::with_default_setup();
+        let table = Arc::new(Table::new(
+            Arc::new(table_info),
+            FilterPushDownType::Unsupported,
+            Arc::new(DummyDataSource),
+        ));
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "val_part_table".to_string(),
+                table_id: 1,
+                table,
+            })
+            .unwrap();
+
+        let backend = prepare_mocked_backend().await;
+        let partition_manager = create_partition_rule_manager(backend).await;
+        let deleter = Deleter::new(
+            catalog,
+            partition_manager,
+            Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+        );
+
+        // Interleave an unrelated field between keys, non-key partition column, and timestamp
+        // to verify both column filtering and positional value alignment across multiple rows.
+        let requests = RowDeleteRequests {
+            deletes: vec![RowDeleteRequest {
+                table_name: "val_part_table".to_string(),
+                rows: Some(Rows {
+                    schema: vec![
+                        tag_column_schema("k1", ColumnDataType::String),
+                        field_column_schema("extra_field", ColumnDataType::Int64),
+                        field_column_schema("part_val", ColumnDataType::Float64),
+                        time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                        tag_column_schema("k2", ColumnDataType::Int32),
+                    ],
+                    rows: vec![
+                        Row {
+                            values: vec![
+                                Value {
+                                    value_data: Some(ValueData::StringValue("job_a".to_string())),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::I64Value(999)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::F64Value(-1.5)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(60_000)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::I32Value(10)),
+                                },
+                            ],
+                        },
+                        Row {
+                            values: vec![
+                                Value {
+                                    value_data: Some(ValueData::StringValue("job_b".to_string())),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::I64Value(1234)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::F64Value(2.5)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(61_000)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::I32Value(20)),
+                                },
+                            ],
+                        },
+                    ],
+                }),
+            }],
+        };
+
+        let trimmed = deleter
+            .trim_columns(requests, &QueryContext::arc())
+            .await
+            .unwrap();
+        validate_column_count_match(&trimmed).unwrap();
+
+        let trimmed_rows = trimmed.deletes[0].rows.as_ref().unwrap();
+        let col_names: Vec<&str> = trimmed_rows
+            .schema
+            .iter()
+            .map(|c| c.column_name.as_str())
+            .collect();
+        assert_eq!(col_names, vec!["k1", "part_val", "ts", "k2"]);
+
+        assert_eq!(
+            trimmed_rows.rows[0].values,
+            vec![
+                Value {
+                    value_data: Some(ValueData::StringValue("job_a".to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::F64Value(-1.5)),
+                },
+                Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(60_000)),
+                },
+                Value {
+                    value_data: Some(ValueData::I32Value(10)),
+                },
+            ]
+        );
+        assert_eq!(
+            trimmed_rows.rows[1].values,
+            vec![
+                Value {
+                    value_data: Some(ValueData::StringValue("job_b".to_string())),
+                },
+                Value {
+                    value_data: Some(ValueData::F64Value(2.5)),
+                },
+                Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(61_000)),
+                },
+                Value {
+                    value_data: Some(ValueData::I32Value(20)),
+                },
+            ]
+        );
+    }
 }

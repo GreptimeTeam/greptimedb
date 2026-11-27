@@ -12,28 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The batches native nodes hand to each other.
+//! The chunk native nodes hand to each other by call; see [`EvaluatedChunk`] for the protocol.
 //!
-//! These are ordinary Rust values passed by call, not DataFusion streams and not encoded messages:
-//! the Arrow arrays, buffers and shared schemas inside them are reused as they are.
-//!
-//! Two rules make a chunk self-describing:
-//!
-//! - A grid position is absolute on the chunk's grid. Batch-local row numbers never stand in for
-//!   one, and an inner grid is never addressed with an outer grid's index.
-//! - A series closes exactly once, on the chunk that carries [`EvaluatedChunk::is_last`]. A closed
-//!   prefix still has to be followed by a final chunk even when that chunk holds no values, so a
-//!   consumer can tell "nothing more here" from "no more input". This is per input series, not per
-//!   label set: a node that rewrites labels can hand two input series over under one label set, and
-//!   each of them still closes on its own chunk, so a label set may be closed more than once. A
-//!   series that produced values closes it, and a later input series with no result at all closes it
-//!   again on the chunk that ends it; a node that can merge two inputs into one series must not read
-//!   the second close as a defect.
-
-//!
-//! The chunk type itself is [`crate::evaluated::EvaluatedChunk`]: one chunk protocol serves both the
-//! evaluator that produces chunks and the native nodes that consume them. Defining a second one
-//! here would let the two drift apart, and a chunk produced by the evaluator could not be handed to
-//! a node without translation.
+//! A series closes once per input series, not per label set: a node that rewrites labels can emit
+//! two input series under one label set, so a consumer that merges inputs must accept a second
+//! close of the same label set.
 
 pub use crate::evaluated::EvaluatedChunk;
