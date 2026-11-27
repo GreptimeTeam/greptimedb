@@ -1,0 +1,106 @@
+config/standalone.example.toml
+  s_b42cba56c4911e::t_cd9a585c626539 577-593
+config/datanode.example.toml
+  s_b42cba56c4911e::t_cd9a585c626539 374-390
+src/file-engine/src/query.rs
+  s_b42cba56c4911e::t_cd9a585c626539 22,48,50-57
+src/object-store/src/error.rs
+  s_b42cba56c4911e::t_cd9a585c626539 42-49,82
+src/operator/src/expr_helper.rs
+  s_b42cba56c4911e::t_cd9a585c626539 35,148
+  s_b42cba56c4911e::t_c107263dda0092 157-158
+src/object-store/Cargo.toml
+  s_b42cba56c4911e::t_cd9a585c626539 26,44
+src/operator/src/statement/import_packed.rs
+  s_b42cba56c4911e::t_cd9a585c626539 70-77
+src/operator/src/statement.rs
+  s_b42cba56c4911e::t_cd9a585c626539 45,153,193,210
+src/operator/src/statement/copy_table_to.rs
+  s_b42cba56c4911e::t_c107263dda0092 228-231,233
+  s_b42cba56c4911e::t_cd9a585c626539 205
+src/object-store/src/remote_access.rs
+  s_b42cba56c4911e::t_cd9a585c626539 1-439
+src/common/datasource/src/error.rs
+  s_b42cba56c4911e::t_cd9a585c626539 103-111,318
+src/query/src/options.rs
+  s_b42cba56c4911e::t_cd9a585c626539 113-118,134-135
+src/operator/src/statement/export_logical_tables.rs
+  s_b42cba56c4911e::t_c107263dda0092 360
+src/datanode/src/config.rs
+  s_b42cba56c4911e::t_cd9a585c626539 174
+src/common/datasource/src/object_store/azblob.rs
+  s_b42cba56c4911e::t_cd9a585c626539 18,20,23-25,40,52-71,74-76,78
+Cargo.toml
+  s_b42cba56c4911e::t_cd9a585c626539 196-197
+src/standalone/src/options.rs
+  s_b42cba56c4911e::t_cd9a585c626539 157
+src/common/datasource/src/object_store/remote_tests.rs
+  s_b42cba56c4911e::t_cd9a585c626539 1-333
+src/operator/src/statement/export_database.rs
+  s_b42cba56c4911e::t_c107263dda0092 225-228,230
+  s_b42cba56c4911e::t_cd9a585c626539 176-183
+src/common/datasource/src/object_store/gcs.rs
+  s_b42cba56c4911e::t_cd9a585c626539 17-18,20,22,25-27,41,49-59,66-109,116-149
+src/common/datasource/src/object_store.rs
+  s_b42cba56c4911e::t_cd9a585c626539 19-20,30-31,33,44-45,332,334-340,342-343,351,353-361,369,371-377,379-380,388,390-398,405,454,460,466,472,487-516,538-539,591-598,607-614,625-632,636-643,648-654,658-665,670-677,683-689,695-702,707-713,717-723,740-747,769-775,784,791-797,802-809,827-834,849-855,905,931-938,941-948,952-959
+src/frontend/src/instance/builder.rs
+  s_b42cba56c4911e::t_cd9a585c626539 25,358-363
+src/datanode/src/datanode.rs
+  s_b42cba56c4911e::t_cd9a585c626539 24,554-558
+src/file-engine/src/region.rs
+  s_b42cba56c4911e::t_cd9a585c626539 110,180-184
+src/common/datasource/src/object_store/oss.rs
+  s_b42cba56c4911e::t_cd9a585c626539 18,22-24,53,61,71,82-102,133-138
+src/operator/src/statement/copy_database.rs
+  s_b42cba56c4911e::t_cd9a585c626539 22-24,152-158,259,261-268,284,322-336
+src/operator/src/statement/copy_table_from.rs
+  s_b42cba56c4911e::t_cd9a585c626539 31-33,101,103-110,524-526,1082-1085,1091-1093,1096-1099,1104,1112,1121,1128,1133-1138,1146,1167,1174-1176,1180,1245-1251,1262-1268,1293
+src/frontend/src/frontend.rs
+  s_b42cba56c4911e::t_cd9a585c626539 172
+src/operator/src/statement/database_copy.rs
+  s_b42cba56c4911e::t_cd9a585c626539 254-256,276-283
+src/common/datasource/Cargo.toml
+  s_b42cba56c4911e::t_cd9a585c626539 22,38
+src/operator/src/statement/ddl.rs
+  s_b42cba56c4911e::t_c107263dda0092 440-443,445
+tests-integration/tests/export_logical_tables.rs
+  s_b42cba56c4911e::t_cd9a585c626539 944
+config/frontend.example.toml
+  s_b42cba56c4911e::t_cd9a585c626539 394-410
+src/common/datasource/src/object_store/s3.rs
+  s_b42cba56c4911e::t_cd9a585c626539 18,22-24,51,63-84,117
+src/file-engine/src/engine.rs
+  s_b42cba56c4911e::t_cd9a585c626539 23,57,60-64,78-82,214-215,239-243,249
+src/object-store/src/lib.rs
+  s_b42cba56c4911e::t_cd9a585c626539 27
+src/cmd/tests/load_config_test.rs
+  s_b42cba56c4911e::t_cd9a585c626539 854-892
+src/operator/src/statement/export_logical_tables/tests.rs
+  s_b42cba56c4911e::t_cd9a585c626539 729
+src/query/src/sql.rs
+  s_b42cba56c4911e::t_cd9a585c626539 34-36,1351,1364
+tests-integration/tests/http.rs
+  s_b42cba56c4911e::t_cd9a585c626539 3195-3196
+src/common/datasource/src/parquet_writer.rs
+  s_b42cba56c4911e::t_cd9a585c626539 667
+config/config.md
+  s_b42cba56c4911e::t_cd9a585c626539 150-151,398-399,633-634
+src/object-store/src/test_util.rs
+  s_b42cba56c4911e::t_cd9a585c626539 36-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "deb42a818dce9d92e409c663fa25abc2bc07f883",
+  "prompts": {},
+  "sessions": {
+    "s_b42cba56c4911e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a207af-50d0-7c80-bdbc-8fe4eee39295",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
