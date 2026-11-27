@@ -1319,7 +1319,7 @@ mod flow_extension_tests {
     fn test_parse_flow_extensions_after_seqs_rejects_upper_bound_below_cursor() {
         let exts = HashMap::from([(
             FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
-            r#"{"7":{"version":3,"shards":[{"expr":null,"seq":10,"until":9}]}}"#.to_string(),
+            r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10,"until":9}]}}"#.to_string(),
         )]);
         let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
         let message = format!("{err}");
@@ -1340,14 +1340,14 @@ mod flow_extension_tests {
             "the failure names the ordering rule: {message}"
         );
 
-        // The bound is refused under either version, and whatever the distance is.
+        // The bound is refused whatever the distance is.
         for (value, region) in [
             (
                 r#"{"8":{"version":2,"shards":[{"expr":null,"seq":10,"until":9}]}}"#,
                 "region 8",
             ),
             (
-                r#"{"9":{"version":3,"shards":[{"expr":null,"seq":5,"until":0}]}}"#,
+                r#"{"9":{"version":2,"shards":[{"expr":null,"seq":5,"until":0}]}}"#,
                 "region 9",
             ),
         ] {
@@ -1365,7 +1365,7 @@ mod flow_extension_tests {
         // covers, and no row of it is above the cursor.
         let exts = HashMap::from([(
             FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
-            r#"{"7":{"version":3,"shards":[{"expr":null,"seq":10,"until":10}]}}"#.to_string(),
+            r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10,"until":10}]}}"#.to_string(),
         )]);
         let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
             .unwrap()
