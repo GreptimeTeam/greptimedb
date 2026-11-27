@@ -646,10 +646,14 @@ fn output_to_flight_record_batch_source(
 
 #[cfg(test)]
 mod tests {
+    use datatypes::value::Value;
+    use partition::expr::{Operand, col};
+    use query::error::Error as QueryError;
     use query::options::{
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ,
         FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, FlowIncrementalMode,
     };
+    use store_api::storage::CursorShard;
     use tonic::metadata::{AsciiMetadataValue, MetadataMap};
 
     use super::*;
@@ -722,7 +726,24 @@ mod tests {
         );
         assert_eq!(
             parsed.incremental_after_seqs,
-            Some(HashMap::from([(1, 10), (2, 20)]))
+            Some(HashMap::from([
+                (
+                    1,
+                    vec![CursorShard {
+                        partition_expr: None,
+                        seq: 10,
+                        until: None,
+                    }],
+                ),
+                (
+                    2,
+                    vec![CursorShard {
+                        partition_expr: None,
+                        seq: 20,
+                        until: None,
+                    }],
+                ),
+            ]))
         );
         assert!(parsed.return_region_seq);
         assert_eq!(parsed.sink_table_id, Some(42));
@@ -736,6 +757,126 @@ mod tests {
         );
         assert_eq!(query_ctx.extension(FLOW_RETURN_REGION_SEQ), Some("true"));
         assert_eq!(query_ctx.extension(FLOW_SINK_TABLE_ID), Some("42"));
+    }
+
+    #[test]
+    fn test_flow_extensions_forward_expression_cursor_to_query_context() {
+        let expr = col("k0")
+            .gt_eq(Operand::Value(Value::UInt64(50)))
+            .as_json_str()
+            .unwrap();
+        let cursor = serde_json::json!({
+            "1": {
+                "version": 2,
+                "shards": [
+                    {"expr": expr, "seq": 10},
+                    {"expr": null, "seq": 15}
+                ]
+            },
+            "2": {"version": 2, "shards": [{"expr": null, "seq": 20}]}
+        })
+        .to_string();
+        let extensions = vec![
+            (FLOW_INCREMENTAL_MODE, "sequence_range"),
+            (FLOW_INCREMENTAL_AFTER_SEQS, cursor.as_str()),
+        ];
+        let metadata_value = serde_json::to_string(&extensions).unwrap();
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from(metadata_value.as_str()).unwrap(),
+        );
+
+        let flow_extensions = extract_flow_extensions(&metadata).unwrap();
+        let query_ctx =
+            create_query_context(Channel::Grpc, None, flow_extensions, HashMap::new()).unwrap();
+        assert_eq!(
+            query_ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some(cursor.as_str())
+        );
+        let parsed =
+            query::options::FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            parsed.incremental_mode,
+            Some(FlowIncrementalMode::SequenceRange)
+        );
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([
+                (
+                    1,
+                    vec![
+                        CursorShard {
+                            partition_expr: Some(expr),
+                            seq: 10,
+                            until: None,
+                        },
+                        CursorShard {
+                            partition_expr: None,
+                            seq: 15,
+                            until: None,
+                        },
+                    ],
+                ),
+                (
+                    2,
+                    vec![CursorShard {
+                        partition_expr: None,
+                        seq: 20,
+                        until: None,
+                    }],
+                ),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_flow_extensions_reject_unknown_cursor_shapes() {
+        for (cursor, expected_reason) in [
+            (
+                r#"{"1":[[0,50,10],[50,100,3]]}"#,
+                "Invalid cursor value type in flow.incremental_after_seqs for region 1",
+            ),
+            (
+                r#"{"1":{"shards":[{"expr":null,"seq":10}]}}"#,
+                "Missing cursor version in flow.incremental_after_seqs for region 1: an object value must state version 2",
+            ),
+            (
+                r#"{"1":{"version":1,"shards":[{"expr":null,"seq":10}]}}"#,
+                "Unsupported cursor version Number(1) in flow.incremental_after_seqs for region 1: this build reads version 2",
+            ),
+            // A version this build does not know is refused.
+            (
+                r#"{"1":{"version":4,"shards":[{"expr":null,"seq":10,"until":20}]}}"#,
+                "Unsupported cursor version Number(4) in flow.incremental_after_seqs for region 1: this build reads version 2",
+            ),
+            (
+                r#"{"not-a-region":{"version":2,"shards":[{"expr":null,"seq":10}]}}"#,
+                "Invalid region id in flow.incremental_after_seqs: not-a-region",
+            ),
+        ] {
+            let extensions = vec![(FLOW_INCREMENTAL_AFTER_SEQS, cursor)];
+            let metadata_value = serde_json::to_string(&extensions).unwrap();
+            let mut metadata = MetadataMap::new();
+            metadata.insert(
+                FLOW_EXTENSIONS_METADATA_KEY,
+                AsciiMetadataValue::try_from(metadata_value.as_str()).unwrap(),
+            );
+            let flow_extensions = extract_flow_extensions(&metadata).unwrap();
+            let query_ctx =
+                create_query_context(Channel::Grpc, None, flow_extensions, HashMap::new()).unwrap();
+            let err =
+                query::options::FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
+                    .unwrap_err();
+            match err {
+                QueryError::InvalidQueryContextExtension { reason, .. } => {
+                    assert_eq!(reason, expected_reason, "cursor: {cursor}");
+                }
+                other => panic!("unexpected error for {cursor}: {other:?}"),
+            }
+        }
     }
 
     #[test]

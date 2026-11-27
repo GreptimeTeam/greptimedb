@@ -41,7 +41,7 @@ use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
 use common_query::request::QueryRequest;
-use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_runtime::{JoinHandle, Runtime};
 use common_telemetry::tracing::{self, info_span};
@@ -74,6 +74,7 @@ use servers::grpc::flight::{
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
+    ScanPartitionExpr, ScanVisibleFileCreators,
 };
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
@@ -1010,48 +1011,135 @@ fn wrap_flow_region_watermark_stream(
     region_id: RegionId,
     query_ctx: &QueryContextRef,
 ) -> SendableRecordBatchStream {
-    if should_collect_region_watermark_from_extensions(&query_ctx.extensions())
-        && let Some(seq) = query_ctx.get_snapshot(region_id.as_u64())
-    {
-        Box::pin(RegionWatermarkStream::new(stream, region_id, seq)) as SendableRecordBatchStream
-    } else {
-        stream
+    if !should_collect_region_watermark_from_extensions(&query_ctx.extensions()) {
+        return stream;
+    }
+    let Some(seq) = query_ctx.get_snapshot(region_id.as_u64()) else {
+        return stream;
+    };
+
+    // The expression is the one this region's scan stated, and the scan stated it from the very
+    // version it read `seq` from (see [`RegionWatermarkStatement`]). A region whose scans stated
+    // no identity - or two different ones - participates without a proof: `partition_expr: None`
+    // says the region's value domain *is* the whole domain, so it cannot stand in for an
+    // identity this process does not know.
+    let (partition_expr, watermark) = match query_ctx.scan_partition_expr(region_id.as_u64()) {
+        Some(ScanPartitionExpr::WholeDomain) => (None, Some(seq)),
+        Some(ScanPartitionExpr::Slice(expr)) => (Some(expr), Some(seq)),
+        Some(ScanPartitionExpr::Conflicting) | None => (None, None),
+    };
+    // The file list the scan started from is a separate statement and stays reportable even
+    // when the domain above is ambiguous: it says which other regions' rows sat in this region
+    // when it was opened, not what this read proved.
+    let visible_foreign_file_creators =
+        match query_ctx.scan_visible_file_creators(region_id.as_u64()) {
+            Some(ScanVisibleFileCreators::Stated(creators)) => Some(creators),
+            Some(ScanVisibleFileCreators::Conflicting) | None => None,
+        };
+    let statement = RegionWatermarkStatement {
+        region_id: region_id.as_u64(),
+        partition_expr,
+        watermark,
+        visible_foreign_file_creators,
+    };
+    Box::pin(RegionWatermarkStream::new(stream, statement)) as SendableRecordBatchStream
+}
+
+/// The `(region, partition expression, watermark)` statement one region read makes about where an
+/// incremental read of it may resume.
+///
+/// # Why the expression belongs to the same snapshot as the sequence
+///
+/// A watermark is a statement about **one value domain**. `watermark` is the upper bound the scan
+/// was opened at, and `partition_expr` is the region's partition expression of the very same
+/// version the engine read that bound from: the engine states both together
+/// ([`store_api::region_engine::ScanSnapshotIdentity`]) and the query binds them together
+/// (`query::dummy_catalog::DummyTableProvider`), so a concurrent repartition - which publishes a
+/// new version - cannot pair this expression with another version's bound.
+///
+/// `partition_expr: None` therefore means exactly one thing: **this region's value domain is the
+/// whole domain**, because it has no partition expression. It is never the fallback for a region
+/// whose expression this process does not know; such a read reports `watermark: None` instead, so
+/// it participates without proving a bound.
+///
+/// # Upgrade order: this report is not mixed-version compatible
+///
+/// [`RegionWatermarkEntry::partition_expr`] is optional, so a payload that omits it decodes as
+/// `None`. That is also what a build predating this report writes for a **partitioned** region,
+/// because it knew no expression to write. The merge
+/// (`query::metrics::merge_region_watermark_entries`) keys statements by
+/// `(region_id, partition_expr)` and folds a region's slices conservatively, so running both
+/// builds against one flow makes the same region's proofs disagree: an upgraded node states
+/// `Slice(expr)` where an old node states the whole domain, and neither statement subsumes the
+/// other, so the region is reported unproved rather than advancing to either. Nothing silently
+/// takes a min/max and no cursor moves to a bound that was never proved - the cost is stalled flow
+/// checkpoints for the affected regions.
+///
+/// So there is an explicit upgrade order, and no pretending the two can run together: upgrade
+/// **every** datanode that serves a flow's source regions before that flow resumes, and do not
+/// roll a datanode back below this build while any flow holds slices of its partitioned regions.
+/// Regions without a partition expression are unaffected (both builds state `None`), so a cluster
+/// whose flow sources are all unpartitioned may be upgraded in any order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegionWatermarkStatement {
+    region_id: u64,
+    /// The slice the statement is about, or `None` when the region's value domain **is** the whole
+    /// domain.
+    partition_expr: Option<String>,
+    /// The proved upper bound, or `None` when the region participated without one.
+    watermark: Option<u64>,
+    /// One sentence: the creators of the files the region had visible when it was opened, i.e. the
+    /// other regions whose rows its file list may hold; `None` when the read could not state them.
+    /// Read from the same version as `partition_expr`/`watermark`, in memory, before any pruning.
+    visible_foreign_file_creators: Option<Vec<u64>>,
+}
+
+impl RegionWatermarkStatement {
+    fn into_entry(self) -> RegionWatermarkEntry {
+        RegionWatermarkEntry {
+            region_id: self.region_id,
+            partition_expr: self.partition_expr,
+            watermark: self.watermark,
+            visible_foreign_file_creators: self.visible_foreign_file_creators,
+        }
     }
 }
 
 /// Wraps a region read stream so terminal metrics can carry the scan-open watermark.
 struct RegionWatermarkStream {
     stream: SendableRecordBatchStream,
-    region_id: u64,
-    snapshot_seq: u64,
+    statement: RegionWatermarkStatement,
     finished: bool,
 }
 
 impl RegionWatermarkStream {
-    fn new(stream: SendableRecordBatchStream, region_id: RegionId, snapshot_seq: u64) -> Self {
+    fn new(stream: SendableRecordBatchStream, statement: RegionWatermarkStatement) -> Self {
         Self {
             stream,
-            region_id: region_id.as_u64(),
-            snapshot_seq,
+            statement,
             finished: false,
         }
     }
 
     fn merged_metrics(&self, mut metrics: RecordBatchMetrics) -> RecordBatchMetrics {
-        if metrics
-            .region_watermarks
-            .iter()
-            .any(|entry| entry.region_id == self.region_id)
-        {
+        // This read opened the region at the snapshot bound above, so its statement is about the
+        // slice the same version stated: the whole domain when the region has no partition
+        // expression, one expression otherwise. It is a duplicate of exactly another statement
+        // about the same slice of the same region. A statement about another slice says something
+        // narrower or incommensurable - dropping it would forget what was read, and dropping this
+        // one for it would claim a slice nobody read - so both are kept and the merge that
+        // follows keys them apart.
+        let duplicate = metrics.region_watermarks.iter().any(|entry| {
+            entry.region_id == self.statement.region_id
+                && entry.partition_expr == self.statement.partition_expr
+        });
+        if duplicate {
             return metrics;
         }
 
         metrics
             .region_watermarks
-            .push(common_recordbatch::adapter::RegionWatermarkEntry {
-                region_id: self.region_id,
-                watermark: Some(self.snapshot_seq),
-            });
+            .push(self.statement.clone().into_entry());
         metrics
     }
 }
@@ -2543,6 +2631,46 @@ mod tests {
             .as_stream()
     }
 
+    /// The statement of a read of a region that has no partition expression: its value domain
+    /// **is** the whole domain.
+    fn whole_domain_statement(
+        region_id: RegionId,
+        watermark: Option<u64>,
+    ) -> RegionWatermarkStatement {
+        RegionWatermarkStatement {
+            region_id: region_id.as_u64(),
+            partition_expr: None,
+            watermark,
+            visible_foreign_file_creators: Some(Vec::new()),
+        }
+    }
+
+    /// The same statement, holding one file another region created.
+    fn whole_domain_statement_with_foreign_file(
+        region_id: RegionId,
+        watermark: Option<u64>,
+        creator: u64,
+    ) -> RegionWatermarkStatement {
+        RegionWatermarkStatement {
+            visible_foreign_file_creators: Some(vec![creator]),
+            ..whole_domain_statement(region_id, watermark)
+        }
+    }
+
+    /// The statement of a read of one partition expression of a region.
+    fn slice_statement(
+        region_id: RegionId,
+        partition_expr: &str,
+        watermark: Option<u64>,
+    ) -> RegionWatermarkStatement {
+        RegionWatermarkStatement {
+            region_id: region_id.as_u64(),
+            partition_expr: Some(partition_expr.to_string()),
+            watermark,
+            visible_foreign_file_creators: Some(Vec::new()),
+        }
+    }
+
     #[tokio::test]
     async fn test_region_watermark_stream_only_sets_terminal_metrics() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -2557,7 +2685,9 @@ mod tests {
             .as_stream();
 
         let region_id = RegionId::new(42, 7);
-        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
+        // A region without a partition expression states `None` and its watermark.
+        let wrapped =
+            RegionWatermarkStream::new(stream, whole_domain_statement(region_id, Some(99)));
         let mut pinned = Box::pin(wrapped);
 
         assert!(pinned.as_ref().get_ref().metrics().is_none());
@@ -2568,9 +2698,99 @@ mod tests {
             metrics.region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: Some(99),
+                visible_foreign_file_creators: Some(Vec::new()),
+            }],
+            "a region holding no foreign file states the empty set, not an unknown one"
+        );
+    }
+
+    #[test]
+    fn test_region_watermark_stream_reports_the_partition_expr_and_the_watermark() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let region_id = RegionId::new(42, 7);
+        // A region with a partition expression states that expression and its watermark.
+        let wrapped = RegionWatermarkStream::new(
+            stream,
+            slice_statement(region_id, r#"{"slice":"k0 < 10"}"#, Some(99)),
+        );
+
+        let merged = wrapped.merged_metrics(RecordBatchMetrics::default());
+        assert_eq!(
+            merged.region_watermarks,
+            vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(99),
+                visible_foreign_file_creators: Some(Vec::new()),
             }]
         );
+    }
+
+    #[test]
+    fn test_region_watermark_stream_keeps_two_slices_of_the_same_region() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let region_id = RegionId::new(42, 7);
+        let wrapped = RegionWatermarkStream::new(
+            stream,
+            slice_statement(region_id, r#"{"slice":"k0 < 10"}"#, Some(99)),
+        );
+        // The stream already stated another slice of the same region: both triples are kept, and
+        // neither slice is dropped for the other.
+        let other_slice_metrics = RecordBatchMetrics {
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: Some(r#"{"slice":"k0 >= 10"}"#.to_string()),
+                watermark: Some(5),
+                visible_foreign_file_creators: Some(vec![7]),
+            }],
+            ..Default::default()
+        };
+
+        let merged = wrapped.merged_metrics(other_slice_metrics);
+        assert_eq!(
+            merged.region_watermarks,
+            vec![
+                RegionWatermarkEntry {
+                    region_id: region_id.as_u64(),
+                    partition_expr: Some(r#"{"slice":"k0 >= 10"}"#.to_string()),
+                    watermark: Some(5),
+                    visible_foreign_file_creators: Some(vec![7]),
+                },
+                RegionWatermarkEntry {
+                    region_id: region_id.as_u64(),
+                    partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                    watermark: Some(99),
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+            ],
+            "two slices of one region are two statements, not one"
+        );
+
+        // The same slice stated twice is the duplicate to skip.
+        let merged_again = wrapped.merged_metrics(merged);
+        assert_eq!(2, merged_again.region_watermarks.len());
     }
 
     #[test]
@@ -2587,11 +2807,13 @@ mod tests {
             .as_stream();
 
         let region_id = RegionId::new(42, 7);
-        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
+        let wrapped = RegionWatermarkStream::new(stream, whole_domain_statement(region_id, None));
         let metrics = RecordBatchMetrics {
             region_watermarks: vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: Some(vec![7]),
             }],
             ..Default::default()
         };
@@ -2601,36 +2823,231 @@ mod tests {
             merged.region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: None,
-            }]
+                visible_foreign_file_creators: Some(vec![7]),
+            }],
+            "an unproved watermark keeps the file creators the stream stated"
         );
     }
 
-    #[tokio::test]
-    async fn test_wrap_flow_region_watermark_stream_adds_terminal_metrics() {
+    #[test]
+    fn test_region_watermark_stream_keeps_expression_entries_of_the_same_region() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
         let region_id = RegionId::new(42, 7);
-        let query_ctx = Arc::new(
+        let wrapped =
+            RegionWatermarkStream::new(stream, whole_domain_statement(region_id, Some(99)));
+        let slice_metrics = RecordBatchMetrics {
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(5),
+                visible_foreign_file_creators: None,
+            }],
+            ..Default::default()
+        };
+
+        let merged = wrapped.merged_metrics(slice_metrics);
+        assert_eq!(
+            merged.region_watermarks,
+            vec![
+                RegionWatermarkEntry {
+                    region_id: region_id.as_u64(),
+                    partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                    watermark: Some(5),
+                    visible_foreign_file_creators: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: region_id.as_u64(),
+                    partition_expr: None,
+                    watermark: Some(99),
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+            ],
+            "the region-wide statement must not be dropped for a narrower one"
+        );
+
+        // A second region-wide statement of the same region is the duplicate to skip.
+        let merged_again = wrapped.merged_metrics(merged);
+        assert_eq!(2, merged_again.region_watermarks.len());
+    }
+
+    fn watermark_collecting_query_ctx() -> QueryContextRef {
+        Arc::new(
             QueryContextBuilder::default()
                 .extensions(HashMap::from([(
                     FLOW_RETURN_REGION_SEQ.to_string(),
                     "true".to_string(),
                 )]))
                 .build(),
-        );
+        )
+    }
+
+    async fn drain_watermark_stream(
+        mut pinned: SendableRecordBatchStream,
+    ) -> Vec<RegionWatermarkEntry> {
+        while pinned.next().await.is_some() {}
+        pinned
+            .as_ref()
+            .get_ref()
+            .metrics()
+            .expect("the wrapped stream must carry terminal metrics")
+            .region_watermarks
+    }
+
+    #[tokio::test]
+    async fn test_wrap_flow_region_watermark_stream_adds_terminal_metrics() {
+        let region_id = RegionId::new(42, 7);
+        let query_ctx = watermark_collecting_query_ctx();
         query_ctx.set_snapshot(region_id.as_u64(), 99);
+        // The region has no partition expression, so its value domain is the whole domain, and
+        // every file it holds was created by itself.
+        query_ctx.bind_scan_partition_expr(region_id.as_u64(), None);
+        query_ctx.bind_scan_visible_file_creators(region_id.as_u64(), Vec::new());
 
         let wrapped =
             wrap_flow_region_watermark_stream(single_value_stream(), region_id, &query_ctx);
-        let mut pinned = Box::pin(wrapped);
-        while pinned.next().await.is_some() {}
-
-        let metrics = pinned.as_ref().get_ref().metrics().unwrap();
         assert_eq!(
-            metrics.region_watermarks,
+            drain_watermark_stream(wrapped).await,
             vec![RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
+                partition_expr: None,
                 watermark: Some(99),
+                visible_foreign_file_creators: Some(Vec::new()),
+            }],
+            "nothing foreign visible is stated as an empty set, not as unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrap_flow_region_watermark_stream_reports_visible_file_creators() {
+        let region_id = RegionId::new(42, 7);
+        let query_ctx = watermark_collecting_query_ctx();
+        query_ctx.set_snapshot(region_id.as_u64(), 99);
+        query_ctx.bind_scan_partition_expr(region_id.as_u64(), None);
+        // The region holds a file another region created, so its rows may come from there.
+        query_ctx.bind_scan_visible_file_creators(region_id.as_u64(), vec![7]);
+
+        let wrapped =
+            wrap_flow_region_watermark_stream(single_value_stream(), region_id, &query_ctx);
+        assert_eq!(
+            drain_watermark_stream(wrapped).await,
+            vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: None,
+                watermark: Some(99),
+                visible_foreign_file_creators: Some(vec![7]),
+            }],
+            "the creator of a visible foreign file is reported with the watermark"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrap_flow_region_watermark_stream_reports_file_creators_without_a_proof() {
+        let region_id = RegionId::new(42, 7);
+        let query_ctx = watermark_collecting_query_ctx();
+        query_ctx.set_snapshot(region_id.as_u64(), 99);
+        // The domain is ambiguous, so no bound is proved - but which files the region held is a
+        // separate statement and is still reported.
+        query_ctx.bind_scan_partition_expr(region_id.as_u64(), None);
+        query_ctx.bind_scan_partition_expr(
+            region_id.as_u64(),
+            Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+        );
+        query_ctx.bind_scan_visible_file_creators(region_id.as_u64(), vec![7, 9]);
+
+        let wrapped =
+            wrap_flow_region_watermark_stream(single_value_stream(), region_id, &query_ctx);
+        assert_eq!(
+            drain_watermark_stream(wrapped).await,
+            vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: None,
+                watermark: None,
+                visible_foreign_file_creators: Some(vec![7, 9]),
+            }],
+            "participation without a proof still states the file creators"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrap_flow_region_watermark_stream_reports_the_bound_partition_expr() {
+        let region_id = RegionId::new(42, 7);
+        let query_ctx = watermark_collecting_query_ctx();
+        query_ctx.set_snapshot(region_id.as_u64(), 99);
+        query_ctx.bind_scan_partition_expr(
+            region_id.as_u64(),
+            Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+        );
+
+        let wrapped =
+            wrap_flow_region_watermark_stream(single_value_stream(), region_id, &query_ctx);
+        assert_eq!(
+            drain_watermark_stream(wrapped).await,
+            vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(99),
+                visible_foreign_file_creators: None,
+            }],
+            "a scan that stated no file list reports the creators as unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrap_flow_region_watermark_stream_refuses_an_unknown_identity() {
+        let region_id = RegionId::new(42, 7);
+        let query_ctx = watermark_collecting_query_ctx();
+        query_ctx.set_snapshot(region_id.as_u64(), 99);
+
+        // No scan stated which part of the region it read, so the read may not claim the
+        // sequence for the whole domain: it participates without proving a bound.
+        let wrapped =
+            wrap_flow_region_watermark_stream(single_value_stream(), region_id, &query_ctx);
+        assert_eq!(
+            drain_watermark_stream(wrapped).await,
+            vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: None,
+                watermark: None,
+                visible_foreign_file_creators: None,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrap_flow_region_watermark_stream_refuses_conflicting_identities() {
+        let region_id = RegionId::new(42, 7);
+        let query_ctx = watermark_collecting_query_ctx();
+        query_ctx.set_snapshot(region_id.as_u64(), 99);
+        // Two scans of one region stated two different value domains.
+        query_ctx.bind_scan_partition_expr(region_id.as_u64(), None);
+        query_ctx.bind_scan_partition_expr(
+            region_id.as_u64(),
+            Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+        );
+
+        let wrapped =
+            wrap_flow_region_watermark_stream(single_value_stream(), region_id, &query_ctx);
+        assert_eq!(
+            drain_watermark_stream(wrapped).await,
+            vec![RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                partition_expr: None,
+                watermark: None,
+                visible_foreign_file_creators: None,
+            }],
+            "an ambiguous domain must state no proof rather than assume one"
         );
     }
 

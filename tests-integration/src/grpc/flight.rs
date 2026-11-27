@@ -1053,7 +1053,9 @@ mod test {
             region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: expected_watermark.0,
+                partition_expr: None,
                 watermark: Some(expected_watermark.1),
+                visible_foreign_file_creators: None,
             }]
         );
 
