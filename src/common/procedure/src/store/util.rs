@@ -39,10 +39,17 @@ impl CollectingState {
     }
 
     fn finish(mut self) -> Result<(KeySet, Vec<u8>)> {
-        let corrupt = |reason| error::Error::CorruptCheckpoint {
-            key: self.key.clone(),
-            keys: self.pairs.iter().map(|(key, _)| key.clone()).collect(),
-            reason,
+        let corrupt = |reason: String| {
+            error::CorruptCheckpointSnafu {
+                key: self.key.clone(),
+                keys: self
+                    .pairs
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>(),
+                reason,
+            }
+            .build()
         };
         if self.pairs[0].0 != self.key {
             return Err(corrupt("missing base segment".to_string()));

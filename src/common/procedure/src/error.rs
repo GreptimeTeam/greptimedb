@@ -219,15 +219,6 @@ pub enum Error {
         reason: String,
     },
 
-    #[snafu(display("Failed to parse segment key: {key}"))]
-    ParseSegmentKey {
-        #[snafu(implicit)]
-        location: Location,
-        key: String,
-        #[snafu(source)]
-        error: std::num::ParseIntError,
-    },
-
     #[snafu(display("Unexpected: {err_msg}"))]
     Unexpected {
         #[snafu(implicit)]
@@ -290,7 +281,6 @@ impl ErrorExt for Error {
             }
             Error::ProcedurePanic { .. }
             | Error::CorruptCheckpoint { .. }
-            | Error::ParseSegmentKey { .. }
             | Error::Unexpected { .. }
             | &Error::ProcedureNotFound { .. }
             | Error::PoisonKeyNotDefined { .. } => StatusCode::Unexpected,
