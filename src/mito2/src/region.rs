@@ -149,8 +149,7 @@ impl RegionRoleState {
         }
     }
 
-    /// Returns whether a region in this state is admitted to flush. A staging region with rows
-    /// in its memtable is still refused a flush, and a close leaves staging before flushing.
+    /// Returns whether a region in this state is admitted to flush.
     pub(crate) fn is_flushable(self) -> bool {
         matches!(
             self,
