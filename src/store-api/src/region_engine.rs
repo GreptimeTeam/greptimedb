@@ -595,8 +595,8 @@ pub type SendableRawSeriesStream = Pin<Box<dyn RawSeriesStream>>;
 /// Stable identity metadata for one ordinal in a prepared series source.
 #[derive(Clone, Debug)]
 pub struct SeriesInfo {
-    /// Complete source identity, not a TSID or hash alone. Explicit-label sources
-    /// may use an opaque domain-qualified identity instead of a label-bearing key.
+    /// Complete source identity, not a TSID or hash alone. Every region holding a fragment of
+    /// one series reports the same identity, so it must not be qualified by region.
     pub primary_key: datatypes::arrow::buffer::Buffer,
     /// Complete explicit metric name and labels, not a partial label projection; or `None` for
     /// primary-key label binding (undecoded, not nameless). The metric name itself may be absent.

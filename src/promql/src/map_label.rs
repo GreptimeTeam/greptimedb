@@ -73,11 +73,8 @@ fn rewrite_all(
     merge_same_labelset(schema, series)
 }
 
-/// The label change of `label_replace` or `label_join`, checked and compiled once and applied to
-/// each series on its own. Series that end up with one label set are the caller's to merge.
-///
-/// Built only through [`Self::replace`] and [`Self::join`], so the expression is anchored and the
-/// label names are checked.
+/// The validated, compiled label change of `label_replace` or `label_join`, applied per series.
+/// Merging series that end up with one label set is left to the caller.
 #[derive(Debug)]
 pub struct LabelRewrite(Change);
 impl serde::Serialize for LabelRewrite {
@@ -248,20 +245,15 @@ impl std::hash::Hash for LabelRewrite {
 }
 
 impl LabelRewrite {
-    /// The label this rewrite writes, which is the one whose routing key may change.
+    /// The label this rewrite writes.
     pub fn destination(&self) -> &str {
         match &self.0 {
             Change::Replace { dst, .. } | Change::Join { dst, .. } => dst,
         }
     }
 
-    /// Whether this change can write a nonempty value.
-    ///
-    /// An empty value removes the destination instead ([`set_label`]), so a change whose value is
-    /// necessarily empty only deletes a label and publishes none that its input did not carry.
-    /// `label_replace`'s template is judged as written: `$1` can expand to nothing for one series and
-    /// to a value for another, so it may write. A `label_join` with no source labels joins nothing
-    /// and is always empty.
+    /// Whether this change can write a nonempty value. When it cannot, it only removes the
+    /// destination label. Judged from the template as written, since `$1` may expand to nothing.
     pub fn writes_value(&self) -> bool {
         match &self.0 {
             Change::Replace { replacement, .. } => !replacement.is_empty(),
@@ -309,13 +301,9 @@ impl LabelRewrite {
         }))
     }
 
-    /// An upper bound on the bytes the label this change writes to `metric` takes, read before it
-    /// is built.
-    ///
-    /// The written value can be far larger than the input: `label_join` concatenates its sources,
-    /// listed any number of times, and every `$` reference of a `label_replace` template can expand
-    /// to the whole source value. The bound counts each source once per listing and each `$` as
-    /// one whole source value.
+    /// An upper bound on the bytes of the label this change writes to `metric`, computable before
+    /// applying it. Each `$` in a template counts as one whole source value, and each `label_join`
+    /// source once per listing.
     pub fn written_bytes(&self, metric: &SeriesLabels) -> usize {
         let value = |name: &str| metric.get(name).map_or(0, str::len);
         match &self.0 {
@@ -342,7 +330,6 @@ impl LabelRewrite {
         }
     }
 
-    /// Changes `metric` the way the function changes one series.
     pub fn apply(&self, metric: &mut SeriesLabels) -> Result<()> {
         let mut value = String::new();
         match &self.0 {

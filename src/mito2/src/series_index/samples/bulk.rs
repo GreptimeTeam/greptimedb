@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, Float64Array, Int64Array, UInt8Array, UInt64Array,
+    Array, ArrayRef, AsArray, BinaryArray, Float64Array, Int64Array, StructArray, UInt8Array,
+    UInt64Array,
 };
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::{DataType, SchemaRef};
@@ -27,6 +28,7 @@ use snafu::ResultExt;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, Result};
+use crate::series_index::samples::histogram::{self, ChunkBound};
 use crate::series_index::samples::{MAX_ROWS, codec, invalid, require};
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +48,7 @@ enum NarthexBulkColumn {
     Key,
     Numbers { encoding: u16, bytes: Bytes },
     Float { nulls: u32, bytes: Bytes },
+    Histogram { nulls: u32, bytes: Bytes },
     Operations { encoding: u16, bytes: Bytes },
 }
 
@@ -63,13 +66,26 @@ impl NarthexBulkPart {
             .downcast_ref::<BinaryArray>()
             .ok_or_else(|| invalid("narthex bulk key must be binary"))?;
         require(keys.null_count() == 0, "narthex bulk key must not be null")?;
+        let histograms = batch
+            .columns()
+            .iter()
+            .filter_map(|column| column.as_struct_opt())
+            .collect::<Vec<_>>();
         let mut start = 0;
         while start < batch.num_rows() {
+            // A block also ends before its histogram chunks would outgrow the limit the samples
+            // writer packs them to, so both decode with the same bounds.
+            let mut bounds = histogram_bounds(&histograms, &[], start)
+                .ok_or_else(|| invalid("native histogram sample exceeds the chunk limit"))?;
             let mut end = start + 1;
             while end < batch.num_rows()
                 && end - start < MAX_ROWS
                 && keys.value(end) == keys.value(start)
             {
+                let Some(next) = histogram_bounds(&histograms, &bounds, end) else {
+                    break;
+                };
+                bounds = next;
                 end += 1;
             }
             let slice = batch.slice(start, end - start);
@@ -94,6 +110,15 @@ impl NarthexBulkPart {
                             NarthexBulkColumn::Float {
                                 nulls: array.null_count() as u32,
                                 bytes: codec::encode_float(&bits).into(),
+                            }
+                        }
+                        DataType::Struct(_) => {
+                            let values = array
+                                .as_struct_opt()
+                                .ok_or_else(|| invalid("invalid narthex bulk histogram column"))?;
+                            NarthexBulkColumn::Histogram {
+                                nulls: array.null_count() as u32,
+                                bytes: histogram::encode(values)?.into(),
                             }
                         }
                         DataType::Timestamp(_, _) => {
@@ -168,6 +193,7 @@ impl NarthexBulkPart {
                                     NarthexBulkColumn::Key => 0,
                                     NarthexBulkColumn::Numbers { bytes, .. }
                                     | NarthexBulkColumn::Float { bytes, .. }
+                                    | NarthexBulkColumn::Histogram { bytes, .. }
                                     | NarthexBulkColumn::Operations { bytes, .. } => bytes.len(),
                                 }
                         })
@@ -191,44 +217,69 @@ impl NarthexBulkPart {
     }
 }
 
+/// Each histogram column's chunk bound with row `row` appended to `bounds`, or `None` when a
+/// chunk would no longer fit. An empty `bounds` starts a block.
+fn histogram_bounds(
+    histograms: &[&StructArray],
+    bounds: &[ChunkBound],
+    row: usize,
+) -> Option<Vec<ChunkBound>> {
+    histograms
+        .iter()
+        .enumerate()
+        .map(|(i, array)| {
+            bounds
+                .get(i)
+                .copied()
+                .unwrap_or_default()
+                .with_row(array, row)
+        })
+        .collect()
+}
+
 impl NarthexBulkBlock {
     fn decode(&self, schema: SchemaRef) -> Result<RecordBatch> {
-        let columns = self
-            .columns
-            .iter()
-            .zip(schema.fields())
-            .map(|(column, field)| {
-                let array: ArrayRef = match column {
-                    NarthexBulkColumn::Key => {
-                        let array: ArrayRef = Arc::new(BinaryArray::from_iter_values(
-                            std::iter::repeat_n(self.key.as_ref(), self.rows),
-                        ));
-                        cast(&array, field.data_type()).context(ComputeArrowSnafu)?
-                    }
-                    NarthexBulkColumn::Numbers { encoding, bytes } => {
-                        let values = codec::decode_numbers(bytes, *encoding, self.rows)?;
-                        if matches!(field.data_type(), DataType::Timestamp(_, _)) {
-                            let array: ArrayRef = Arc::new(Int64Array::from(
-                                values.into_iter().map(|v| v as i64).collect::<Vec<_>>(),
+        let columns =
+            self.columns
+                .iter()
+                .zip(schema.fields())
+                .map(|(column, field)| {
+                    let array: ArrayRef = match column {
+                        NarthexBulkColumn::Key => {
+                            let array: ArrayRef = Arc::new(BinaryArray::from_iter_values(
+                                std::iter::repeat_n(self.key.as_ref(), self.rows),
                             ));
                             cast(&array, field.data_type()).context(ComputeArrowSnafu)?
-                        } else {
-                            Arc::new(UInt64Array::from(values))
                         }
-                    }
-                    NarthexBulkColumn::Float { bytes, nulls } => Arc::new(Float64Array::from(
-                        codec::decode_float(bytes, self.rows, *nulls)?
-                            .into_iter()
-                            .map(|v| v.map(f64::from_bits))
-                            .collect::<Vec<_>>(),
-                    )),
-                    NarthexBulkColumn::Operations { encoding, bytes } => Arc::new(
-                        UInt8Array::from(codec::decode_operations(bytes, *encoding, self.rows)?),
-                    ),
-                };
-                Ok(array)
-            })
-            .collect::<Result<Vec<_>>>()?;
+                        NarthexBulkColumn::Numbers { encoding, bytes } => {
+                            let values = codec::decode_numbers(bytes, *encoding, self.rows)?;
+                            if matches!(field.data_type(), DataType::Timestamp(_, _)) {
+                                let array: ArrayRef = Arc::new(Int64Array::from(
+                                    values.into_iter().map(|v| v as i64).collect::<Vec<_>>(),
+                                ));
+                                cast(&array, field.data_type()).context(ComputeArrowSnafu)?
+                            } else {
+                                Arc::new(UInt64Array::from(values))
+                            }
+                        }
+                        NarthexBulkColumn::Float { bytes, nulls } => Arc::new(Float64Array::from(
+                            codec::decode_float(bytes, self.rows, *nulls)?
+                                .into_iter()
+                                .map(|v| v.map(f64::from_bits))
+                                .collect::<Vec<_>>(),
+                        )),
+                        NarthexBulkColumn::Histogram { bytes, nulls } => Arc::new(
+                            histogram::decode(bytes, field.data_type(), self.rows, *nulls)?,
+                        ),
+                        NarthexBulkColumn::Operations { encoding, bytes } => {
+                            Arc::new(UInt8Array::from(codec::decode_operations(
+                                bytes, *encoding, self.rows,
+                            )?))
+                        }
+                    };
+                    Ok(array)
+                })
+                .collect::<Result<Vec<_>>>()?;
         RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)
     }
 }
@@ -239,6 +290,72 @@ mod tests {
     use datatypes::arrow::array::TimestampMillisecondArray;
     use datatypes::arrow::datatypes::{Field, Schema, TimeUnit};
     use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
+
+    /// Large histograms of one series are cut into blocks whose chunks stay within the samples
+    /// chunk limit, and the blocks read back as the input.
+    #[test]
+    fn narthex_bulk_splits_histogram_blocks_by_chunk_limit() {
+        use datatypes::arrow::compute::concat_batches;
+
+        use crate::series_index::samples::metadata::CHUNK_LIMIT;
+        use crate::series_index::samples::{TestHistogram, histogram_array};
+
+        let histograms = histogram_array(
+            &(0..24)
+                .map(|i| {
+                    Some(TestHistogram {
+                        sum: i as f64,
+                        positive_spans: vec![(0, 8000)],
+                        floats: Some((
+                            8000.0,
+                            0.0,
+                            (0..8000).map(|j| ((i * 8000 + j) as f64).sqrt()).collect(),
+                            vec![],
+                        )),
+                        ..Default::default()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert!(histogram::encode(&histograms).unwrap().len() > CHUNK_LIMIT);
+        let rows = histograms.len();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", histograms.data_type().clone(), true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
+            Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false),
+            Field::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(histograms),
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..rows as i64)),
+                Arc::new(BinaryArray::from_iter_values(vec![b"a".as_slice(); rows])),
+                Arc::new(UInt64Array::from(vec![1; rows])),
+                Arc::new(UInt8Array::from(vec![1; rows])),
+            ],
+        )
+        .unwrap();
+        let mut part = NarthexBulkPart::default();
+        part.push(&batch).unwrap();
+        assert!(part.blocks.len() > 1);
+        for block in part.blocks.iter() {
+            let NarthexBulkColumn::Histogram { bytes, .. } = &block.columns[0] else {
+                panic!("the first column is the histogram field");
+            };
+            assert!(bytes.len() <= CHUNK_LIMIT);
+        }
+        let decoded = part
+            .read(schema.clone())
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(batch, concat_batches(&schema, &decoded).unwrap());
+    }
 
     #[test]
     fn narthex_bulk_codec_preserves_keys_nulls_sequences_and_float_bits() {

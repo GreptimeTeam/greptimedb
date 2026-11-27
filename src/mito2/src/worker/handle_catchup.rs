@@ -27,16 +27,17 @@ use tokio::sync::mpsc::Sender;
 
 use crate::config::IndexBuildMode;
 use crate::error::{self, Result};
-use crate::region::catchup::RegionCatchupTask;
+use crate::region::catchup::{RegionCatchupTask, hand_over};
 use crate::region::opener::RegionOpener;
 use crate::region::{
     CatchupRegionsRef, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
 };
 use crate::request::{
-    BackgroundNotify, BuildIndexRequest, CaughtUpAgain, OptionOutputTx, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, CaughtUpAgain, HandedOver, OptionOutputTx,
+    WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
-use crate::tail_replay::notify_worker;
+use crate::tail_replay::{notify_worker, release_wal_to_replay_start};
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
@@ -46,12 +47,15 @@ use crate::worker::{
 };
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Catches the region up from its WAL. A region that awaits its Leader lease is caught up
-    /// again into a replacement instance, which replaces it only if the replay succeeds, see
-    /// [Self::catch_up_again]. The replacement holds only the rows its WAL replays: unflushed rows
-    /// written with `skip_wal`, and unflushed rows under a local WAL, are dropped, while flushed
-    /// rows stay in its SSTs. Only a catchup with `set_writable` promotes the region again. The
-    /// replay of a remote WAL first waits until the entries the region acknowledged are durable.
+    /// Catches the region up from its WAL, or, for a region whose manifest is published
+    /// conditionally and a catchup that makes it writable and carries the entry its source
+    /// reported, hands it over from that source without replaying (see [hand_over]). A region
+    /// that awaits its Leader lease is caught up again into a replacement instance, which
+    /// replaces it only if the replay succeeds, see [Self::catch_up_again]. The replacement holds
+    /// only the rows its WAL replays: unflushed rows written with `skip_wal`, and unflushed rows
+    /// under a local WAL, are dropped, while flushed rows stay in its SSTs. Only a catchup with
+    /// `set_writable` promotes the region again. The replay of a remote WAL first waits until the
+    /// entries the region acknowledged are durable.
     pub(crate) async fn handle_catchup_request(
         &mut self,
         region_id: RegionId,
@@ -93,6 +97,32 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        // A catchup that makes a region whose manifest is published conditionally writable, and
+        // carries the last entry its source reported, hands the region over from that source,
+        // replaying nothing. Its memtable must be empty: the hand-off floor would skip the entries
+        // of the rows it holds, and a reopen would drop them, which for rows written without the
+        // WAL is their only copy. The refused region keeps its rows as a Follower; a retry succeeds
+        // once a Leader lease has made it writable again (the catchup is then skipped) or it was
+        // reopened without those rows.
+        let handover = if request.set_writable && region.manifest_ctx.is_conditional_publication() {
+            request.entry_id
+        } else {
+            None
+        };
+        // A tail replay that has not reported its end may still have a committed edit for the
+        // worker to apply. A handover's edit applied first changes the version's pending tails,
+        // so the worker would skip the replay's edit and leave its SSTs out of the version.
+        if handover.is_some()
+            && (!region.version().memtables.is_empty()
+                || self.tail_replays.contains_key(&region_id))
+        {
+            warn!(
+                "Region {region_id} has rows in its memtable or a running tail replay, refusing to hand it over"
+            );
+            region.manifest_ctx.end_catchup();
+            sender.send(Err(error::RegionBusySnafu { region_id }.build()));
+            return;
+        }
         // The worker writes a region inline, so every write acknowledged so far has an entry id
         // at or below this one.
         let last_entry_id = region.version_control.current().last_entry_id;
@@ -111,19 +141,41 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
         let node_lease = self.node_lease.clone();
+        let node_id = self.file_ref_manager.node_id();
         common_runtime::spawn_global(async move {
-            let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
-                .with_entry_receiver(entry_receiver)
-                .with_expected_last_entry_id(request.entry_id)
-                .with_set_writable(request.set_writable)
-                .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id))
-                .with_acknowledged_entry_id(last_entry_id);
-
             // Under conditional manifest publication, the region becomes writable only once its
             // catchup committed the next manifest version.
-            let result = match task.run().await {
-                Ok(_) if request.set_writable => region.manifest_ctx.commit_catchup().await,
-                result => result.map(|()| None),
+            let result = match handover {
+                Some(entry_id) => {
+                    match hand_over(&region, &wal, node_id, request.source_node_id, entry_id).await
+                    {
+                        Ok((hook, edit)) => {
+                            hook.fire().await;
+                            // The worker applies the edit and promotes the region.
+                            let notify = BackgroundNotify::HandedOver(HandedOver {
+                                region,
+                                edit,
+                                sender: finish.sender,
+                            });
+                            notify_worker(&finish.worker_sender, region_id, notify).await;
+                            return;
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                None => {
+                    let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
+                        .with_entry_receiver(entry_receiver)
+                        .with_expected_last_entry_id(request.entry_id)
+                        .with_set_writable(request.set_writable)
+                        .with_node_id(node_id)
+                        .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id))
+                        .with_acknowledged_entry_id(last_entry_id);
+                    match task.run().await {
+                        Ok(_) if request.set_writable => region.manifest_ctx.commit_catchup().await,
+                        result => result.map(|()| None),
+                    }
+                }
             };
             match result {
                 Ok(hook) => {
@@ -191,6 +243,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let manifest_version = region.manifest_ctx.manifest_version().await;
         self.catchup_regions.insert_region(region_id);
         let wal = self.wal.clone();
+        let node_id = self.file_ref_manager.node_id();
         let config = self.config.clone();
         let worker_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
@@ -198,6 +251,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let replacement = opener.open(&config, &wal).await?;
                 RegionCatchupTask::new(replacement.clone(), wal, config.allow_stale_entries)
                     .with_entry_receiver(entry_receiver)
+                    .with_node_id(node_id)
                     .with_expected_last_entry_id(request.entry_id)
                     .with_set_writable(request.set_writable)
                     .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id))
@@ -317,6 +371,69 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         common_runtime::spawn_global(async move {
             finish.run(promoted).await;
         });
+    }
+
+    /// Applies the edit a catchup committed for the handover of a region and promotes the
+    /// region, on the worker, in order with the edits of flushes and compactions. Ends the catchup
+    /// with an error if the region was replaced or stopped since; the committed edit stays in the
+    /// manifest, which the next open recovers, and this node's WAL is still released up to the
+    /// committed manifest's replay start, capped by this node's pending tails, before the reply.
+    pub(crate) fn handle_handed_over(&mut self, region_id: RegionId, handed_over: HandedOver) {
+        let HandedOver {
+            region,
+            edit,
+            sender,
+        } = handed_over;
+        let registered = self
+            .regions
+            .get_region(region_id)
+            .is_some_and(|registered| Arc::ptr_eq(&registered, &region));
+        if !registered || region.manifest_ctx.is_stopped() {
+            warn!("Region {region_id} was replaced or stopped before its handover applied");
+            region.manifest_ctx.end_catchup();
+            self.catchup_regions.remove_region(region_id);
+            let error = error::RegionNotFoundSnafu { region_id }.build();
+            // The committed handover still releases this node's entries up to where the committed
+            // manifest replays its WAL, keeping this node's pending tails.
+            let wal = self.wal.clone();
+            let node_id = self.file_ref_manager.node_id();
+            common_runtime::spawn_global(async move {
+                release_wal_to_replay_start(&region, &wal, node_id).await;
+                sender.send(Err(error));
+            });
+            return;
+        }
+        if let Some(edit) = edit {
+            region
+                .version_control
+                .apply_edit(Some(edit), &[], region.file_purger.clone());
+        }
+        // The region takes writes under the node lease until its next Leader grant.
+        self.node_lease.seed(&region.manifest_ctx.leader_deadline);
+        let promoted = region.manifest_ctx.promote_after_catchup(region_id);
+        let finish = self.catchup_finish(region.clone(), sender);
+        let wal = self.wal.clone();
+        let node_id = self.file_ref_manager.node_id();
+        // The finish drains through this worker, so it must not be awaited here.
+        common_runtime::spawn_global(async move {
+            // A handover replayed nothing, so this node's entries up to its handoff floor are
+            // released here, keeping its pending tails. The committed manifest alone decides the
+            // release, so it does not depend on the promotion.
+            release_wal_to_replay_start(&region, &wal, node_id).await;
+            finish.run(promoted).await;
+        });
+    }
+
+    /// Returns whether a manifest sync or a follower's option change of `region` is refused
+    /// with RegionBusy: the instance is in a catchup, which replays the WAL into its memtable and
+    /// reads its options and manifest outside the worker, or it is fenced while the worker holds
+    /// a catchup or reload registration for the region. A reload reopens the region with the
+    /// options it read when it began, which would drop an option change; a sync shares the
+    /// predicate.
+    pub(crate) fn is_catching_up_or_reloading(&self, region: &MitoRegion) -> bool {
+        region.manifest_ctx.is_catching_up()
+            || (self.catchup_regions.is_region_exists(region.region_id)
+                && region.manifest_ctx.is_reload_pending())
     }
 
     fn catchup_finish(&self, region: MitoRegionRef, sender: OptionOutputTx) -> CatchupFinish {
