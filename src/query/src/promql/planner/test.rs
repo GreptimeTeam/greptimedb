@@ -2555,9 +2555,11 @@ async fn native_metric_discovery_without_a_matching_metric_answers_absent_and_or
 /// vector, with the layout any one-field selection publishes: the time index, the value named after
 /// the expression, and the labels. The frame is what the matcher decides, not the answer.
 ///
-/// A matcher whose answer is a set over a table's field columns - `!=`, `=~`, `!~` - has no such
-/// columns to read here, so that selection keeps the existing plan rather than claiming a layout
-/// nothing decided; `native_empty_discovery_keeps_a_field_operator_it_cannot_apply` holds that.
+/// A matcher whose answer is a set over a table's field columns - `!=`, `=~`, `!~` - states no name
+/// of its own, so it keeps or drops the one field this route declares for a selection that names no
+/// field: `native_empty_discovery_applies_a_field_operator_to_the_default_field` holds the layouts
+/// that answers, and `native_empty_discovery_keeps_a_field_operator_it_cannot_apply` the ones that
+/// leave nothing to declare.
 #[tokio::test]
 async fn native_empty_discovery_declares_the_field_its_matcher_names() {
     let layout = |plan: &LogicalPlan| {
@@ -2613,18 +2615,22 @@ async fn native_empty_discovery_declares_the_field_its_matcher_names() {
     }
 }
 
-/// The zero-match answer of a `__field__` operator this route cannot apply keeps the existing plan.
+/// The zero-match answer of a `__field__` operator that drops the one field this route can state
+/// keeps the existing plan.
 ///
 /// The field operators other than `=` keep or drop columns by a rule over every field a table
-/// carries, and an input that reads no table has none: there is no layout to state, so the
-/// selection is not one this route answers and the statement is planned the way it was without the
-/// route - the existing planner's own answer, including the refusal it raises when it has no table
-/// to bind.
+/// carries, and an input that reads no table carries none: the one name it can be given is the
+/// default field this route declares for a selection that names no field, and a rule that drops
+/// that name leaves no layout to state. Such a selection is not one this route answers and the
+/// statement is planned the way it was without the route - the existing planner's own answer,
+/// including the refusal it raises when it has no table to bind.
 #[tokio::test]
 async fn native_empty_discovery_keeps_a_field_operator_it_cannot_apply() {
     for query in [
+        // The default field this route declares is `value`, which each of these rules drops.
         r#"{__field__=~"field.*", job="api"}"#,
-        r#"{__field__!="field_0", job="api"}"#,
+        r#"{__field__!="value", job="api"}"#,
+        r#"{__field__!~"value", job="api"}"#,
     ] {
         let native = PromPlanner::stmt_to_plan_with_annotations(
             metric_discovery_provider(&["alpha_total", "beta_total"]).await,
@@ -2667,6 +2673,70 @@ async fn native_empty_discovery_keeps_a_field_operator_it_cannot_apply() {
                 without_flag.is_ok()
             ),
         }
+    }
+}
+
+/// A `__field__` operator that keeps the one field a zero-match selection can be given answers the
+/// empty vector.
+///
+/// The operators other than `=` state no name of their own; the name an input that reads no table
+/// can be given is the default field this route declares for a selection that names no field, and
+/// these operators keep or drop exactly that name. A rule that keeps it leaves a layout to state,
+/// so the selection is planned here - where without the route the statement is refused, because the
+/// existing planner has no table to bind - and answers the rows a selection over no metric answers:
+/// none, whatever its `__field__` matcher says.
+#[tokio::test]
+async fn native_empty_discovery_applies_a_field_operator_to_the_default_field() {
+    // The same statement without a matcher: the value column is named after the expression, so the
+    // rows layouts are compared by the types they carry rather than by that name.
+    let (plain, _) = execute_no_match_discovery(r#"{job="api"}"#).await;
+    let layout = |plan: &LogicalPlan| {
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>()
+    };
+    for query in [
+        // `field_0` is not the default field, so the rule keeps it.
+        r#"{__field__!="field_0", job="api"}"#,
+        r#"{__field__!~"field.*", job="api"}"#,
+        r#"{__field__=~"value", job="api"}"#,
+        r#"{__field__=~".*", job="api"}"#,
+    ] {
+        let (plan, batches) = execute_no_match_discovery(query).await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` left the native route: {plan:?}"
+        );
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a selection that matches no metric: {plan:?}"
+        );
+        // The one input is the typed empty frame, and it declares the default field: the only name
+        // an input that reads no table can be given reports the layout one field publishes.
+        let fused = find_fused_series(&plan).expect("the plan is the native one");
+        let [LogicalPlan::EmptyRelation(relation)] = fused.children() else {
+            panic!("`{query}`: the empty input is the node's only child: {plan:?}");
+        };
+        let declaration = SeriesFrameDeclaration::parse(relation.schema.as_arrow())
+            .unwrap_or_else(|error| panic!("`{query}` declares no raw series frame: {error}"));
+        assert_eq!(
+            vec!["value".to_string()],
+            declaration
+                .series()
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect::<Vec<_>>(),
+            "`{query}`: the empty frame declares the one field the rule kept"
+        );
+        assert_eq!(
+            layout(&plain),
+            layout(&plan),
+            "`{query}` publishes the layout a selection of one field publishes: {plan:?}"
+        );
     }
 }
 
