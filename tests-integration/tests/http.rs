@@ -7931,10 +7931,14 @@ pub async fn test_remote_write_v2_histogram_fold_above_split_native_route(store_
     // Rewriting `instance` away gives two series of each job one label set. Prometheus refuses
     // that before anything folds them, and both routes report the collision.
     let collapsed = r#"sum(label_replace(nh_seg, "instance", "z", "instance", ".*"))"#;
-    for hints in [
-        "query.experimental_native_promql=true,query_parallelism=4",
-        "query.experimental_native_promql=false",
+    for (hints, native) in [
+        (
+            "query.experimental_native_promql=true,query_parallelism=4",
+            true,
+        ),
+        ("query.experimental_native_promql=false", false),
     ] {
+        observer.clear();
         let response = client
             .get(&format!(
                 "/v1/prometheus/api/v1/query?query={}&time=2",
@@ -7950,6 +7954,9 @@ pub async fn test_remote_write_v2_histogram_fold_above_split_native_route(store_
                 && body.contains("vector cannot contain metrics with the same labelset"),
             "`{collapsed}` with {hints}: {status} {body}"
         );
+        if native {
+            assert_outer_sum_folded_natively(&observer.take_all(collapsed), collapsed);
+        }
     }
     // The same folds over a range: every step folds all four series once.
     for query in ["sum(sum by (job) (nh_seg))", "histogram_count(sum(nh_seg))"] {
@@ -7962,7 +7969,7 @@ pub async fn test_remote_write_v2_histogram_fold_above_split_native_route(store_
             "query.experimental_native_promql=true,query_parallelism=4",
         )
         .await;
-        observer.take_all(query);
+        assert_outer_sum_folded_natively(&observer.take_all(query), query);
         let legacy = sorted_prom_query(
             &client,
             "query_range",
@@ -7984,6 +7991,17 @@ pub async fn test_remote_write_v2_histogram_fold_above_split_native_route(store_
             "`{query}` answers steps 2, 3 and 4: {native}"
         );
     }
+}
+
+/// Asserts that the statement's outermost `sum` ran in a fused node, not only a fold below it.
+fn assert_outer_sum_folded_natively(fused: &[Arc<dyn ExecutionPlan>], query: &str) {
+    let described = describe_nodes(fused);
+    assert!(
+        described.iter().any(|node| node
+            .lines()
+            .any(|line| line.trim_start().starts_with("Aggregate: sum by [] "))),
+        "`{query}` did not run its outer fold natively: {described:?}"
+    );
 }
 
 /// A point whose samples disagree on their bucket layout is removed, and the response says why.
