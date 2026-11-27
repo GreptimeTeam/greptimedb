@@ -824,6 +824,7 @@ async fn test_narthex_copy_and_remap(
             .unwrap();
         let result = engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: source,
                 input_regions: vec![source],
                 region_mapping: HashMap::from([(source, vec![target])]),

@@ -103,7 +103,7 @@ async fn test_delayed_series_index_notification_after_removal() -> WhateverResul
                             ..Default::default()
                         },
                         waiters: crate::request::Waiters::one(tx),
-                        result: Ok(()),
+                        result: Ok(crate::request::RegionEditOutcome::Written),
                         is_staging: false,
                         preload_sst_cache: false,
                         update_region_state: false,
