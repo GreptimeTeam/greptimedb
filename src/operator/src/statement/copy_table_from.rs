@@ -31,9 +31,11 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{
     LocalFileAccess, RemoteStorageAccess, build_backend_with_path,
 };
+use common_error::ext::{BoxedError, ErrorExt};
 use common_query::{OutputCost, OutputRows};
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
+use common_recordbatch::error::Error as RecordBatchError;
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::physical_plan::{CsvSource, FileSource, JsonSource};
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
@@ -234,6 +236,7 @@ impl StatementExecutor {
         file_metadata: &FileMetadata,
         projection: Vec<usize>,
         filters: Vec<Expr>,
+        primary_key_columns: Vec<String>,
     ) -> Result<DfSendableRecordBatchStream> {
         match file_metadata {
             FileMetadata::Csv {
@@ -285,6 +288,7 @@ impl StatementExecutor {
                     // The projection is already applied in the CSV reader when we created the stream,
                     // so we pass None here to avoid double projection which would cause schema mismatch errors.
                     RecordBatchStreamTypeAdapter::new(output_schema, stream, None)
+                        .with_primary_key_columns(primary_key_columns.clone())
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 );
@@ -343,6 +347,7 @@ impl StatementExecutor {
                     // The projection is already applied in the JSON reader when we created the stream,
                     // so we pass None here to avoid double projection which would cause schema mismatch errors.
                     RecordBatchStreamTypeAdapter::new(output_schema, stream, None)
+                        .with_primary_key_columns(primary_key_columns.clone())
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 ))
@@ -374,6 +379,7 @@ impl StatementExecutor {
                 );
                 Ok(Box::pin(
                     RecordBatchStreamTypeAdapter::new(output_schema, stream, Some(projection))
+                        .with_primary_key_columns(primary_key_columns.clone())
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 ))
@@ -402,6 +408,7 @@ impl StatementExecutor {
 
                 Ok(Box::pin(
                     RecordBatchStreamTypeAdapter::new(output_schema, stream, Some(projection))
+                        .with_primary_key_columns(primary_key_columns.clone())
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 ))
@@ -444,11 +451,10 @@ impl StatementExecutor {
             .with_batch_size(DEFAULT_BATCH_SIZE)
             .build()
             .context(error::BuildParquetRecordBatchStreamSnafu)?;
-        let mut stream = Box::pin(RecordBatchStreamTypeAdapter::new(
-            target_schema.clone(),
-            stream,
-            Some(file_projection),
-        ));
+        let mut stream = Box::pin(
+            RecordBatchStreamTypeAdapter::new(target_schema.clone(), stream, Some(file_projection))
+                .with_primary_key_columns(primary_key_column_names(&table)),
+        );
         let info = table.table_info();
         let mut rows = 0u64;
         loop {
@@ -520,6 +526,7 @@ impl StatementExecutor {
             table: &req.table_name,
         };
         let table = self.get_table(&table_ref).await?;
+        let primary_key_columns = primary_key_column_names(&table);
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         let (object_store, paths) =
             list_copy_from_paths(&req, &self.local_file_access, &self.remote_storage_access)
@@ -591,6 +598,7 @@ impl StatementExecutor {
                     &file_metadata,
                     file_schema_projection,
                     filters.clone(),
+                    primary_key_columns.clone(),
                 )
                 .await?;
 
@@ -722,9 +730,20 @@ impl futures::Stream for SkipBadRecordsStream {
 fn is_skippable_record_error(error: &DataFusionError) -> bool {
     match error {
         DataFusionError::ArrowError(error, _) => is_skippable_arrow_error(error),
-        DataFusionError::External(error) => error
-            .downcast_ref::<ArrowError>()
-            .is_some_and(is_skippable_arrow_error),
+        DataFusionError::External(error) => {
+            error
+                .downcast_ref::<ArrowError>()
+                .is_some_and(is_skippable_arrow_error)
+                // A payload that is neither JSON text nor binary jsonb is a bad
+                // record too: `skip_bad_records` asks to drop the rows that cannot
+                // be written.
+                || error
+                    .downcast_ref::<BoxedError>()
+                    .and_then(|error| error.as_any().downcast_ref::<RecordBatchError>())
+                    .is_some_and(|error| {
+                        matches!(error, RecordBatchError::InvalidJsonbPayload { .. })
+                    })
+        }
         DataFusionError::Context(_, error) => is_skippable_record_error(error),
         _ => false,
     }
@@ -875,6 +894,20 @@ fn can_csv_reader_parse_type(data_type: &ArrowDataType) -> bool {
         ArrowDataType::Dictionary(_, value_type) => value_type.as_ref() == &ArrowDataType::Utf8,
         _ => false,
     }
+}
+
+/// Names of the primary-key columns of `table`.
+///
+/// The COPY adapter hands them to [`RecordBatchStreamTypeAdapter::with_primary_key_columns`],
+/// which applies the same JSON-key rule as
+/// [`common_recordbatch::JsonPayloadPolicy`].
+fn primary_key_column_names(table: &table::TableRef) -> Vec<String> {
+    table
+        .table_info()
+        .meta
+        .row_key_column_names()
+        .cloned()
+        .collect()
 }
 
 fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
@@ -1059,6 +1092,61 @@ mod tests {
             timestamp_range: None,
             limit: None,
         }
+    }
+
+    /// An invalid JSON payload in a file is a problem with the user's data, so the
+    /// COPY error has to be classified as a user error (`InvalidArguments`), not as
+    /// an internal one. The adapter is what COPY uses to cast a file batch into the
+    /// table schema, and `ReadDfRecordBatch` is where its error is wrapped.
+    #[tokio::test]
+    async fn test_invalid_json_payload_is_a_user_error() {
+        use common_error::status_code::StatusCode;
+        use common_recordbatch::DfRecordBatch;
+        use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
+        use datatypes::arrow::array::StringArray;
+        use datatypes::schema::TYPE_KEY;
+        use futures::StreamExt;
+        use snafu::IntoError;
+
+        let target_schema = Arc::new(Schema::new(vec![
+            Field::new("j", DataType::Binary, true)
+                .with_metadata(HashMap::from([(TYPE_KEY.to_string(), "Json".to_string())])),
+        ]));
+        let input_schema = Arc::new(Schema::new(vec![Field::new("j", DataType::Utf8, true)]));
+        let input = DfRecordBatch::try_new(
+            input_schema,
+            vec![Arc::new(StringArray::from(vec![r#"{"a":}"#]))],
+        )
+        .unwrap();
+
+        let stream = futures::stream::iter(vec![Ok::<_, ArrowError>(input)]);
+        let mut adapter = Box::pin(RecordBatchStreamTypeAdapter::new(
+            target_schema,
+            stream,
+            None,
+        ));
+
+        let error = adapter
+            .next()
+            .await
+            .expect("the stream yields the invalid batch")
+            .expect_err("the invalid payload must be rejected");
+        let error = error::ReadDfRecordBatchSnafu.into_error(error);
+
+        assert_eq!(
+            StatusCode::InvalidArguments,
+            error.status_code(),
+            "unexpected classification: {error}"
+        );
+        assert!(
+            is_skippable_record_error(&DataFusionError::External(Box::new(BoxedError::new(
+                RecordBatchError::InvalidJsonbPayload {
+                    reason: "test".to_string(),
+                    location: snafu::Location::default(),
+                }
+            )))),
+            "skip_bad_records must still skip an invalid JSON payload"
+        );
     }
 
     #[tokio::test]

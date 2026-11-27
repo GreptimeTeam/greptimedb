@@ -141,6 +141,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid value for a JSON column: {}", reason))]
+    InvalidJsonbPayload {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported operation: {}", reason))]
     UnsupportedOperation {
         reason: String,
@@ -195,7 +202,8 @@ impl ErrorExt for Error {
         match self {
             Error::NewDfRecordBatch { .. }
             | Error::EmptyStream { .. }
-            | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
+            | Error::SchemaNotMatch { .. }
+            | Error::InvalidJsonbPayload { .. } => StatusCode::InvalidArguments,
 
             Error::DataTypes { .. }
             | Error::CreateRecordBatches { .. }
