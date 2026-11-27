@@ -1451,17 +1451,14 @@ impl RangeEvaluator {
                     // window head decides: a later one cannot be inside this window if this one
                     // is not. The check runs only when a batch kernel is set, so a function
                     // without one never pays for it.
-                    let histogram_window = !delta
+                    let batched = !delta
                         && self.batch.is_some()
-                        && self.fields.iter().any(|field| {
+                        && !self.fields.iter().any(|field| {
                             field.histograms.get(field.histogram_head).is_some_and(
                                 |(timestamp, _)| i128::from(*timestamp) <= i128::from(eval_ts),
                             )
                         });
-                    if let Some(kernel) = self.batch.as_mut()
-                        && !histogram_window
-                        && !delta
-                    {
+                    if batched && let Some(kernel) = self.batch.as_mut() {
                         accumulate(&mut self.pending, state.cursor, eval_ts, &self.fields);
                         if self.pending.len() >= EVALUATION_BATCH {
                             flush_batch(
