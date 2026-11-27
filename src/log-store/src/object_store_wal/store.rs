@@ -206,11 +206,11 @@ pub struct UnreleasedRegions {
     /// Regions with an entry above their obsolete watermark in an indexed
     /// object.
     pub region_ids: Vec<RegionId>,
-    /// The largest entry id indexed when the regions were listed, or zero
-    /// without one. Every entry of a listed region at or below it is durable.
-    /// Every entry not yet indexed at the listing, and every entry appended
-    /// later, is above it, so a release through it keeps them, and their
-    /// region is listed again once they are indexed.
+    /// The largest entry id the store has ever indexed, or zero without one.
+    /// Every entry of a listed region at or below it is durable. Every entry
+    /// not yet indexed at the listing, and every entry appended later, is
+    /// above it, so a release through it keeps them, and their region is
+    /// listed again once they are indexed.
     pub entry_id_bound: EntryId,
 }
 
@@ -10284,9 +10284,8 @@ mod tests {
                 HashSet::from([one, two]),
                 listed.region_ids.iter().copied().collect::<HashSet<_>>()
             );
-            // In the `enqueued` mode a release through a bound that includes the
-            // open batch is clamped instead of refused, so the bound is asserted
-            // exactly.
+            // The bound is the largest indexed id: the entry in the open batch,
+            // `id(2, 1)`, is not indexed yet and is above it.
             assert_eq!(id(1, 2), listed.entry_id_bound);
             // The bound is above the largest entry of region one.
             for region_id in listed.region_ids {
