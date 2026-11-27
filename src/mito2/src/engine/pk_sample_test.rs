@@ -61,6 +61,26 @@ const STAT_KINDS: [&str; 7] = [
     "rows_filtered",
 ];
 
+/// Serializes the tests of this module that sample, and therefore touch
+/// [`PK_SAMPLE_STATS`].
+///
+/// The sampler records its work in that one process-wide counter vector: it has no
+/// per-scan handle a test could read instead (the interval travels on the scan
+/// input, but the counters are incremented through `pk_sample::inc`). A
+/// `before`/`after` difference is only meaningful while the only scans of the
+/// process are this module's own, so every test that samples -- the ones that read
+/// a difference *and* the ones that only produce increments -- holds this lock.
+///
+/// The lock costs nothing under a runner that gives each test its own process
+/// (nextest), and it keeps these tests honest under a runner that shares one
+/// process across threads (`cargo test`), where the differences would otherwise
+/// count the reads of a concurrent test.
+static PK_SAMPLE_STATS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn lock_pk_sample_stats() -> tokio::sync::MutexGuard<'static, ()> {
+    PK_SAMPLE_STATS_TEST_LOCK.lock().await
+}
+
 type Counters = BTreeMap<&'static str, u64>;
 
 fn counters() -> Counters {
@@ -127,6 +147,7 @@ fn key_rows(keys: impl Iterator<Item = usize>, ts: i64) -> Vec<api::v1::Row> {
 #[tokio::test]
 #[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
 async fn test_pk_sample_prunes_and_never_splits_a_key() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -247,6 +268,7 @@ async fn test_pk_sample_prunes_and_never_splits_a_key() {
 /// every row.
 #[tokio::test]
 async fn test_pk_sample_rejects_invalid_fraction() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1024, 1);
@@ -356,6 +378,7 @@ fn quarter_sample(filters: Vec<Expr>) -> ScanRequest {
 #[tokio::test]
 #[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
 async fn test_pk_sample_with_equality_predicate_keeps_the_key_it_reads() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(one_file_per_flush_config()).await;
     let region_id = RegionId::new(1024, 2);
@@ -405,6 +428,7 @@ async fn test_pk_sample_with_equality_predicate_keeps_the_key_it_reads() {
 #[tokio::test]
 #[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
 async fn test_pk_sample_with_range_predicate_prunes_files_it_does_not_read() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(one_file_per_flush_config()).await;
     let region_id = RegionId::new(1024, 3);
@@ -459,6 +483,7 @@ async fn test_pk_sample_with_range_predicate_prunes_files_it_does_not_read() {
 #[tokio::test]
 #[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
 async fn test_pk_sample_with_key_predicate_outside_every_file_returns_no_rows() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(one_file_per_flush_config()).await;
     let region_id = RegionId::new(1024, 4);
@@ -497,6 +522,7 @@ async fn test_pk_sample_with_key_predicate_outside_every_file_returns_no_rows() 
 #[tokio::test]
 #[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
 async fn test_pk_sample_without_key_predicate_is_unchanged() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(one_file_per_flush_config()).await;
     let region_id = RegionId::new(1024, 5);
@@ -716,6 +742,7 @@ async fn publish_file_without_key_stats(
 #[tokio::test]
 #[allow(clippy::print_stdout)] // The rejection message is this test's evidence; report it.
 async fn test_pk_sample_without_key_statistics_is_rejected() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(one_file_per_flush_config()).await;
     let region_id = RegionId::new(1024, 6);
@@ -779,6 +806,7 @@ async fn test_pk_sample_without_key_statistics_is_rejected() {
 #[tokio::test]
 #[allow(clippy::print_stdout)] // The read counts are this test's evidence; report them.
 async fn test_pk_sample_keeps_rows_of_files_without_key_statistics() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(one_file_per_flush_config()).await;
     let region_id = RegionId::new(1024, 7);
@@ -851,6 +879,7 @@ async fn test_pk_sample_keeps_rows_of_files_without_key_statistics() {
 /// not errors: there is nothing to sample in either case.
 #[tokio::test]
 async fn test_pk_sample_of_nothing_is_not_an_error() {
+    let _guard = lock_pk_sample_stats().await;
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(one_file_per_flush_config()).await;
 
