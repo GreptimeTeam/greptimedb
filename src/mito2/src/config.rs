@@ -253,7 +253,10 @@ pub struct MitoConfig {
 
     /// Answers eligible scalar COUNT queries from manifest row counts instead
     /// of scanning SST rows. May read Parquet footers to prove uniqueness and
-    /// the absence of deletes.
+    /// the absence of deletes. Footer reads use `sst_meta_cache` outside
+    /// `query.scan_memory_limit` and `query.memory_pool_size`.
+    /// Partial counts use captured source containers without a single-instant
+    /// snapshot across partitions. Append-mode scans only use full metadata counts.
     pub experimental_metadata_aggr: bool,
 
     pub gc: GcConfig,

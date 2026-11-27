@@ -43,7 +43,15 @@ use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Presence certifies at most one physical row per (primary key, timestamp).
 /// The value has no meaning. Any new claim must use a different key.
-pub(crate) const DEDUPED_SST_KEY: &str = "greptimedb.deduped";
+pub const DEDUPED_SST_KEY: &str = "greptimedb.deduped";
+
+/// Whether the footer carries a writer's deduplication claim.
+pub fn has_deduped_sst_marker(metadata: &ParquetMetaData) -> bool {
+    metadata
+        .file_metadata()
+        .key_value_metadata()
+        .is_some_and(|entries| entries.iter().any(|entry| entry.key == DEDUPED_SST_KEY))
+}
 
 /// The estimated size of the footer and metadata need to read from the end of parquet file.
 const DEFAULT_PREFETCH_SIZE: u64 = 64 * 1024;
