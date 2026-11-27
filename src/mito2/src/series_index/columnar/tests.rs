@@ -35,11 +35,14 @@ use store_api::storage::FileId;
 use super::codec::{self, Compression};
 use super::metadata::{self, PayloadReference, Trailer};
 use super::{ColumnarSeriesFormat, Manifest};
-use crate::series_index::catalog::SeriesIndexEntry;
-use crate::series_index::format::{SeriesIndexFormat, SeriesReadRequest};
-use crate::series_index::{
-    MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
+use crate::series_index::artifact::ArtifactMetadata;
+use crate::series_index::format::SeriesReadRequest;
+use crate::series_index::format::{FormatReader, FormatWriter};
+use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN};
+use crate::sst::file::{
+    FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSeriesIndexMeta, WindowSequence,
 };
+use crate::test_util::new_noop_file_purger;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
 fn metadata() -> RegionMetadataRef {
@@ -50,19 +53,76 @@ fn metadata() -> RegionMetadataRef {
 fn store() -> ObjectStore {
     ObjectStore::new(object_store::services::Memory::default()).unwrap()
 }
-fn entry() -> SeriesIndexEntry {
-    SeriesIndexEntry {
-        artifact: None,
-        file_size: 0,
-        index_uuid: FileId::random(),
-        bucket_start: common_time::Timestamp::new_second(0),
-        bucket_end: common_time::Timestamp::new_second(100),
-        source_file_ids: Some(Vec::new()),
-        min_file_sequence: 1,
-        max_file_sequence: 2,
-        compaction_window_secs: 100,
-        window_sequences: Default::default(),
+fn entry() -> FileMeta {
+    FileMeta {
+        region_id: metadata().region_id,
+        file_id: FileId::random(),
+        time_range: (
+            common_time::Timestamp::new_second(0),
+            common_time::Timestamp::new_second(100),
+        ),
+        format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
+            manifest_size: 0,
+            parts: Default::default(),
+            window: WindowSequence {
+                start: 0,
+                end: 100,
+                max_sequence: 2,
+            },
+        })),
+        ..Default::default()
     }
+}
+
+fn region_dir() -> String {
+    format!("{}/series", metadata().region_id.as_u64())
+}
+
+impl ColumnarSeriesFormat {
+    async fn writer(
+        &self,
+        metadata: RegionMetadataRef,
+        store: ObjectStore,
+        file: &FileMeta,
+    ) -> crate::error::Result<Box<dyn FormatWriter>> {
+        Ok(self.narthex_writer(
+            metadata,
+            store,
+            file,
+            crate::sst::location::narthex_file_dir(&region_dir(), file.file_id),
+        )?)
+    }
+
+    async fn reader(
+        &self,
+        store: ObjectStore,
+        file: FileHandle,
+    ) -> crate::error::Result<Box<dyn FormatReader>> {
+        Ok(Box::new(
+            super::reader::ColumnarReader::open(store, file, &region_dir()).await?,
+        ))
+    }
+}
+
+fn index_meta(file: &mut FileMeta) -> &mut NarthexSeriesIndexMeta {
+    let FileFormat::NarthexSeriesIndex(index) = &mut file.format else {
+        panic!("expected series index");
+    };
+    index
+}
+
+fn finished_file(mut file: FileMeta, artifact: ArtifactMetadata) -> FileHandle {
+    file.file_size = artifact.file_size;
+    let (manifest, parts) = artifact.objects.split_last().unwrap();
+    let index = index_meta(&mut file);
+    index.manifest_size = manifest.file_size;
+    index.parts = parts
+        .iter()
+        .map(|p| NarthexPartMeta {
+            file_size: p.file_size,
+        })
+        .collect();
+    FileHandle::new(file, new_noop_file_purger())
 }
 fn batch(keys: &[Vec<u8>], dictionary: bool, timestamp: i64) -> RecordBatch {
     let keys: ArrayRef = if dictionary {
@@ -100,9 +160,9 @@ async fn build(
     format: &ColumnarSeriesFormat,
     store: &ObjectStore,
     batches: &[RecordBatch],
-) -> SeriesIndexFileHandle {
+) -> FileHandle {
     let meta = metadata();
-    let mut entry = entry();
+    let entry = entry();
     let mut writer = format
         .writer(meta.clone(), store.clone(), &entry)
         .await
@@ -111,21 +171,16 @@ async fn build(
         writer.write(batch).await.unwrap();
     }
     let artifact = writer.finish().await.unwrap();
-    entry.file_size = artifact.file_size;
-    entry.artifact = Some(artifact);
-    SeriesIndexFileHandle::new(meta.region_id, entry)
+    finished_file(entry, artifact)
 }
-async fn manifest(store: &ObjectStore, handle: &SeriesIndexFileHandle) -> Manifest {
-    let path = handle
-        .entry()
-        .artifact
-        .as_ref()
-        .unwrap()
-        .objects
-        .iter()
-        .find(|object| object.path.ends_with("manifest.json"))
-        .unwrap();
-    serde_json::from_slice(&store.read(&path.path).await.unwrap().to_bytes()).unwrap()
+async fn manifest(store: &ObjectStore, handle: &FileHandle) -> Manifest {
+    let objects = handle.meta_ref().narthex_objects(&region_dir()).unwrap();
+    let path = objects.last().unwrap();
+    let mut manifest: Manifest =
+        serde_json::from_slice(&store.read(&path.path).await.unwrap().to_bytes()).unwrap();
+    manifest.prefix =
+        crate::sst::location::narthex_file_dir(&region_dir(), handle.meta_ref().file_id);
+    manifest
 }
 fn request(names: &[&str]) -> SeriesReadRequest {
     SeriesReadRequest {
@@ -223,8 +278,8 @@ async fn full_key_reader_reconstructs_sparse_keys_and_counts() {
             .await
             .unwrap();
     }
-    let handle = handle_of(&store, entry, writer).await;
-    let reader = super::reader::ColumnarReader::open(store, handle)
+    let handle = handle_of(entry, writer).await;
+    let reader = super::reader::ColumnarReader::open(store, handle, &region_dir())
         .await
         .unwrap();
     let mut stream = reader.read_full_keys();
@@ -342,7 +397,7 @@ async fn aggregation_projection_and_independent_reads() {
 async fn read_rows(
     format: &ColumnarSeriesFormat,
     store: &ObjectStore,
-    handle: SeriesIndexFileHandle,
+    handle: FileHandle,
 ) -> Vec<(u64, u64, String)> {
     let batches = format
         .reader(store.clone(), handle)
@@ -384,13 +439,11 @@ async fn read_rows(
 /// Publishes a writer that was created from the returned `entry`.
 async fn handle_of(
     _store: &ObjectStore,
-    mut entry: SeriesIndexEntry,
+    entry: FileMeta,
     writer: Box<dyn crate::series_index::format::FormatWriter>,
-) -> SeriesIndexFileHandle {
+) -> FileHandle {
     let artifact = writer.finish().await.unwrap();
-    entry.file_size = artifact.file_size;
-    entry.artifact = Some(artifact);
-    SeriesIndexFileHandle::new(metadata().region_id, entry)
+    finished_file(entry, artifact)
 }
 
 /// The captured failure pair: two distinct series with one `table_id`/`tsid` whose
@@ -430,7 +483,7 @@ async fn colliding_tsids_are_retained_not_merged() {
                 .await
                 .unwrap();
         }
-        let handle = handle_of(&store, entry, writer).await;
+        let handle = handle_of(entry, writer).await;
         // Two batches of two rows per series: both rows and both label sets survive,
         // and each series keeps its own count.
         assert_eq!(
@@ -462,7 +515,7 @@ async fn many_distinct_keys_under_one_tsid_are_retained() {
             .await
             .unwrap();
         writer.write(&batch(&keys, dictionary, 0)).await.unwrap();
-        let handle = handle_of(&store, entry, writer).await;
+        let handle = handle_of(entry, writer).await;
         let rows = read_rows(&format, &store, handle).await;
         assert_eq!(rows.len(), keys.len());
         for (index, row) in rows.iter().enumerate() {
@@ -508,7 +561,7 @@ async fn same_exact_series_continues_across_batches_leaves_and_parts() {
     let rest: Vec<_> = (1..5)
         .map(|tsid| new_sparse_primary_key(&["a", "x"], &meta, 1, tsid))
         .collect();
-    let mut entry = entry();
+    let entry = entry();
     let mut writer = format
         .writer(meta.clone(), store.clone(), &entry)
         .await
@@ -526,9 +579,7 @@ async fn same_exact_series_continues_across_batches_leaves_and_parts() {
             .unwrap();
     }
     let artifact = writer.finish().await.unwrap();
-    entry.file_size = artifact.file_size;
-    entry.artifact = Some(artifact);
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
+    let handle = finished_file(entry, artifact);
     assert!(manifest(&store, &handle).await.files.len() > 1);
     let batches = format
         .reader(store.clone(), handle)
@@ -616,37 +667,29 @@ async fn inconsistent_object_sizes_are_rejected() {
         )],
     )
     .await;
-    for case in 0..6 {
-        let mut entry = handle.entry().clone();
-        let artifact = entry.artifact.as_mut().unwrap();
+    for case in 0..4 {
+        let mut file = handle.meta_ref().clone();
+        let index = index_meta(&mut file);
         let reason = match case {
             0 => {
-                artifact.objects.push(artifact.objects[0].clone());
-                "duplicate series artifact object"
+                index.parts.push(index.parts[0].clone());
+                "series part count mismatch"
             }
             1 => {
-                artifact.objects[0].file_size += 1;
+                index.parts[0].file_size += 1;
                 "series part length mismatch"
             }
             2 => {
-                artifact.objects.last_mut().unwrap().file_size = super::MANIFEST_LIMIT as u64 + 1;
+                index.manifest_size = super::MANIFEST_LIMIT as u64 + 1;
                 "series manifest exceeds size limit"
             }
             3 => {
-                artifact.file_size += 1;
+                file.file_size += 1;
                 "series artifact size mismatch"
-            }
-            4 => {
-                entry.file_size += 1;
-                "series artifact size mismatch"
-            }
-            5 => {
-                artifact.objects.pop();
-                "missing series manifest object"
             }
             _ => unreachable!(),
         };
-        let invalid = SeriesIndexFileHandle::new(meta.region_id, entry);
+        let invalid = FileHandle::new(file, new_noop_file_purger());
         let error = format.reader(store.clone(), invalid).await.err().unwrap();
         assert!(error.to_string().contains(reason), "case {case}: {error}");
     }
@@ -667,8 +710,8 @@ async fn truncated_objects_are_rejected() {
         )],
     )
     .await;
-    let artifact = handle.entry().artifact.as_ref().unwrap();
-    let part = &artifact.objects[0];
+    let objects = handle.meta_ref().narthex_objects(&region_dir()).unwrap();
+    let part = &objects[0];
     let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
     let bytes = store.read(&part.path).await.unwrap().to_bytes();
     store
@@ -684,7 +727,7 @@ async fn truncated_objects_are_rejected() {
             .is_err()
     );
 
-    let manifest = artifact.objects.last().unwrap();
+    let manifest = objects.last().unwrap();
     let bytes = store.read(&manifest.path).await.unwrap().to_bytes();
     store
         .write(&manifest.path, bytes.slice(..bytes.len() - 1))
@@ -704,7 +747,14 @@ async fn empty_nullable_and_block_row_options() {
     let format = ColumnarSeriesFormat::default();
     let empty = build(&format, &store, &[]).await;
     assert!(manifest(&store, &empty).await.files.is_empty());
-    assert_eq!(empty.entry().artifact.as_ref().unwrap().objects.len(), 1);
+    assert_eq!(
+        empty
+            .meta_ref()
+            .narthex_objects(&region_dir())
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(
         format
             .reader(store.clone(), empty)
@@ -864,7 +914,7 @@ async fn explicit_abort_drop_and_failed_finish_cleanup() {
         .collect();
     for drop_writer in [false, true] {
         let entry = entry();
-        let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+        let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.file_id);
         let mut writer = format
             .writer(meta.clone(), store.clone(), &entry)
             .await
@@ -900,7 +950,7 @@ async fn explicit_abort_drop_and_failed_finish_cleanup() {
         .unwrap();
     }
     let entry = entry();
-    let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+    let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.file_id);
     let mut writer = format.writer(meta, store.clone(), &entry).await.unwrap();
     writer.write(&batch(&keys, false, 0)).await.unwrap();
     assert!(writer.write(&batch(&keys, false, 0)).await.is_err());
@@ -935,8 +985,7 @@ async fn selective_io_and_pinned_stream_retirement() {
         &[batch(&[a.clone(), a, b.clone(), b.clone(), b, c], false, 0)],
     )
     .await;
-    let handle = SeriesIndexFileHandle::new(meta.region_id, built.entry().clone());
-    drop(built);
+    let handle = built;
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
     let layer = MockLayerBuilder::default()
@@ -1066,7 +1115,7 @@ async fn opendal_write_close_and_manifest_failures() {
             .build()
             .unwrap();
         let entry = entry();
-        let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+        let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.file_id);
         let format = ColumnarSeriesFormat {
             block_rows: 1,
             ..Default::default()
@@ -1215,17 +1264,11 @@ async fn malformed_manifest_and_timestamp_independence() {
         .await
         .unwrap();
     assert!(format.reader(store.clone(), first).await.is_err());
-    let mut entry = second.entry().clone();
-    entry
-        .artifact
-        .as_mut()
-        .unwrap()
-        .objects
-        .push(crate::series_index::artifact::ArtifactObject {
-            path: "unowned".into(),
-            file_size: 0,
-        });
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
+    let mut file = second.meta_ref().clone();
+    index_meta(&mut file)
+        .parts
+        .push(NarthexPartMeta { file_size: 0 });
+    let handle = FileHandle::new(file, new_noop_file_purger());
     assert!(format.reader(store, handle).await.is_err());
 }
 
@@ -1251,7 +1294,7 @@ async fn cancelled_finish_aborts_live_writer() {
     let store = store();
     let meta = metadata();
     let entry = entry();
-    let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.index_uuid);
+    let prefix = format!("{}/series/{}/", meta.region_id.as_u64(), entry.file_id);
     let closing = Arc::new(tokio::sync::Notify::new());
     let observed = closing.clone();
     let layer = MockLayerBuilder::default()
@@ -1368,19 +1411,13 @@ async fn opendal_reads_sparse_part_beyond_four_gib() {
     drop(file);
     manifest.files[0].file_size += shift;
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let mut entry = handle.entry().clone();
-    entry.file_size = manifest_bytes.len() as u64 + manifest.files[0].file_size;
-    let artifact = entry.artifact.as_mut().unwrap();
-    artifact.file_size = entry.file_size;
-    for object in &mut artifact.objects {
-        object.file_size = if object.path == manifest.path() {
-            manifest_bytes.len() as u64
-        } else {
-            manifest.files[0].file_size
-        };
-    }
+    let mut file = handle.meta_ref().clone();
+    file.file_size = manifest_bytes.len() as u64 + manifest.files[0].file_size;
+    let index = index_meta(&mut file);
+    index.manifest_size = manifest_bytes.len() as u64;
+    index.parts[0].file_size = manifest.files[0].file_size;
     store.write(&manifest.path(), manifest_bytes).await.unwrap();
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
+    let handle = FileHandle::new(file, new_noop_file_purger());
     let batches = format
         .reader(store, handle)
         .await
@@ -1486,7 +1523,7 @@ async fn large_repeated_tags_across_small_batches() {
     let meta = metadata();
     let format = ColumnarSeriesFormat::default();
     let label = "x".repeat(1024 * 1024);
-    let mut entry = entry();
+    let entry = entry();
     let mut writer = format
         .writer(meta.clone(), store.clone(), &entry)
         .await
@@ -1502,9 +1539,7 @@ async fn large_repeated_tags_across_small_batches() {
         }
     }
     let artifact = writer.finish().await.unwrap();
-    entry.file_size = artifact.file_size;
-    entry.artifact = Some(artifact);
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
+    let handle = finished_file(entry, artifact);
     let batches = format
         .reader(store.clone(), handle)
         .await

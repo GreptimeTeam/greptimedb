@@ -26,7 +26,6 @@ use store_api::metadata::RegionMetadataRef;
 use crate::error::{Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::artifact_writer::Outputs;
-use crate::series_index::catalog::SeriesIndexEntry;
 use crate::series_index::columnar::codec::{self, encode_dictionary, encode_integers};
 use crate::series_index::columnar::metadata::{
     self, Block, Column, Page, PageReference, Trailer, pack,
@@ -39,6 +38,7 @@ use crate::series_index::identity::decode_series_identity;
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::writer::{tag_columns, validate_metadata};
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TSID_COLUMN};
+use crate::sst::file::FileMeta;
 
 /// Maximum owned row bytes per block; a single larger row is flushed on its own.
 const BLOCK_BYTE_BUDGET: usize = 8 * 1024 * 1024;
@@ -70,22 +70,18 @@ pub(crate) struct ColumnarWriter {
     failed: bool,
 }
 impl ColumnarWriter {
-    pub(crate) fn with_prefix(mut self, prefix: String) -> Result<Self> {
-        require(
-            prefix.ends_with('/') && !prefix.split('/').any(|part| part == ".."),
-            "invalid narthex series prefix",
-        )?;
-        self.manifest.prefix = Some(prefix);
-        Ok(self)
-    }
-
     pub(crate) fn new(
         options: ColumnarSeriesFormat,
         metadata: RegionMetadataRef,
         store: ObjectStore,
-        entry: &SeriesIndexEntry,
+        file: &FileMeta,
+        prefix: String,
     ) -> Result<Self> {
         validate_metadata(&metadata)?;
+        require(
+            prefix.ends_with('/') && !prefix.split('/').any(|part| part == ".."),
+            "invalid narthex series prefix",
+        )?;
         require(
             options.block_rows > 0
                 && options.block_rows <= codec::COLUMN_LIMIT / 10
@@ -95,16 +91,13 @@ impl ColumnarWriter {
             "invalid columnar writer options",
         )?;
         let tags = tag_columns(&metadata);
-        let mut coverage = entry.clone();
-        coverage.file_size = 0;
-        coverage.artifact = None;
         let manifest = Manifest {
-            prefix: None,
+            prefix,
             format: ArtifactFormat::ColumnarSeries,
             version: VERSION,
             identity_encoding: IdentityEncoding::CURRENT_SERIES_INDEX,
             region_id: metadata.region_id.as_u64(),
-            generation: entry.index_uuid,
+            generation: file.file_id,
             tags: tags
                 .iter()
                 .map(|(id, name)| Tag {
@@ -112,7 +105,7 @@ impl ColumnarWriter {
                     name: name.clone(),
                 })
                 .collect(),
-            coverage,
+            coverage: super::SeriesCoverage::from_file(file),
             files: Vec::new(),
         };
         Ok(Self {

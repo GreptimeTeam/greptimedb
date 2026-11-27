@@ -31,10 +31,9 @@ use store_api::storage::FileId;
 use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{InvalidRecordBatchSnafu, Result};
-use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, SamplesFileHandle};
-use crate::series_index::catalog::SeriesIndexEntry;
+use crate::series_index::MetricSeriesId;
+use crate::series_index::artifact::{ArtifactMetadata, SamplesFileHandle};
 use crate::series_index::identity::ExactSeriesKey;
-use crate::series_index::{MetricSeriesId, SeriesIndexFileHandle};
 use crate::sst::PARQUET_FIELD_ID_KEY;
 
 /// Writers own partial outputs until finish succeeds; abort removes every partial object.
@@ -59,28 +58,6 @@ pub(crate) struct SeriesReadRequest {
 pub(crate) trait FormatReader: Send + Sync {
     fn schema(&self) -> SchemaRef;
     fn read(&self, request: SeriesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>>;
-}
-
-/// Builds and opens immutable series-index artifacts.
-#[async_trait]
-pub(crate) trait SeriesIndexFormat: Debug + Send + Sync {
-    fn format(&self) -> ArtifactFormat;
-    async fn reader(
-        &self,
-        _store: ObjectStore,
-        _handle: SeriesIndexFileHandle,
-    ) -> Result<Box<dyn FormatReader>> {
-        crate::error::UnsupportedOperationSnafu {
-            err_msg: "This series format has no reader",
-        }
-        .fail()
-    }
-    async fn writer(
-        &self,
-        metadata: RegionMetadataRef,
-        store: ObjectStore,
-        entry: &SeriesIndexEntry,
-    ) -> Result<Box<dyn FormatWriter>>;
 }
 
 /// Selection in the stored timestamp unit. No visibility filtering is implicit.
@@ -126,7 +103,6 @@ pub(crate) trait SamplesFormatReader: Send + Sync {
 /// Builds and opens immutable samples artifacts.
 #[async_trait]
 pub(crate) trait SamplesFormat: Debug + Send + Sync {
-    fn format(&self) -> ArtifactFormat;
     async fn reader(
         &self,
         _store: ObjectStore,

@@ -127,13 +127,11 @@ pub(crate) async fn open_sources(
         }
         let mut reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
             context.input.access_layer.object_store().clone(),
-            crate::series_index::SeriesIndexFileHandle::from_narthex(
-                file.clone(),
-                &context
-                    .input
-                    .access_layer
-                    .build_region_dir(file.meta_ref().region_id),
-            )?,
+            file.clone(),
+            &context
+                .input
+                .access_layer
+                .build_region_dir(file.region_id()),
             context
                 .input
                 .cache_strategy

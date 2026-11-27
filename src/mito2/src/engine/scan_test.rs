@@ -670,13 +670,10 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
         .await?;
     let version = region.version();
     let file = version.ssts.series_indexes().values().next().unwrap();
-    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
-        file.clone(),
-        &region.access_layer.build_region_dir(id),
-    )?;
     let reader = crate::series_index::columnar::reader::ColumnarReader::open(
         region.access_layer.object_store().clone(),
-        handle,
+        file.clone(),
+        &region.access_layer.build_region_dir(id),
     )
     .await?;
     let mut stream = reader.read(crate::series_index::format::SeriesReadRequest {
@@ -697,7 +694,6 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
 
 #[tokio::test]
 async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
-    use crate::series_index::SeriesIndexFileHandle;
     use crate::series_index::columnar::reader::ColumnarReader;
     use crate::series_index::format::SeriesReadRequest;
     use crate::sst::file::WindowSequence;
@@ -838,12 +834,18 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
         .values()
         .find(|f| f.meta_ref().series_window().unwrap().start == 0)
         .unwrap();
-    let open = |file: &FileHandle| SeriesIndexFileHandle::from_narthex(file.clone(), &dir);
     let retired_id = old.file_id();
     let old_path = old.meta_ref().narthex_objects(&dir).unwrap()[0]
         .path
         .clone();
-    let pinned_reader = ColumnarReader::open(store.clone(), open(old)?).await?;
+    let count_request = || SeriesReadRequest {
+        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
+        ..Default::default()
+    };
+
+    let pinned_reader = ColumnarReader::open(store.clone(), old.clone(), &dir).await?;
+    let mut pinned_stream = pinned_reader.read(count_request())?;
+    drop(pinned_reader);
     for expected in [5, 2] {
         reads.lock().unwrap().clear();
         if expected == 5 {
@@ -869,11 +871,6 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
                 .any(|s| p.trim_start_matches('/') == s.trim_start_matches('/'))
         }));
     }
-    let count_request = || SeriesReadRequest {
-        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
-        ..Default::default()
-    };
-
     let merged = region
         .version()
         .ssts
@@ -884,7 +881,7 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
         .clone();
     let window = merged.meta_ref().series_window().unwrap();
     assert_eq!(window.max_sequence, watermark);
-    let reader = ColumnarReader::open(store.clone(), open(&merged)?).await?;
+    let reader = ColumnarReader::open(store.clone(), merged.clone(), &dir).await?;
     let mut stream = reader.read(count_request())?;
     let mut counts = Vec::new();
     while let Some(batch) = stream.try_next().await? {
@@ -913,14 +910,8 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
         Err(Error::RegionBusy { .. })
     ));
     drop(pins);
-    assert!(
-        pinned_reader
-            .read(count_request())?
-            .try_next()
-            .await?
-            .is_some()
-    );
-    drop(pinned_reader);
+    assert!(pinned_stream.try_next().await?.is_some());
+    drop(pinned_stream);
     tokio::time::timeout(Duration::from_secs(10), async {
         while store.exists(&old_path).await.unwrap() {
             tokio::time::sleep(Duration::from_millis(10)).await;

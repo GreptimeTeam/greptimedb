@@ -178,11 +178,12 @@ async fn series_keys(
     source: &FileHandle,
     metadata: &RegionMetadata,
 ) -> Result<BoxStream<'static, Result<(ExactSeriesKey, u64)>>> {
-    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
+    let mut reader = ColumnarReader::open(
+        layer.object_store().clone(),
         source.clone(),
         &layer.build_region_dir(source.region_id()),
-    )?;
-    let mut reader = ColumnarReader::open(layer.object_store().clone(), handle).await?;
+    )
+    .await?;
     reader.adapt_tags(metadata)?;
     Ok(reader.read_full_keys())
 }
@@ -214,14 +215,10 @@ pub(crate) async fn write_series(
         })),
         ..Default::default()
     };
-    let entry = crate::series_index::narthex_series_entry(
-        &file,
-        &layer.build_region_dir(metadata.region_id),
-    )?;
     let mut writer = ColumnarSeriesFormat::default().narthex_writer(
         metadata.clone(),
         layer.object_store().clone(),
-        &entry,
+        &file,
         prefix,
     )?;
     let write_result: Result<()> = async {

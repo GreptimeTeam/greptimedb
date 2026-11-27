@@ -18,7 +18,6 @@
 
 pub(crate) mod artifact;
 mod artifact_writer;
-mod catalog;
 pub(crate) mod columnar;
 pub(crate) mod format;
 pub(crate) mod identity;
@@ -26,7 +25,6 @@ pub(crate) mod samples;
 mod task;
 #[cfg(test)]
 mod tests;
-mod version;
 mod writer;
 
 #[cfg(test)]
@@ -41,8 +39,6 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::ReservedColumnId;
 
 pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
-pub(crate) use crate::series_index::version::SeriesIndexFileHandle;
-pub(crate) use crate::series_index::version::narthex_series_entry;
 
 pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
 pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";
