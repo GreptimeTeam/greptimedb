@@ -574,7 +574,7 @@ impl MitoEngine {
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
-        self.edit_region_with_kind(region_id, edit, RegionEditKind::Import)
+        self.edit_region_with_kind(region_id, edit, RegionEditKind::Import, true)
             .await
     }
 
@@ -588,8 +588,13 @@ impl MitoEngine {
                 reason: "SST ingestion cannot remove files"
             }
         );
-        self.edit_region_with_kind(region_id, edit, RegionEditKind::Ingest)
-            .await
+        self.edit_region_with_kind(
+            region_id,
+            edit,
+            RegionEditKind::Ingest,
+            *INGEST_PRELOAD_SST_CACHE,
+        )
+        .await
     }
 
     async fn edit_region_with_kind(
@@ -597,6 +602,7 @@ impl MitoEngine {
         region_id: RegionId,
         edit: RegionEdit,
         kind: RegionEditKind,
+        preload_sst_cache: bool,
     ) -> Result<()> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&["edit_region"])
@@ -611,10 +617,6 @@ impl MitoEngine {
         );
 
         let (tx, rx) = oneshot::channel();
-        // Only external ingestion uses this switch. Imports retain their existing
-        // policy; staging publication already explicitly disables preloading.
-        let preload_sst_cache =
-            !matches!(kind, RegionEditKind::Ingest) || *INGEST_PRELOAD_SST_CACHE;
         let mut request = RegionEditRequest::new(region_id, edit, preload_sst_cache, tx);
         request.kind = kind;
         let request = WorkerRequest::EditRegion(request);

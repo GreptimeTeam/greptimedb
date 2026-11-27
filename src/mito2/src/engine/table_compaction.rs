@@ -30,7 +30,7 @@ use crate::manifest::action::RegionEdit;
 use crate::region::options::RegionOptions;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{RegionEditKind, RegionEditRequest, WorkerRequest};
-use crate::sst::file::{FileMeta, SHARED_LEVEL_SLOT};
+use crate::sst::file::{FileMeta, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 
 /// A query-visible input snapshot. Callers may select a subset of `inputs` for a job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +70,30 @@ pub fn is_table_compaction_metadata_compatible(
 }
 
 impl MitoEngine {
+    /// Installs shared ingestion references using the ingestion cache policy.
+    /// Keep import accounting: the same SST is referenced by multiple targets
+    /// and must not be counted as fresh writes at every target.
+    pub async fn ingest_shared_ssts(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
+        ensure!(
+            edit.files_to_remove.is_empty()
+                && edit
+                    .files_to_add
+                    .iter()
+                    .all(|file| file.level == LEVEL_SHARED),
+            InvalidRequestSnafu {
+                region_id,
+                reason: "Shared ingestion requires shared files and cannot remove files"
+            }
+        );
+        self.edit_region_with_kind(
+            region_id,
+            edit,
+            RegionEditKind::Import,
+            *super::INGEST_PRELOAD_SST_CACHE,
+        )
+        .await
+    }
+
     /// Reads committed inputs while an ordinary edit or ALTER is in progress.
     pub fn table_compaction_snapshot(
         &self,

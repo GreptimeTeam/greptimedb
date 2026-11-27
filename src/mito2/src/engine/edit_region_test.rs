@@ -315,6 +315,25 @@ async fn test_edit_region_fill_cache(
     #[case] index_file_size: Option<u64>,
     #[values(false, true)] ingestion: bool,
 ) {
+    check_edit_region_fill_cache(flat_format, index_file_size, ingestion, false).await;
+}
+
+#[cfg(feature = "enterprise")]
+#[rstest::rstest]
+#[case::without_index(None)]
+#[case::known_index_size(Some(7))]
+#[case::unknown_index_size(Some(0))]
+#[tokio::test]
+async fn test_shared_ingestion_fill_cache(#[case] index_file_size: Option<u64>) {
+    check_edit_region_fill_cache(true, index_file_size, false, true).await;
+}
+
+async fn check_edit_region_fill_cache(
+    flat_format: bool,
+    index_file_size: Option<u64>,
+    ingestion: bool,
+    shared: bool,
+) {
     let mut env = TestEnv::new().await;
 
     struct EditRegionListener {
@@ -369,9 +388,13 @@ async fn test_edit_region_fill_cache(
     let mut meta = FileMeta {
         region_id,
         file_id,
+        file_size: 1,
         index_version: 3,
         ..Default::default()
     };
+    if shared {
+        meta.level = crate::sst::file::LEVEL_SHARED;
+    }
     if let Some(size) = index_file_size {
         meta.index_file_size = size;
         meta.indexes.push(ColumnIndexMetadata {
@@ -401,13 +424,30 @@ async fn test_edit_region_fill_cache(
         committed_sequence: None,
         ..Default::default()
     };
-    if ingestion {
+    if shared {
+        #[cfg(feature = "enterprise")]
+        {
+            engine
+                .ingest_shared_ssts(region.region_id, edit)
+                .await
+                .unwrap();
+            assert_eq!(
+                engine
+                    .get_region_statistic(region_id)
+                    .unwrap()
+                    .ingested_parquet_bytes,
+                0
+            );
+        }
+        #[cfg(not(feature = "enterprise"))]
+        unreachable!("Shared ingestion requires enterprise");
+    } else if ingestion {
         engine.ingest_ssts(region.region_id, edit).await.unwrap();
     } else {
         engine.edit_region(region.region_id, edit).await.unwrap();
     }
 
-    if ingestion && !*super::INGEST_PRELOAD_SST_CACHE {
+    if (ingestion || shared) && !*super::INGEST_PRELOAD_SST_CACHE {
         // Publication completes even though neither artifact is warmed.
         assert!(
             region
@@ -419,6 +459,13 @@ async fn test_edit_region_fill_cache(
         );
         let cache_manager = engine.cache_manager();
         let file_cache = cache_manager.write_cache().unwrap().file_cache();
+        assert!(!file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Parquet)));
+        assert!(!file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Puffin(3))));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx)
+                .await
+                .is_err()
+        );
         assert!(!file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Parquet)));
         assert!(!file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Puffin(3))));
         return;
