@@ -2406,6 +2406,95 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
 /// (__name__)` groups by the identity of the series, and an `or` reports each side's own name. An
 /// operator that computes a value of its own - a math kernel, a folding aggregate - drops the name
 /// exactly as it drops a label, so its rows answer no `__name__` label at all.
+/// Logical tables `{prefix}_a`, `{prefix}_b` and `{prefix}_c` on the physical table `{prefix}`.
+/// `a` and `b` both store `{host="x"}`, and both hold a sample at `0`; `c` stores `{host="x"}`
+/// under one more label.
+fn physical_table_fixture(prefix: &str, partition: &str) -> String {
+    format!(
+        "CREATE TABLE {prefix} (ts TIMESTAMP TIME INDEX, val DOUBLE) {partition} \
+             ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+         CREATE TABLE {prefix}_a (host STRING NULL, ts TIMESTAMP NOT NULL, val DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) ENGINE=metric WITH (on_physical_table = '{prefix}'); \
+         CREATE TABLE {prefix}_b (host STRING NULL, ts TIMESTAMP NOT NULL, val DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) ENGINE=metric WITH (on_physical_table = '{prefix}'); \
+         CREATE TABLE {prefix}_c (host STRING NULL, job STRING NULL, ts TIMESTAMP NOT NULL, \
+             val DOUBLE NULL, TIME INDEX (ts), PRIMARY KEY (host, job)) \
+             ENGINE=metric WITH (on_physical_table = '{prefix}'); \
+         INSERT INTO {prefix}_a (host, ts, val) VALUES ('x', 0, 1), ('x', 60000, 2), \
+             ('x', 120000, 3), ('y', 0, 10); \
+         INSERT INTO {prefix}_b (host, ts, val) VALUES ('x', 0, 50), ('x', 180000, 4), \
+             ('x', 240000, 5); \
+         INSERT INTO {prefix}_c (host, job, ts, val) VALUES ('x', 'j', 0, 100)"
+    )
+}
+
+/// What Prometheus answers over [`physical_table_fixture`] on `TQL EVAL (0, 240, '60s')`.
+///
+/// Prometheus reads series with identical labels as one series, samples chained by timestamp and
+/// one sample per timestamp, so `a` and `b` are one `{host="x"}`. Both hold a sample at `0`; `a`'s
+/// stored key sorts first (its `__table_id` is smaller), so its `1` is the one kept.
+fn physical_table_expected(query: &str) -> Vec<(i64, String, f64)> {
+    let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+    let mut rows = Vec::new();
+    for (step, time) in (0..=240_000).step_by(60_000).enumerate() {
+        let mut add = |labels: &str, value: f64| rows.push((time, labels.to_string(), value));
+        if query == "sum(PHY)" {
+            add("", x[step] + 10.0 + 100.0);
+        } else if query == "sum by (host) (PHY)" {
+            add("host=x", x[step] + 100.0);
+            add("host=y", 10.0);
+        } else {
+            let (x, xj, y) = match query {
+                "PHY + 0" => (x[step], 100.0, 10.0),
+                // The window `(t - 5m, t]` holds every merged sample up to `t`: the two at `0` are one.
+                "count_over_time(PHY[5m])" => ((step + 1) as f64, 1.0, 1.0),
+                _ => unreachable!("{query}"),
+            };
+            add("host=x", x);
+            add("host=x,job=j", xj);
+            add("host=y", y);
+        }
+    }
+    rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    rows
+}
+
+const PHYSICAL_TABLE_QUERIES: [&str; 4] = [
+    "PHY + 0",
+    "count_over_time(PHY[5m])",
+    "sum(PHY)",
+    "sum by (host) (PHY)",
+];
+
+/// A selector naming a metric-engine physical table answers one series per label set, as
+/// Prometheus does, although every logical table on it stores its own series. The existing plan
+/// answers the same, including which sample the shared timestamp keeps.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_physical_table_merges_equal_label_sets() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_physical_table",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &physical_table_fixture("native_phy", ""),
+        QueryContext::arc(),
+    )
+    .await;
+    for query in PHYSICAL_TABLE_QUERIES {
+        let expression = query.replace("PHY", "native_phy");
+        let sql = format!("TQL EVAL (0, 240, '60s') {expression}");
+        observer.clear();
+        let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
+        assert_native_rows_plan(&observer);
+        assert_eq!(physical_table_expected(query), native, "{expression}");
+        let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+        assert_eq!(legacy, native, "{expression}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_rows_name_each_row_after_its_metric() {
     common_telemetry::init_default_ut_logging();
@@ -3788,6 +3877,61 @@ fn cross_region_fixture_inserts(prefix: &str) -> String {
     format!(
         "INSERT INTO {prefix}_a (host, val, ts) VALUES ('x', 2, 60000), ('x', 4, 120000), ('x', 6, 180000), ('x', 8, 240000), ('y', 4, 60000), ('y', 6, 120000), ('y', 8, 180000), ('y', 10, 240000); INSERT INTO {prefix}_b (host, val, ts) VALUES ('x', 1, 60000), ('x', 2, 120000), ('x', 3, 180000), ('x', 4, 240000), ('y', 2, 60000), ('y', 3, 120000), ('y', 4, 180000), ('y', 5, 240000); INSERT INTO {prefix}_reset (host, val, ts) VALUES ('x', 0, 0), ('x', 5, 60000), ('x', 10, 120000), ('x', 1, 180000), ('x', 3, 240000), ('x', 5, 300000), ('y', 0, 0), ('y', 1, 60000), ('y', 2, 120000), ('y', 3, 180000), ('y', 4, 240000), ('y', 5, 300000)"
     )
+}
+
+/// [`native_promql_physical_table_merges_equal_label_sets`] over a physical table split by time
+/// across two datanodes, so the stored series of one label set arrive from several regions and
+/// the merge has to run above all of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_physical_table_merges_label_sets_across_regions() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_physical_table")
+        .await
+        .with_datanodes(2)
+        .with_real_datanode_grpc_addr(true)
+        .with_frontend_real_datanode_grpc(true)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let instance = cluster.fe_instance().clone();
+    execute_all(
+        &instance,
+        &physical_table_fixture(
+            "dist_phy",
+            "PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:01:00', \
+             ts >= '1970-01-01 00:01:00' AND ts < '1970-01-01 00:03:00', \
+             ts >= '1970-01-01 00:03:00')",
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    for query in PHYSICAL_TABLE_QUERIES {
+        let expression = query.replace("PHY", "dist_phy");
+        let output = instance
+            .do_query(
+                &format!("TQL EVAL (0, 240, '60s') {expression}"),
+                native_query_context(true, 2),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let plan = output.meta.plan.clone().expect("frontend physical plan");
+        let display = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(true)
+            .to_string();
+        assert_eq!(
+            physical_table_expected(query),
+            native_rows(output, None).await,
+            "{expression}: {display}"
+        );
+        assert!(
+            display.contains("identity=label_set") && display.contains("MergeScanExec"),
+            "{expression}: {display}"
+        );
+    }
 }
 
 /// Real two-datanode TCP acceptance for raw series fragmented by time. Ratios alone can hide

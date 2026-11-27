@@ -81,7 +81,9 @@ use promql_parser::parser::{
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::{ResultExt, ensure};
-use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
@@ -427,9 +429,23 @@ impl PromPlanner {
         // planner asks, the logical plan is already this node: the refusal there is a planning error, not a
         // fallback. So the engine is checked here. A file-engine table is the concrete case, since its
         // `SinglePartitionScanner` leaves `raw_series_schema` at the default `None`. A metric-engine selector is
-        // admitted through its verified logical rewrite.
+        // admitted through its verified logical rewrite, or as the physical table it names.
+        //
+        // A physical table keys each logical table's series by `__table_id` and `__tsid`, which are not
+        // labels, so two logical tables with equal labels store two series under one label set. Prometheus
+        // answers one series per label set, so the selector reads through a source that merges them.
+        // A logical selector's scan is already rewritten to its physical table, so `table_meta` is the
+        // physical table's there too; only a scan without that rewrite names the physical table.
+        let physical_metric_table = !has_verified_metric_rewrite
+            && table_meta.engine == METRIC_ENGINE_NAME
+            && table_meta
+                .options
+                .extra_options
+                .contains_key(PHYSICAL_TABLE_METADATA_KEY);
         if !supports_native_raw_series(&table_meta.engine)
-            || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
+            || (table_meta.engine == METRIC_ENGINE_NAME
+                && !has_verified_metric_rewrite
+                && !physical_metric_table)
         {
             return Ok(declined("engine_without_raw_series_scanner"));
         }
@@ -517,6 +533,19 @@ impl PromPlanner {
             table_scan.filters.append(&mut filters);
         } else {
             return Ok(declined("selector_plan_is_not_a_table_scan"));
+        }
+        if physical_metric_table {
+            let source = RawSeriesSource::try_new(
+                Arc::from(metric.as_str()),
+                tags.clone(),
+                fields.clone(),
+                input,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .with_label_set_merge();
+            input = LogicalPlan::Extension(Extension {
+                node: Arc::new(source),
+            });
         }
         Ok(Some((
             input,
