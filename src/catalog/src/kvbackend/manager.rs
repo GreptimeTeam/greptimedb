@@ -55,7 +55,8 @@ use crate::error::{
     Result, TableMetadataManagerSnafu,
 };
 use crate::information_schema::{
-    InformationExtensionRef, InformationSchemaProvider, InformationSchemaTableFactoryRef,
+    InformationExtensionRef, InformationSchemaProvider, InformationSchemaSessionVariables,
+    InformationSchemaTableFactoryRef, QueryOptionValueProviderRef, SESSION_VARIABLES,
 };
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
@@ -79,6 +80,11 @@ pub struct KvBackendCatalogManager {
     /// stays shared across `Clone`s of the manager (a plain `OnceLock` would
     /// fork on clone).
     pub(super) entity_graph_provider: Arc<OnceLock<EntityGraphProviderRef>>,
+    /// Resolves `query.*` options to their effective values for
+    /// `information_schema.session_variables`. Set once, after the query engine
+    /// is built, for the same `catalog -> query` cycle reason as
+    /// `entity_graph_provider`; the table omits those options until then.
+    pub(super) query_option_value_provider: Arc<OnceLock<QueryOptionValueProviderRef>>,
     /// Manages partition rules.
     pub(super) partition_manager: PartitionRuleManagerRef,
     /// Manages table metadata.
@@ -141,6 +147,19 @@ impl KvBackendCatalogManager {
     /// call is a no-op (the first binding wins).
     pub fn set_entity_graph_provider(&self, provider: EntityGraphProviderRef) {
         let _ = self.entity_graph_provider.set(provider);
+    }
+
+    /// Returns the query-option resolver, or `None` if it has not been injected
+    /// yet. `information_schema.session_variables` omits `query.*` options until
+    /// it is set.
+    pub fn query_option_value_provider(&self) -> Option<QueryOptionValueProviderRef> {
+        self.query_option_value_provider.get().cloned()
+    }
+
+    /// Injects the query-option resolver once the query engine exists. A second
+    /// call is a no-op (the first binding wins).
+    pub fn set_query_option_value_provider(&self, provider: QueryOptionValueProviderRef) {
+        let _ = self.query_option_value_provider.set(provider);
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {
@@ -741,6 +760,22 @@ impl SystemCatalog {
     ) -> Option<TableRef> {
         let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
         if schema == INFORMATION_SCHEMA_NAME {
+            // `session_variables` reports per-session state, which the cached
+            // provider cannot hold. Rebuild it per resolution so it reads the
+            // resolving query's context, the way the computed entity-graph
+            // tables do. Everything else comes from the per-catalog cache.
+            if table_name.eq_ignore_ascii_case(SESSION_VARIABLES) {
+                let query_options = self
+                    .catalog_manager
+                    .upgrade()
+                    .and_then(|manager| manager.query_option_value_provider());
+                return Some(InformationSchemaSessionVariables::build_table(
+                    catalog,
+                    query_ctx.cloned().map(Arc::new),
+                    query_options,
+                ));
+            }
+
             let information_schema_provider =
                 self.catalog_cache.get_with_by_ref(catalog, move || {
                     let provider = InformationSchemaProvider::new(

@@ -383,12 +383,9 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
             vec![],
         ),
 
-        // FIXME(#2931): `session_variables` always returns zero rows. Real
-        // values live on the query context, but `SystemTable::to_stream` only
-        // receives a `ScanRequest`, and the `information_schema` provider is
-        // cached per catalog, so it cannot hold per-session state. Populating
-        // it requires rebuilding the provider per query, the way
-        // `SemanticGraphTableProvider` captures its context.
+        // The static registration carries the column shape only; the real rows
+        // are produced by the context-bound instance that the system catalog
+        // builds per resolution (see `session_variables.rs`).
         SESSION_VARIABLES => (
             vec![
                 string_column("VARIABLE_NAME"),

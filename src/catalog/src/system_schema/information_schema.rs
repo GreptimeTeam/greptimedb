@@ -29,6 +29,7 @@ mod region_info;
 pub mod region_peers;
 mod region_statistics;
 pub mod schemata;
+mod session_variables;
 mod ssts;
 pub mod statistics;
 mod table_constraints;
@@ -73,6 +74,9 @@ pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
+pub use self::session_variables::{
+    InformationSchemaSessionVariables, QueryOptionValueProvider, QueryOptionValueProviderRef,
+};
 use crate::CatalogManager;
 use crate::error::Error;
 use crate::process_manager::ProcessManagerRef;

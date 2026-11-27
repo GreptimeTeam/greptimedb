@@ -62,6 +62,7 @@ use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
 use crate::instance::otlp::TraceAuxCache;
+use crate::instance::query_option_value::build_query_option_value_provider;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::service_config::BatcherOptions;
 
@@ -351,6 +352,13 @@ impl FrontendBuilder {
                 plugins.get::<PermissionCheckerRef>(),
             ));
             kv_catalog.set_entity_graph_provider(provider);
+
+            // Same late binding for the `query.*` options that
+            // `information_schema.session_variables` reports: their effective
+            // values live in the engine, above the catalog crate.
+            kv_catalog.set_query_option_value_provider(build_query_option_value_provider(
+                query_engine.clone(),
+            ));
         }
 
         let frontend_peer_addr = self.options.peer_addr();
