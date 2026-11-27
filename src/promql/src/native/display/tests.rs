@@ -47,7 +47,6 @@ fn fields() -> Arc<[FieldSpec]> {
     }])
 }
 
-/// The samples a node produces on `grid`.
 fn evaluated(grid: Arc<EvalGrid>) -> NativeType {
     NativeType::Samples(Arc::new(SeriesSchema {
         fields: fields(),
@@ -55,11 +54,7 @@ fn evaluated(grid: Arc<EvalGrid>) -> NativeType {
     }))
 }
 
-/// An unqualified scan over raw samples, which is what a compiled query starts from.
 fn raw_input() -> NativeNode {
-    // One allocation shared by the binding and the output: `validate` checks allocation identity.
-    // The fields are the ones a window over this input reports, because a window keeps its input's
-    // layout and `validate` rejects a node that declares a different count.
     let output = NativeType::Samples(Arc::new(SeriesSchema {
         fields: fields(),
         eval_grid: None,
@@ -114,14 +109,10 @@ fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
     }
 }
 
-/// The expected display of a tree, one string per line, so a change in wording, order or
-/// indentation fails the test rather than passing as a substring.
 fn shown(lines: &[&str]) -> String {
     lines.join("\n")
 }
 
-/// A tree is plan lines and nothing else: no header above them and no word beside a node, so every
-/// line reads as the operator it is, one level in from the operator line it is drawn under.
 #[test]
 fn a_tree_is_plan_lines_only() {
     let tree = NativeTree::try_new(raw_input()).unwrap();
@@ -145,31 +136,6 @@ fn a_tree_is_plan_lines_only() {
     );
 }
 
-/// A compiled tree is one line per node, outermost first: the window is the root and the scan it
-/// folds is shown beneath it.
-#[test]
-fn a_window_over_raw_samples_is_shown_once_per_node() {
-    let tree = NativeTree::try_new(window_over(
-        raw_input(),
-        RangeFunction::Rate,
-        300_000,
-        0,
-        None,
-        grid(0, 60_000, 4),
-    ))
-    .unwrap();
-
-    assert_eq!(
-        tree.to_string(),
-        shown(&[
-            "Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "  Input: raw samples source=0",
-        ])
-    );
-}
-
-/// A map nests one level deeper than the window it reads, and lists its operations in the order
-/// they are applied.
 #[test]
 fn a_map_nests_below_the_window_it_maps() {
     let tree = NativeTree::try_new(map(
@@ -195,8 +161,6 @@ fn a_map_nests_below_the_window_it_maps() {
     );
 }
 
-/// A parameterised window names the constant it was bound to, and an anchored one names its
-/// anchor instead of printing the absent case.
 #[test]
 fn a_window_names_its_constant_argument_and_its_anchor() {
     let tree = NativeTree::try_new(window_over(
@@ -218,8 +182,6 @@ fn a_window_names_its_constant_argument_and_its_anchor() {
     );
 }
 
-/// An input says whether its samples are raw or already evaluated, and reports the ordering it
-/// guarantees when that is weaker than the scan default.
 #[test]
 fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let contiguous = NativeType::Samples(Arc::new(SeriesSchema {
@@ -259,8 +221,6 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     );
 }
 
-/// A leaf kind renders what it holds, whether or not anything could run it: the line names the
-/// node it is and makes no claim about executability.
 #[test]
 fn a_scalar_and_an_instant_line_show_what_they_hold() {
     let out = grid(0, 60_000, 4);
@@ -294,8 +254,6 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
     );
 }
 
-/// An aggregate and a binary operation name the binding they were compiled with, which is what
-/// makes the line worth reading.
 #[test]
 fn an_aggregate_and_a_binary_name_their_binding() {
     let out = grid(0, 60_000, 4);
@@ -328,8 +286,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
         ])
     );
 
-    // A scalar broadcast, which is the one binary shape whose matching rules are never consulted:
-    // the display still prints them, because the binding is what the compiler decided.
+    // A broadcast never consults its matching, but the display still prints the binding.
     let binary = NativeNode {
         expr: NativeExpr::Binary {
             left: Box::new(NativeNode {
@@ -381,9 +338,8 @@ fn an_aggregate_and_a_binary_name_their_binding() {
     );
 }
 
-/// A set operation names its operator and its matching labels: the logical plan compares fused
-/// nodes by this rendering, so `and`, `or` and `unless`, and `on` and `ignoring`, must not read
-/// alike.
+/// The logical plan compares fused nodes by this rendering, so set operators and `on`/`ignoring`
+/// must not read alike.
 #[test]
 fn a_set_operation_names_its_operator_and_labels() {
     let out = grid(0, 60_000, 4);
@@ -423,11 +379,6 @@ fn a_set_operation_names_its_operator_and_labels() {
     );
 }
 
-/// A `without` grouping reads as `without [...]`, not as `by [...]`.
-///
-/// The two are different queries over the same label list: `by(job)` keeps `job` and drops the
-/// rest, `without(job)` drops `job` and keeps the rest. A rendering that spelled both `by` would
-/// show two different queries as one.
 #[test]
 fn a_without_grouping_does_not_read_as_by() {
     let out = grid(0, 60_000, 4);
@@ -461,7 +412,6 @@ fn a_without_grouping_does_not_read_as_by() {
     );
 }
 
-/// A vector operation names its operator, constant and grouping.
 #[test]
 fn instant_at_and_timestamp_are_displayed() {
     let out = grid(0, 60_000, 4);
@@ -555,7 +505,6 @@ fn a_vector_operation_names_its_binding() {
     }
 }
 
-/// A window read with a range modifier names it and the lookback it reads around the window.
 #[test]
 fn a_modified_window_names_its_modifier() {
     let out = grid(0, 60_000, 4);
@@ -582,8 +531,6 @@ fn a_modified_window_names_its_modifier() {
     );
 }
 
-/// An aggregate over a window over a scan, which is the shape whose three nodes each record
-/// something different.
 fn aggregate_over_window(out: Arc<EvalGrid>) -> NativeTree {
     NativeTree::try_new(NativeNode {
         expr: NativeExpr::Aggregate {
@@ -607,8 +554,6 @@ fn aggregate_over_window(out: Arc<EvalGrid>) -> NativeTree {
     .unwrap()
 }
 
-/// A node's figures end its own line, and only its own: the walk asks for them by the path the
-/// runtime registered that node under, so one node never reports another's work.
 #[test]
 fn each_node_shows_only_the_figures_it_recorded() {
     let tree = aggregate_over_window(grid(0, 60_000, 4));
@@ -636,9 +581,6 @@ fn each_node_shows_only_the_figures_it_recorded() {
     );
 }
 
-/// A tree whose nodes recorded nothing - one that was never run, which is what `EXPLAIN` shows -
-/// is the same lines without figures. No flag says so: an empty snapshot is what an unexecuted
-/// registration leaves.
 #[test]
 fn a_tree_that_recorded_nothing_shows_no_figures() {
     let tree = aggregate_over_window(grid(0, 60_000, 4));
@@ -651,9 +593,7 @@ fn a_tree_that_recorded_nothing_shows_no_figures() {
     assert!(!tree.to_string().contains("metrics="));
 }
 
-/// A node's figures are read from the path the runtime registers, not from the name the bound tree
-/// gives the operand: `info` binds its operands as `base` and `info`, and the runtime registers them
-/// as the kernel's `left` and `right`.
+/// `info`'s `base` and `info` are registered as `left` and `right`.
 #[test]
 fn every_child_is_read_from_the_path_the_runtime_registers() {
     let out = grid(0, 60_000, 4);

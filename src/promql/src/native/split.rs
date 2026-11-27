@@ -14,16 +14,13 @@
 
 //! Where a native aggregate is split so two planes can run it.
 //!
-//! A `Complete` aggregate folds every contribution to a group, which is only correct when one
-//! execution reads all of them. A raw-series scan hands its partitions to separate executions, so the
-//! aggregate is split instead: the per-series prefix of the tree runs below the aggregate in the
-//! partitions that read series, that aggregate becomes a `Partial` one exporting the state each
-//! partition folded, and everything above it runs over the merged series.
+//! A `Complete` aggregate is only correct when one execution reads every contribution. Over a
+//! partitioned raw-series scan, the innermost aggregate is split: the per-series prefix runs in each
+//! partition under a `Partial` aggregate, and the suffix above the cut runs over a `Final` aggregate
+//! of the merged state.
 //!
-//! The split is structural. The innermost aggregate of the tree is replaced by an input node at its
-//! own output - that is where state enters - and the nodes above it become the suffix. What cannot be
-//! split correctly is refused with [`DataFusionError::NotImplemented`], which the planner reads as
-//! "plan this query the existing way".
+//! What cannot be split correctly is refused with [`DataFusionError::NotImplemented`], which the
+//! planner reads as "plan this query the existing way".
 
 use std::sync::Arc;
 
@@ -38,13 +35,12 @@ use crate::native::plan::{
 };
 
 pub(crate) struct Split {
-    /// The per-series tree below the cut aggregate, which the producer runs.
+    /// The per-series tree below the cut aggregate.
     prefix: NativeNode,
-    /// The tree above it, starting at the input the merged values enter at.
+    /// The tree above the cut, with an input node where the merged values enter.
     suffix: NativeNode,
-    /// The aggregate that was cut out.
     op: BoundAggregate,
-    /// What that aggregate produces: the layout the exported state is indexed by.
+    /// The cut aggregate's output, which the exported state is indexed by.
     schema: Arc<SeriesSchema>,
     /// The suffix reads whole histograms rather than individual groups.
     histogram: bool,
@@ -59,21 +55,12 @@ pub(crate) fn histogram_group_is_single(group: &Grouping) -> bool {
     }))
 }
 
-/// Splits the innermost aggregate out of `node`.
+/// Splits the innermost aggregate out of `node`; `Ok(None)` when `node` holds no aggregate.
 ///
-/// `Ok(None)` is a subtree holding no aggregate. Point-wise operations can run where their groups
-/// are owned. Histogram functions can also run there when the state router co-locates every bucket
-/// and every histogram whose output labels collide. A label rewrite may change that key, so it is
-/// only admitted alongside a partitioned histogram when it cannot change a label in the cut's
-/// routing key. A single-owner histogram needs no such restriction. A histogram parameter is
-/// answered above the cut, so it has to read no series: one that does would be silently replaced by
-/// the merged values. `topk`, a second aggregate and vector-vector matching still need a whole-vector
-/// boundary.
-///
-/// An instant selection or a window over raw samples above the cut cannot be applied to the merged
-/// values under the tree's current binding: the cut output is evaluated, whereas these nodes consume
-/// raw samples. A subquery window instead reads an evaluated input, so it is admitted when its
-/// declared grid equals its direct input's grid.
+/// The suffix may hold maps, constant-sided binaries, subquery windows and one histogram function.
+/// A label rewrite that changes a label of the cut's routing key is refused alongside a partitioned
+/// histogram, because the state router co-locates buckets by that key. A histogram parameter must
+/// read no series (see [`suffix_carries`]).
 pub(crate) fn split(
     node: &NativeNode,
     fields: &[FieldSpec],
@@ -118,9 +105,6 @@ pub(crate) fn split(
         NativeExpr::Aggregate { input, op } => {
             check_cut(op, fields, time_index)?;
             match split(input, fields, time_index)? {
-                // A second aggregate above the cut folds the merged values of every group, which
-                // no partition owns on its own: it would have to be replanned as its own
-                // `Partial`/`Final` pair above the first one's result.
                 Some(_) => Err(declined("an aggregate above a split aggregate")),
                 None => {
                     admit_prefix(input)?;
@@ -132,11 +116,7 @@ pub(crate) fn split(
                     }
                     Ok(Some(Split {
                         prefix: (**input).clone(),
-                        // The merged values enter the suffix as the aggregate's own output: the same
-                        // binding and the same value, which is what the tree validates, at source
-                        // `0` of the suffix's own execution - a source index is local to one
-                        // execution, so the suffix names its one input rather than inheriting the
-                        // prefix's.
+                        // Source indices are local to one execution; the suffix has one input.
                         suffix: NativeNode {
                             expr: NativeExpr::Input(BoundInput {
                                 source_index: 0,
@@ -180,10 +160,6 @@ pub(crate) fn split(
             };
             Ok(Some(inner))
         }
-        // The same histogram operation with a parameter evaluated at every grid point instead of
-        // bound as a constant. The parameter is a per-point scalar - an expression of `time()` and
-        // literals - so it reads no series and means the same thing above the merged values, and
-        // the suffix carries it unchanged.
         NativeExpr::ParameterizedHistogram {
             input,
             op,
@@ -192,8 +168,6 @@ pub(crate) fn split(
             let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
             };
-            // The same two refusals as the literal form: successive calls may drop different labels,
-            // so only the first call's partition key is known, and a rewrite may change that key.
             if inner.histogram {
                 return Err(declined("nested histograms above a split aggregate"));
             }
@@ -202,9 +176,6 @@ pub(crate) fn split(
                     "a routing-label rewrite around a partitioned histogram",
                 ));
             }
-            // A parameter is answered at its own grid point rather than from the merged values, so
-            // one that reads the series the prefix reads has no source above the cut: applying it
-            // there would silently answer it from the merged state instead.
             if parameters
                 .iter()
                 .any(|parameter| !suffix_carries(parameter))
@@ -224,17 +195,18 @@ pub(crate) fn split(
             };
             Ok(Some(inner))
         }
-        // TopK ranks the whole vector, not one histogram or aggregation group at a time.
         NativeExpr::Vector {
             op: BoundVectorOp::TopK { .. },
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
+        // Always a `quantile`, which `check_cut` declines.
+        NativeExpr::ParameterizedAggregate { .. } => Err(declined("a `quantile` aggregate")),
+        // A merge in the prefix would see one partition's pieces only, so colliding series in
+        // different partitions would be folded instead of reported as
+        // `vector cannot contain metrics with the same labelset`. The merge must stay a boundary
+        // above every partition (`canonical_boundary_stages`).
         NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
-        // A window whose input is already evaluated - a subquery - applies to the merged values the
-        // suffix reads, provided it evaluates on a grid. The declared grid and the input's grid are
-        // already required to be the same one when the window is bound, so the cut's grid need not be
-        // that grid: a window between them may already have re-gridded the values. A raw-sample
-        // window cannot sit above the cut.
+        // Only a subquery window, whose input is evaluated, can sit above the cut.
         NativeExpr::Window { input, op } => {
             let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
@@ -255,12 +227,9 @@ pub(crate) fn split(
             };
             Ok(Some(inner))
         }
-        // These read values the merged state does not answer: an instant selection or window reads
-        // raw samples, `scalar`/`vector` answers one value or one series instead of the vector, and a
-        // parameterized map reads the whole vector at a point. `ParameterizedTopK` declines here
-        // exactly like the literal `topk` above does: a per-point `k` ranks the whole vector just as
-        // a bound one does, so it needs the same whole-vector boundary. Admitting the one and
-        // refusing the other would be an inconsistency rather than a capability.
+        // None of these is rebuilt above the cut by `enter_suffix`: an instant selection reads raw
+        // samples, `scalar()` and a ranking read the whole vector, and the rest are not supported
+        // there.
         NativeExpr::Instant { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. }
@@ -278,16 +247,11 @@ pub(crate) fn split(
             right,
             matching,
         } => {
-            // Each side is split once, and at most one of them may hold the innermost aggregate: two
-            // would be two cuts, which this node cannot merge.
             let (left_split, right_split) = (
                 split(left, fields, time_index)?,
                 split(right, fields, time_index)?,
             );
-            // A constant operand is broadcast over whatever the other side answers, so applying the
-            // same operation to the merged values is the operation the query wrote. Any other sibling
-            // would have to be matched with those values by label, which nothing below this node
-            // gathers.
+            // Only a broadcast against a literal applies unchanged to the merged values.
             let (mut inner, constant_on_the_left) = match (left_split, right_split) {
                 (None, None) => return Ok(None),
                 (Some(inner), None) if matches!(right.expr, NativeExpr::Scalar(_)) => {
@@ -300,9 +264,6 @@ pub(crate) fn split(
                     ));
                 }
             };
-            // The cut side's own suffix takes the place of the aggregate, on the side the query wrote
-            // it: a non-commutative operator means what that order says, and the matching and the
-            // output are the ones the compiler bound.
             let (left, right) = if constant_on_the_left {
                 ((**left).clone(), inner.suffix)
             } else {
@@ -318,8 +279,6 @@ pub(crate) fn split(
             };
             Ok(Some(inner))
         }
-        // A set operation keeps samples by whether their match group is present on the other side,
-        // which the merged values of one side cannot answer.
         NativeExpr::Set { left, right, .. } => {
             match (
                 split(left, fields, time_index)?,
@@ -329,8 +288,6 @@ pub(crate) fn split(
                 _ => Err(declined("an aggregate under a set operation")),
             }
         }
-        // The suffix above a split aggregate reads the merged state alone, so it has no source for
-        // the info series.
         NativeExpr::Info { base, info, .. } => {
             match (
                 split(base, fields, time_index)?,
@@ -343,13 +300,8 @@ pub(crate) fn split(
     }
 }
 
-/// The field names of the raw series the prefix reads, in source order.
-///
-/// Read off the tree's own raw input node, which is the one authority on what the prefix is
-/// compiled against: the root is already evaluated on the statement's grid, so its fields are the
-/// statement's value columns rather than the raw ones a `by(...)` clause would name. The prefix is
-/// one series at a time and the tree reads exactly one source, so the first raw input answers for
-/// all of them.
+/// The fields of the first raw input in `tree`, which a `by(...)` naming a value field would name.
+/// The split tree reads exactly one source.
 pub(crate) fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
     tree.root()
         .inputs()
@@ -364,13 +316,8 @@ pub(crate) fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
         .ok_or_else(|| declined("a tree that reads no raw series"))
 }
 
-/// Refuses an aggregate whose state the split cannot carry, and one grouped by a value field.
-///
-/// Only the eight fixed-width accumulators are carried: a quantile's state is the group's samples, and
-/// a non-`Complete` stage is a state or a merge rather than an answer. A `by(...)` naming a value field
-/// or the time index cannot be kept either - the state rows are indexed by field and by grid point,
-/// so a group that varies with either is not a group - while a label the input does not have is
-/// simply absent, exactly as it is in the existing planner.
+/// Refuses a non-`Complete` aggregate, a `quantile` (no fixed-width state), and a `by(...)` naming
+/// a value field or the time index.
 pub(crate) fn check_cut(
     op: &BoundAggregate,
     fields: &[FieldSpec],
@@ -395,16 +342,10 @@ pub(crate) fn check_cut(
     Ok(())
 }
 
-/// Checks that the per-series prefix is a tree one partition can evaluate on its own.
+/// Checks that the prefix answers one series from one series' samples: maps and constant-sided
+/// binaries over a window or instant selection of a raw input.
 ///
-/// The producer runs one execution per partition and folds exactly the series that partition's scan
-/// returned, so the prefix has to answer one series from one series' samples: maps are point-wise, a
-/// binary operation with a constant side applies that constant to each series its other side answers,
-/// and a window or an instant selection reads the raw input itself. A raw input means no evaluation
-/// grid - a tree whose input is already evaluated is a subquery's, which one partition cannot evaluate.
-///
-/// A `clamp` whose maximum is below its minimum answers no value at all, so the fold would see a group
-/// with no sample of that field rather than the query the reader wrote.
+/// A `clamp` whose maximum is below its minimum answers no value, so it is refused too.
 pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
     let mut node = root;
     loop {
@@ -419,10 +360,6 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
                 }
                 node = input;
             }
-            // Only a constant side is broadcast: it reaches each series the other side answers, so
-            // that side is the one the fold runs. Two constants answer one value per grid point and
-            // read no series, and two vectors are a label match over the whole vector, which is not
-            // what either half of the split produces.
             NativeExpr::Binary { left, right, .. } => {
                 node = match (&left.expr, &right.expr) {
                     (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => {
@@ -436,6 +373,9 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
                         ));
                     }
                 };
+            }
+            NativeExpr::Merge { .. } => {
+                return Err(declined("a per-series prefix that collects a label set"));
             }
             _ => break,
         }
@@ -463,23 +403,16 @@ pub(crate) fn declined(reason: &str) -> DataFusionError {
     ))
 }
 
-/// A split aggregate as the two trees that run it, and the state they exchange between them.
-///
-/// The prefix runs where the series are read and ends at a `Partial` aggregate exporting the state
-/// each partition folded. The suffix runs where every partition's state has arrived and starts at a
-/// `Final` aggregate consuming it, so nothing above the cut sees a partial contribution.
+/// A split aggregate as the two trees that run it.
 pub struct SplitTrees {
-    /// The prefix, with the cut aggregate bound over it as `Partial`; it answers aggregate state.
+    /// The prefix under a `Partial` aggregate, answering aggregate state per partition.
     pub partial: NativeTree,
-    /// The `Final` aggregate over that state, and everything the split moved above the cut.
+    /// The suffix over a `Final` aggregate of every partition's state.
     pub final_tree: NativeTree,
 }
 
 impl Split {
-    /// Binds this split as the two trees that run it.
-    ///
-    /// `Ok(None)` is an aggregate whose kernel keeps no mergeable state, which cannot cross a
-    /// partition boundary at all.
+    /// `Ok(None)` when the aggregate has no mergeable state.
     pub fn into_trees(self) -> DfResult<Option<SplitTrees>> {
         let Self {
             prefix,
@@ -539,11 +472,7 @@ impl Split {
     }
 }
 
-/// Puts `merged` at the cut and returns the suffix above it.
-///
-/// A suffix is the spine of point-wise maps, constant-sided binaries, evaluated-input windows and at
-/// most one histogram operation between the cut and the root, with scalar constants and the
-/// evaluation time preserved. Other whole-vector operations are refused by `split`.
+/// Replaces the suffix's input node with `merged`.
 fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     let NativeNode { expr, output } = node;
     let rejected = || {
@@ -551,13 +480,9 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     };
     let expr = match expr {
         NativeExpr::Input(_) => return Ok(merged.clone()),
-        // A constant carries no state: the suffix keeps it as it is, beside the merged values. The
-        // evaluation time is such a constant - it answers the grid's own timestamps, and the suffix
-        // runs on the statement's grid, so it answers the same per-point value there.
         NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
             return Ok(NativeNode { expr, output });
         }
-        // A subquery window above the cut is rebuilt over the merged values, on its own grid.
         NativeExpr::Window { input, op } => NativeExpr::Window {
             input: Box::new(enter_suffix(*input, merged)?),
             op,
@@ -573,9 +498,7 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
             input: Box::new(enter_suffix(*input, merged)?),
             op,
         },
-        // The parameters are per-point scalars that read no series - `split` refuses the split
-        // otherwise - so they mean the same above the merged values and are handed over untouched
-        // while only the input is rebuilt.
+        // `split` checked the parameters read no series, so they are kept as they are.
         NativeExpr::ParameterizedHistogram {
             input,
             op,
@@ -599,29 +522,17 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     Ok(NativeNode { expr, output })
 }
 
-/// Whether [`enter_suffix`] rebuilds this subtree without reading `merged`.
-///
-/// This is the question the histogram arm of [`split`] asks of every parameter before it is carried
-/// above the cut: a parameter that `enter_suffix` rebuilds from constants alone means the same thing
-/// there, and one that reads the series has no source above the cut. Keeping the answer exactly the
-/// set of shapes `enter_suffix` builds is what keeps a misplaced tree a decline rather than an
-/// `Internal` error: a subtree that claims to carry but does not would reach `rejected()`.
+/// Whether [`enter_suffix`] rebuilds this subtree from constants alone. It accepts a subset of the
+/// shapes `enter_suffix` builds; a shape outside them would become an `Internal` error there.
 fn suffix_carries(node: &NativeNode) -> bool {
     match &node.expr {
-        // Constants: they answer their own values on the statement's grid.
         NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
-        // Point-wise spines over something that carries: the map and the histogram application
-        // reach each series the way they are rebuilt.
         NativeExpr::Map { input, .. }
         | NativeExpr::Vector {
             input,
             op: BoundVectorOp::Histogram(_),
         } => suffix_carries(input),
-        // A binary operation carries when both sides do: a constant broadcast over a constant is
-        // still a constant.
         NativeExpr::Binary { left, right, .. } => suffix_carries(left) && suffix_carries(right),
-        // Everything else reads a source: the cut's own values (`Input`), the whole vector at a
-        // point (`ScalarOf`, a vector operation), or the series a parameter reads.
         _ => false,
     }
 }

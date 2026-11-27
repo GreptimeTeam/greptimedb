@@ -22,6 +22,8 @@ pub mod multi_region;
 mod overlap;
 pub mod picker;
 mod reader;
+#[cfg(test)]
+pub(crate) use reader::CompactionSstReaderBuilder;
 pub mod run;
 mod scheduler;
 mod task;
@@ -41,11 +43,11 @@ use common_time::range::TimestampRange;
 pub(crate) use json2::{
     Json2RewritePlans, collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema,
 };
-pub use scheduler::CompactionRequest;
 pub(crate) use scheduler::{
     CancelCompactionResult, CompactionCoordinator, CompactionExecution, CompactionPickFinished,
     CompactionScheduler, CompactionState, CompactionStateRef, CompactionTransition,
 };
+pub use scheduler::{CompactionGuard, CompactionRequest};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::mito_engine_options::{TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM};
@@ -55,7 +57,7 @@ use crate::error::{GetSchemaMetadataSnafu, Result, TimeoutSnafu};
 use crate::sst::file::{FileHandle, FileMeta, Level};
 
 /// Finds compaction options and TTL together with a single metadata fetch to reduce RTT.
-async fn find_dynamic_options(
+pub(crate) async fn find_dynamic_options(
     region_id: RegionId,
     region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,
@@ -170,4 +172,9 @@ pub(crate) fn format_panic_reason(payload: &(dyn Any + Send + 'static)) -> Strin
     } else {
         "unknown panic".to_string()
     }
+}
+
+/// A rewrite is balanced when the peers contribute at least the largest input size.
+pub(crate) fn bytes_balanced(largest: u128, total: u128) -> bool {
+    largest <= total - largest
 }

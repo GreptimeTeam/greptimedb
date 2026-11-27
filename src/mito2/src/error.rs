@@ -101,6 +101,15 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Source metadata file disappeared while copying {path}"))]
+    MetadataCopyFileNotFound {
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Manifest delta {} disappeared after it was listed, path: {}",
         version,
@@ -425,6 +434,17 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot remap regions that hold files they did not create: {}",
+        offenders
+    ))]
+    ForeignFilePartitionExpr {
+        /// One entry per offending file: the holding region and the file it must settle.
+        offenders: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Files lost during remapping: old={}, new={}", old_count, new_count))]
     FilesLost {
         old_count: usize,
@@ -552,6 +572,14 @@ pub enum Error {
 
     #[snafu(display("Failed to check the WAL history, region_id: {}", region_id))]
     CheckWalHistory {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to hand the WAL of region {} over to this node", region_id))]
+    HandoffWal {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -796,6 +824,16 @@ pub enum Error {
 
     #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
     RegionLeaseExpired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} has not received a leader lease since a catchup made it writable",
+        region_id
+    ))]
+    RegionLeaseNotReceived {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1636,6 +1674,7 @@ impl Error {
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
+            | Error::RegionLeaseNotReceived { .. }
             | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
@@ -1670,6 +1709,7 @@ impl ErrorExt for Error {
             SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
             OpenDal { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. }
@@ -1680,7 +1720,8 @@ impl ErrorExt for Error {
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
-            | CheckWalHistory { source, .. } => source.status_code(),
+            | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1772,6 +1813,7 @@ impl ErrorExt for Error {
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             IndexBuildIncomplete { .. } => StatusCode::IllegalState,
+            ForeignFilePartitionExpr { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,
@@ -1782,7 +1824,9 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
+            | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             RegionPendingTails { .. } => StatusCode::RegionNotReady,
             RemoteWalUnsupported { .. } => StatusCode::Unsupported,
             TailEntryMissing { .. } => StatusCode::StorageUnavailable,
@@ -1887,6 +1931,7 @@ impl ErrorExt for Error {
             | RegionClosed { .. }
             | RejectWriteInStaging { .. }
             | RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
             | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
@@ -1906,6 +1951,7 @@ impl ErrorExt for Error {
             | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
@@ -1922,6 +1968,7 @@ impl ErrorExt for Error {
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 
@@ -2142,6 +2189,12 @@ mod tests {
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because no Leader lease has confirmed the catchup.
+        let error = RegionLeaseNotReceivedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+        assert!(error.retry_hint().is_retryable());
 
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();

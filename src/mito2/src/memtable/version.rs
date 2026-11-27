@@ -178,6 +178,17 @@ impl MemtableVersion {
             .sum()
     }
 
+    /// Returns the estimated bytes of the rows in all memtables once decoded. It sizes data
+    /// rather than memory: encoded memtables hold fewer bytes.
+    pub(crate) fn decoded_bytes(&self) -> usize {
+        self.mutable.decoded_bytes()
+            + self
+                .immutables
+                .iter()
+                .map(|mem| mem.stats().decoded_bytes())
+                .sum::<usize>()
+    }
+
     /// Returns the number of rows in memtables.
     pub(crate) fn num_rows(&self) -> u64 {
         self.immutables
@@ -281,6 +292,11 @@ impl MutableMemtables {
     /// Returns the mutable memory usage.
     pub(crate) fn memory_usage(&self) -> usize {
         self.partitions.memory_usage()
+    }
+
+    /// Returns the estimated bytes of the mutable rows once decoded.
+    pub(crate) fn decoded_bytes(&self) -> usize {
+        self.partitions.decoded_bytes()
     }
 
     /// Returns the number of time series in mutable time partitions.

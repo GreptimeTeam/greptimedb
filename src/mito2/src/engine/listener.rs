@@ -38,8 +38,42 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener before a catchup reopens the region.
     async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener after the worker handled the end of the region's wait for its
+    /// Leader lease.
+    fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when the worker spawns the persisting of the region's backfilled
+    /// metadata.
+    fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener in the spawned save of the region's backfilled metadata, before it
+    /// takes the manifest lock.
+    async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after the worker handled a notification that the region became
+    /// writable, before it runs the region's deferred work.
+    fn on_region_became_writable(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when the worker starts the work due once the region is a writable
+    /// leader with its Leader lease.
+    async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when an index build request passed the worker's checks of the
+    /// region's state, before it reads the manifest.
+    async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when the worker receives a notification that a save of the region's
+    /// backfilled metadata was deferred.
+    fn on_backfill_deferred(&self, _region_id: RegionId) {}
+
     /// Notifies the listener before a tail replay commits its result.
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after a tail replay committed its result, before the worker is told.
+    async fn on_tail_commit_end(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after a discard of pending tails released the region's WAL.
+    fn on_discarded_tails_wal_released(&self, _region_id: RegionId) {}
 
     /// Notifies the listener each time a tail replay checks for a Leader lease while it waits.
     fn on_tail_lease_check(&self, _region_id: RegionId) {}

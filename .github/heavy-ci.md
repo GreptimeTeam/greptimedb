@@ -5,7 +5,7 @@ action before expensive builds and tests. A failed, skipped, or cancelled
 script-test job blocks those jobs, including manually dispatched runs. Each
 workflow runs its own preflight so it does not wait on another workflow run.
 
-Rust CI keeps the Windows compilation check on PRs and merge groups. Windows
+Rust CI runs the Windows compilation check on its weekday schedule and on manual dispatch, not on PRs or merge groups. Windows
 nextest and Windows SQLness run in the existing Nightly CI workflow, which also
 supports manual dispatch. Its existing schedule is Tuesday through Friday at
 07:00 Asia/Shanghai, not every day. No new Windows test job is added.

@@ -159,6 +159,13 @@ pub(crate) fn cap_wal_release(
 }
 
 impl RegionEdit {
+    pub(crate) fn series_window_seconds(&self) -> Option<i64> {
+        self.series_indexes_to_add
+            .iter()
+            .find_map(FileMeta::series_window)
+            .map(|window| window.end - window.start)
+    }
+
     /// Whether this edit adds or removes data files or series indexes.
     pub(crate) fn has_file_changes(&self) -> bool {
         !self.files_to_add.is_empty()
@@ -233,6 +240,9 @@ pub struct RegionManifest {
     pub files: HashMap<FileId, FileMetaRef>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub series_indexes: HashMap<FileId, FileMetaRef>,
+    /// Fixed at first native series-index publication and retained across expiration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_window_seconds: Option<i64>,
     /// Removed files, which are not in the current manifest but may still be kept for a while.
     /// This is a list of (set of files, timestamp) pairs, where the timestamp is the time when
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
@@ -268,8 +278,8 @@ pub struct RegionManifest {
     /// `after < upto`: a new segment of a node takes as `after` the largest of the
     /// flushed entry id, the `upto`s of the node's existing segments and its handoff
     /// floor, and is added only if that is below its `upto`. So the entries of a node
-    /// between two of its segments are flushed or at or below a handoff floor of the
-    /// node, and need no replay.
+    /// between two of its segments are flushed, discarded or at or below a handoff floor
+    /// of the node, and need no replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_tails: Vec<PendingTail>,
     /// The [HandoffFloor] of each node, removed once the flushed entry id reaches it.
@@ -283,12 +293,20 @@ impl RegionManifest {
     }
 
     /// Returns the entry id after which node `node_id` replays its WAL when it opens
-    /// the region. Entries up to it are flushed, left to the pending tails, or below
-    /// the handoff floor of the node.
+    /// the region. Entries up to it are flushed, discarded, left to the pending tails,
+    /// or below the handoff floor of the node.
     ///
     /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
     /// Whoever adds a tail ensures that every entry id the node allocates afterwards is
     /// above the tail's `upto`, so no later write of the node falls in a skipped range.
+    /// It also ensures that the node's WAL durably holds history through `upto`: a tail
+    /// commit or a discard can raise the flushed entry id to it, and an open of the region
+    /// checks that the WAL holds history through the flushed entry id where the log store
+    /// checks history (see [LogStore::check_region_history]). A discard raises the flushed
+    /// entry id on whichever node leads the region, so whoever adds a tail ensures both for
+    /// every node that may lead the region afterwards, not only for the tail's own node.
+    ///
+    /// [LogStore::check_region_history]: store_api::logstore::LogStore::check_region_history
     pub(crate) fn wal_replay_start(&self, node_id: Option<u64>) -> EntryId {
         let floor = node_id.and_then(|node_id| self.handoff_floors.get(&node_id).copied());
         self.pending_tails
@@ -305,6 +323,7 @@ impl PartialEq for RegionManifest {
     fn eq(&self, other: &Self) -> bool {
         self.metadata == other.metadata
             && self.files == other.files
+            && self.series_window_seconds == other.series_window_seconds
             && self.series_indexes == other.series_indexes
             && self.flushed_entry_id == other.flushed_entry_id
             && self.flushed_sequence == other.flushed_sequence
@@ -332,6 +351,7 @@ pub struct RegionManifestBuilder {
     metadata: Option<RegionMetadataRef>,
     files: HashMap<FileId, FileMetaRef>,
     series_indexes: HashMap<FileId, FileMetaRef>,
+    series_window_seconds: Option<i64>,
     pub removed_files: RemovedFilesRecord,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
@@ -392,6 +412,7 @@ impl RegionManifestBuilder {
                 metadata: Some(s.metadata),
                 files: s.files,
                 series_indexes: s.series_indexes,
+                series_window_seconds: s.series_window_seconds,
                 removed_files: s.removed_files,
                 flushed_entry_id: s.flushed_entry_id,
                 manifest_version: s.manifest_version,
@@ -443,6 +464,9 @@ impl RegionManifestBuilder {
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
 
+        self.series_window_seconds = self
+            .series_window_seconds
+            .or_else(|| edit.series_window_seconds());
         let mut removed_files = vec![];
         for file in edit.files_to_add {
             let file = FileMetaRef::from(file);
@@ -574,6 +598,7 @@ impl RegionManifestBuilder {
             metadata,
             files: self.files,
             series_indexes: self.series_indexes,
+            series_window_seconds: self.series_window_seconds,
             removed_files: self.removed_files,
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
@@ -1187,6 +1212,7 @@ mod tests {
             append_mode: None,
             pending_tails: Default::default(),
             series_indexes: Default::default(),
+            series_window_seconds: None,
             handoff_floors: Default::default(),
         };
 
@@ -1373,6 +1399,7 @@ mod tests {
                 append_mode: None,
                 pending_tails: Default::default(),
                 series_indexes: Default::default(),
+                series_window_seconds: None,
                 handoff_floors: Default::default(),
             }
         );
@@ -1391,6 +1418,7 @@ mod tests {
             append_mode: None,
             pending_tails: Default::default(),
             series_indexes: Default::default(),
+            series_window_seconds: None,
             handoff_floors: Default::default(),
         };
         let json = serde_json::to_string(&new_manifest).unwrap();
@@ -1665,6 +1693,10 @@ mod tests {
         assert_eq!(edit.series_indexes_to_add.len(), 1);
         let index = edit.series_indexes_to_add[0].clone();
         let first = edit.files_to_add[0].clone();
+        // Sequence trust follows file ownership without format-specific metadata.
+        assert!(!first.is_effective_target_sequence_trusted(first.region_id));
+        let foreign_target = RegionId::new(first.region_id.table_id(), 99);
+        assert!(first.is_effective_target_sequence_trusted(foreign_target));
         builder.apply_edit(1, edit);
         let checkpoint = builder.try_build().unwrap();
         let encoded = serde_json::to_vec(&checkpoint).unwrap();
@@ -1684,6 +1716,37 @@ mod tests {
         assert_eq!(replaced.files.len(), 1);
         assert_eq!(replaced.series_indexes[&index.file_id].as_ref(), &index);
         assert_eq!(checkpoint.series_indexes.len(), 1);
+        assert_eq!(Some(10), replaced.series_window_seconds);
+        let bytes =
+            include_bytes!("../../../../tests/compatibility/manifest/narthex/fixed-window.json");
+        let (_, _, edit) = RegionMetaActionList::decode(bytes)
+            .unwrap()
+            .split_region_change_and_edit();
+        let id = edit.series_indexes_to_add[0].file_id();
+        let mut builder =
+            RegionManifestBuilder::with_checkpoint(Some(replaced), Default::default());
+        builder.apply_edit(3, edit);
+        let current = builder.try_build().unwrap();
+        assert_eq!(current.series_indexes.len(), 1);
+        assert_eq!(
+            current.series_indexes[&id.file_id()]
+                .series_window()
+                .unwrap()
+                .max_sequence,
+            90
+        );
+        let mut builder = RegionManifestBuilder::with_checkpoint(Some(current), Default::default());
+        builder.apply_edit(
+            4,
+            RegionEdit {
+                series_indexes_to_remove: vec![id],
+                ..Default::default()
+            },
+        );
+        let empty = builder.try_build().unwrap();
+        let restored = RegionManifest::decode(&serde_json::to_vec(&empty).unwrap()).unwrap();
+        assert!(restored.series_indexes.is_empty());
+        assert_eq!(Some(10), restored.series_window_seconds);
         let legacy = include_bytes!(
             "../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json"
         );

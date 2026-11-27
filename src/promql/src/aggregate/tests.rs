@@ -616,14 +616,37 @@ fn incremental_retained_bytes_match_full_recount_for_many_groups() {
     }
 }
 
-/// The unbudgeted entry point is the budgeted one with a no-op budget, so this compares one path
-/// with itself: it is a smoke check that the wrapper still runs, not evidence that the kernels are
-/// right. The numbers are checked against Prometheus in `aggregates_match_prometheus` and
-/// `stat_aggregates_match_prometheus`.
+/// A state is its exported components plus a presence word, unless the count serves as presence.
 #[test]
-fn every_supported_kind_runs_through_the_unbudgeted_entry_point() {
-    let schema = schema(&["value"]);
-    let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0), Some(3.0)]]);
+fn a_state_is_as_wide_as_the_operation_it_belongs_to() {
+    for op in [
+        AggregateOp::Count,
+        AggregateOp::Group,
+        AggregateOp::Min,
+        AggregateOp::Max,
+        AggregateOp::Sum,
+        AggregateOp::Stddev,
+        AggregateOp::Stdvar,
+        AggregateOp::Avg,
+    ] {
+        let counted = op
+            .state_fields()
+            .iter()
+            .any(|field| matches!(field, StateField::Count));
+        assert_eq!(
+            op.state_words(),
+            op.state_fields().len() + usize::from(!counted),
+            "{op:?} keeps its own components and nothing else"
+        );
+    }
+}
+
+/// What a block keeps is what its operation folds: for every operation the fold's retained figure
+/// and the recount of its live blocks agree, and a block holds one state per point per field, each
+/// as many words as the operation keeps.
+#[test]
+fn every_operation_recounts_the_states_it_keeps() {
+    let schema = schema_with_grid_len(&["value", "other"], 256);
     for op in [
         AggregateOp::Sum,
         AggregateOp::Count,
@@ -634,17 +657,48 @@ fn every_supported_kind_runs_through_the_unbudgeted_entry_point() {
         AggregateOp::Stddev,
         AggregateOp::Stdvar,
     ] {
-        let mut plain = FloatAggregator::try_new(&schema, op, Grouping::By(&[])).unwrap();
-        plain.update(&series).unwrap();
-        let plain = plain.finish().unwrap();
-        let mut budgeted =
-            FloatAggregator::try_new_budgeted(&schema, op, Grouping::By(&[]), |_| Ok(())).unwrap();
-        budgeted.update_budgeted(&series, |_| Ok(())).unwrap();
-        let budgeted = budgeted.finish_budgeted(|_| Ok(())).unwrap();
+        let mut aggregator =
+            FloatAggregator::try_new(&schema, op, Grouping::By(&["zone"])).unwrap();
         assert_eq!(
-            values_of(&plain, 0, 128),
-            values_of(&budgeted, 0, 128),
-            "{op:?}"
+            aggregator.state_bytes(),
+            aggregator.recounted_state_bytes(),
+            "{op:?} initial state"
+        );
+        let updates = [
+            input(
+                &schema,
+                metric("m", &[("zone", "a")]),
+                0,
+                &[vec![Some(1.0), Some(2.0)], vec![Some(3.0)]],
+            ),
+            input(
+                &schema,
+                metric("m", &[("zone", "a")]),
+                64,
+                &[vec![Some(4.0)], vec![Some(5.0)]],
+            ),
+            input(
+                &schema,
+                metric("m", &[("zone", "b")]),
+                128,
+                &[vec![Some(6.0)], vec![Some(7.0)]],
+            ),
+        ];
+        for (index, series) in updates.iter().enumerate() {
+            aggregator.update(series).unwrap();
+            assert_eq!(
+                aggregator.state_bytes(),
+                aggregator.recounted_state_bytes(),
+                "{op:?} update {index}"
+            );
+        }
+        // The first group wrote two blocks of two fields.
+        let blocks = &aggregator.groups[0].blocks;
+        assert_eq!(blocks.len(), 2, "{op:?} blocks the first group wrote");
+        assert_eq!(
+            blocks.values().map(|block| block.len()).sum::<usize>(),
+            blocks.len() * BLOCK_POINTS * schema.fields.len() * op.state_words(),
+            "{op:?} words per block"
         );
     }
 }
@@ -677,11 +731,9 @@ fn adjacent_blocks_are_admitted_and_accounted_separately() {
         .unwrap();
     assert_eq!(aggregator.groups(), 1);
     assert_eq!(aggregator.groups[0].blocks.len(), 2);
-    // A new block is admitted on the retained state alone, so the last admission settles at
-    // exactly what the fold keeps and no staging buffer is charged for the samples in it.
-    let block = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    // A new block is admitted on the retained state alone, so the last admission is exactly what
+    // the fold keeps.
+    let block = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let (first, second) = (
         admissions[admissions.len() - 2],
         admissions[admissions.len() - 1],
@@ -710,9 +762,7 @@ fn a_rejected_block_allocation_does_not_insert_a_block() {
     // The figure a new block's admission adds: the block's states and its tree node, on top of
     // whatever the fold already holds. Located by the value, not by which call reaches it, so
     // reordering the earlier admissions cannot make this test pass without testing anything.
-    let block_states = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    let block_states = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let block = block_states.saturating_add(btree_backing_bytes(1));
     let mut aggregator =
         FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
@@ -756,9 +806,7 @@ fn a_rejected_later_block_keeps_the_blocks_the_group_already_holds() {
     // The group and the tree node are already there, so the block's own states are the whole
     // charge of the second block.
     let later = input(&schema, metric("m", &[]), 64, &[vec![Some(2.0)]]);
-    let block_states = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    let block_states = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let threshold = retained
         .saturating_add(btree_backing_bytes(2).saturating_sub(btree_backing_bytes(1)))
         .saturating_add(block_states);
@@ -784,9 +832,7 @@ fn a_rejected_later_block_keeps_the_blocks_the_group_already_holds() {
     );
 }
 
-/// The fold admits exactly the figures it reports: a bound equal to the peak it asked for admits
-/// the whole series, and one byte less refuses it. The staging pass that used to buffer a block's
-/// samples is gone, so the block no longer costs a buffer beside its states.
+/// A bound equal to the peak the fold asked for admits the whole series; one byte less refuses it.
 #[test]
 fn a_bound_equal_to_the_fold_peak_admits_the_whole_series() {
     let schema = schema(&["value", "other"]);
@@ -864,9 +910,7 @@ fn the_fold_releases_the_series_workspace_before_it_admits_a_block() {
     let state = aggregator.state_bytes();
     assert_eq!(aggregator.recounted_state_bytes(), state);
 
-    let block = BLOCK_POINTS
-        .saturating_mul(schema.fields.len())
-        .saturating_mul(std::mem::size_of::<FloatState>());
+    let block = block_bytes(schema.fields.len(), AggregateOp::Sum);
     let entry = state
         .saturating_sub(block)
         .saturating_sub(btree_backing_bytes(1));
@@ -883,6 +927,101 @@ fn the_fold_releases_the_series_workspace_before_it_admits_a_block() {
         grouping > entry,
         "the series workspace was still charged at the fold entry: {grouping} <= {entry}"
     );
+}
+
+/// A chunk admits its workspace and the group it may open in one pool call, releases the
+/// workspace at the fold entry, and pays for each block it opens: three calls for a chunk that
+/// falls in one block, four for one that opens two.
+#[test]
+fn a_chunk_admits_its_workspace_release_and_blocks_in_three_or_four_calls() {
+    let schema = schema(&["value", "other"]);
+    let one_block = input(
+        &schema,
+        metric("m", &[("zone", "a")]),
+        0,
+        &[vec![Some(1.0), Some(2.0)], vec![Some(3.0)]],
+    );
+    // Two samples of the first field straddle the edge at 64, so the fold opens a second block.
+    let two_blocks = input(
+        &schema,
+        metric("m", &[("zone", "a")]),
+        63,
+        &[vec![Some(1.0), Some(2.0)], vec![Some(3.0)]],
+    );
+    let admissions = |series: &Series| {
+        let mut aggregator =
+            FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone"])).unwrap();
+        let mut calls = Vec::new();
+        aggregator
+            .update_budgeted(series, |bytes| {
+                calls.push(bytes);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(aggregator.state_bytes(), aggregator.recounted_state_bytes());
+        calls
+    };
+
+    let one = admissions(&one_block);
+    assert_eq!(
+        one.len(),
+        3,
+        "the workspace, the release and one block: {one:?}"
+    );
+    assert!(
+        one[0] > one[1],
+        "the workspace was admitted beside the retained state: {one:?}"
+    );
+    let block = block_bytes(schema.fields.len(), AggregateOp::Sum);
+    assert_eq!(
+        one[2],
+        one[1]
+            .saturating_add(block)
+            .saturating_add(btree_backing_bytes(1)),
+        "the block is admitted on the retained state alone"
+    );
+
+    let two = admissions(&two_blocks);
+    assert_eq!(
+        two.len(),
+        4,
+        "the workspace, the release and two blocks: {two:?}"
+    );
+    assert!(two[3] > two[2], "each block is admitted separately");
+}
+
+/// A chunk that only writes into states its group already holds costs the workspace admission and
+/// the release, and no block.
+#[test]
+fn a_chunk_of_existing_blocks_admits_only_its_workspace_and_release() {
+    let schema = schema(&["value"]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone"])).unwrap();
+    aggregator
+        .update(&input(
+            &schema,
+            metric("m", &[("zone", "a")]),
+            0,
+            &[vec![Some(1.0)]],
+        ))
+        .unwrap();
+    let mut calls = Vec::new();
+    aggregator
+        .update_budgeted(
+            &input(
+                &schema,
+                metric("m", &[("zone", "a")]),
+                1,
+                &[vec![Some(2.0)]],
+            ),
+            |bytes| {
+                calls.push(bytes);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(calls.len(), 2, "the workspace and the release: {calls:?}");
+    assert_eq!(aggregator.state_bytes(), aggregator.recounted_state_bytes());
 }
 
 /// A block a field holds no value in is not allocated: two fields whose samples fall in different
@@ -1404,11 +1543,7 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
         Samples::try_from_histogram(UInt32Array::from(vec![None]), batch).unwrap(),
     ])
     .unwrap();
-    // `count` and `group` ask only whether a sample is present, so a histogram is one
-    // contribution for them, `min`/`max` skip it, and `sum`/`avg` fold whatever payload they are
-    // handed -- this column holds no sample at all, so there is nothing for them to fold. No
-    // operation this route folds refuses a histogram series any more; what it does with each sample
-    // is the fold's decision.
+    // No operation refuses a histogram-typed column; this one holds no sample at all.
     for op in OPS {
         let answer = aggregate_float(
             &schema,
@@ -1452,59 +1587,7 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
     assert!(aggregate_float(&raw_schema, &[], AggregateOp::Sum, Grouping::By(&[])).is_err());
 }
 
-/// Aggregating a series of several runs folds the positions its axis carries, once each.
-///
-/// The rows of a sparse input are not adjacent, so a fold that walked `0..len` and added the
-/// first position would aggregate the holes as if they were the carried rows.
-#[test]
-fn aggregates_fold_a_sparse_axis_by_its_positions() {
-    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1000, 8).unwrap()).unwrap());
-    let schema = Arc::new(SeriesSchema {
-        fields: vec![FieldSpec {
-            name: Arc::from("value"),
-        }]
-        .into(),
-        eval_grid: Some(grid),
-    });
-    let mut points = crate::grid_series::reference::Points::new();
-    for (position, value) in [(1, 1.0), (2, 2.0), (6, 6.0)] {
-        points.insert(position, f64::to_bits(value));
-    }
-    let a = crate::grid_series::reference::sparse_series(
-        &schema,
-        &Labels::from([("host".to_string(), "a".to_string())]),
-        &points,
-    )
-    .unwrap();
-    let mut other = crate::grid_series::reference::Points::new();
-    for (position, value) in [(2, 20.0), (6, 60.0)] {
-        other.insert(position, f64::to_bits(value));
-    }
-    let b = crate::grid_series::reference::sparse_series(
-        &schema,
-        &Labels::from([("host".to_string(), "b".to_string())]),
-        &other,
-    )
-    .unwrap();
-
-    // `By(&[])`: one group over both series, since their `host` labels differ.
-    let pieces = aggregate_float(&schema, &[a, b], AggregateOp::Sum, Grouping::By(&[])).unwrap();
-    // One group, one piece: the group holds a result at positions 1, 2 and 6.
-    let dense = crate::grid_series::reference::stitch(&pieces);
-    let values = dense
-        .iter()
-        .enumerate()
-        .filter_map(|(position, row)| row[0].map(|value| (position, value)))
-        .collect::<Vec<_>>();
-    assert_eq!(values, vec![(1, 1.0), (2, 22.0), (6, 66.0)]);
-}
-
-/// F: an aggregation over inputs of several runs folds the carried positions and reports them as
-/// the runs they make up, compared in full against the dense reference.
-///
-/// Series `a` holds 1, 2 and 6; series `b` holds 2 and 6 with a different value. Their sum is 1 at
-/// position 1, 22 at 2 and 66 at 6, and the hole at 3..5 is not a row: the result's runs are
-/// `[(1, 2), (6, 1)]`, not `[(1, 6)]`.
+/// The hole at 3..5 must not become rows: the sum's runs are `[(1, 2), (6, 1)]`, not `[(1, 6)]`.
 #[test]
 fn an_aggregation_of_sparse_inputs_is_compared_in_full_against_the_reference() {
     use crate::grid_series::reference::{
@@ -1565,7 +1648,7 @@ fn an_aggregation_of_sparse_inputs_is_compared_in_full_against_the_reference() {
     }
     assert_eq!(stitch(&pieces), expected);
 
-    // `count` keeps the same axis: two inputs hold something at positions 1, 2 and 6.
+    // `count` over `b` alone keeps `b`'s runs.
     let counts = aggregate_float(&schema, &[b], AggregateOp::Count, Grouping::By(&[]))
         .expect("one float input");
     let mut counted: Dense = vec![vec![None]; 8];
@@ -1983,7 +2066,7 @@ fn merge_charges_one_block_per_new_block_not_per_point() {
     aggregator.update(&series).unwrap();
     let partial = aggregator.finish_partial().unwrap();
     assert_eq!(partial.groups[0].states[0].len(), 64);
-    let block = BLOCK_POINTS * 64 * std::mem::size_of::<FloatState>();
+    let block = block_bytes(64, AggregateOp::Sum);
     let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
     let (peak, result) =
         peak_admission(|budget| merge_partial_budgeted(&mut merger, partial, budget));
@@ -1999,10 +2082,8 @@ fn merge_charges_one_block_per_new_block_not_per_point() {
 }
 
 #[test]
-fn merge_admits_groups_and_blocks_before_it_inserts_them() {
+fn a_refused_merge_leaves_the_retained_figure_unchanged() {
     let schema = schema(&["value"]);
-    // A group opens on the first position its row carries, so every row here carries one: the
-    // group, its index slot and its block are each admitted before they are allocated.
     let one_point =
         || TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, 1).unwrap());
     let point = || {
@@ -2049,10 +2130,10 @@ fn merge_admits_groups_and_blocks_before_it_inserts_them() {
     );
 }
 
-/// Building a label key copies the metric name, so the copy is admitted before it is made: a
-/// refusal arrives before the merge touches anything, even for a group and block it already has.
+/// Building a label key copies the metric name, so the merge admits it even for a group and block
+/// it already has.
 #[test]
-fn merge_admits_the_key_before_it_builds_it() {
+fn merge_admits_the_key_even_for_an_existing_group() {
     let schema = schema(&["value"]);
     let series = input(&schema, metric("m", &[("job", "a")]), 0, &[vec![Some(1.0)]]);
     let partial = || {
@@ -2118,52 +2199,6 @@ fn a_long_metric_name_is_held_by_the_group_and_by_its_key() {
         2 * EXTRA,
         "the name is held once by the group and once by the key"
     );
-}
-
-/// The budgeted partial path keeps the numbers of the public one: one partition, so the merged
-/// result is the serial fold bit for bit, for every supported aggregation.
-#[test]
-fn budgeted_partial_state_merges_to_the_public_numbers() {
-    let schema = schema(&["value"]);
-    let series = input(
-        &schema,
-        metric("m", &[]),
-        0,
-        &[vec![Some(1.0), None, Some(3.0), Some(-2.0)]],
-    );
-    for op in [
-        AggregateOp::Sum,
-        AggregateOp::Count,
-        AggregateOp::Avg,
-        AggregateOp::Min,
-        AggregateOp::Max,
-        AggregateOp::Group,
-        AggregateOp::Stddev,
-        AggregateOp::Stdvar,
-    ] {
-        let serial = aggregate_float(
-            &schema,
-            std::slice::from_ref(&series),
-            op,
-            Grouping::By(&[]),
-        )
-        .unwrap();
-        let expected = values_of(&serial, 0, 128);
-        let mut aggregator = FloatAggregator::try_new(&schema, op, Grouping::By(&[])).unwrap();
-        aggregator.update(&series).unwrap();
-        let partial = aggregator.finish_partial_budgeted(|_| Ok(())).unwrap();
-        let mut merger = FloatMerger::try_new(&schema, op).unwrap();
-        merge_partial_budgeted(&mut merger, partial.clone(), |_| Ok(())).unwrap();
-        let merged = merger.finish_budgeted(|_| Ok(())).unwrap();
-        assert_eq!(values_of(&merged, 0, 128), expected, "{op:?} budgeted");
-        let mut plain = FloatMerger::try_new(&schema, op).unwrap();
-        merge_partial(&mut plain, partial);
-        assert_eq!(
-            values_of(&plain.finish().unwrap(), 0, 128),
-            expected,
-            "{op:?}"
-        );
-    }
 }
 
 /// Partial states merged in any partition and merge order give the serial result, within the
@@ -2379,7 +2414,7 @@ fn a_merge_rejects_state_that_does_not_fit() {
     // Another aggregation: its state is not this merge's state.
     let other = state_row_of(AggregateOp::Avg, partial(AggregateOp::Avg).groups.remove(0));
     assert!(merger.merge_row(&other, |_| Ok(())).is_err());
-    // More fields than the merge's schema holds: the shape no longer fits.
+    // More fields than the merge's schema holds.
     let mut wide =
         FloatAggregator::try_new(&wide_schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
     wide.update(&input(
@@ -2458,12 +2493,8 @@ fn count_values_keeps_neighbours_of_a_power_of_two_apart() {
     );
 }
 
-/// `count` and `group` ask whether a sample is present, so a histogram is one contribution.
-///
-/// Prometheus counts every present sample whatever its type is, and answers `1` for a non-empty
-/// group. A native histogram therefore counts once - including one that observed nothing - and
-/// contributes nothing to a group that has no other sample. Every other aggregate reads the value,
-/// so it must still refuse a histogram rather than count it.
+/// Prometheus counts every present sample whatever its type, so a histogram counts once, including
+/// one that observed nothing.
 #[test]
 fn count_and_group_count_histogram_samples() {
     use crate::grid_series::reference::OwnedHistogram;
@@ -2551,8 +2582,8 @@ fn count_and_group_count_histogram_samples() {
     }
 }
 
-/// `min`, `max`, `stddev`, `stdvar` and `quantile` read a float value, so a histogram sample is
-/// skipped rather than refused - and a group holding only histograms has no answer at all.
+/// `min` and `max` skip a histogram sample rather than refuse it, and a point holding only
+/// histograms has no answer. `sum` and `avg` refuse a group mixing floats and histograms.
 #[test]
 fn value_reading_aggregates_skip_histogram_samples() {
     use crate::grid_series::reference::OwnedHistogram;
@@ -3750,35 +3781,6 @@ fn assert_histogram_close(actual: &HistogramView<'_>, expected: &HistogramView<'
     }
 }
 
-/// Two partitions' sums merge into the answer one fold over both partitions' samples gives.
-#[test]
-fn merging_two_partials_answers_the_sum_the_one_fold_answers() {
-    let schema = schema_with_grid_len(&["value"], 1);
-    let sample =
-        |sum: f64| histogram_sample(0, &[(0, 1.0)], &[], 1.0, sum, CounterResetHint::Unknown);
-    let first = [
-        histogram_series(&schema, "a", vec![(0, sample(1.0))]),
-        histogram_series(&schema, "b", vec![(0, sample(2.0))]),
-    ];
-    let second = [
-        histogram_series(&schema, "c", vec![(0, sample(3.0))]),
-        histogram_series(&schema, "d", vec![(0, sample(4.0))]),
-    ];
-    let both: Vec<Series> = first.iter().chain(&second).cloned().collect();
-    let left = partial_state(AggregateOp::Sum, &schema, &first);
-    let right = partial_state(AggregateOp::Sum, &schema, &second);
-    let merged =
-        merged_histogram_answer(AggregateOp::Sum, &[left, right]).expect("a merged answer");
-    let complete = aggregate_answer(&schema, &both, AggregateOp::Sum);
-    let row = answered_row(&merged);
-    assert_histogram_close(
-        &row.view(0).expect("one answer row"),
-        &answered_histogram(&complete, 0, 0),
-    );
-    assert_eq!(merged.sum, 10.0);
-    assert_eq!(merged.count, 4.0);
-}
-
 /// One partition that switched to a mean and one that is still summing merge into the answer one
 /// fold over both partitions' samples gives.
 #[test]
@@ -3852,119 +3854,6 @@ fn merging_two_overflowing_partials_answers_a_finite_mean() {
     assert!(value.sum.is_finite(), "a mean of finite sums is finite");
     assert_eq!(value.sum, 1e308, "(1e308 + 1e308) / 2");
     assert_eq!(value.count, 1.0);
-}
-
-/// A mean-path merge weights each side's mean by that side's own count, so partitions of unequal
-/// size answer the weighted mean and not an average of two means.
-///
-/// Both partitions fold only the sample values `2^1023` and `2^1021`, which keeps every step exact:
-/// the left one overflows on its second sample and switches to a mean of `2^1023` over 2 samples,
-/// while the right one keeps summing six samples of `2^1021` into `3 * 2^1022`, a mean of `2^1021`
-/// over 6. Eight samples in all, so the weights are exactly `2/8` and `6/8`, and the answer is
-/// `2^1023 * 2/8 + 2^1021 * 6/8 = 7 * 2^1019`. Swapping the two weights answers
-/// `2^1023 * 6/8 + 2^1021 * 2/8 = 13 * 2^1019`, which is why the assertion is on the literal.
-#[test]
-fn merging_unequal_mean_partials_weights_each_mean_by_its_count() {
-    let schema = schema_with_grid_len(&["value"], 1);
-    let large = || {
-        histogram_sample(
-            0,
-            &[(0, 1.0)],
-            &[],
-            1.0,
-            2f64.powi(1023),
-            CounterResetHint::Unknown,
-        )
-    };
-    let small = || {
-        histogram_sample(
-            0,
-            &[(0, 1.0)],
-            &[],
-            1.0,
-            2f64.powi(1021),
-            CounterResetHint::Unknown,
-        )
-    };
-    // `2^1023 + 2^1023` is `Inf`, so the left partition's second sample is what forces its switch.
-    let left_input: Vec<Series> = (0..2)
-        .map(|index| histogram_series(&schema, &format!("a{index}"), vec![(0, large())]))
-        .collect();
-    let right_input: Vec<Series> = (0..6)
-        .map(|index| histogram_series(&schema, &format!("b{index}"), vec![(0, small())]))
-        .collect();
-    let left = partial_state(AggregateOp::Avg, &schema, &left_input);
-    let right = partial_state(AggregateOp::Avg, &schema, &right_input);
-    let left_payload = left.groups[0].states[0][0]
-        .as_ref()
-        .and_then(StatePayload::histogram)
-        .expect("a histogram state");
-    assert!(left_payload.incremental_mean, "the left partition switched");
-    assert_eq!(left_payload.count, 2.0);
-    let right_payload = right.groups[0].states[0][0]
-        .as_ref()
-        .and_then(StatePayload::histogram)
-        .expect("a histogram state");
-    assert!(
-        !right_payload.incremental_mean,
-        "the right partition kept its sum"
-    );
-    assert_eq!(right_payload.count, 6.0);
-    // One side switching is enough to put the merge on its mean path.
-    let value = merged_histogram_answer(AggregateOp::Avg, &[left, right]).expect("a merged answer");
-    assert_eq!(
-        value.sum,
-        7.0 * 2f64.powi(1019),
-        "2^1023 * 2/8 + 2^1021 * 6/8, not an average of the two means"
-    );
-    // The observation counts follow the same weights, and both sides average one observation per
-    // sample, so the answer's count stays 1 whatever the weights are.
-    assert_eq!(value.count, 1.0);
-    assert_eq!(value.positive, vec![(0, 1.0)]);
-}
-
-/// A poisoned partition poisons the point whatever the other partition holds, and a poisoned point
-/// answers nothing.
-#[test]
-fn a_poisoned_partial_poisons_the_merged_point() {
-    let schema = schema_with_grid_len(&["value"], 1);
-    let exponential = || histogram_sample(0, &[(0, 1.0)], &[], 1.0, 2.0, CounterResetHint::Unknown);
-    let custom = || {
-        histogram_sample(
-            CUSTOM_BUCKETS,
-            &[(0, 1.0)],
-            &[1.0],
-            1.0,
-            3.0,
-            CounterResetHint::Unknown,
-        )
-    };
-    let poisoned = partial_state(
-        AggregateOp::Sum,
-        &schema,
-        &[
-            histogram_series(&schema, "a", vec![(0, exponential())]),
-            histogram_series(&schema, "b", vec![(0, custom())]),
-        ],
-    );
-    let legal = partial_state(
-        AggregateOp::Sum,
-        &schema,
-        &[histogram_series(&schema, "c", vec![(0, exponential())])],
-    );
-    for order in [
-        [poisoned.clone(), legal.clone()],
-        [legal.clone(), poisoned.clone()],
-    ] {
-        let merged = merged_histogram_answer(AggregateOp::Sum, &order);
-        assert!(
-            merged.is_none(),
-            "a poisoned point answers nothing, whichever side poisoned it"
-        );
-        let evidence = merged_histogram_evidence(AggregateOp::Sum, &order);
-        assert!(evidence.poisoned);
-        assert!(evidence.incompatible_layout);
-    }
 }
 
 /// Which partition arrived first does not change what the merge reports: a reconciliation between

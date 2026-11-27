@@ -193,6 +193,31 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         Ok(())
     }
 
+    /// Hands the provider's region over to this log store before the region
+    /// becomes writable on it, and returns the bound: an id at or above
+    /// `entry_id` and every id of the region the log store still holds or
+    /// assigned since it opened. Ids it assigned before and no longer holds
+    /// need not be covered; they stay below every id it assigns later.
+    ///
+    /// Once it returns:
+    /// - every id the log store assigns to the region is above the bound,
+    ///   also after a restart;
+    /// - no entry of the region is obsolete that was not before;
+    /// - [`check_region_history`](Self::check_region_history) accepts the
+    ///   region, as [`start_region_history`](Self::start_region_history)
+    ///   makes it.
+    ///
+    /// The default does nothing and returns `entry_id`. It suits a log store
+    /// that never assigns a region an id at or below one already used for the
+    /// region, wherever it was used, and that accepts every history.
+    async fn handoff(
+        &self,
+        _provider: &Provider,
+        entry_id: EntryId,
+    ) -> Result<EntryId, Self::Error> {
+        Ok(entry_id)
+    }
+
     /// Streams the entries of `region_id` in `(after, upper]` from the WAL of node `node_id`,
     /// which shares this log store's storage, without writing to that WAL.
     ///

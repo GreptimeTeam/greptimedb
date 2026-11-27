@@ -101,7 +101,9 @@ impl UpgradeRegionsHandler {
         let mut timeout = None;
 
         for upgrade_region in upgrade_regions {
-            let Some(writable) = ctx.region_server.is_region_leader(upgrade_region.region_id)
+            let Some(confirmed) = ctx
+                .region_server
+                .is_confirmed_leader(upgrade_region.region_id)
             else {
                 // Region is not found.
                 debug!("Region {} is not found", upgrade_region.region_id);
@@ -114,8 +116,10 @@ impl UpgradeRegionsHandler {
                 continue;
             };
 
-            // Ignores the catchup requests for writable regions.
-            if writable {
+            // Ignores the catchup requests for writable regions, except those a catchup made
+            // writable with no Leader lease since: they may lack what the leader has written
+            // since, and the engine catches them up again.
+            if confirmed {
                 warn!(
                     "Region {} is writable, ignores the catchup request",
                     upgrade_region.region_id
@@ -133,6 +137,7 @@ impl UpgradeRegionsHandler {
                     replay_entry_id,
                     metadata_replay_entry_id,
                     replay_timeout,
+                    location_id,
                     ..
                 } = upgrade_region;
                 match timeout {
@@ -161,6 +166,7 @@ impl UpgradeRegionsHandler {
                         entry_id: last_entry_id,
                         metadata_entry_id: metadata_last_entry_id,
                         checkpoint,
+                        source_node_id: location_id,
                     },
                 ));
             }
@@ -226,6 +232,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::RegionRole;
+    use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
     use crate::error;
@@ -319,14 +326,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_legacy_wal_index_hint() {
+    async fn test_location_id_is_the_catchup_source() {
         for location_id in [None, Some(42)] {
             let mock_region_server = mock_region_server();
             let region_id = RegionId::new(1024, 1);
             let (mock_engine, _) =
                 MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |engine| {
                     engine.mock_role = Some(Some(RegionRole::Follower));
-                    engine.handle_request_mock_fn = Some(Box::new(|_, request| {
+                    engine.handle_request_mock_fn = Some(Box::new(move |_, request| {
                         let store_api::region_request::RegionRequest::Catchup(request) = request
                         else {
                             panic!("expected catchup request");
@@ -334,6 +341,7 @@ mod tests {
                         assert!(request.set_writable);
                         assert_eq!(request.entry_id, Some(10));
                         assert_eq!(request.metadata_entry_id, Some(5));
+                        assert_eq!(request.source_node_id, location_id);
                         Ok(0)
                     }));
                 });
@@ -359,6 +367,38 @@ mod tests {
             assert!(reply.exists);
             assert!(reply.error.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn test_writable_region_awaiting_leader_lease_catches_up() {
+        let mock_region_server = mock_region_server();
+        let region_id = RegionId::new(1024, 1);
+
+        let (mock_engine, mut requests) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                region_engine.mock_role = Some(Some(RegionRole::Leader));
+                region_engine.mock_confirmed_leader = Some(false);
+            });
+        mock_region_server.register_test_region(region_id, mock_engine);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
+        let reply = UpgradeRegionsHandler::new_test()
+            .handle(
+                &handler_context,
+                vec![UpgradeRegion {
+                    region_id,
+                    replay_timeout: Duration::from_secs(1),
+                    ..Default::default()
+                }],
+            )
+            .await;
+
+        let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
+        assert!(reply.ready);
+        assert!(reply.error.is_none());
+        let (caught_up, request) = requests.try_recv().unwrap();
+        assert_eq!(caught_up, region_id);
+        assert!(matches!(request, RegionRequest::Catchup(_)));
     }
 
     #[tokio::test]

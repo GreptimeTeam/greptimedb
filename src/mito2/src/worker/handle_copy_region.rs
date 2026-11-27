@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use common_telemetry::{debug, error, info};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::MitoCopyRegionFromResponse;
@@ -29,6 +32,53 @@ use crate::request::{
 use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
+
+/// COPY locks shared by one region worker and its background tasks.
+#[derive(Clone, Default)]
+pub(super) struct CopyRegionLocks {
+    entries: Arc<Mutex<HashMap<RegionId, CopyRegionLock>>>,
+}
+
+struct CopyRegionLock {
+    mutex: Arc<tokio::sync::Mutex<()>>,
+    users: usize,
+}
+
+/// Registers a COPY before it is spawned, including while it waits for the lock.
+struct CopyRegionGuard {
+    locks: CopyRegionLocks,
+    region_id: RegionId,
+    mutex: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl CopyRegionLocks {
+    fn register(&self, region_id: RegionId) -> CopyRegionGuard {
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.entry(region_id).or_insert_with(|| CopyRegionLock {
+            mutex: Arc::new(tokio::sync::Mutex::new(())),
+            users: 0,
+        });
+        entry.users += 1;
+        CopyRegionGuard {
+            locks: self.clone(),
+            region_id,
+            mutex: entry.mutex.clone(),
+        }
+    }
+}
+
+impl Drop for CopyRegionGuard {
+    fn drop(&mut self) {
+        // Registration and removal share the map lock, so a queued COPY cannot
+        // lose its entry and race a new COPY using a different mutex.
+        let mut entries = self.locks.entries.lock().unwrap();
+        let entry = entries.get_mut(&self.region_id).unwrap();
+        entry.users -= 1;
+        if entry.users == 0 {
+            entries.remove(&self.region_id);
+        }
+    }
+}
 
 impl<S> RegionWorkerLoop<S> {
     pub(crate) fn handle_copy_region_from_request(&mut self, request: CopyRegionFromRequest) {
@@ -73,7 +123,9 @@ impl<S> RegionWorkerLoop<S> {
         );
         let worker_sender = self.sender.clone();
 
+        let copy_guard = self.copy_region_locks.register(region_id);
         common_runtime::spawn_global(async move {
+            let _copy_lock = copy_guard.mutex.lock().await;
             let (region_edit, source_file_ids) = match Self::copy_region_from(
                 &region,
                 region_metadata_loader,
@@ -97,8 +149,8 @@ impl<S> RegionWorkerLoop<S> {
                         .iter()
                         .any(|file| file.level == file::LEVEL_SHARED) =>
                 {
-                    // Shared references and their target admission sequence must enter
-                    // the serialized edit lane, not the asynchronous physical-copy path.
+                    // Shared references enter the serialized
+                    // edit lane for destination admission sequences.
                     // The response lists installed references, including shared SSTs
                     // whose objects stay in place; it is not a physical COPY count.
                     let copied_file_ids = region_edit
@@ -131,6 +183,7 @@ impl<S> RegionWorkerLoop<S> {
                     let _ = sender.send(result);
                 }
                 Some(region_edit) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
                     if let Err(e) = worker_sender
                         .send(WorkerRequestWithTime::new(WorkerRequest::Background {
                             region_id,
@@ -138,14 +191,22 @@ impl<S> RegionWorkerLoop<S> {
                                 CopyRegionFromFinished {
                                     region_id,
                                     edit: region_edit,
-                                    sender,
+                                    sender: tx,
                                 },
                             ),
                         }))
                         .await
                     {
-                        error!(e; "Failed to send copy region from finished notification to worker, region_id: {}", region_id);
+                        error!(e; "Failed to send copy region from finished notification, region_id: {}", region_id);
+                        let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
+                        return;
                     }
+                    // Keep ownership until the worker installs the published version.
+                    let result = match rx.await {
+                        Ok(result) => result,
+                        Err(error) => Err(error).context(crate::error::RecvSnafu),
+                    };
+                    let _ = sender.send(result);
                 }
                 None => {
                     let _ = sender.send(Ok(MitoCopyRegionFromResponse {
@@ -203,6 +264,16 @@ impl<S> RegionWorkerLoop<S> {
             .context(MissingManifestSnafu {
                 region_id: source_region_id,
             })?;
+        let narthex_format =
+            region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
+        ensure!(
+            (source_region_manifest.sst_format == crate::sst::FormatType::Narthex)
+                == narthex_format,
+            InvalidRequestSnafu {
+                region_id: target_region_id,
+                reason: "Cannot copy between Parquet and Narthex regions",
+            }
+        );
         // Metadata sync transforms copied rows and then removes these references.
         // It cannot retire shared inputs through the ordinary edit API, so reject
         // them before either physical copying or extending the target manifest.
@@ -228,24 +299,28 @@ impl<S> RegionWorkerLoop<S> {
             "source region files: {:?}, source region id: {}",
             source_region_manifest.files, source_region_id
         );
+        let mut file_descriptors = Vec::new();
         for (file_id, file_meta) in &source_region_manifest.files {
-            if !target_region_manifest.files.contains_key(file_id) {
-                new_file_metas.push(if file_meta.level == file::LEVEL_SHARED {
-                    file_meta.as_ref().clone()
-                } else {
-                    remap_copied_file_meta(file_meta, target_region_id)
-                });
+            if target_region_manifest.files.contains_key(file_id) {
+                continue;
+            }
+            if file_meta.level == file::LEVEL_SHARED {
+                new_file_metas.push(file_meta.as_ref().clone());
+            } else if narthex_format {
+                let (copied, objects) = prepare_narthex_copy(region, file_meta).await?;
+                new_file_metas.push(copied);
+                file_descriptors.extend(objects);
+            } else {
+                let copied = remap_copied_file_meta(file_meta, target_region_id);
+                file_descriptors.extend(file_descriptors_for_meta(&copied));
+                new_file_metas.push(copied);
             }
         }
+        // Native series coverage belongs to the source region's sequence domain.
         if new_file_metas.is_empty() {
             return Ok((None, source_file_ids));
         }
 
-        let file_descriptors = new_file_metas
-            .iter()
-            .filter(|file| file.level != file::LEVEL_SHARED)
-            .flat_map(file_descriptors_for_meta)
-            .collect();
         debug!("File descriptors to copy: {:?}", file_descriptors);
         let copier = RegionFileCopier::new(region.access_layer());
         // TODO(weny): ensure the target region is empty.
@@ -325,5 +400,112 @@ fn file_descriptors_for_meta(file_meta: &FileMeta) -> Vec<FileDescriptor> {
         ]
     } else {
         vec![data]
+    }
+}
+
+/// Prepares a physical narthex copy without rewriting encoded parts. The artifact
+/// manifest records the physical owner; paths are resolved from FileMeta on read.
+async fn prepare_narthex_copy(
+    region: &MitoRegionRef,
+    source: &FileMeta,
+) -> Result<(FileMeta, Vec<FileDescriptor>)> {
+    use crate::series_index::columnar::{invalid, require};
+    use crate::sst::file::FileFormat;
+
+    let layer = region.access_layer();
+    let source_objects = source
+        .narthex_objects(&layer.build_region_dir(source.region_id))
+        .ok_or_else(|| invalid("expected Narthex copy source"))?;
+    let (source_manifest, parts) = source_objects
+        .split_last()
+        .expect("Narthex inventory includes manifest");
+    let bytes = layer
+        .object_store()
+        .read(&source_manifest.path)
+        .await
+        .context(crate::error::OpenDalSnafu)?
+        .to_bytes();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
+    require(
+        manifest["region_id"].as_u64() == Some(source.region_id.as_u64())
+            && manifest["generation"].as_str() == Some(source.file_id.to_string().as_str()),
+        "narthex copy manifest identity mismatch",
+    )?;
+    manifest["region_id"] = serde_json::json!(region.region_id.as_u64());
+    let bytes = bytes::Bytes::from(
+        serde_json::to_vec(&manifest).map_err(|error| invalid(error.to_string()))?,
+    );
+    let target_region_dir = layer.build_region_dir(region.region_id);
+    let mut copied = remap_copied_file_meta(source, region.region_id);
+    let manifest_size = bytes.len() as u64;
+    match &mut copied.format {
+        FileFormat::NarthexSamples(meta) => meta.manifest_size = manifest_size,
+        FileFormat::NarthexSeriesIndex(meta) => meta.manifest_size = manifest_size,
+        FileFormat::Parquet => return Err(invalid("expected Narthex copy source")),
+    }
+    let targets = copied
+        .narthex_objects(&target_region_dir)
+        .expect("Narthex copy");
+    let descriptors: Vec<_> = source_objects
+        .iter()
+        .zip(targets)
+        .enumerate()
+        .map(|(i, (object, target))| FileDescriptor::NarthexObject {
+            source: object.path.clone(),
+            target: target.path,
+            size: target.file_size,
+            manifest: (i == parts.len()).then(|| bytes.clone()),
+        })
+        .collect();
+    copied.file_size = descriptors.iter().try_fold(0u64, |size, object| {
+        size.checked_add(object.size())
+            .ok_or_else(|| invalid("narthex copy size overflow"))
+    })?;
+    Ok((copied, descriptors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn copy_lock_guard_cleans_up_after_waiter_cancellation() {
+        let locks = CopyRegionLocks::default();
+        let region_id = RegionId::new(1, 1);
+        let first = locks.register(region_id);
+        let held = first.mutex.lock().await;
+        let waiting = locks.register(region_id);
+        assert!(Arc::ptr_eq(&first.mutex, &waiting.mutex));
+        let task = tokio::spawn(async move {
+            let _held = waiting.mutex.lock().await;
+        });
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(locks.entries.lock().unwrap()[&region_id].users, 1);
+        drop(held);
+        drop(first);
+        assert!(locks.entries.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_lock_guard_retains_entry_for_waiting_copy() {
+        let locks = CopyRegionLocks::default();
+        let region_id = RegionId::new(1, 1);
+        let first = locks.register(region_id);
+        let held = first.mutex.lock().await;
+        let waiting = locks.register(region_id);
+        assert!(waiting.mutex.try_lock().is_err());
+        drop(held);
+        drop(first);
+        let next = locks.register(region_id);
+        assert!(Arc::ptr_eq(&waiting.mutex, &next.mutex));
+        let held = waiting.mutex.lock().await;
+        assert!(next.mutex.try_lock().is_err());
+        drop(held);
+        drop(waiting);
+        assert_eq!(locks.entries.lock().unwrap()[&region_id].users, 1);
+        drop(next);
+        assert!(locks.entries.lock().unwrap().is_empty());
     }
 }

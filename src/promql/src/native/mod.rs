@@ -14,18 +14,11 @@
 
 //! The native PromQL evaluation model.
 //!
-//! A query compiles to a [`plan::NativeTree`]: nodes whose operations, fields and grids are already
-//! bound. Nodes hand each other [`batch::EvaluatedChunk`]s as ordinary Rust values, so no row batch
-//! is materialised between them. [`metrics`] names each node after its position in that tree.
-//!
-//! Three properties keep this apart from recognising a query shape in a finished physical plan:
-//!
-//! - Legality is a type and data-dependency question ([`plan::NativeNode::validate`]), so a new
-//!   combination of supported operations is an ordinary tree, not another matcher.
-//! - A window binds its input and output grids separately, so a subquery's inner grid is consumed
-//!   as it is instead of being resampled onto the outer grid.
-//! - A series closes exactly once, on the chunk that says so, so a consumer can tell "nothing more
-//!   here" from "no more input".
+//! A query compiles to a [`plan::NativeTree`] whose nodes have their operations, fields and grids
+//! already bound; legality is checked by [`plan::NativeNode::validate`]. Nodes hand each other
+//! [`batch::EvaluatedChunk`]s as Rust values, and a window binds its input and output grids
+//! separately, so a subquery's inner grid is consumed without resampling onto the outer grid.
+//! [`metrics`] names each node after its position in the tree.
 
 mod aggregate;
 pub mod batch;
@@ -34,7 +27,6 @@ pub mod display;
 pub mod execute;
 pub mod metrics;
 pub mod plan;
-pub(crate) mod runs;
 pub mod segment;
 pub(crate) mod split;
 pub(crate) mod state;

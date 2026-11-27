@@ -41,8 +41,8 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{
-    PROMQL_QUERY, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
-    PermissionTableTargets,
+    COPY_TO, PROMQL_QUERY, PermissionChecker, PermissionCheckerRef, PermissionReq,
+    PermissionTableTarget, PermissionTableTargets, TableTargetPrecheck,
 };
 use catalog::CatalogManagerRef;
 use catalog::process_manager::{
@@ -100,7 +100,7 @@ use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::comment::CommentObject;
-use sql::statements::copy::{CopyDatabase, CopyTable};
+use sql::statements::copy::{Copy, CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sql::util::{
@@ -111,12 +111,23 @@ use sqlparser::ast::{AnalyzeFormat, ObjectName};
 use tracing::Span;
 
 use crate::error::{
-    self, CollectRecordbatchSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
-    InvalidSqlSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
+    self, CatalogSnafu, CollectRecordbatchSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu,
+    ExternalSnafu, InvalidSqlSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SqlExecInterceptedSnafu, StatementTimeoutSnafu, TableOperationSnafu,
 };
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
+
+fn deduplicate_permission_targets(targets: PermissionTableTargets) -> PermissionTableTargets {
+    let PermissionTableTargets::Resolved(mut targets) = targets else {
+        return PermissionTableTargets::Unresolved;
+    };
+    if targets.len() > 1 {
+        let mut seen = HashSet::with_capacity(targets.len());
+        targets.retain(|target| seen.insert(target.clone()));
+    }
+    PermissionTableTargets::resolved(targets)
+}
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -448,6 +459,9 @@ impl Instance {
                 {
                     return self.copy_metric_database(arg.clone(), query_ctx).await;
                 }
+                if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy)) = &stmt {
+                    return self.copy_database(copy.clone(), &stmt, query_ctx).await;
+                }
                 self.statement_executor
                     .execute_sql(stmt, query_ctx)
                     .await
@@ -590,6 +604,77 @@ fn attach_timeout(
 }
 
 impl Instance {
+    async fn copy_database(
+        &self,
+        copy: CopyDatabase,
+        stmt: &Statement,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        match copy {
+            CopyDatabase::To(arg) => {
+                let req = operator::statement::to_copy_database_request(arg, &ctx)?;
+                let tables = self
+                    .statement_executor
+                    .capture_database_export_tables(&req, None, &ctx)
+                    .await?;
+                let targets = PermissionTableTargets::resolved(
+                    tables
+                        .iter()
+                        .map(|table| {
+                            let info = table.table_info();
+                            PermissionTableTarget::new(
+                                &info.catalog_name,
+                                &info.schema_name,
+                                &info.name,
+                            )
+                        })
+                        .collect(),
+                );
+                self.check_table_permission(
+                    &ctx,
+                    PermissionReq::SqlStatement(stmt),
+                    targets.clone(),
+                )
+                .context(PermissionSnafu)?;
+                self.check_table_permission(&ctx, PermissionReq::Action(COPY_TO), targets)
+                    .context(PermissionSnafu)?;
+                self.statement_executor
+                    .copy_database_to_tables(req, tables, ctx)
+                    .await
+                    .context(TableOperationSnafu)
+            }
+            CopyDatabase::From(arg) => {
+                let req = operator::statement::to_copy_database_request(arg, &ctx)?;
+                let requests = self
+                    .statement_executor
+                    .prepare_database_import(&req)
+                    .await?;
+                let targets = PermissionTableTargets::resolved(
+                    requests
+                        .iter()
+                        .map(|request| {
+                            PermissionTableTarget::new(
+                                &request.catalog_name,
+                                &request.schema_name,
+                                &request.table_name,
+                            )
+                        })
+                        .collect(),
+                );
+                self.check_resolved_table_permission(
+                    &ctx,
+                    PermissionReq::SqlStatement(stmt),
+                    targets,
+                )
+                .await?;
+                self.statement_executor
+                    .copy_database_from_requests(req, requests, ctx)
+                    .await
+                    .context(TableOperationSnafu)
+            }
+        }
+    }
+
     async fn check_sql_permission(
         &self,
         stmt: &Statement,
@@ -607,6 +692,11 @@ impl Instance {
             )
             .context(PermissionSnafu)?;
 
+        // Database COPY needs the full table set before table-target authorization.
+        if matches!(stmt, Statement::Copy(Copy::CopyDatabase(_))) {
+            return Ok(());
+        }
+
         let targets = match extract_tables_from_statement_checked(stmt) {
             Some(tables) => PermissionTableTargets::resolved(
                 tables
@@ -623,14 +713,22 @@ impl Instance {
             ),
             None => PermissionTableTargets::Unresolved,
         };
-        let targets = self
-            .resolve_query_permission_targets(targets, query_ctx)
+        let req = PermissionReq::SqlStatement(stmt);
+        if matches!(
+            stmt,
+            Statement::Copy(Copy::CopyTable(CopyTable::To(_)) | Copy::CopyQueryTo(_))
+        ) {
+            // COPY retains its write permission requirement and also reads source data.
+            self.check_resolved_table_permissions(
+                query_ctx,
+                [PermissionReq::Action(COPY_TO), req],
+                targets,
+            )
             .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-        self.check_table_permission(query_ctx, PermissionReq::SqlStatement(stmt), targets)
-            .context(PermissionSnafu)?;
-        Ok(())
+        } else {
+            self.check_resolved_table_permission(query_ctx, req, targets)
+                .await
+        }
     }
 
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_analyze_stream_query")]
@@ -1268,7 +1366,7 @@ impl Instance {
         &self,
         target: &PermissionTableTarget,
         query_ctx: &QueryContextRef,
-    ) -> server_error::Result<bool> {
+    ) -> Result<bool> {
         self.catalog_manager
             .table(
                 &target.catalog,
@@ -1278,43 +1376,132 @@ impl Instance {
             )
             .await
             .map(|table| table.is_some_and(|table| table.table_info().is_physical_table()))
-            .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)
+            .context(CatalogSnafu)
     }
 
-    async fn resolve_query_permission_targets(
+    pub(crate) async fn check_resolved_table_permission(
         &self,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
         targets: PermissionTableTargets,
-        query_ctx: &QueryContextRef,
-    ) -> server_error::Result<PermissionTableTargets> {
+    ) -> Result<()> {
+        self.check_resolved_table_permissions(ctx, [req], targets)
+            .await
+    }
+
+    async fn check_resolved_table_permissions<const N: usize>(
+        &self,
+        ctx: &QueryContextRef,
+        requests: [PermissionReq<'_>; N],
+        targets: PermissionTableTargets,
+    ) -> Result<()> {
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        if checker.is_none() {
+            return Ok(());
+        }
+        let checker = checker.as_ref();
+        let mut targets = if checker.uses_table_targets() {
+            deduplicate_permission_targets(targets)
+        } else {
+            targets
+        };
+
+        let user = ctx.current_user();
+        let check = |req, targets| {
+            checker
+                .check_permission_with_table_targets(user.clone(), req, targets)
+                .map(|_| ())
+                .context(PermissionSnafu)
+        };
+        let mut looked_up = HashSet::new();
+        for (i, req) in requests.into_iter().enumerate() {
+            match checker
+                .precheck_table_targets(user.clone(), req.clone(), &targets)
+                .context(PermissionSnafu)?
+            {
+                TableTargetPrecheck::Allow => continue,
+                TableTargetPrecheck::Reject => {
+                    unreachable!("Option<&PermissionCheckerRef> maps Reject to PermissionDenied")
+                }
+                TableTargetPrecheck::NeedsPhysicalResolution(indices) => {
+                    self.resolve_physical_permission_targets(
+                        ctx,
+                        &mut targets,
+                        indices,
+                        &mut looked_up,
+                    )
+                    .await?;
+                }
+            }
+
+            if i + 1 == N {
+                return check(req, targets);
+            }
+            check(req, targets.clone())?;
+        }
+        Ok(())
+    }
+
+    async fn resolve_physical_permission_targets(
+        &self,
+        ctx: &QueryContextRef,
+        targets: &mut PermissionTableTargets,
+        mut indices: Vec<usize>,
+        looked_up: &mut HashSet<usize>,
+    ) -> Result<()> {
         const CONCURRENCY: usize = 8;
 
-        let checker = self.plugins.get::<PermissionCheckerRef>();
-        if !checker.as_ref().uses_table_targets() {
-            return Ok(targets);
-        }
-
-        let PermissionTableTargets::Resolved(mut targets) = targets else {
-            return Ok(PermissionTableTargets::Unresolved);
-        };
-        if targets.len() > 1 {
-            let mut seen = HashSet::with_capacity(targets.len());
-            targets.retain(|target| seen.insert(target.clone()));
-        }
-        // Bound catalog load and inspect results in target order to preserve serial semantics.
-        for chunk in targets.chunks_mut(CONCURRENCY) {
-            let results = future::join_all(
-                chunk
-                    .iter()
-                    .map(|target| self.is_physical_query_permission_target(target, query_ctx)),
-            )
-            .await;
-            for (target, result) in chunk.iter_mut().zip(results) {
-                target.is_physical_metric_table = result?;
+        if let PermissionTableTargets::Resolved(resolved) = targets {
+            if let Some(index) = indices.iter().find(|&&index| index >= resolved.len()) {
+                return auth::error::InternalStateSnafu {
+                    msg: format!(
+                        "permission target precheck returned out-of-bounds index {index} for {} targets",
+                        resolved.len()
+                    ),
+                }
+                .fail()
+                .context(PermissionSnafu);
             }
+            indices.retain(|index| looked_up.insert(*index));
+            // Bound catalog load and inspect results in target order to preserve serial semantics.
+            for chunk in indices.chunks(CONCURRENCY) {
+                let results =
+                    future::join_all(chunk.iter().map(|&index| {
+                        self.is_physical_query_permission_target(&resolved[index], ctx)
+                    }))
+                    .await;
+                for (&index, result) in chunk.iter().zip(results) {
+                    if result? {
+                        resolved[index].is_physical_metric_table = true;
+                    }
+                }
+            }
+        } else if !indices.is_empty() {
+            return auth::error::InternalStateSnafu {
+                msg: "permission target precheck returned indices for unresolved targets"
+                    .to_string(),
+            }
+            .fail()
+            .context(PermissionSnafu);
         }
 
-        Ok(PermissionTableTargets::resolved(targets))
+        Ok(())
+    }
+
+    pub(crate) async fn check_server_table_permission(
+        &self,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
+        targets: PermissionTableTargets,
+    ) -> server_error::Result<()> {
+        match self
+            .check_resolved_table_permission(ctx, req, targets)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(Error::Permission { source, .. }) => Err(source).context(AuthSnafu),
+            Err(err) => Err(BoxedError::new(err)).context(ExecuteQuerySnafu),
+        }
     }
 
     fn prom_queries_permission_targets(
@@ -1755,12 +1942,8 @@ impl PrometheusHandler for Instance {
         targets: PermissionTableTargets,
         query_ctx: &QueryContextRef,
     ) -> server_error::Result<()> {
-        let targets = self
-            .resolve_query_permission_targets(targets, query_ctx)
-            .await?;
-        self.check_table_permission(query_ctx, PermissionReq::Action(PROMQL_QUERY), targets)
-            .context(AuthSnafu)?;
-        Ok(())
+        self.check_server_table_permission(query_ctx, PermissionReq::Action(PROMQL_QUERY), targets)
+            .await
     }
 
     async fn filter_metadata_metric_names(
@@ -3187,6 +3370,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_copy_database_enforces_read_and_write_targets() -> TestResult<()> {
+        struct DatabaseCopyAcl {
+            reject_read: bool,
+        }
+        impl PermissionChecker for DatabaseCopyAcl {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                let applies = match req {
+                    PermissionReq::Action(action) => action == COPY_TO && self.reject_read,
+                    PermissionReq::SqlStatement(Statement::Copy(Copy::CopyDatabase(_))) => {
+                        !self.reject_read
+                    }
+                    _ => false,
+                };
+                let PermissionTableTargets::Resolved(targets) = targets else {
+                    return Ok(PermissionResp::Reject);
+                };
+                Ok(
+                    if applies
+                        && targets.iter().any(|target| {
+                            target.table == "denied" || target.is_physical_metric_table
+                        })
+                    {
+                        PermissionResp::Reject
+                    } else {
+                        PermissionResp::Allow
+                    },
+                )
+            }
+        }
+        for (table, direction, reject_read) in [
+            (test_table(1024, "denied")?, "TO", true),
+            (test_table(1024, "denied")?, "TO", false),
+            (test_table(1024, "denied")?, "FROM", false),
+            (test_physical_table(1024, "physical")?, "FROM", false),
+            (test_table(1024, "source")?, "TO", true),
+            (test_table(1024, "source")?, "TO", false),
+            (test_table(1024, "source")?, "FROM", false),
+        ] {
+            let dir = common_test_util::temp_dir::create_temp_dir("copy_database_permissions");
+            let name = table.table_info().name.clone();
+            let catalog = catalog::memory::MemoryCatalogManager::new_with_table(table);
+            catalog
+                .register_table_sync(catalog::RegisterTableRequest {
+                    catalog: "greptime".into(),
+                    schema: "public".into(),
+                    table_name: "allowed".into(),
+                    table_id: 1025,
+                    table: test_table(1025, "allowed")?,
+                })
+                .unwrap();
+            if direction == "FROM" {
+                std::fs::write(dir.path().join("allowed.parquet"), b"not parquet").unwrap();
+                std::fs::write(dir.path().join(format!("{name}.parquet")), b"not parquet").unwrap();
+            }
+            let kv = Arc::new(MemoryKvBackend::new());
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(DatabaseCopyAcl { reject_read }));
+            let instance = FrontendBuilder::new(
+                FrontendOptions::default(),
+                kv.clone(),
+                test_cache_registry(kv)?,
+                catalog,
+                Arc::new(client::client_manager::NodeClients::default()),
+                Arc::new(NoopProcedureExecutor),
+                Arc::new(ProcessManager::new("copy-permissions".into(), None)),
+            )
+            .with_plugin(plugins)
+            .with_local_file_access(
+                common_datasource::object_store::LocalFileAccess::sandboxed(dir.path()).unwrap(),
+            )
+            .try_build()
+            .await
+            .context(BuildFrontendSnafu)?;
+            let location = reqwest::Url::from_directory_path(dir.path()).unwrap();
+            let sql = format!(
+                "COPY DATABASE public {direction} '{location}' WITH (continue_on_error='true')"
+            );
+            let result = instance
+                .do_query_inner(&sql, QueryContext::arc())
+                .await
+                .remove(0);
+            if name == "source" {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert_eq!(
+                    StatusCode::PermissionDenied,
+                    result.unwrap_err().status_code()
+                );
+                if direction == "TO" {
+                    assert_eq!(0, std::fs::read_dir(dir.path()).unwrap().count());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_metric_export_http_timeout_cancels_ordinary_source() {
         let destination = common_test_util::temp_dir::create_temp_dir("metric_export_timeout");
         let (started_tx, started_rx) = oneshot::channel();
@@ -3446,6 +3738,7 @@ mod tests {
                     panic!("unresolved export")
                 };
                 if req.is_readonly() {
+                    assert!(matches!(req, PermissionReq::Action(action) if action == COPY_TO));
                     // The first table is readable; the later table has only write access.
                     Ok(if tables.iter().any(|t| t.table == "target") {
                         PermissionResp::Reject
@@ -3872,6 +4165,108 @@ mod tests {
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_export_read_action_has_source_targets() -> TestResult<()> {
+        let checker = Arc::new(RejectEndpointPermissionChecker::default());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_physical_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        for (sql, name, physical) in [
+            ("COPY source TO '/unused.parquet'", "source", false),
+            (
+                "COPY (SELECT * FROM source) TO '/unused.parquet'",
+                "source",
+                false,
+            ),
+            ("COPY target TO '/unused.parquet'", "target", true),
+        ] {
+            assert_eq!(
+                StatusCode::PermissionDenied,
+                instance
+                    .check_sql_permission(&parse_one_sql(sql), &QueryContext::arc())
+                    .await
+                    .unwrap_err()
+                    .status_code(),
+            );
+            assert_action_checked(
+                &checker,
+                COPY_TO,
+                Some(PermissionTableTargets::resolved(vec![
+                    PermissionTableTarget::new("greptime", "public", name)
+                        .with_physical_metric_table(physical),
+                ])),
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_export_requires_read_and_write_permission() -> TestResult<()> {
+        use auth::UserProvider;
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(auth::DefaultPermissionChecker::arc());
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let provider = auth::static_user_provider_from_option(
+            "static_user_provider:cmd:reader:ro=pwd,writer:wo=pwd,owner:rw=pwd",
+        )
+        .unwrap();
+        for (username, can_export, can_import) in [
+            ("reader", false, false),
+            ("writer", false, true),
+            ("owner", true, true),
+        ] {
+            let ctx = QueryContext::arc();
+            ctx.set_current_user(
+                provider
+                    .authenticate(
+                        auth::Identity::UserId(username, None),
+                        auth::Password::PlainText("pwd".to_string().into()),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            for sql in [
+                "COPY source TO '/unused.parquet'",
+                "COPY (SELECT * FROM source) TO '/unused.parquet'",
+            ] {
+                let result = instance
+                    .check_sql_permission(&parse_one_sql(sql), &ctx)
+                    .await;
+                if can_export {
+                    result.unwrap();
+                } else {
+                    assert_eq!(
+                        StatusCode::PermissionDenied,
+                        result.unwrap_err().status_code()
+                    );
+                }
+            }
+            let result = instance
+                .check_sql_permission(&parse_one_sql("COPY target FROM '/unused.parquet'"), &ctx)
+                .await;
+            if can_import {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    StatusCode::PermissionDenied,
+                    result.unwrap_err().status_code()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -4343,25 +4738,38 @@ mod tests {
         let checker = Arc::new(TargetIndependentPermissionChecker::default());
         let plugins = Plugins::new();
         plugins.insert::<PermissionCheckerRef>(checker.clone());
-        let instance = test_instance_with_plugins(
-            test_physical_table(1024, physical_table)?,
-            test_table(1025, "target")?,
-            plugins,
-        )
-        .await?;
+        let catalog = catalog::memory::MemoryCatalogManager::new_with_table(test_physical_table(
+            1024,
+            physical_table,
+        )?);
+        catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "target".to_string(),
+                table_id: 1025,
+                table: test_table(1025, "target")?,
+            })
+            .with_context(|_| RegisterTableSnafu {
+                table_name: "target".to_string(),
+            })?;
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
 
         let ctx = test_query_ctx(1);
         let physical_target = PermissionTableTarget::new("greptime", "public", physical_table);
-        assert_eq!(
-            PermissionTableTargets::Resolved(vec![physical_target.clone()]),
-            instance
-                .resolve_query_permission_targets(
-                    PermissionTableTargets::resolved(vec![physical_target]),
-                    &ctx,
-                )
-                .await
-                .unwrap()
-        );
+        instance
+            .check_resolved_table_permission(
+                &ctx,
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![physical_target]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(0, counting_catalog.total_table_lookups());
+        assert_eq!(1, checker.checks.load(atomic::Ordering::Relaxed));
         assert_eq!(
             vec![physical_table.to_string(), "target".to_string()],
             PrometheusHandler::filter_metadata_metric_names(
@@ -4373,34 +4781,81 @@ mod tests {
             .await
             .unwrap()
         );
-        assert_eq!(1, checker.checks.load(atomic::Ordering::Relaxed));
+        assert_eq!(0, counting_catalog.total_table_lookups());
+        assert_eq!(2, checker.checks.load(atomic::Ordering::Relaxed));
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_query_permission_targets_are_deduplicated() -> TestResult<()> {
+        struct RecordingTargetChecker(std::sync::Mutex<Vec<PermissionTableTargets>>);
+        impl PermissionChecker for RecordingTargetChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                self.0.lock().unwrap().push(targets);
+                Ok(PermissionResp::Allow)
+            }
+        }
+
+        let checker = Arc::new(RecordingTargetChecker(Default::default()));
         let plugins = Plugins::new();
-        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
-        let instance = test_instance_with_plugins(
-            test_table(1024, "source")?,
-            test_table(1025, "target")?,
-            plugins,
-        )
-        .await?;
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "target".to_string(),
+                table_id: 1025,
+                table: test_table(1025, "target")?,
+            })
+            .with_context(|_| RegisterTableSnafu {
+                table_name: "target".to_string(),
+            })?;
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
         let ctx = test_query_ctx(1);
         let target = PermissionTableTarget::new("greptime", "public", "target");
 
+        instance
+            .check_resolved_table_permission(
+                &ctx,
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![target.clone(), target.clone()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, counting_catalog.table_calls());
+        assert_eq!(0, counting_catalog.table_id_calls());
+        assert_eq!(0, counting_catalog.table_info_by_id_calls());
         assert_eq!(
-            PermissionTableTargets::Resolved(vec![target.clone()]),
-            instance
-                .resolve_query_permission_targets(
-                    PermissionTableTargets::resolved(vec![target.clone(), target]),
-                    &ctx,
-                )
-                .await
-                .unwrap()
+            *checker.0.lock().unwrap(),
+            vec![PermissionTableTargets::Resolved(vec![target])]
         );
+
+        counting_catalog.reset_counts();
+        instance
+            .check_sql_permission(&parse_one_sql("COPY target TO '/unused.parquet'"), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(1, counting_catalog.total_table_lookups());
+        assert_eq!(3, checker.0.lock().unwrap().len());
 
         Ok(())
     }
@@ -4516,30 +4971,28 @@ mod tests {
 
         let ctx = test_query_ctx(1);
         let logical_target = PermissionTableTarget::new("greptime", "public", "target");
-        assert_eq!(
-            PermissionTableTargets::Resolved(vec![logical_target.clone()]),
-            instance
-                .resolve_query_permission_targets(
-                    PermissionTableTargets::resolved(vec![logical_target.clone()]),
-                    &ctx,
-                )
-                .await
-                .unwrap()
-        );
+        instance
+            .check_resolved_table_permission(
+                &ctx,
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![logical_target.clone()]),
+            )
+            .await
+            .unwrap();
         let physical_target = PermissionTableTarget::new("greptime", "public", physical_table)
             .with_physical_metric_table(true);
-        assert_eq!(
-            PermissionTableTargets::Resolved(vec![logical_target.clone(), physical_target.clone()]),
-            instance
-                .resolve_query_permission_targets(
-                    PermissionTableTargets::resolved(
-                        vec![logical_target, physical_target.clone(),]
-                    ),
-                    &ctx,
-                )
-                .await
-                .unwrap()
-        );
+        let err = instance
+            .check_resolved_table_permission(
+                &ctx,
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![
+                    logical_target,
+                    PermissionTableTarget::new("greptime", "public", physical_table),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
         assert_eq!(
             vec!["target".to_string()],
             PrometheusHandler::filter_metadata_metric_names(
@@ -6178,6 +6631,620 @@ mod tests {
             "the route stays on the engine default"
         );
 
+        Ok(())
+    }
+
+    struct CountingCatalogManager {
+        inner: Arc<catalog::memory::MemoryCatalogManager>,
+        table_calls: atomic::AtomicUsize,
+        table_id_calls: atomic::AtomicUsize,
+        table_info_by_id_calls: atomic::AtomicUsize,
+    }
+
+    impl CountingCatalogManager {
+        fn new(inner: Arc<catalog::memory::MemoryCatalogManager>) -> Self {
+            Self {
+                inner,
+                table_calls: atomic::AtomicUsize::new(0),
+                table_id_calls: atomic::AtomicUsize::new(0),
+                table_info_by_id_calls: atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn reset_counts(&self) {
+            self.table_calls.store(0, atomic::Ordering::Relaxed);
+            self.table_id_calls.store(0, atomic::Ordering::Relaxed);
+            self.table_info_by_id_calls
+                .store(0, atomic::Ordering::Relaxed);
+        }
+
+        fn table_calls(&self) -> usize {
+            self.table_calls.load(atomic::Ordering::Relaxed)
+        }
+
+        fn table_id_calls(&self) -> usize {
+            self.table_id_calls.load(atomic::Ordering::Relaxed)
+        }
+
+        fn table_info_by_id_calls(&self) -> usize {
+            self.table_info_by_id_calls.load(atomic::Ordering::Relaxed)
+        }
+
+        fn total_table_lookups(&self) -> usize {
+            self.table_calls() + self.table_id_calls() + self.table_info_by_id_calls()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl catalog::CatalogManager for CountingCatalogManager {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn catalog_names(&self) -> catalog::error::Result<Vec<String>> {
+            self.inner.catalog_names().await
+        }
+
+        async fn schema_names(
+            &self,
+            catalog: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> catalog::error::Result<Vec<String>> {
+            self.inner.schema_names(catalog, query_ctx).await
+        }
+
+        async fn table_names(
+            &self,
+            catalog: &str,
+            schema: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> catalog::error::Result<Vec<String>> {
+            self.inner.table_names(catalog, schema, query_ctx).await
+        }
+
+        async fn catalog_exists(&self, catalog: &str) -> catalog::error::Result<bool> {
+            self.inner.catalog_exists(catalog).await
+        }
+
+        async fn schema_exists(
+            &self,
+            catalog: &str,
+            schema: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> catalog::error::Result<bool> {
+            self.inner.schema_exists(catalog, schema, query_ctx).await
+        }
+
+        async fn table_exists(
+            &self,
+            catalog: &str,
+            schema: &str,
+            table: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> catalog::error::Result<bool> {
+            self.inner
+                .table_exists(catalog, schema, table, query_ctx)
+                .await
+        }
+
+        async fn table(
+            &self,
+            catalog: &str,
+            schema: &str,
+            table_name: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> catalog::error::Result<Option<TableRef>> {
+            self.table_calls.fetch_add(1, atomic::Ordering::Relaxed);
+            self.inner
+                .table(catalog, schema, table_name, query_ctx)
+                .await
+        }
+
+        async fn table_id(
+            &self,
+            catalog: &str,
+            schema: &str,
+            table_name: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> catalog::error::Result<Option<table::metadata::TableId>> {
+            self.table_id_calls.fetch_add(1, atomic::Ordering::Relaxed);
+            self.inner
+                .table_id(catalog, schema, table_name, query_ctx)
+                .await
+        }
+
+        async fn table_info_by_id(
+            &self,
+            table_id: table::metadata::TableId,
+        ) -> catalog::error::Result<Option<table::metadata::TableInfoRef>> {
+            self.table_info_by_id_calls
+                .fetch_add(1, atomic::Ordering::Relaxed);
+            self.inner.table_info_by_id(table_id).await
+        }
+
+        async fn tables_by_ids(
+            &self,
+            catalog: &str,
+            schema: &str,
+            table_ids: &[table::metadata::TableId],
+        ) -> catalog::error::Result<Vec<TableRef>> {
+            self.inner.tables_by_ids(catalog, schema, table_ids).await
+        }
+
+        fn tables<'a>(
+            &'a self,
+            catalog: &'a str,
+            schema: &'a str,
+            query_ctx: Option<&'a QueryContext>,
+        ) -> futures::stream::BoxStream<'a, catalog::error::Result<TableRef>> {
+            self.inner.tables(catalog, schema, query_ctx)
+        }
+    }
+
+    async fn test_instance_with_counting_catalog(
+        catalog_manager: Arc<CountingCatalogManager>,
+        plugins: Plugins,
+    ) -> TestResult<Instance> {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
+        catalog_manager
+            .inner
+            .register_process_list_table(process_manager.clone());
+        let cache_registry = test_cache_registry(kv_backend.clone())?;
+
+        FrontendBuilder::new(
+            FrontendOptions::default(),
+            kv_backend,
+            cache_registry,
+            catalog_manager,
+            Arc::new(client::client_manager::NodeClients::default()),
+            Arc::new(NoopProcedureExecutor),
+            process_manager,
+        )
+        .with_plugin(plugins)
+        .try_build()
+        .await
+        .context(BuildFrontendSnafu)
+    }
+
+    #[tokio::test]
+    async fn test_precheck_allow_skips_catalog_lookups() -> TestResult<()> {
+        struct PrecheckAllowChecker;
+        impl PermissionChecker for PrecheckAllowChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn precheck_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: &PermissionTableTargets,
+            ) -> auth::error::Result<TableTargetPrecheck> {
+                Ok(TableTargetPrecheck::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                panic!("check_permission_with_table_targets should be skipped on precheck Allow")
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(PrecheckAllowChecker));
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "target")?);
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
+
+        instance
+            .check_resolved_table_permission(
+                &test_query_ctx(1),
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "target",
+                )]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(0, counting_catalog.total_table_lookups());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_precheck_reject_skips_catalog_lookups() -> TestResult<()> {
+        struct PrecheckRejectChecker;
+        impl PermissionChecker for PrecheckRejectChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn precheck_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: &PermissionTableTargets,
+            ) -> auth::error::Result<TableTargetPrecheck> {
+                Ok(match (req, targets) {
+                    (PermissionReq::Action(COPY_TO), PermissionTableTargets::Resolved(_)) => {
+                        TableTargetPrecheck::Allow
+                    }
+                    _ => TableTargetPrecheck::Reject,
+                })
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                panic!("check_permission_with_table_targets should be skipped on precheck Reject")
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(PrecheckRejectChecker));
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "target")?);
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
+
+        let err = instance
+            .check_resolved_table_permission(
+                &test_query_ctx(1),
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "target",
+                )]),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Permission { .. }));
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        // A plugin can construct the public variant with an incomplete target.
+        let err = instance
+            .check_resolved_table_permission(
+                &test_query_ctx(1),
+                PermissionReq::Action(COPY_TO),
+                PermissionTableTargets::Resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "",
+                )]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        let err = instance
+            .check_sql_permission(
+                &parse_one_sql("COPY target TO '/unused.parquet'"),
+                &test_query_ctx(1),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        assert_eq!(0, counting_catalog.total_table_lookups());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_precheck_partial_indices_only_resolves_listed_targets() -> TestResult<()> {
+        struct PartialPrecheckChecker(std::sync::Mutex<Vec<PermissionTableTargets>>);
+        impl PermissionChecker for PartialPrecheckChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn precheck_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: &PermissionTableTargets,
+            ) -> auth::error::Result<TableTargetPrecheck> {
+                let PermissionTableTargets::Resolved(targets) = targets else {
+                    return Ok(TableTargetPrecheck::Reject);
+                };
+                if targets.len() == 2 {
+                    Ok(TableTargetPrecheck::NeedsPhysicalResolution(vec![1]))
+                } else {
+                    Ok(TableTargetPrecheck::Allow)
+                }
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                self.0.lock().unwrap().push(targets);
+                Ok(PermissionResp::Allow)
+            }
+        }
+
+        let checker = Arc::new(PartialPrecheckChecker(Default::default()));
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "wide")?);
+        catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "narrow".to_string(),
+                table_id: 1025,
+                table: test_physical_table(1025, "narrow")?,
+            })
+            .with_context(|_| RegisterTableSnafu {
+                table_name: "narrow".to_string(),
+            })?;
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
+
+        instance
+            .check_resolved_table_permission(
+                &test_query_ctx(1),
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![
+                    PermissionTableTarget::new("greptime", "public", "wide"),
+                    PermissionTableTarget::new("greptime", "public", "narrow"),
+                ]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, counting_catalog.table_calls());
+        assert_eq!(0, counting_catalog.table_id_calls());
+        assert_eq!(0, counting_catalog.table_info_by_id_calls());
+        assert_eq!(
+            *checker.0.lock().unwrap(),
+            vec![PermissionTableTargets::Resolved(vec![
+                PermissionTableTarget::new("greptime", "public", "wide"),
+                PermissionTableTarget::new("greptime", "public", "narrow")
+                    .with_physical_metric_table(true),
+            ])]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_precheck_runs_once_for_multi_chunk_resolution() -> TestResult<()> {
+        struct MultiChunkPrecheckChecker {
+            precheck_calls: std::sync::Mutex<Vec<PermissionTableTargets>>,
+            final_calls: std::sync::Mutex<Vec<PermissionTableTargets>>,
+        }
+        impl PermissionChecker for MultiChunkPrecheckChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn precheck_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: &PermissionTableTargets,
+            ) -> auth::error::Result<TableTargetPrecheck> {
+                self.precheck_calls.lock().unwrap().push(targets.clone());
+                let PermissionTableTargets::Resolved(targets) = targets else {
+                    return Ok(TableTargetPrecheck::Reject);
+                };
+                Ok(TableTargetPrecheck::NeedsPhysicalResolution(
+                    (0..targets.len()).collect(),
+                ))
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                self.final_calls.lock().unwrap().push(targets);
+                Ok(PermissionResp::Allow)
+            }
+        }
+
+        let checker = Arc::new(MultiChunkPrecheckChecker {
+            precheck_calls: Default::default(),
+            final_calls: Default::default(),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_physical_table(1024, "t0")?);
+        let mut targets = vec![PermissionTableTarget::new("greptime", "public", "t0")];
+        for i in 1..10u32 {
+            let name = format!("t{i}");
+            catalog
+                .register_table_sync(catalog::RegisterTableRequest {
+                    catalog: "greptime".to_string(),
+                    schema: "public".to_string(),
+                    table_name: name.clone(),
+                    table_id: 1024 + i,
+                    table: test_table(1024 + i, &name)?,
+                })
+                .with_context(|_| RegisterTableSnafu { table_name: name })?;
+            targets.push(PermissionTableTarget::new(
+                "greptime",
+                "public",
+                format!("t{i}"),
+            ));
+        }
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
+
+        let mut request_targets = targets.clone();
+        request_targets.push(targets[0].clone());
+        instance
+            .check_resolved_table_permission(
+                &test_query_ctx(1),
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(request_targets),
+            )
+            .await
+            .unwrap();
+        assert_eq!(10, counting_catalog.table_calls());
+        assert_eq!(0, counting_catalog.table_id_calls());
+        assert_eq!(0, counting_catalog.table_info_by_id_calls());
+
+        let precheck_calls = checker.precheck_calls.lock().unwrap();
+        assert_eq!(1, precheck_calls.len());
+        assert_eq!(
+            PermissionTableTargets::Resolved(targets.clone()),
+            precheck_calls[0]
+        );
+
+        let mut expected_final = targets;
+        expected_final[0].is_physical_metric_table = true;
+        let final_calls = checker.final_calls.lock().unwrap();
+        assert_eq!(1, final_calls.len());
+        assert_eq!(
+            PermissionTableTargets::Resolved(expected_final),
+            final_calls[0]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_target_independent_checker_preserves_target_hook_without_lookups()
+    -> TestResult<()> {
+        struct EndpointHookChecker {
+            target_hook_calls: atomic::AtomicUsize,
+        }
+        impl PermissionChecker for EndpointHookChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn uses_table_targets(&self) -> bool {
+                false
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                self.target_hook_calls
+                    .fetch_add(1, atomic::Ordering::Relaxed);
+                Ok(PermissionResp::Reject)
+            }
+        }
+
+        let checker = Arc::new(EndpointHookChecker {
+            target_hook_calls: atomic::AtomicUsize::new(0),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "target")?);
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
+
+        let err = instance
+            .check_resolved_table_permission(
+                &test_query_ctx(1),
+                PermissionReq::Action(PROMQL_QUERY),
+                PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "target",
+                )]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        assert_eq!(0, counting_catalog.total_table_lookups());
+        assert_eq!(1, checker.target_hook_calls.load(atomic::Ordering::Relaxed));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_precheck_out_of_bounds_index_returns_internal_error() -> TestResult<()> {
+        struct BadIndexChecker;
+        impl PermissionChecker for BadIndexChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn precheck_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: &PermissionTableTargets,
+            ) -> auth::error::Result<TableTargetPrecheck> {
+                Ok(TableTargetPrecheck::NeedsPhysicalResolution(vec![99]))
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                _: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                unreachable!("must fail before check_permission_with_table_targets")
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(BadIndexChecker));
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "target")?);
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance =
+            test_instance_with_counting_catalog(counting_catalog.clone(), plugins).await?;
+        counting_catalog.reset_counts();
+        let ctx = test_query_ctx(1);
+
+        for targets in [
+            PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+                "greptime", "public", "target",
+            )]),
+            PermissionTableTargets::Unresolved,
+        ] {
+            let err = instance
+                .check_resolved_table_permission(&ctx, PermissionReq::Action(PROMQL_QUERY), targets)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Permission { .. }));
+            assert_eq!(StatusCode::Unexpected, err.status_code());
+            assert_eq!(0, counting_catalog.total_table_lookups());
+        }
         Ok(())
     }
 }

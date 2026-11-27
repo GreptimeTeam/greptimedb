@@ -68,6 +68,21 @@ impl Default for ColumnarSeriesFormat {
     }
 }
 
+impl ColumnarSeriesFormat {
+    pub(crate) fn narthex_writer(
+        &self,
+        metadata: RegionMetadataRef,
+        store: ObjectStore,
+        entry: &SeriesIndexEntry,
+        prefix: String,
+    ) -> Result<Box<writer::ColumnarWriter>> {
+        Ok(Box::new(
+            writer::ColumnarWriter::new(self.clone(), metadata, store, entry)?
+                .with_prefix(prefix)?,
+        ))
+    }
+}
+
 #[async_trait]
 impl SeriesIndexFormat for ColumnarSeriesFormat {
     fn format(&self) -> ArtifactFormat {
@@ -114,6 +129,8 @@ pub(crate) struct Part {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Manifest {
+    #[serde(skip)]
+    pub(crate) prefix: Option<String>,
     pub(crate) format: ArtifactFormat,
     pub(crate) version: u32,
     /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
@@ -127,17 +144,19 @@ pub(crate) struct Manifest {
 
 impl Manifest {
     fn retained_size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.files.capacity() * std::mem::size_of::<Part>()
+        std::mem::size_of::<Self>() + self.prefix.as_ref().map_or(0, String::capacity) + self.files.capacity() * std::mem::size_of::<Part>()
             + self.tags.capacity() * std::mem::size_of::<Tag>()
             + self.tags.iter().map(|tag| tag.name.capacity()).sum::<usize>()
-            + self.coverage.source_file_ids.capacity() * std::mem::size_of::<FileId>()
+            + self.coverage.source_file_ids.as_ref().map_or(0, Vec::capacity) * std::mem::size_of::<FileId>()
             // BTree nodes include allocation and partially occupied key/value slots.
             + 512
             + self.coverage.window_sequences.len() * 128
     }
 
     pub(crate) fn prefix(&self) -> String {
-        format!("{}/series/{}/", self.region_id, self.generation)
+        self.prefix
+            .clone()
+            .unwrap_or_else(|| format!("{}/series/{}/", self.region_id, self.generation))
     }
     pub(crate) fn part_path(&self, id: u32) -> String {
         format!("{}part-{id}.series", self.prefix())

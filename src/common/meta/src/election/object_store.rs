@@ -12,13 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Authority Head v1 codec and non-retrying conditional object storage.
+//! Object-store Authority election, Head v1 codec and conditional storage.
 
+mod authority;
 mod head;
 mod probe;
 mod store;
 #[cfg(test)]
 mod tests;
 
+pub use authority::{
+    Authority, AuthorityMutation, AuthorityPrecondition, AuthorityStatus, FencingToken,
+    TakeoverOutcome,
+};
 pub use head::{AuthorityHead, HEAD_FORMAT_VERSION, NodeIdentity};
 pub use store::{AuthorityState, HeadStore};

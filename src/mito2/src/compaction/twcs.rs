@@ -803,7 +803,7 @@ impl Candidate {
     /// A large historical file is only rewritten once its peers contribute at least
     /// the same amount of data, so every rewrite moves it into a larger size tier.
     fn is_balanced(&self) -> bool {
-        self.largest_file_size <= self.total_size - self.largest_file_size
+        crate::compaction::bytes_balanced(self.largest_file_size as u128, self.total_size as u128)
     }
 
     /// Bounds rewrite amplification for mixed L0/L1 candidates. Legacy files with

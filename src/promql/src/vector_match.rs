@@ -14,11 +14,10 @@
 
 //! Vector–vector binary and set operations over evaluated series on one grid.
 //!
-//! Semantics follow Prometheus `VectorBinop`, `VectorAnd`, `VectorOr` and `VectorUnless`
-//! evaluated at every grid point. Series are processed whole, over their own grid ranges, and
-//! the cardinality rules are checked per point: series sharing a match group only conflict at
-//! points where both are present. Each field is matched on its own, as if the operands held
-//! only that field; the results of all fields with one label set form one series.
+//! Semantics follow Prometheus `VectorBinop`, `VectorAnd`, `VectorOr` and `VectorUnless` at every
+//! grid point. Cardinality rules are checked per point: series sharing a match group conflict only
+//! where both are present. Each field is matched on its own; the results of all fields with one
+//! label set form one series.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -42,29 +41,20 @@ use crate::map::{ArithmeticOp, ComparisonOp};
 #[cfg(test)]
 mod tests;
 
-// How many candidate pairs the binary kernel visited on this thread.
-//
-// Test-only, and per thread: the pairs a query considers are what says whether a series delivered in
-// many chunks is still one candidate, and that is not visible in the result. A thread of its own
-// keeps one test's chunks out of another test's figure, and the counter is compiled out of the
-// kernel otherwise.
+// Candidate pairs the binary kernel visited on this thread, so tests can check work that is not
+// visible in the result. Per thread to isolate concurrent tests.
 #[cfg(test)]
 thread_local! {
     static VISITED_PAIRS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Resets the candidate-pair counter of this thread to zero.
 #[cfg(test)]
 pub(crate) fn reset_visited_pairs() {
     VISITED_PAIRS.with(|visited| visited.set(0));
 }
 
-/// The candidate pairs the binary kernel has visited on this thread since the last
-/// [`reset_visited_pairs`].
-///
-/// A pair is visited once per one-side candidate the kernel looks up for a many-side series, before
-/// the pairing's label set and axis intersection are built, so the count is what the kernel actually
-/// does rather than what its operands' sizes imply it would.
+/// Candidate pairs visited on this thread since [`reset_visited_pairs`]: one per one-side candidate
+/// looked up for a many-side series.
 #[cfg(test)]
 pub(crate) fn visited_pairs() -> usize {
     VISITED_PAIRS.with(std::cell::Cell::get)
@@ -96,9 +86,8 @@ pub enum BinaryKind {
 }
 
 impl BinaryOp {
-    /// The kernel operation this operator names. Every path that evaluates a binary operator over
-    /// two floats, the broadcast of a scalar and a constant fold included, reads it from here, so
-    /// they cannot disagree about which operator is which or about what it computes.
+    /// The kernel operation this operator names. Every float evaluation path, broadcast and
+    /// constant folding included, must go through this.
     #[inline]
     pub fn kind(self) -> BinaryKind {
         match self {
@@ -223,15 +212,7 @@ pub fn binary_vectors(
     binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None, None, None)
 }
 
-/// [`binary_vectors`], handing the live workspace it holds to `reserve` as it allocates.
-///
-/// What the operation will allocate cannot be known before it allocates: which series match each
-/// other, where their axes overlap and which rows the operator keeps all come out of the operands
-/// as they are read. So `reserve` receives the **total** live workspace the operation holds, and it
-/// is asked at the three granularities [`Budget`] describes: where a long-lived result buffer grows,
-/// once per phase, and in the blocks a growing result buffer is reserved in. It is never asked per
-/// grid point or per row. A total `reserve` refuses ends the operation with that error, and what it
-/// admitted stays the caller's to release.
+/// The plan node and its shared duplicate-match evidence, for a binary operator that reports it.
 #[derive(Clone, Copy)]
 pub(crate) struct NodeEvidence<'a> {
     pub(crate) node: usize,
@@ -244,6 +225,9 @@ struct FieldEvidence<'a> {
     evidence: &'a DuplicateEvidence,
 }
 
+/// [`binary_vectors`], reporting its total live workspace to `reserve` at the granularities
+/// [`Budget`] describes, never per point or row. A refusal fails the operation with that error;
+/// releasing what was admitted is the caller's job.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn binary_vectors_with_reservation(
     matching: &BinaryMatching,
@@ -268,8 +252,7 @@ pub(crate) fn binary_vectors_with_reservation(
     )
 }
 
-/// The one binary kernel: one walk, one lookup and one error order, whether or not a caller
-/// accounts for the workspace. Every figure is reserved only when `budget` is held.
+/// The binary kernel, with or without a budget.
 #[allow(clippy::too_many_arguments)]
 fn binary_vectors_inner(
     matching: &BinaryMatching,
@@ -281,11 +264,7 @@ fn binary_vectors_inner(
     annotations: Option<&PromqlAnnotationCollector>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
-    // The grid both operands are evaluated on, checked before anything is reserved for them.
     let grid = same_grid(lhs_schema, rhs_schema)?;
-    // The fields paired by position and the descriptors they are handed back in: one result table
-    // per field, the field list both the results and the output schema keep, and the schema itself.
-    // The schema is what these bytes cover, so they are reserved before it is built.
     let width = lhs_schema.fields.len().min(rhs_schema.fields.len());
     if let Some(budget) = budget.as_deref_mut() {
         budget.hold(output_bytes(width))?;
@@ -311,51 +290,46 @@ fn binary_vectors_inner(
             annotations,
             budget.as_deref_mut(),
         )?;
-        // The field's flags, tables and sort are destroyed with its frame, so its phase ends here:
-        // what the field filed is what stays live, and the next field's phase is charged on its own.
+        // The field's working tables are dropped here; only its filed results stay live.
         if let Some(budget) = budget.as_deref_mut() {
             budget.phase(0)?;
         }
         fields.push(results);
     }
     earliest_error(errors)?;
-    // The merge is the operation's last phase: it enters its own figure from the results the fields
-    // filed, which is where every term of it is read.
     merge_fields(fields, output, budget)
 }
 
-/// The capacity a fresh `Vec` holds: a first push allocates four entries, and a full one doubles.
+/// The smallest non-zero capacity assumed when estimating the next growth of a `Vec`, or of the
+/// one-to-one `HashSet` whose growth this approximates.
 const VEC_MIN_CAPACITY: usize = 4;
 
-/// One label of a match key, charged twice because `group_key` grows its `Vec` by doubling.
+/// One label of a match key, doubled for `Vec` growth slack.
 const KEY_LABEL_BYTES: usize = 2 * std::mem::size_of::<(Arc<str>, Arc<str>)>();
 
-/// One name of [`MatchingLabels`], which `result_metric` collects into a reference vector. The
-/// vector is collected from an exact-size iterator, so its buffer holds one `&str` per name.
+/// One name of [`MatchingLabels`] in the exact-size reference vector `result_metric` collects.
 const MATCHING_NAME_BYTES: usize = std::mem::size_of::<&str>();
 
-/// One entry of a match-group table, with the control byte and spare capacity it keeps.
+/// One entry of a match-group table, doubled for control bytes and spare capacity.
 const GROUP_SLOT_BYTES: usize = 2 * std::mem::size_of::<(GroupKey, Vec<usize>)>();
 
-/// One entry of the one-to-one match set, charged the same way.
+/// One entry of the one-to-one match set, doubled likewise.
 const MATCH_SLOT_BYTES: usize = 2 * std::mem::size_of::<(usize, usize)>();
 
-/// One entry of a field's result table, charged the same way.
+/// One entry of a field's result table, doubled likewise.
 const RESULT_SLOT_BYTES: usize = 2 * std::mem::size_of::<(GroupKey, ResultRows)>();
 
-/// One row of a field's results: its point, its match group and its value. The three vectors grow
-/// together, so one slot of each is what a row takes, and a block of the vectors is charged a row's
-/// bytes per slot it grew by.
+/// One row of a field's results: one slot each of the point, group and value vectors, which grow
+/// together.
 const RESULT_ROW_BYTES: usize =
     2 * std::mem::size_of::<usize>() + std::mem::size_of::<Option<GridSample>>();
 
-/// One row while a label set is sorted: the old and the new copy of its point, group and value
-/// vectors, and the row order the sort reads. The sort copies a label set's rows when they are not
-/// already in order, so this is what one row costs while it runs.
+/// One row while an unsorted label set is sorted: old and new copies of its point, group and value
+/// slots, plus the order vector.
 const SORT_ROW_BYTES: usize =
     4 * std::mem::size_of::<usize>() + 2 * std::mem::size_of::<Option<GridSample>>();
 
-/// One row of the merge's table, charged the same way.
+/// One row of the merge's table, doubled for spare capacity.
 const MERGE_SLOT_BYTES: usize =
     2 * std::mem::size_of::<(GroupKey, (SeriesLabels, Vec<(usize, usize, GridSample)>))>();
 
@@ -368,36 +342,25 @@ pub(crate) const HISTOGRAM_ROW_BYTES: usize = 4 * std::mem::size_of::<f64>()
 /// The fixed text of one error message, around the label set it renders.
 const ERROR_TEXT_BYTES: usize = 256;
 
-/// The bytes the operation's own descriptors cost: one result table per paired field, the field
-/// list the results and the output schema each keep, and the schema struct.
+/// Bytes of the per-field result tables and the output schema.
 fn output_bytes(fields: usize) -> usize {
     fields
         .saturating_mul(std::mem::size_of::<Results>() + 2 * std::mem::size_of::<FieldSpec>())
         .saturating_add(std::mem::size_of::<SeriesSchema>())
 }
 
-/// The live workspace a binary, set or `info` operation admits as it allocates, at three
-/// granularities.
+/// Turns the allocations of a binary, set or `info` operation into the total live workspace the
+/// caller's `reserve` admits, charged at allocation boundaries rather than per value:
 ///
-/// A resource limit belongs at an allocation boundary, not at a value:
-///
-/// - [`Budget::hold`]: what the results keep until the operation returns -- rows, the label sets they
-///   are filed under, the values boxed along them, the messages an error reports. Each is charged
-///   where its container grows.
-/// - [`Budget::phase`]: one figure for the workspace of one walk, read from the operands before it
-///   allocates and replacing the phase before it, so the total is the phase being run beside what is
-///   held and never the sum of every phase.
-/// - [`Budget::grow`]: a block a container of that phase took when it outgrew what it held.
-///
-/// It exists because the caller is handed a *total*, and this turns those figures into that total.
+/// - [`Budget::hold`]: results kept until the operation returns.
+/// - [`Budget::phase`]: the workspace of one walk, estimated up front and replacing the previous
+///   phase.
+/// - [`Budget::grow`]: a block a container of the current phase took when it outgrew its capacity.
 pub(crate) struct Budget<'a> {
-    /// Admits the live workspace, or refuses it.
     reserve: &'a mut dyn FnMut(usize) -> Result<()>,
-    /// The bytes the results keep until the operation returns.
     held: usize,
-    /// The bytes of the phase being run, beside what is held.
     phase: usize,
-    /// The total handed to `reserve` last, so an unchanged one is not asked for twice.
+    /// The last total passed to `reserve`, to skip asking again for the same figure.
     requested: Option<usize>,
 }
 
@@ -417,20 +380,19 @@ impl<'a> Budget<'a> {
         self.admit()
     }
 
-    /// Admits `bytes` as the whole workspace of the phase being run, replacing the phase before it.
+    /// Sets the current phase's workspace to `bytes`, replacing the previous phase.
     pub(crate) fn phase(&mut self, bytes: usize) -> Result<()> {
         self.phase = bytes;
         self.admit()
     }
 
-    /// Adds `bytes` to the phase for a container of it that has outgrown what was reserved.
+    /// Adds `bytes` to the current phase.
     pub(crate) fn grow(&mut self, bytes: usize) -> Result<()> {
         self.phase = self.phase.saturating_add(bytes);
         self.admit()
     }
 
-    /// Hands the live total to `reserve` when it differs from the last one. It falls as well as
-    /// rises, and only a repeated figure is left out.
+    /// Passes the live total, which may fall as well as rise, to `reserve` unless it is unchanged.
     fn admit(&mut self) -> Result<()> {
         let total = self.held.saturating_add(self.phase);
         if self.requested != Some(total) {
@@ -441,29 +403,22 @@ impl<'a> Budget<'a> {
     }
 }
 
-/// The figures one field's phases are charged from, read once from its operands.
+/// The byte figures one field's phases are charged from, read once from its operands.
 #[derive(Default)]
 struct FieldMetadata {
-    /// The presence flags and the one side's match groups.
+    /// Three presence flags per grid point and the one side's match groups.
     tables: usize,
-    /// The allowance for the messages the field can report, which its sort reserves before it knows
-    /// which of them it appends; only the ones it writes are kept.
+    /// An allowance for the at most three messages the field can report.
     errors: usize,
     /// The largest key a row of the field is filed under.
     largest_key: usize,
-    /// The widest pairing's label set and the histogram workspace one row of the walk reads.
+    /// The widest pairing's label set and one row's histogram workspace.
     pairing: usize,
 }
 
-/// The figures one field's phases are charged from.
-///
-/// The presence of each side and of the points both are present at are three flags per grid point;
-/// the one side's groups are a key, the values `on(...)` matching copies and a member list per
-/// series; one series of the many side is looked up by a key of its own; and a field reports at most
-/// three messages, each a fixed frame around one rendering. The duplicate scan's list is not part of
-/// these tables: a group of one member collects nothing, and a wider group's list is charged by
-/// [`overlap`] as it grows. The pairing's own terms are read from the widest series of each side
-/// rather than from every pair, since one pairing's label set replaces the one before it.
+/// Computes [`FieldMetadata`]. The duplicate scan's list is charged separately by [`overlap`]. The
+/// pairing figure comes from the widest series of each side, since each pairing's scratch replaces
+/// the previous one.
 fn field_metadata_bytes(
     matching: &BinaryMatching,
     include: &[Arc<str>],
@@ -487,8 +442,7 @@ fn field_metadata_bytes(
         lookup = lookup.max(match_key_bytes(&series.metric, &matching.labels));
         largest_key = largest_key.max(result_key_bytes(&series.metric));
     }
-    // A result label set carries the many side's labels and the `group_*` ones copied into it, so
-    // the widest rendering over both operands bounds the text an error writes.
+    // The widest rendering over both operands, plus the `group_*` labels, bounds an error's text.
     let include_text = include.iter().fold(0usize, |bytes, name| {
         bytes.saturating_add(name.len()).saturating_add(6)
     });
@@ -499,8 +453,6 @@ fn field_metadata_bytes(
         .fold(include_text, |bytes, series| {
             bytes.max(label_text_bytes(&series.metric).saturating_add(include_text))
         });
-    // The widest series of each side: one pairing's label set replaces the one before it, so the
-    // widest is what the phase holds at its peak.
     let pairing = widest_metric(many)
         .zip(widest_metric(one))
         .map_or(0, |(many, one)| pair_bytes(many, one, matching, include));
@@ -512,8 +464,7 @@ fn field_metadata_bytes(
     }
 }
 
-/// The series of `operand` with the most labels: the widest label set one pairing of its field can
-/// build.
+/// The series of `operand` with the most labels.
 fn widest_metric<'a>(operand: &'a Operand<'_>) -> Option<&'a SeriesLabels> {
     operand
         .series
@@ -522,26 +473,16 @@ fn widest_metric<'a>(operand: &'a Operand<'_>) -> Option<&'a SeriesLabels> {
         .max_by_key(|metric| metric.tags().len())
 }
 
-/// The bytes one pairing allocates before it files a row: the result label set `result_metric`
-/// rewrites, the `group_*` labels it copies in, the reference vector it collects the matching label
-/// names into, and the key its rows are looked up by.
-///
-/// Each rewrite filters the tag list into a `Vec` and turns that into a shared slice, so the list it
-/// replaces is alive while two copies of the new one are built, and an included label the many side
-/// does not carry is inserted, which costs its descriptor too. The matching names are collected into
-/// a reference vector of their own before the rewrite, for `on(...)` and `ignoring(...)` alike and
-/// whether or not the series carries them. This is one pairing's scratch: the next pairing replaces
-/// it, and a pairing whose axes share no position still pays it, because the label set is built
-/// before the axes are intersected.
+/// The scratch one pairing allocates before it files a row: the result label set `result_metric`
+/// builds (the old list alive beside two copies of the new one), the copied `group_*` labels, the
+/// matching-name vector, and the row key. Paid even when the axes share no position, because the
+/// label set is built before the axes are intersected.
 fn pair_bytes(
     many: &SeriesLabels,
     one: &SeriesLabels,
     matching: &BinaryMatching,
     include: &[Arc<str>],
 ) -> usize {
-    // The label list each rewrite builds and the one it replaces, then the key `key_of` builds for
-    // a row: every label with a value and the name, each charged twice for the growth of the key's
-    // `Vec`, and the name string it copies.
     let labels = 3usize
         .saturating_mul(many.tags().len().saturating_add(include.len()))
         .saturating_mul(std::mem::size_of::<Label>());
@@ -552,8 +493,7 @@ fn pair_bytes(
         .saturating_add(1)
         .saturating_mul(KEY_LABEL_BYTES)
         .saturating_add(many.name().map_or(0, str::len));
-    // Only a one-to-one match rewrites the label list by its matching labels, and it collects their
-    // names first; `group_left` and `group_right` copy the included labels instead.
+    // Only one-to-one collects the matching names; `group_*` copies the included labels instead.
     let names = match (&matching.cardinality, &matching.labels) {
         (Cardinality::OneToOne, MatchingLabels::On(names))
         | (Cardinality::OneToOne, MatchingLabels::Ignoring(names)) => {
@@ -567,8 +507,7 @@ fn pair_bytes(
         .saturating_add(names)
 }
 
-/// The label text `result_metric` copies from the one side: the value of every included label it
-/// sets, and the name of a label it inserts, since `SeriesLabels::set` copies that as well.
+/// The label text `result_metric` copies from the one side: name and value of each included label.
 fn copied_bytes(one: &SeriesLabels, include: &[Arc<str>]) -> usize {
     include
         .iter()
@@ -580,8 +519,7 @@ fn copied_bytes(one: &SeriesLabels, include: &[Arc<str>]) -> usize {
         })
 }
 
-/// The key `key_of` files a result label set under: every label with a value and the name, each
-/// charged twice for the growth of the key's `Vec`, plus the name string it copies.
+/// The key `key_of` files a result label set under, including the copied name string.
 fn result_key_bytes(metric: &SeriesLabels) -> usize {
     metric
         .tags()
@@ -591,8 +529,8 @@ fn result_key_bytes(metric: &SeriesLabels) -> usize {
         .saturating_add(metric.name().map_or(0, str::len))
 }
 
-/// The bytes one result label set keeps once a row is filed under it: the label list and the
-/// copied strings `result_metric` leaves behind, its key and its entry in the result table.
+/// The bytes one result label set keeps once a row is filed under it: labels, copied strings, key
+/// and result-table entry.
 fn result_set_bytes(metric: &SeriesLabels, one: &SeriesLabels, include: &[Arc<str>]) -> usize {
     metric
         .tags()
@@ -603,15 +541,9 @@ fn result_set_bytes(metric: &SeriesLabels, one: &SeriesLabels, include: &[Arc<st
         .saturating_add(RESULT_SLOT_BYTES)
 }
 
-/// The bytes the merge of every field's results and the builder writing them out allocate.
-///
-/// The merge files every kept triple under its label set and hands one series per label set to a
-/// builder, so the triples, the table, the row it fills, the output vector and the builder's own
-/// buffers are alive together: one triple of a label set's samples, the span a run may start with, a
-/// row of the histogram table per histogram and the heap its buckets are copied to. Every term counts
-/// a value a field actually kept or a label set it filed, so a pair the operator filtered costs its
-/// label set -- the table holds one without a value -- and no row at all. What grows with the output
-/// rows is the builder's columns, which [`merge_fields`] reserves in blocks as it pushes them.
+/// The bytes the merge of every field's results allocates, apart from the builder's columns, which
+/// [`merge_fields`] reserves in blocks. Counts kept values and filed label sets only; a filtered
+/// pair costs its label set but no row.
 fn merge_bytes(
     kept: usize,
     sets: usize,
@@ -619,31 +551,23 @@ fn merge_bytes(
     histograms: usize,
     histogram_heap: usize,
 ) -> usize {
-    // One kept triple, charged twice for the capacity its vector ends at, one slot of the row the
-    // builder reads and the span it may start.
+    // A kept triple (doubled for capacity), its builder slot and the span it may start.
     let row = (2 * std::mem::size_of::<(usize, usize, GridSample)>())
         .saturating_add(2 * std::mem::size_of::<usize>())
         .saturating_add(2 * std::mem::size_of::<GridSpan>());
     kept.saturating_mul(row)
-        // One label set's entry in the merge table and the series it is written out as.
         .saturating_add(
             sets.saturating_mul(MERGE_SLOT_BYTES.saturating_add(2 * std::mem::size_of::<Series>())),
         )
-        // The row the builder reads its pushes from.
         .saturating_add(2 * fields.saturating_mul(std::mem::size_of::<Option<GridSample>>()))
-        // The histogram table of every field that carries one: the builders of its columns, the
-        // scalars and list offsets of its rows, and the buckets the batch copies beside the value
-        // the results still hold.
+        // Histogram builders, rows, and bucket copies beside the values the results still hold.
         .saturating_add(fields.saturating_mul(std::mem::size_of::<HistogramBatchBuilder>()))
         .saturating_add(histograms.saturating_mul(2 * HISTOGRAM_ROW_BYTES))
         .saturating_add(2 * histogram_heap)
 }
 
-/// The bytes one match key holds: its label pairs and, for `on(...)`, a copy of each value.
-///
-/// `group_key` copies an `on(...)` value with `Arc::from` and shares the `Arc` of an
-/// `ignoring(...)` label, so only `on(...)` adds string bytes. The pairs are charged twice because
-/// the key is collected into a `Vec` that grows by doubling.
+/// The bytes one match key holds: its label pairs and, for `on(...)`, a copy of each value;
+/// `ignoring(...)` keys share the label's `Arc`.
 fn match_key_bytes(metric: &SeriesLabels, labels: &MatchingLabels) -> usize {
     match labels {
         MatchingLabels::On(names) => {
@@ -665,8 +589,7 @@ fn match_key_bytes(metric: &SeriesLabels, labels: &MatchingLabels) -> usize {
     }
 }
 
-/// The bytes `render` writes for a label set built from `metric`: each label as `name="value"`,
-/// the braces and separators between them, and the metric's name.
+/// The bytes `render` writes for a label set built from `metric`.
 fn label_text_bytes(metric: &SeriesLabels) -> usize {
     let named = metric
         .name()
@@ -679,8 +602,7 @@ fn label_text_bytes(metric: &SeriesLabels) -> usize {
     })
 }
 
-/// The bytes one owned copy of a histogram view holds: its scalars inline, and on the heap the
-/// buckets of both sides, the span layout of the view and its custom bounds.
+/// The bytes one owned copy of a histogram view holds, inline and on the heap.
 pub(crate) fn owned_histogram_bytes(view: &HistogramView<'_>) -> usize {
     let sides = [view.positive, view.negative];
     let buckets = sides
@@ -709,19 +631,15 @@ pub(crate) fn owned_histogram_bytes(view: &HistogramView<'_>) -> usize {
         )
 }
 
-/// The bytes one boxed histogram value holds: its scalars inline and the heap its buckets, bounds
-/// and span layout own.
+/// The bytes one boxed histogram value holds, inline and on the heap.
 fn result_histogram_bytes(histogram: &FloatHistogram) -> usize {
     std::mem::size_of::<FloatHistogram>().saturating_add(histogram.heap_bytes())
 }
 
-/// The bytes one row of a histogram operator holds at its peak, read once from the widest histogram
-/// of each side of a field: an owned copy of each operand, the union `+` and `-` grow into -- both
-/// sides' buckets, charged twice because the union reallocates while the old buffer is alive -- the
-/// custom bounds the wider side copies, and the value the operator boxes. A phase figure, not one per
-/// row: a row that pairs two histograms is bounded by the widest of each side.
+/// The peak bytes of one histogram row, bounded by the widest histogram of each side: an owned
+/// copy of each operand, the bucket union `+`/`-` grow (doubled for reallocation), the custom
+/// bounds, and the boxed result.
 fn histogram_phase_bytes(many: &Operand<'_>, one: &Operand<'_>) -> usize {
-    // What one owned copy of a view takes, the buckets the union grows by and its custom bounds.
     let operand = |operand: &Operand<'_>| match operand.widest_histogram() {
         Some(view) => (
             owned_histogram_bytes(&view),
@@ -754,11 +672,8 @@ fn histogram_phase_bytes(many: &Operand<'_>, one: &Operand<'_>) -> usize {
 }
 
 /// Matches one field of each side, collecting the first failure of each kind as
-/// `(point, rank, message)`.
-///
-/// The field's tables and the match set it builds are its own workspace: they replace what the field
-/// before held and are gone when it returns, which is why the caller admits that release after the
-/// call. The messages it appended and the rows it filed are what stays live.
+/// `(point, rank, message)`. Its tables are a phase the caller ends after the call; only the
+/// appended messages and filed rows stay live.
 #[allow(clippy::too_many_arguments)]
 fn binary_field(
     matching: &BinaryMatching,
@@ -780,9 +695,7 @@ fn binary_field(
         (grid.spec().start_ms as i128 + point as i128 * grid.spec().step_ms as i128) as i64
     };
     let errors_before = errors.len();
-    // The pairing phase is entered once, before the field allocates anything: its presence flags,
-    // its match groups, the widest label set a pairing builds and the histogram payload one row of
-    // the walk reads. Nothing of the field before it is still live.
+    // Entered once, before the field allocates anything.
     let metadata = match budget.as_deref_mut() {
         Some(budget) => {
             let metadata = field_metadata_bytes(matching, include, points, many, one);
@@ -791,8 +704,8 @@ fn binary_field(
         }
         None => FieldMetadata::default(),
     };
-    // The walk below fills `rhs` for a missing one-side sample and `lhs` for a missing many-side
-    // one, so under `group_right`, whose one side is the left, the two trade places.
+    // The walk fills `rhs` for a missing one-side sample and `lhs` for a missing many-side one, so
+    // they swap under `group_right`.
     let fill = if one_is_left {
         FillValues {
             lhs: matching.fill.rhs,
@@ -825,9 +738,6 @@ fn binary_field(
     let one_groups = group(one, &matching.labels);
     let mut one_duplicate: Option<(usize, &GroupKey)> = None;
     for (key, members) in &one_groups {
-        // Scanning one group is its own phase: the list of its present points is the only thing it
-        // allocates, it is charged by the block it takes as it grows, and it is dropped with the
-        // scan, so the next group's list replaces it.
         let mut duplicate_at: Option<usize> = None;
         let mut group_key: Option<Arc<GroupKey>> = None;
         overlap(
@@ -835,16 +745,13 @@ fn binary_field(
             members,
             |point| {
                 if evaluated[point] {
-                    // This partition's own presence already decides the point: the duplicate below
-                    // aborts the execution from here, so recording it for the other partitions
-                    // would only take their lock to store a verdict nobody will ask for.
+                    // Decided locally and fails the execution; no need to record it as evidence.
                     if duplicate_at.is_none_or(|first| point < first) {
                         duplicate_at = Some(point);
                     }
                 } else if let Some(evidence) = &evidence {
-                    // The gate is false here only because this partition holds one side of the
-                    // match. Whether the point is eligible is a property of the whole execution,
-                    // so the finding is recorded and judged once every partition has reported.
+                    // Not evaluated here may still be evaluated globally: another partition may
+                    // hold the other side. Record it and judge once every partition has reported.
                     let side = if one_is_left { "left" } else { "right" };
                     evidence.evidence.record_candidate(
                         evidence.node,
@@ -875,9 +782,6 @@ fn binary_field(
         annotations,
         group_keys: Vec::new(),
         group_ids: HashMap::new(),
-        // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
-        // comparison as a match too, but not an operation that failed. Filling the many side
-        // consults the same set.
         matched: (matching.cardinality == Cardinality::OneToOne || fill.lhs.is_some())
             .then(HashSet::new),
         implicit_many_to_one: None,
@@ -890,14 +794,9 @@ fn binary_field(
         }
         let group = pairs.group_id(&key);
         for &one_index in candidates {
-            // One candidate of the one side is paired with this series, whether or not the pairing
-            // turns out to hold a row: the visit is what the test-only counter reports, before the
-            // pairing's label set and axis intersection are built.
             #[cfg(test)]
             VISITED_PAIRS.with(|visited| visited.set(visited.get() + 1));
-            // One pairing's label set is built before the axes are intersected, and the next
-            // pairing replaces it: its bytes are part of the phase entered above, not a figure
-            // reserved per pair.
+            // Charged in the phase above (`pair_bytes`), not per pair.
             let metric = result_metric(
                 &many_series.metric,
                 &one.series[one_index].metric,
@@ -910,16 +809,10 @@ fn binary_field(
             } else {
                 0
             };
-            // Only the positions both operands carry are evaluated, and each keeps its own row:
-            // the intersection is a merge of the two axes, never an envelope with offsets.
-            // One cursor per side serves this whole pairing: `intersect_runs` walks both axes'
-            // run lists forward, and each `GridRunPair` carries the row of each side, so the rows
-            // asked for only increase from one shared run to the next -- the order a `RowCursor`
-            // requires. A cursor per run would restart at row 0 and re-walk every row before it.
+            // Shared runs ascend, so one forward `RowCursor` per side serves the whole pairing.
             let (mut many_cursor, mut one_cursor) =
                 (many.cursor(many_index), one.cursor(one_index));
-            // The pairing's row is opened by the first point it files and reused by every later
-            // one, so a pairing whose axes do not intersect never builds its key.
+            // Opened by the first filed point, so a pairing that files nothing builds no key.
             let mut slot = RowSlot::Unfiled(&mut results.series);
             for pair in many.shared_runs(many_index, one, one_index) {
                 for offset in 0..pair.len {
@@ -947,8 +840,7 @@ fn binary_field(
                 }
             }
         }
-        // A many-side sample no one-side series matched is answered with the fill value, at the
-        // label set the match group of the many-side series gives it.
+        // Fill the missing one-side sample of a many-side series nothing matched.
         if let Some(value) = fill.rhs {
             let metric = result_metric(
                 &many_series.metric,
@@ -965,7 +857,6 @@ fn binary_field(
             let mut cursor = many.cursor(many_index);
             let mut candidate_cursors: Vec<RowCursor<'_>> =
                 candidates.iter().map(|&index| one.cursor(index)).collect();
-            // One fill label set for this many-side series, opened by the first point it files.
             let mut slot = RowSlot::Unfiled(&mut results.series);
             for (point, row) in many.positions(many_index) {
                 let sample = cursor.at(row).expect("a row never goes back");
@@ -974,7 +865,6 @@ fn binary_field(
                     .zip(&mut candidate_cursors)
                     .any(|(&index, cursor)| one.present(index, point, cursor));
                 if !matched {
-                    // A fill row pairs no two series, so it builds no pairing label set.
                     slot = pairs.apply(
                         slot,
                         &mut results.totals,
@@ -991,8 +881,8 @@ fn binary_field(
             }
         }
     }
-    // Prometheus fills the many side after every match of the step, for the samples of the one
-    // side that no operation matched.
+    // Fill the missing many-side sample of a one-side series nothing matched. Prometheus does this
+    // after every match of the step.
     if let Some(value) = fill.lhs {
         for (one_index, one_series) in one.series.iter().enumerate() {
             let key = group_key(&one_series.metric, &matching.labels);
@@ -1018,8 +908,6 @@ fn binary_field(
                     .is_some_and(|matched| matched.contains(&(group, point)))
                 {
                     let sample = cursor.at(row).expect("a row never goes back");
-                    // A fill row pairs no two series, so it builds no pairing label set: what it
-                    // keeps is the label set it is filed under.
                     slot = pairs.apply(
                         slot,
                         &mut results.totals,
@@ -1036,15 +924,13 @@ fn binary_field(
             }
         }
     }
-    // The match set, the groups and the pairing state are gone with the walk: taking them apart
-    // here drops them, so the sort and the messages are what is live from here on.
+    // Drops the match set and pairing state before the sort phase.
     let Pairs {
         group_keys,
         implicit_many_to_one,
         ..
     } = pairs;
-    // The sort phase: one figure for the tables still live beside it, the messages it may append
-    // and one slot per row it sorts -- entered once, before it allocates any of them.
+    // The sort phase, admitted before it allocates.
     if let Some(budget) = budget.as_deref_mut() {
         budget.phase(
             metadata
@@ -1094,8 +980,7 @@ fn binary_field(
             )
         });
     }
-    // Only the messages this field actually appended stay live until the earliest one is reported.
-    // They join what the results retain, once the field's tables and sort are gone.
+    // The appended messages stay live until the earliest one is reported.
     if let Some(budget) = budget {
         let appended = errors[errors_before..]
             .iter()
@@ -1109,25 +994,23 @@ fn binary_field(
     Ok(results)
 }
 
-/// The matched pairs of one field and the state Prometheus checks them against.
-///
-/// The results are filed beside it, not in it: a pairing's open row borrows the table it files into
-/// while the match state stays free to move with the point.
+/// The match state of one field. Results live outside it, so an open [`RowSlot`] can borrow them
+/// while this is mutated.
 struct Pairs<'a> {
     matching: &'a BinaryMatching,
     one_is_left: bool,
     annotations: Option<&'a PromqlAnnotationCollector>,
     group_keys: Vec<GroupKey>,
     group_ids: HashMap<GroupKey, usize>,
-    /// The match groups an operation matched at a point, kept where Prometheus consults them:
-    /// one-to-one matching, and filling the many side. A filtered comparison counts as a match,
-    /// an operation that failed does not.
+    /// `(group, point)` pairs matched so far, kept for one-to-one matching and for filling the
+    /// many side. As in Prometheus, a filtered comparison counts as a match; a failed operation does
+    /// not.
     matched: Option<HashSet<(usize, usize)>>,
     implicit_many_to_one: Option<(usize, usize)>,
 }
 
 impl Pairs<'_> {
-    /// The id of the match group `key`, which stands for it in `matched` and in the results.
+    /// The id of the match group `key`, allocating one on first sight.
     fn group_id(&mut self, key: &GroupKey) -> usize {
         if let Some(&id) = self.group_ids.get(key) {
             return id;
@@ -1139,13 +1022,8 @@ impl Pairs<'_> {
     }
 
     /// Applies the operator to a sample of each side at `point`; a missing sample is no pair.
-    ///
-    /// Nothing here is charged per point: the operator's histograms are part of the phase, and the
-    /// only figures a row can charge are the two allocation boundaries it crosses -- a block the match
-    /// set grows into, and `label_set`, the bytes a result label set keeps when this row is the first
-    /// filed under it, or the value the results retain. The row a pairing files under its label set
-    /// is opened by [`RowSlot`] on the first point the pairing files, and the slot is handed back to
-    /// file the pairing's next point with.
+    /// Returns the slot for the pairing's next point. `label_set` is charged only when this row is
+    /// the first filed under it; nothing is charged per point except match-set growth.
     #[allow(clippy::too_many_arguments)]
     fn apply<'s>(
         &mut self,
@@ -1168,18 +1046,14 @@ impl Pairs<'_> {
         } else {
             (many_value, one_value)
         };
-        // Prometheus runs the operation on the float a fill value puts in place of a missing sample,
-        // so a filled pair reports the legacy dropped-sample Info too. What stays out is not the
-        // fill but the pair: one missing a side never reaches here, and a supported operation that
-        // declines for another reason -- incompatible bucket layouts -- is already outside what
-        // [`unsupported_histogram_arithmetic`] reports.
+        // A filled pair reports the dropped-sample info too: Prometheus runs the operation on the
+        // fill value.
         let dropped_op = if self.annotations.is_some() {
             unsupported_histogram_arithmetic(self.matching.op, &lhs_value, &rhs_value)
         } else {
             None
         };
-        // A fill value is a float, so a filled pair never holds the two histograms `elem_binop`
-        // states its reconciliation and reset diagnostics for: those stay off for it.
+        // A fill value is a float, so histogram-pair diagnostics do not apply.
         let pair_annotations = if actual_pair { self.annotations } else { None };
         let Some((result, keep)) =
             elem_binop(self.matching.op, lhs_value, rhs_value, pair_annotations)?
@@ -1189,15 +1063,11 @@ impl Pairs<'_> {
                     "{op}: dropped native histogram samples because this binary operation is not supported for native histograms"
                 ));
             }
-            // The operator skipped the pair and nothing of it was filed.
             return Ok(slot);
         };
-        // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
-        // comparison as a match too, but not an operation that failed.
         if let Some(matched) = &mut self.matched {
-            // The match set is the one container this walk grows point by point, so it is charged by
-            // the block it takes when it outgrows what it holds -- before the insert allocates it, and
-            // never per point of a set that has room.
+            // Charge the set's growth before the insert allocates it. The doubling estimate only
+            // approximates `HashSet` growth.
             if matched.len() + 1 > matched.capacity()
                 && let Some(budget) = budget.as_deref_mut()
             {
@@ -1217,8 +1087,6 @@ impl Pairs<'_> {
                 self.implicit_many_to_one = Some((point, group));
             }
         }
-        // The value the row keeps. A `bool` comparison keeps a float and a filtered comparison
-        // keeps nothing; a kept value is moved into the row.
         let value = if self.matching.return_bool {
             drop(result);
             Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
@@ -1272,11 +1140,8 @@ pub fn set_vectors(
     set_vectors_inner(op, labels, lhs_schema, lhs, rhs_schema, rhs, None)
 }
 
-/// [`set_vectors`], handing the live workspace it holds to `reserve` as it allocates.
-///
-/// The figures follow [`binary_vectors_with_reservation`]: what the results keep is held as their
-/// containers grow, each field's walk and sort is a phase that replaces the one before it, and the
-/// merge is the last phase. A total `reserve` refuses ends the operation with that error.
+/// [`set_vectors`], reporting its live workspace to `reserve` as
+/// [`binary_vectors_with_reservation`] does.
 pub(crate) fn set_vectors_with_reservation(
     op: SetOp,
     labels: &MatchingLabels,
@@ -1298,7 +1163,6 @@ pub(crate) fn set_vectors_with_reservation(
     )
 }
 
-/// The one set kernel, whether or not a caller accounts for its workspace.
 fn set_vectors_inner(
     op: SetOp,
     labels: &MatchingLabels,
@@ -1336,7 +1200,7 @@ fn set_vectors_inner(
             &mut errors,
             budget.as_deref_mut(),
         )?;
-        // The field's group table and sort are gone with its frame; what it filed stays live.
+        // The field's working tables are dropped here; only its filed results stay live.
         if let Some(budget) = budget.as_deref_mut() {
             budget.phase(0)?;
         }
@@ -1346,14 +1210,13 @@ fn set_vectors_inner(
     merge_fields(fields, output, budget)
 }
 
-/// The figures one set field's phases are charged from, read once from its operands.
+/// The byte figures one set field's phases are charged from, read once from its operands.
 struct SetFieldMetadata {
-    /// The filter side's match-group table, without the presence bitmaps it holds.
+    /// The filter side's match-group table, without its presence bitmaps.
     tables: usize,
-    /// The widest key one row builds: the match key a kept series is looked up by, or the key a row
-    /// is filed under.
+    /// The widest match or result key one row builds.
     scratch: usize,
-    /// The one message the field can report, a fixed frame around one rendering.
+    /// The one message the field can report.
     error: usize,
 }
 
@@ -1368,8 +1231,7 @@ fn set_field_metadata(
             .saturating_add(match_key_bytes(&series.metric, labels))
             .saturating_add(GROUP_SLOT_BYTES);
     }
-    // `or` files the filter side's rows too, so both sides' label sets bound a row's keys and the
-    // text of the message.
+    // `or` files the filter side's rows too, so both sides bound the keys and the message.
     let (mut scratch, mut text) = (0usize, 0usize);
     for series in kept.series.iter().chain(filter.series) {
         scratch = scratch
@@ -1400,8 +1262,7 @@ fn set_field(
         SetOp::Unless => (lhs, rhs, false),
         SetOp::Or => (rhs, lhs, false),
     };
-    // The walk is one phase, entered before the group table exists; each group's bitmap joins it
-    // as the group is first met.
+    // Each group's bitmap grows this phase as the group is first met.
     let metadata = match budget.as_deref_mut() {
         Some(budget) => {
             let metadata = set_field_metadata(labels, kept, filter);
@@ -1416,8 +1277,6 @@ fn set_field(
         grid.spec().len as usize,
         budget.as_deref_mut(),
     )?;
-    // A set operator hands on its operands' label sets unchanged, so a row is filed under the label
-    // set of the series it came from.
     let charged = budget.is_some();
     let label_set = |metric: &SeriesLabels| {
         if charged {
@@ -1432,8 +1291,6 @@ fn set_field(
             let metric = &lhs.series[index].metric;
             let label_set = label_set(metric);
             let mut cursor = lhs.cursor(index);
-            // The series' row is opened by the first point it files, and every later point of the
-            // series is pushed to it.
             let mut slot = RowSlot::Unfiled(&mut results.series);
             for (point, row) in lhs.positions(index) {
                 if let Some(value) = owned(cursor.at(row).expect("a row never goes back"))? {
@@ -1475,8 +1332,7 @@ fn set_field(
             }
         }
     }
-    // The group table is gone before the sort phase, which is charged without it: the message the
-    // sort may append and one slot per row it sorts, entered before it allocates either.
+    // The sort phase is charged without the group table, so drop it first.
     drop(presence);
     if let (Some(budget), Some(metadata)) = (budget.as_deref_mut(), &metadata) {
         budget.phase(
@@ -1499,12 +1355,8 @@ fn set_field(
     Ok(results)
 }
 
-/// The points at which each match group of `operand` holds a sample, one bit per grid point.
-///
-/// Prometheus decides a set operator at a step from the signatures present on the filter side, so
-/// a kept sample needs only whether its group is present at its point: built once from the filter
-/// side's rows, that is one lookup per kept sample however many series share the group. A group's
-/// bitmap is charged as the group is first met, before it is allocated.
+/// The points at which each match group of `operand` holds a sample, one bit per grid point, so a
+/// kept sample needs one lookup however many filter series share its group.
 fn group_presence(
     operand: &Operand<'_>,
     labels: &MatchingLabels,
@@ -1536,22 +1388,14 @@ fn group_presence(
     Ok(presence)
 }
 
-/// Joins the per-field results into series with all fields, by label set.
-///
-/// The merge is one phase, entered from the results the fields filed: the triples it groups, the
-/// table it groups them in and the builder's own buffers. Its columns are reserved once per result
-/// series, before the series pushes its first row, rather than once per row.
-///
-/// The phase figure is entered here, before either merge runs, so both are charged the same bytes
-/// and neither can allocate before it is admitted.
+/// Joins the per-field results into series with all fields, by label set. The merge phase is
+/// admitted here, before either merge path allocates; columns are then reserved once per series.
 fn merge_fields(
     fields: Vec<Results>,
     schema: Arc<SeriesSchema>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
     let width = schema.fields.len();
-    // What the merge holds before it allocates any of it, read from the results themselves: the
-    // kept triples, the label sets they are filed under and the histogram payload they carry.
     if let Some(budget) = budget.as_deref_mut() {
         let mut sets = 0usize;
         let mut merge = (0usize, 0usize, 0usize);
@@ -1565,25 +1409,19 @@ fn merge_fields(
         }
         budget.phase(merge_bytes(merge.0, sets, width, merge.1, merge.2))?;
     }
-    // One field of one result table is the whole merge, so its rows are written out as they are
-    // read; every other shape keeps the merge that groups, sorts and fills rows.
     if width == 1 && fields.len() == 1 {
         return merge_single_field(fields, schema, budget);
     }
     merge_multi_field(fields, schema, budget)
 }
 
-/// The merge of every field's results into one series per label set: the `(point, field, value)`
-/// triples of a label set, sorted and filled into a row the builder writes one value per point.
-///
-/// The phase the two merges share is entered by [`merge_fields`], before this runs.
+/// Groups `(point, field, value)` triples by label set, sorts them, and writes one row per point.
 fn merge_multi_field(
     fields: Vec<Results>,
     schema: Arc<SeriesSchema>,
     mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Vec<Series>> {
     let width = schema.fields.len();
-    // Per label set: the metric and its `(point, field, value)` samples.
     type Merged = (SeriesLabels, Vec<(usize, usize, GridSample)>);
     let mut merged: HashMap<GroupKey, Merged> = HashMap::new();
     for (field, results) in fields.into_iter().enumerate() {
@@ -1602,11 +1440,9 @@ fn merge_multi_field(
     let mut row: Vec<Option<GridSample>> = Vec::with_capacity(width);
     let mut output = Vec::with_capacity(merged.len());
     for (metric, mut samples) in merged.into_values() {
-        // One builder serves every label set, so each result series starts explicitly.
         builder.begin_series();
         samples.sort_unstable_by_key(|(point, field, _)| (*point, *field));
-        // This series' columns, in one reservation before it writes the first row of them. They stay
-        // live inside the series it is finished as, so the phase keeps them.
+        // The columns stay live in the finished series, so they grow the phase.
         if let Some(budget) = budget.as_deref_mut() {
             budget.grow(merge_series_columns(&samples, width))?;
         }
@@ -1625,19 +1461,9 @@ fn merge_multi_field(
     Ok(output)
 }
 
-/// The one-field shape's merge: the label set's rows written out as they are read.
-///
-/// A merge of one field has nothing to merge. The field filed each label set's rows already sorted
-/// by point and already proven to hold one row per point -- the field's own sort reports two rows at
-/// one point as an error, which is reported before the merge runs -- so the series is its rows: no
-/// triples table, no sort and no row buffer, one single-value row per kept sample. A sample the
-/// operator filtered (`None`) writes no row, exactly as in [`merge_multi_field`], and a label set
-/// whose samples were all filtered finishes as no series at all.
-///
-/// The rows it keeps are charged the figure [`merge_multi_field`] charges for the same samples, so
-/// the two merges bill a one-field result the same. The order the series are handed out in is not
-/// guaranteed -- label sets are read from a hash map, as in [`merge_multi_field`] -- so no result is
-/// defined by it.
+/// The single-field merge: each label set's rows are already sorted and unique per point (the
+/// field's sort errors otherwise), so they are written out directly. Filtered samples write no row,
+/// and charges match [`merge_multi_field`]. Series order is unspecified in both.
 fn merge_single_field(
     fields: Vec<Results>,
     schema: Arc<SeriesSchema>,
@@ -1648,11 +1474,7 @@ fn merge_single_field(
     let mut output = Vec::with_capacity(series);
     for results in fields {
         for (_, rows) in results.series {
-            // One builder serves every label set, so each result series starts explicitly.
             builder.begin_series();
-            // This series' columns, in one reservation before it writes the first row of them: the
-            // points of the samples it keeps, which are the rows the builder writes, counted in the
-            // one walk it already takes over them.
             if let Some(budget) = budget.as_deref_mut() {
                 budget.grow(merge_series_columns_of(
                     rows.points
@@ -1665,7 +1487,6 @@ fn merge_single_field(
             }
             for (&point, value) in rows.points.iter().zip(&rows.values) {
                 if value.is_some() {
-                    // A one-field row is the sample itself, borrowed rather than built.
                     builder.push_samples(point, std::slice::from_ref(value))?;
                 }
             }
@@ -1675,20 +1496,14 @@ fn merge_single_field(
     Ok(output)
 }
 
-/// The bytes one result series' columns take, read from the triples the multi-field merge sorts:
-/// the points they sit at, one row per point.
+/// [`merge_series_columns_of`] over sorted triples.
 fn merge_series_columns(samples: &[(usize, usize, GridSample)], fields: usize) -> usize {
     merge_series_columns_of(samples.iter().map(|(point, ..)| *point), fields)
 }
 
-/// The bytes one result series' columns take: the rows it writes -- one per distinct point of its
-/// samples, which is what the builder writes a row for -- times a row's columns. The points arrive
-/// sorted, so a distinct point is a point that differs from the one before it.
-///
-/// A row is the value and validity column of every field, charged twice for the capacity each column
-/// grows to, and the histogram index column of every field. The index columns are counted for every
-/// field rather than only the ones that happen to carry a histogram, so the figure over-reserves
-/// rather than missing a column, and nothing here follows how a column grows.
+/// The bytes one result series' columns take, for sorted `points`: per distinct point, every
+/// field's value and validity (doubled for capacity) and histogram index column. Counting index
+/// columns for every field over-reserves rather than missing one.
 fn merge_series_columns_of(points: impl Iterator<Item = usize>, fields: usize) -> usize {
     let row = 2 * fields.saturating_mul(std::mem::size_of::<f64>() + 1)
         + fields.saturating_mul(std::mem::size_of::<Option<u32>>());
@@ -1788,17 +1603,18 @@ impl DuplicateEvidence {
         }
     }
 
-    /// ORs one partition's operand presence into the node/field slot.
+    /// Marks one partition as completed. Returns whether it was the last and nothing aborted;
+    /// the last one also computes the final verdict.
     pub fn complete(&self) -> bool {
         self.exit_claim(false)
     }
 
-    /// Whether every output partition has completed or aborted this evidence generation.
+    /// Whether every output partition has completed or aborted.
     pub fn finished(&self) -> bool {
         self.remaining.load(std::sync::atomic::Ordering::Acquire) == 0
     }
 
-    /// Whether any claim in this generation was aborted.
+    /// Whether any partition aborted.
     pub fn aborted(&self) -> bool {
         self.aborted.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -2061,12 +1877,8 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
     groups
 }
 
-/// Reports every point where two or more `members` are present.
-///
-/// The group's list of present points is the only thing this scan allocates, and scanning one group
-/// is its own phase: the block the list takes is charged when it outgrows what it holds, and the next
-/// group's scan enters `base` again rather than adding a second list to it. A group of one member and
-/// a group whose members carry no sample both cost nothing, however long their axes are.
+/// Reports every point where two or more `members` are present. Its point list is a phase on top
+/// of `base`, reset to `base` when the scan ends.
 fn overlap(
     operand: &Operand<'_>,
     members: &[usize],
@@ -2086,7 +1898,6 @@ fn overlap(
                 cursor.at(row).expect("a row never goes back"),
                 SampleRef::Missing
             ) {
-                // A new block of the list, reserved before the push that allocates it.
                 if let Some(budget) = budget.as_deref_mut()
                     && points.len() == points.capacity()
                 {
@@ -2104,7 +1915,6 @@ fn overlap(
             on_duplicate(pair[0])?;
         }
     }
-    // The list is dropped with this scan, so the field's own phase figure is live from here on.
     if let Some(budget) = budget {
         budget.phase(base)?;
     }
@@ -2144,16 +1954,11 @@ fn result_metric(
 }
 
 /// Validates one operand of [`binary_vectors`]: every series must sit on the schema's grid, carry
-/// the schema's fields, and hold one sample for every row its own axis places.
-///
-/// [`Series`] keeps its fields public, so a series built by struct literal can disagree with the
-/// schema it is handed in with, and then the row the axis names has nothing to read. The kernel
-/// cannot read such an operand, so the check lives here and runs before a field builds its matching
-/// tables: the output schema is reserved before it, but nothing of the walk is.
+/// the schema's fields, and hold one sample per axis row. [`Series`] fields are public, so a series
+/// can disagree with its schema.
 pub(crate) fn validate_binary_operand(schema: &SeriesSchema, series: &[Series]) -> Result<()> {
     let grid = schema.eval_grid.as_ref().map(|grid| grid.spec());
     for item in series {
-        // Both grid axes address the grid; the explicit ones cannot be indexed by position.
         let Some(item_grid) = item.time.grid() else {
             return Err(DataFusionError::Execution(
                 "vector operand series must be on the evaluation grid".into(),
@@ -2174,13 +1979,8 @@ pub(crate) fn validate_binary_operand(schema: &SeriesSchema, series: &[Series]) 
     Ok(())
 }
 
-/// One field of one side's series, with verified grid axes.
-///
-/// An operand's series are addressed on the evaluation grid, and each may skip positions. Every
-/// accessor therefore reads the axis: a point lookup asks the axis for the row of a position
-/// (`row_of`, a binary search), and a traversal walks the rows the axis carries
-/// (`positions`). Nothing here assumes a series covers one contiguous range, so a sparse operand
-/// never reads a hole as a row.
+/// One field of one side's series, with verified grid axes. Axes may skip positions, so every
+/// accessor goes through the axis rather than assuming a contiguous range.
 struct Operand<'a> {
     series: &'a [Series],
     field: usize,
@@ -2196,11 +1996,8 @@ impl<'a> Operand<'a> {
         &self.series[index].time
     }
 
-    /// The widest histogram this operand's field holds.
-    ///
-    /// Read once before the rows are matched, so the workspace of a histogram row is reserved for
-    /// the field rather than per row. A field of floats is answered without reading a sample: its
-    /// segments say what it holds, so the numeric path pays nothing for this figure.
+    /// The widest histogram this operand's field holds. Float-only fields are skipped by their
+    /// segment type without reading samples.
     fn widest_histogram(&self) -> Option<HistogramView<'a>> {
         let mut widest: Option<(HistogramView<'a>, usize)> = None;
         for series in self.series {
@@ -2226,25 +2023,20 @@ impl<'a> Operand<'a> {
         widest.map(|(view, _)| view)
     }
 
-    /// Every absolute position this series carries, with its compact row, in order.
+    /// Every absolute position `series[index]` carries, with its row, in order.
     fn positions(&self, index: usize) -> datatypes::series::time::Positions<'a> {
         self.series[index].time.positions()
     }
 
-    /// A forward reader of `series[index]`'s field, for a walk in axis order.
-    ///
-    /// The rows of one walk only increase, so a cursor reads the field once; reading each row
-    /// with [`Samples::sample`](datatypes::series::samples::Samples::sample) would rescan the
-    /// chunk descriptors per row.
+    /// A forward reader of `series[index]`'s field. Use it instead of
+    /// [`Samples::sample`](datatypes::series::samples::Samples::sample), which rescans the chunk
+    /// descriptors per call.
     fn cursor(&self, index: usize) -> RowCursor<'a> {
         self.series[index].fields.as_slice()[self.field].cursor()
     }
 
-    /// Whether `series[index]` holds a value at absolute grid `point`, read through `cursor`.
-    ///
-    /// The points one walk asks about only increase, so its cursor never goes back: a candidate
-    /// read per point through [`Samples::sample`](datatypes::series::samples::Samples::sample)
-    /// would rescan the chunk descriptors from the start every time.
+    /// Whether `series[index]` holds a value at absolute grid `point`. Points must increase
+    /// across calls with the same `cursor`.
     fn present(&self, index: usize, point: usize, cursor: &mut RowCursor<'a>) -> bool {
         self.axis(index).row_of(point).is_some_and(|row| {
             !matches!(
@@ -2254,10 +2046,7 @@ impl<'a> Operand<'a> {
         })
     }
 
-    /// The positions both series carry, as shared runs with a compact row on each side.
-    ///
-    /// A merge over the two axes' runs, so the cost is the runs and not the positions between
-    /// them, and neither side's row is derived by subtracting a start.
+    /// The positions both series carry, as shared runs with each side's row.
     fn shared_runs(
         &self,
         own: usize,
@@ -2287,8 +2076,9 @@ impl<'a> Operand<'a> {
     }
 }
 
-/// The legacy Info applies only to unsupported histogram arithmetic, not to other reasons a
-/// supported histogram operation can decline a pair (such as incompatible bucket layouts).
+/// The operator symbol when `op` has no histogram form for these operand types, for the legacy
+/// dropped-sample info. Supported operations declined for other reasons (incompatible bucket
+/// layouts) return `None`.
 fn unsupported_histogram_arithmetic(
     op: BinaryOp,
     lhs: &SampleRef<'_>,
@@ -2359,10 +2149,8 @@ fn elem_binop(
                     } else {
                         NativeHistogramSub::name()
                     };
-                    // The layouts decide whether there is a pair at all: Prometheus reports a pair
-                    // whose bucket layouts cannot be combined as that one error, before it looks at
-                    // the reset hints, so a pair that fails both carries only the schema warning.
-                    // Synthetic fill samples have no collector here.
+                    // Prometheus checks layouts before reset hints, so a pair failing both gets
+                    // only the schema warning.
                     if lhs.uses_custom_buckets() != rhs.uses_custom_buckets() {
                         if let Some(collector) = annotations {
                             collector.record_warning(format!(
@@ -2371,9 +2159,7 @@ fn elem_binop(
                         }
                         return Ok(None);
                     }
-                    // Prometheus hands the collision back as the operation's error, and a pair that
-                    // reports one is skipped before its match is counted. A reconciliation the same
-                    // pair needed goes unreported with it.
+                    // Skipped before the match is counted, as in Prometheus.
                     if matches!(
                         (lhs.reset_hint, rhs.reset_hint),
                         (
@@ -2418,21 +2204,14 @@ fn elem_binop(
 }
 
 /// The result rows of one field by result label set.
-///
-/// A pairing opens one [`RowSlot`] and looks its label set up on the first row it files, so the key
-/// is built, hashed and compared once per pairing that files -- not once per point.
 #[derive(Default)]
 struct Results {
     series: HashMap<GroupKey, ResultRows>,
-    /// The figures a filed row advances; see [`ResultTotals`].
     totals: ResultTotals,
 }
 
-/// The rows filed, the rows holding a value, the rows holding a histogram and the heap those
-/// histograms hold: counted as each row is filed, so neither later phase walks them again.
-///
-/// Held beside the table rather than in it, so a pairing's open row borrows the table it files into
-/// while these figures stay free to move with the point.
+/// Counts of filed rows, kept values, histograms and their heap bytes, updated as rows are filed so
+/// the sort and merge phases can be charged without walking them.
 #[derive(Default)]
 struct ResultTotals {
     rows: usize,
@@ -2465,13 +2244,8 @@ fn same_labelset(key: &GroupKey, timestamp: i64) -> String {
     )
 }
 
-/// One pairing's result row, opened by the first point the pairing files.
-///
-/// A pairing builds its label set once, but the row it files under is looked up, created and
-/// charged only when that pairing files the first of its points: a pairing whose samples never
-/// pair, or whose axes do not intersect, costs what it cost before -- nothing. Once open, the row
-/// is pushed to directly, so the points of one pairing build no key, hash nothing and clone no
-/// metric.
+/// One pairing's result rows, looked up (and charged, if new) on the first filed point only, so
+/// later points build no key and a pairing that files nothing costs nothing.
 enum RowSlot<'a> {
     /// No point filed yet, and the table the first one is filed in.
     Unfiled(&'a mut HashMap<GroupKey, ResultRows>),
@@ -2480,13 +2254,8 @@ enum RowSlot<'a> {
 }
 
 impl<'a> RowSlot<'a> {
-    /// Files one row of one field, opening the pairing's row on its first filed point, and returns
-    /// the slot to file the pairing's next point with.
-    ///
-    /// A row whose value the operator filtered is still a row: it keeps its slots and its label
-    /// set, which the merge carries as a set without a value. A kept histogram is boxed beside its
-    /// row, so its payload is charged here, where the value is retained, and never per grid point
-    /// of a float.
+    /// Files one row and returns the slot for the pairing's next point. A filtered (`None`) value
+    /// is still a row, so its label set reaches the merge.
     #[allow(clippy::too_many_arguments)]
     fn file(
         self,
@@ -2503,8 +2272,6 @@ impl<'a> RowSlot<'a> {
             Self::Unfiled(series) => match series.entry(key_of(metric)) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    // The label set the row is filed under is only built when the table does not
-                    // hold it yet, so these bytes are charged on the vacant entry alone.
                     if let Some(budget) = budget.as_deref_mut() {
                         budget.hold(label_set)?;
                     }
@@ -2517,8 +2284,7 @@ impl<'a> RowSlot<'a> {
                 }
             },
         };
-        // The row vectors grow together, so one block of them is charged once when the point,
-        // group and value vectors outgrow the capacity they hold.
+        // The three row vectors grow together; charge their next block before the push.
         if rows.points.len() == rows.points.capacity()
             && let Some(budget) = budget.as_deref_mut()
         {
@@ -2589,10 +2355,7 @@ impl Results {
     }
 }
 
-// The one-field shape's merge against the merge every other shape keeps, on the same results.
-//
-// Inline rather than in `tests.rs` so the two merges and their comparison live in one file: the fast
-// path is shown to write what the grouped, sorted merge writes, on the results both are given.
+// The single-field merge against the multi-field merge, on the same results.
 #[cfg(test)]
 mod merge_shape_tests {
     type LabelPairs = Vec<(String, String)>;
@@ -2643,8 +2406,7 @@ mod merge_shape_tests {
         ResultRows {
             metric,
             points: rows.iter().map(|(point, _)| *point).collect(),
-            // The merge reads a row's point and value; the match group it came from is the field's
-            // duplicate evidence, which the field's own sort has already reported.
+            // The merge ignores groups.
             groups: vec![0; rows.len()],
             values: rows
                 .iter()
@@ -2840,8 +2602,6 @@ mod merge_shape_tests {
             .expect("the multi-field merge of one field");
         let single =
             merge_single_field(vec![field_results()], schema(), None).expect("the one-field merge");
-        // A filtered sample writes no row and a label set with no value writes no series, so every
-        // row here is a sample the field kept, at the point it kept it:
         let expected = vec![
             (
                 labels("m1", "a"),
@@ -2861,8 +2621,6 @@ mod merge_shape_tests {
         assert_eq!(rows_of(&single), expected);
     }
 
-    /// A histogram field is one field: the entry hands it to the fast path, and its histograms come
-    /// out row by row as the field filed them, boxed payload and hole included.
     #[test]
     fn a_histogram_field_keeps_its_rows_and_histograms_through_the_one_field_merge() {
         let expected = vec![(
@@ -2880,8 +2638,6 @@ mod merge_shape_tests {
         assert_eq!(histograms_of(&fast), expected);
     }
 
-    /// A label set whose every sample was filtered holds no row, so the merge writes no series for
-    /// it -- read through the entry, which is what hands a one-field table to the fast path.
     #[test]
     fn a_fully_filtered_label_set_writes_no_series() {
         let filtered = field_of(vec![result_rows(
@@ -2893,8 +2649,6 @@ mod merge_shape_tests {
         assert!(merged.is_empty(), "{merged:?}");
     }
 
-    /// The two merges bill a one-field result the same: the rows of the samples it keeps. A filtered
-    /// sample holds no column bytes in either.
     #[test]
     fn the_one_field_merge_bills_the_rows_the_multi_field_merge_bills() {
         let multi = reserved_bytes(merge_multi_field);
@@ -2906,11 +2660,9 @@ mod merge_shape_tests {
         );
     }
 
-    /// The entry admits the merge's phase figure; a column reservation past that limit is refused
-    /// and the refusal reaches the caller, so no series are handed over.
     #[test]
     fn a_column_reservation_over_the_limit_reaches_the_caller() {
-        // The first figure the merge asks for is its phase, entered before it allocates.
+        // The first figure the merge asks for is its phase.
         let entry = std::cell::Cell::new(None);
         let mut record = |total: usize| {
             if entry.get().is_none() {

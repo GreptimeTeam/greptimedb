@@ -23,11 +23,14 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{
     CsvFormat, is_skippable_arrow_error, tolerant_csv_stream,
 };
-use common_datasource::file_format::json::JsonFormat;
+use common_datasource::file_format::decimal::{TextNumber, parse_number_columns};
+use common_datasource::file_format::json::{JsonFormat, json_text_stream};
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
+use common_datasource::object_store::{
+    LocalFileAccess, RemoteStorageAccess, build_backend_with_path,
+};
 use common_query::{OutputCost, OutputRows};
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
@@ -40,7 +43,7 @@ use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::config::CsvOptions;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
@@ -95,10 +98,16 @@ impl FileMetadata {
 async fn list_copy_from_paths(
     req: &CopyTableRequest,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<(ObjectStore, Vec<String>)> {
-    let backend = build_backend_with_path(&req.location, &req.connection, local_file_access)
-        .await
-        .context(error::BuildBackendSnafu)?;
+    let backend = build_backend_with_path(
+        &req.location,
+        &req.connection,
+        local_file_access,
+        remote_storage_access,
+    )
+    .await
+    .context(error::BuildBackendSnafu)?;
     let regex = req
         .pattern
         .as_ref()
@@ -241,13 +250,20 @@ impl StatementExecutor {
                 let options = CsvOptions::default()
                     .with_has_header(format.has_header)
                     .with_delimiter(format.delimiter);
-                let csv_source = CsvSource::new(schema.clone())
+                let reader_schema = exact_numeric_reader_schema(schema, &compat_schema, true);
+                let csv_source = CsvSource::new(Arc::new(reader_schema))
                     .with_csv_options(options)
                     .with_batch_size(DEFAULT_BATCH_SIZE);
                 let stream = if format.skip_bad_records {
                     let reader_schema =
                         csv_reader_schema_for_skip_bad_records(schema, &compat_schema);
-                    tolerant_csv_stream(
+                    // This reader takes its types from the table, not from the inferred
+                    // schema, so the table types also say which columns to parse.
+                    let numbers = projection
+                        .iter()
+                        .map(|idx| table_text_number(compat_schema.fields().get(*idx)))
+                        .collect();
+                    let stream = tolerant_csv_stream(
                         object_store,
                         path,
                         Arc::new(reader_schema),
@@ -255,9 +271,13 @@ impl StatementExecutor {
                         format,
                     )
                     .await
-                    .context(error::BuildFileStreamSnafu)?
+                    .context(error::BuildFileStreamSnafu)?;
+                    // The stream has one record in a batch, so a number that fails to parse
+                    // is skipped with its record.
+                    parse_number_columns(stream, numbers, true)
                 } else {
-                    file_to_stream(
+                    let numbers = text_number_columns(schema, &compat_schema, &projection, true);
+                    let stream = file_to_stream(
                         object_store,
                         path,
                         csv_source,
@@ -265,7 +285,9 @@ impl StatementExecutor {
                         format.compression_type,
                     )
                     .await
-                    .context(error::BuildFileStreamSnafu)?
+                    .context(error::BuildFileStreamSnafu)?;
+                    // An empty csv field is NULL.
+                    parse_number_columns(stream, numbers, true)
                 };
 
                 let stream = Box::pin(
@@ -292,17 +314,39 @@ impl StatementExecutor {
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
-                let json_source =
-                    JsonSource::new(schema.clone()).with_batch_size(DEFAULT_BATCH_SIZE);
-                let stream = file_to_stream(
-                    object_store,
-                    path,
-                    json_source,
-                    Some(projection),
-                    format.compression_type,
-                )
-                .await
-                .context(error::BuildFileStreamSnafu)?;
+                let reader_schema = exact_numeric_reader_schema(schema, &compat_schema, false);
+                let numbers = text_number_columns(schema, &compat_schema, &projection, false);
+                let stream = if numbers.iter().any(Option::is_some) {
+                    // Only this stream reads a number as its text.
+                    let projected_schema = Arc::new(
+                        reader_schema
+                            .project(&projection)
+                            .context(error::ProjectSchemaSnafu)?,
+                    );
+                    json_text_stream(
+                        object_store,
+                        path,
+                        projected_schema,
+                        format,
+                        DEFAULT_BATCH_SIZE,
+                    )
+                    .await
+                    .context(error::BuildFileStreamSnafu)?
+                } else {
+                    let json_source = JsonSource::new(Arc::new(reader_schema))
+                        .with_batch_size(DEFAULT_BATCH_SIZE);
+                    file_to_stream(
+                        object_store,
+                        path,
+                        json_source,
+                        Some(projection),
+                        format.compression_type,
+                    )
+                    .await
+                    .context(error::BuildFileStreamSnafu)?
+                };
+                // An empty json string is not a number, so it is an error like other text.
+                let stream = parse_number_columns(stream, numbers, false);
 
                 Ok(Box::pin(
                     // The projection is already applied in the JSON reader when we created the stream,
@@ -486,7 +530,9 @@ impl StatementExecutor {
         };
         let table = self.get_table(&table_ref).await?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
-        let (object_store, paths) = list_copy_from_paths(&req, &self.local_file_access).await?;
+        let (object_store, paths) =
+            list_copy_from_paths(&req, &self.local_file_access, &self.remote_storage_access)
+                .await?;
         let mut files = Vec::with_capacity(paths.len());
         let table_schema = table.schema().arrow_schema().clone();
         let filters = table
@@ -685,9 +731,15 @@ impl futures::Stream for SkipBadRecordsStream {
 fn is_skippable_record_error(error: &DataFusionError) -> bool {
     match error {
         DataFusionError::ArrowError(error, _) => is_skippable_arrow_error(error),
-        DataFusionError::External(error) => error
-            .downcast_ref::<ArrowError>()
-            .is_some_and(is_skippable_arrow_error),
+        DataFusionError::External(error) => {
+            error
+                .downcast_ref::<ArrowError>()
+                .is_some_and(is_skippable_arrow_error)
+                // The error of a stream that wraps another one.
+                || error
+                    .downcast_ref::<DataFusionError>()
+                    .is_some_and(is_skippable_record_error)
+        }
         DataFusionError::Context(_, error) => is_skippable_record_error(error),
         _ => false,
     }
@@ -722,12 +774,94 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
     can_cast_types(from, to)
 }
 
+/// Returns the schema to read the file with.
+///
+/// Schema inference reads a number as `Int64` or `Float64`. Casting such a column to a wider
+/// table type afterwards rounds every value a `Float64` can't hold, and a value outside the
+/// `Int64` range fails to parse. So a column that loads into a `Decimal128` or `UInt64` column
+/// is read as a string and parsed by [`parse_number_columns`], see [`text_number_columns`].
+fn exact_numeric_reader_schema(file: &SchemaRef, compat: &SchemaRef, csv: bool) -> Schema {
+    let fields = file
+        .fields()
+        .iter()
+        .enumerate()
+        .map(
+            |(idx, file_field)| match text_number(file_field, compat.fields().get(idx), csv) {
+                Some(_) => text_field(file_field),
+                None => file_field.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+
+    Schema::new_with_metadata(fields, file.metadata().clone())
+}
+
+fn text_field(field: &FieldRef) -> FieldRef {
+    Arc::new(field.as_ref().clone().with_data_type(ArrowDataType::Utf8))
+}
+
+/// Returns the type to parse each projected column into that the reader schema reads as a
+/// string, and `None` for the other columns.
+fn text_number_columns(
+    file: &SchemaRef,
+    compat: &SchemaRef,
+    projection: &[usize],
+    csv: bool,
+) -> Vec<Option<TextNumber>> {
+    projection
+        .iter()
+        .map(|idx| text_number(file.fields().get(*idx)?, compat.fields().get(*idx), csv))
+        .collect()
+}
+
+/// Returns the type to parse the text of a file column into, if it is read as a string for
+/// that.
+///
+/// A csv file has no types of its own. When its numbers don't all look like an `Int64` or a
+/// `Float64`, as with a value above the `Int64` range next to one in scientific notation, the
+/// column is inferred as a string. So with `csv` such a column is parsed in the same way. A
+/// json string is left to the cast.
+fn text_number(
+    file_field: &FieldRef,
+    compat_field: Option<&FieldRef>,
+    csv: bool,
+) -> Option<TextNumber> {
+    let number_text = match file_field.data_type() {
+        ArrowDataType::Int64 | ArrowDataType::Float64 => true,
+        ArrowDataType::Utf8 => csv,
+        _ => false,
+    };
+    if !number_text {
+        return None;
+    }
+    table_text_number(compat_field)
+}
+
+/// Returns the type to parse text into for a table column that is a `Decimal128` or a
+/// `UInt64`.
+fn table_text_number(compat_field: Option<&FieldRef>) -> Option<TextNumber> {
+    match compat_field?.data_type() {
+        ArrowDataType::Decimal128(precision, scale) => Some(TextNumber::Decimal128 {
+            precision: *precision,
+            scale: *scale,
+        }),
+        ArrowDataType::UInt64 => Some(TextNumber::UInt64),
+        _ => None,
+    }
+}
+
 fn csv_reader_schema_for_skip_bad_records(file: &SchemaRef, compat: &SchemaRef) -> Schema {
     let fields = file
         .fields()
         .iter()
         .enumerate()
         .map(|(idx, file_field)| match compat.fields().get(idx) {
+            // Arrow's csv reader drops the digits of a decimal beyond its scale, is wrong for
+            // some numbers in scientific notation, and only reads an unsigned integer from
+            // plain digits.
+            // Whatever type the column was inferred as: this reader uses the table type for
+            // every other column too.
+            compat_field if table_text_number(compat_field).is_some() => text_field(file_field),
             Some(compat_field) if can_csv_reader_parse_type(compat_field.data_type()) => {
                 compat_field.clone()
             }
@@ -970,21 +1104,29 @@ mod tests {
         ] {
             // PATTERN applies to directories, not an explicitly selected file.
             let req = copy_from_request(&location, Some("does-not-match"));
-            let (store, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+            let (store, paths) =
+                list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+                    .await
+                    .unwrap();
             assert_eq!(paths, ["data file.parquet"]);
             assert_eq!(store.read(&paths[0]).await.unwrap().to_vec(), b"data");
         }
 
         let req = copy_from_request("nested/", Some("^data"));
-        let (_, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        let (_, paths) = list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+            .await
+            .unwrap();
         assert_eq!(paths, ["data file.parquet"]);
         let req = copy_from_request("nested/", None);
-        let (_, mut paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        let (_, mut paths) =
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+                .await
+                .unwrap();
         paths.sort();
         assert_eq!(paths, ["data file.parquet", "other.csv"]);
         let req = copy_from_request("nested/data.dir", None);
         assert!(
-            list_copy_from_paths(&req, &access)
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
                 .await
                 .unwrap()
                 .1
@@ -992,7 +1134,7 @@ mod tests {
         );
         let req = copy_from_request("nested/", Some("does-not-match"));
         assert!(
-            list_copy_from_paths(&req, &access)
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
                 .await
                 .unwrap()
                 .1
@@ -1001,19 +1143,24 @@ mod tests {
 
         let req = copy_from_request("nested/missing.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::ListObjects {
                 source: common_datasource::error::Error::ListObjects { error, .. }, ..
             }) if error.kind() == object_store::ErrorKind::NotFound
         ));
         let req = copy_from_request("nested/data file.parquet", Some("["));
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::BuildRegex { .. })
         ));
         let req = copy_from_request("nested/data file.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &LocalFileAccess::Disabled).await,
+            list_copy_from_paths(
+                &req,
+                &LocalFileAccess::Disabled,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await,
             Err(error::Error::BuildBackend {
                 source: common_datasource::error::Error::LocalFileAccessDisabled { .. },
                 ..
@@ -1021,7 +1168,7 @@ mod tests {
         ));
         let req = copy_from_request("../outside.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::BuildBackend {
                 source: common_datasource::error::Error::LocalFileAccessDenied { .. },
                 ..
@@ -1042,18 +1189,20 @@ mod tests {
 
         let req = copy_from_request("link.parquet", None);
         assert!(
-            list_copy_from_paths(&req, &access)
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
                 .await
                 .unwrap()
                 .1
                 .is_empty()
         );
         let req = copy_from_request("./", None);
-        let (_, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        let (_, paths) = list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+            .await
+            .unwrap();
         assert_eq!(paths, ["data.parquet"]);
         let req = copy_from_request("dangling.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::ListObjects {
                 source: common_datasource::error::Error::ListObjects { error, .. }, ..
             }) if error.kind() == object_store::ErrorKind::NotFound
@@ -1118,9 +1267,13 @@ mod tests {
                 Some("does-not-match"),
             );
             req.connection = connection.clone();
-            let (_, paths) = list_copy_from_paths(&req, &LocalFileAccess::Disabled)
-                .await
-                .unwrap();
+            let (_, paths) = list_copy_from_paths(
+                &req,
+                &LocalFileAccess::Disabled,
+                &RemoteStorageAccess::unrestricted(),
+            )
+            .await
+            .unwrap();
             assert_eq!(paths, [filename]);
         }
         {
@@ -1131,9 +1284,13 @@ mod tests {
         }
         let mut req = copy_from_request("s3://bucket/backup/schema/1/", Some(r"^data\."));
         req.connection = connection.clone();
-        let (_, mut paths) = list_copy_from_paths(&req, &LocalFileAccess::Disabled)
-            .await
-            .unwrap();
+        let (_, mut paths) = list_copy_from_paths(
+            &req,
+            &LocalFileAccess::Disabled,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         paths.sort();
         let mut expected = (0..16)
             .map(|i| format!("data.{i}.parquet"))
@@ -1158,7 +1315,7 @@ mod tests {
                 copy_from_request(&format!("s3://bucket/backup/schema/1/{name}.parquet"), None);
             req.connection = connection.clone();
             assert!(matches!(
-                list_copy_from_paths(&req, &LocalFileAccess::Disabled).await,
+                list_copy_from_paths(&req, &LocalFileAccess::Disabled, &RemoteStorageAccess::unrestricted()).await,
                 Err(error::Error::ListObjects {
                     source: common_datasource::error::Error::ListObjects { error, .. }, ..
                 }) if error.kind() == kind
@@ -1418,6 +1575,106 @@ mod tests {
             reader_schema.field(2).data_type(),
             compat_schema.field(2).data_type()
         );
+    }
+
+    #[test]
+    fn test_exact_numeric_reader_schema() {
+        let file_schema = make_test_schema(&[
+            Field::new("price", DataType::Float64, true),
+            Field::new("amount", DataType::Int64, true),
+            Field::new("count", DataType::Float64, true),
+            Field::new("id", DataType::Int64, true),
+            Field::new("cpu", DataType::Float64, true),
+            Field::new("text", DataType::Utf8, true),
+            Field::new("big", DataType::Utf8, true),
+            Field::new("extra", DataType::Float64, true),
+        ]);
+        let compat_schema = make_test_schema(&[
+            Field::new("price", DataType::Decimal128(38, 10), false),
+            Field::new("amount", DataType::Decimal128(20, 2), true),
+            Field::new("count", DataType::UInt64, true),
+            Field::new("id", DataType::UInt64, true),
+            Field::new("cpu", DataType::Float64, true),
+            Field::new("text", DataType::Decimal128(38, 10), true),
+            Field::new("big", DataType::UInt64, true),
+        ]);
+        let text = |name: &str| Field::new(name, DataType::Utf8, true);
+
+        // A decimal or unsigned integer column is read as a string, to be parsed from every
+        // digit.
+        for csv in [true, false] {
+            let reader_schema = exact_numeric_reader_schema(&file_schema, &compat_schema, csv);
+            assert_eq!(reader_schema.field(0), &text("price"));
+            assert_eq!(reader_schema.field(1), &text("amount"));
+            assert_eq!(reader_schema.field(2), &text("count"));
+            assert_eq!(reader_schema.field(3), &text("id"));
+            for idx in 4..file_schema.fields().len() {
+                assert_eq!(reader_schema.field(idx), file_schema.field(idx));
+            }
+        }
+
+        let amount = TextNumber::Decimal128 {
+            precision: 20,
+            scale: 2,
+        };
+        let price = TextNumber::Decimal128 {
+            precision: 38,
+            scale: 10,
+        };
+        let text = TextNumber::Decimal128 {
+            precision: 38,
+            scale: 10,
+        };
+        let projection = [5, 1, 4, 0, 7, 3, 6];
+        // A csv column inferred as a string is parsed as well. A json string is not.
+        assert_eq!(
+            text_number_columns(&file_schema, &compat_schema, &projection, true),
+            vec![
+                Some(text),
+                Some(amount),
+                None,
+                Some(price),
+                None,
+                Some(TextNumber::UInt64),
+                Some(TextNumber::UInt64)
+            ]
+        );
+        assert_eq!(
+            text_number_columns(&file_schema, &compat_schema, &projection, false),
+            vec![
+                None,
+                Some(amount),
+                None,
+                Some(price),
+                None,
+                Some(TextNumber::UInt64),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn test_csv_reader_schema_for_skip_bad_records_reads_numbers_as_text() {
+        let file_schema = make_test_schema(&[
+            Field::new("price", DataType::Float64, true),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("small", DataType::Int64, true),
+            // Inferred from a first value of `true`.
+            Field::new("flag", DataType::Boolean, true),
+        ]);
+        let compat_schema = make_test_schema(&[
+            Field::new("price", DataType::Decimal128(38, 2), true),
+            Field::new("id", DataType::UInt64, true),
+            Field::new("small", DataType::UInt32, true),
+            Field::new("flag", DataType::UInt64, true),
+        ]);
+
+        let reader_schema = csv_reader_schema_for_skip_bad_records(&file_schema, &compat_schema);
+
+        assert_eq!(reader_schema.field(0).data_type(), &DataType::Utf8);
+        assert_eq!(reader_schema.field(1).data_type(), &DataType::Utf8);
+        assert_eq!(reader_schema.field(2).data_type(), &DataType::UInt32);
+        assert_eq!(reader_schema.field(3).data_type(), &DataType::Utf8);
     }
 
     fn make_csv_metadata(schema: Arc<Schema>, has_header: bool) -> FileMetadata {

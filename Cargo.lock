@@ -1712,7 +1712,6 @@ dependencies = [
  "common-procedure",
  "common-query",
  "common-recordbatch",
- "common-runtime",
  "common-telemetry",
  "common-time",
  "common-version",
@@ -1741,7 +1740,6 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -2244,6 +2242,7 @@ dependencies = [
  "similar-asserts",
  "smallvec",
  "snafu 0.8.6",
+ "sql",
  "sqlparser",
  "standalone",
  "store-api",
@@ -2400,6 +2399,7 @@ dependencies = [
  "arrow-schema 59.2.0",
  "async-compression",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "common-base",
  "common-error",
@@ -2416,6 +2416,7 @@ dependencies = [
  "lazy_static",
  "object-store",
  "object_store_opendal",
+ "opendal-service-azure-common",
  "orc-rust",
  "parquet",
  "paste",
@@ -2686,6 +2687,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-base",
+ "common-cache",
  "common-catalog",
  "common-error",
  "common-event-recorder",
@@ -2858,6 +2860,7 @@ dependencies = [
  "jsonb",
  "pin-project",
  "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "snafu 0.8.6",
@@ -2958,7 +2961,6 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "tempfile",
- "tokio",
  "tracing",
  "tracing-appender",
  "tracing-log",
@@ -5625,9 +5627,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -6185,7 +6187,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c46f7ee9c82ff90f5762ae192fcf8bb2b0d6046f#c46f7ee9c82ff90f5762ae192fcf8bb2b0d6046f"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=8aa45418597636516410c0c892dbd0269754a02c#8aa45418597636516410c0c892dbd0269754a02c"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -7622,7 +7624,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.5.6"
-source = "git+https://github.com/GreptimeTeam/jsonb?rev=5a6472858d860ac034075c17253f41617bdfa956#5a6472858d860ac034075c17253f41617bdfa956"
+source = "git+https://github.com/GreptimeTeam/jsonb?rev=ae1ca9a26c65902dac9b53864bf502843c312ea5#ae1ca9a26c65902dac9b53864bf502843c312ea5"
 dependencies = [
  "byteorder",
  "ethnum",
@@ -8726,6 +8728,7 @@ dependencies = [
  "futures-util",
  "fxhash",
  "humantime-serde",
+ "intern-arc",
  "itertools 0.14.0",
  "lazy_static",
  "log-store",
@@ -9687,6 +9690,7 @@ dependencies = [
  "derive_builder 0.20.2",
  "futures",
  "hdfs-native",
+ "http 1.5.0",
  "humantime-serde",
  "object-store",
  "object_store",
@@ -9700,6 +9704,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "url",
  "uuid",
 ]
 
@@ -12091,6 +12096,7 @@ dependencies = [
  "snafu 0.8.6",
  "sql",
  "sqlparser",
+ "stacker",
  "store-api",
  "substrait 1.4.0-alpha.0",
  "table",
@@ -14286,7 +14292,6 @@ version = "1.4.0-alpha.0"
 dependencies = [
  "api",
  "arrow-buffer 59.2.0",
- "arrow-schema 59.2.0",
  "chrono",
  "common-base",
  "common-catalog",
@@ -15564,6 +15569,7 @@ dependencies = [
  "opentelemetry-proto",
  "operator",
  "otel-arrow-rust",
+ "partition",
  "paste",
  "pipeline",
  "plugins",
@@ -16596,9 +16602,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.7"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08bc136a29a3d1758e07a9cca267be308aeebf5cfd5a10f3f67ab2097683ef5b"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

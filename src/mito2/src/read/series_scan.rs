@@ -14,7 +14,7 @@
 
 //! Per-series scan implementation.
 
-mod prepared;
+pub(crate) mod prepared;
 mod raw;
 
 use std::collections::HashSet;
@@ -134,7 +134,7 @@ type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
 type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
 
 #[derive(Clone)]
-struct RawScanPreparation {
+pub(crate) struct RawScanPreparation {
     schema: Arc<SeriesSchema>,
     fields: Vec<(usize, ConcreteDataType)>,
     predicates: Vec<Arc<dyn PhysicalExpr>>,
@@ -173,6 +173,7 @@ struct SeriesReaderInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeriesScanMode {
+    Prepared,
     Legacy,
     TwoPhase,
 }
@@ -180,6 +181,7 @@ enum SeriesScanMode {
 impl SeriesScanMode {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Prepared => "prepared",
             Self::Legacy => "legacy",
             Self::TwoPhase => "two_phase",
         }
@@ -226,7 +228,9 @@ pub struct SeriesScan {
 impl SeriesScan {
     /// Creates a new [SeriesScan].
     pub(crate) fn new(input: ScanInput, experimental_series_scan_v2: bool) -> Self {
-        let mode = if experimental_series_scan_v2 && Self::supports_two_phase(&input) {
+        let mode = if input.requires_narthex_preparation() {
+            SeriesScanMode::Prepared
+        } else if experimental_series_scan_v2 && Self::supports_two_phase(&input) {
             SeriesScanMode::TwoPhase
         } else {
             SeriesScanMode::Legacy
@@ -244,7 +248,9 @@ impl SeriesScan {
         // Create the shared pruner with number of workers equal to CPU cores.
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         let pruner = match mode {
-            SeriesScanMode::Legacy => Arc::new(Pruner::new(stream_ctx.clone(), num_workers)),
+            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
+                Arc::new(Pruner::new(stream_ctx.clone(), num_workers))
+            }
             SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
                 stream_ctx.clone(),
                 num_workers,
@@ -305,15 +311,17 @@ impl SeriesScan {
     }
 
     fn uses_columnar(&self) -> bool {
-        self.stream_ctx
-            .input
-            .series_index
-            .as_ref()
-            .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
+        self.stream_ctx.input.requires_narthex_preparation()
+            || self
+                .stream_ctx
+                .input
+                .series_index
+                .as_ref()
+                .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
     }
 
-    /// Whether every selected *field* is a `Float64`, which is all the columnar prepared reader
-    /// serves.
+    /// Whether every selected *field* is a `Float64` or a native histogram struct, which is all the
+    /// columnar prepared reader serves.
     ///
     /// Only field columns count: the projection also carries tags and the time index, and those are
     /// no part of the samples the prepared reader hands over. Checking them here would send an
@@ -330,7 +338,10 @@ impl SeriesScan {
                         && column.semantic_type == SemanticType::Field
                 })
             })
-            .all(|output| output.data_type == ConcreteDataType::float64_datatype())
+            .all(|output| {
+                output.data_type == ConcreteDataType::float64_datatype()
+                    || is_native_histogram_value_type(&output.data_type)
+            })
     }
 
     /// Returns whether raw series come from the columnar prepared source.
@@ -366,6 +377,16 @@ impl SeriesScan {
             return Ok(cached);
         }
         let computed = self.prepare_raw_scan_uncached(label_source)?;
+        if self.stream_ctx.input.requires_narthex_preparation()
+            && !matches!(computed, Some((_, true)))
+        {
+            return Err(BoxedError::new(
+                InvalidRecordBatchSnafu {
+                    reason: "Narthex raw scans require prepared-series support",
+                }
+                .build(),
+            ));
+        }
         // Both sides of the cache are cheap to clone, and callers own their copy: the merge schema
         // helper rewrites the field indices and predicates of the preparation it is given, which
         // must never reach the stored answer.
@@ -442,17 +463,26 @@ impl SeriesScan {
                 return Ok(None);
             }
         }
-        if self.uses_columnar() && !is_sparse_metric_metadata(metadata) {
+        // The columnar prepared reader serves sparse metric regions only: another region on a store in
+        // that format has no columnar samples, and its SST rows are the sources the ordinary scan reads
+        // anyway. Missing columnar coverage is not a reason to refuse the raw path - see the
+        // `prepared_columnar` gate below - so such a scan keeps it and is served from the ordinary scan.
+        // Refusing here instead would be an error no caller can turn into a fallback: the logical plan
+        // above this leaf is already the fused node by the time the region is asked.
+        let columnar_region = self.uses_columnar() && is_sparse_metric_metadata(metadata);
+        // Narthex samples exist for sparse metric regions only, so a scan that requires them and is not
+        // one of those has nothing to read them from.
+        if !columnar_region && input.requires_narthex_preparation() {
             return Ok(None);
         }
         let selected = input.mapper.output_schema();
         let mut fields = Vec::new();
         let mut specs = Vec::new();
-        // The columnar prepared reader serves `Float64` fields only. A selection carrying another
-        // kind the raw path supports - a native histogram struct, today - is read by the ordinary
-        // scan instead: the columnar samples are an artifact beside the SST rows, so the same
-        // sources are still reachable, and the frame schema and ordering follow the reader that
-        // actually answers.
+        // The columnar prepared reader serves `Float64` and native histogram fields. A selection
+        // carrying another kind the raw path supports - a numeric field it casts - is read by the
+        // ordinary scan instead: the columnar samples are an artifact beside the SST rows, so the
+        // same sources are still reachable, and the frame schema and ordering follow the reader
+        // that actually answers.
         let columnar_fields_supported = self.columnar_fields_supported();
         for output in selected.column_schemas() {
             let Some(column) = metadata.column_metadatas.iter().find(|column| {
@@ -498,7 +528,7 @@ impl SeriesScan {
         }
         let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
         if fields.is_empty()
-            || input.append_mode
+            || (input.append_mode && !input.requires_narthex_preparation())
             || input.series_row_selector.is_some()
             || !time_is_millis
         {
@@ -514,7 +544,8 @@ impl SeriesScan {
         }
         // Structural eligibility errors still reject the raw path; ordinary scans cover sources
         // without columnar artifacts, so missing coverage is not an error here.
-        let prepared_columnar = self.uses_prepared_columnar()? && columnar_fields_supported;
+        let prepared_columnar =
+            columnar_region && self.uses_prepared_columnar()? && columnar_fields_supported;
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
@@ -593,6 +624,7 @@ impl SeriesScan {
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
     > {
+        let scan_pool = ctx.memory_pool.clone();
         let state = self.prepared.clone();
         let stream_ctx = self.stream_ctx.clone();
         let ranges = self
@@ -619,7 +651,7 @@ impl SeriesScan {
                 return Ok(None);
             }
             state
-                .prepare(stream_ctx, ranges, labels, preparation, metrics)
+                .prepare(stream_ctx, ranges, labels, preparation, metrics, scan_pool)
                 .await
                 .map(Some)
         })
@@ -705,6 +737,20 @@ impl SeriesScan {
         );
 
         match self.mode {
+            SeriesScanMode::Prepared => Ok(prepared::scan_batches(
+                self.prepared.clone(),
+                self.stream_ctx.clone(),
+                self.properties
+                    .partitions
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect(),
+                partition,
+                self.properties.num_partitions().max(1),
+                part_metrics,
+                ctx.memory_pool.clone(),
+            )),
             SeriesScanMode::Legacy => self.scan_legacy_batch_in_partition(
                 partition,
                 part_metrics,
@@ -1154,6 +1200,9 @@ impl RegionScanner for SeriesScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
+        if self.stream_ctx.input.requires_narthex_preparation() {
+            return vec![false; filter_exprs.len()];
+        }
         let matched = self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs);
         // The added filters change the predicate group the preflight inspects.
         self.clear_preflight_cache();
@@ -1166,7 +1215,9 @@ impl RegionScanner for SeriesScan {
         self.stream_ctx.input.predicate.clear_dyn_filters();
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         self.pruner = match self.mode {
-            SeriesScanMode::Legacy => Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers)),
+            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
+                Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers))
+            }
             SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
                 self.stream_ctx.clone(),
                 num_workers,

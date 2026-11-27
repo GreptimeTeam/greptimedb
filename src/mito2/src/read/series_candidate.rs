@@ -76,7 +76,7 @@ pub(crate) struct SeriesCandidateScanner {
 }
 
 impl SeriesCandidateScanner {
-    /// Creates a candidate-series scanner for native memtable and SST ranges.
+    /// Creates a candidate-series scanner for narthex memtable and SST ranges.
     ///
     /// Callers must fall back to the legacy series-scan path when the scan contains
     /// extension ranges. Candidate-series discovery does not support other range types.
@@ -935,7 +935,7 @@ mod tests {
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(20),
-            source_file_ids: Vec::new(),
+            source_file_ids: Some(Vec::new()),
             min_file_sequence: 1,
             max_file_sequence: 2,
             compaction_window_secs: 1,

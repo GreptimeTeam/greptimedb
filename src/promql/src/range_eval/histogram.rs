@@ -80,10 +80,10 @@ pub(super) fn evaluate(
             ),
         );
     }
-    // The functions that read only the floats of a mixed window ignore its histograms, which is
-    // what the existing planner tells the client with an info. The set is the one that path lists
-    // as `FloatOnly`; the experimental functions this crate also has carry no message there, so
-    // they stay silent rather than inventing one.
+    // Float-only functions ignore the histograms of a mixed window and say so with an info, as
+    // the legacy planner's `FloatOnly` set does. `mad_over_time` and `ts_of_{min,max}_over_time`
+    // also ignore them but record nothing here, although Prometheus emits
+    // HistogramIgnoredInMixedRange for them too (`funcMadOverTime`, `compareOverTime`).
     if floats.is_some()
         && matches!(
             function,
@@ -158,8 +158,6 @@ pub(super) fn evaluate(
             } else {
                 HistogramAggregate::Avg
             };
-            // The hints are read from the window's own histograms, so nothing is cloned for the
-            // check; the fold below clones one sample at a time as it consumes them.
             if has_contradictory_reset_hints(histograms.iter().map(|(_, h)| h)) {
                 record_warning(
                     collector,
@@ -169,9 +167,7 @@ pub(super) fn evaluate(
                     ),
                 );
             }
-            // The fold reports both answers itself: a `None` is the mixed-bucket drop, and the
-            // flag is the reconciliation its own adds already observed. Re-walking the pairs to
-            // learn either would double the histogram work of every window.
+            // `None` is the mixed-bucket drop; the flag reports a custom-bucket reconciliation.
             let (result, custom_reconciled) =
                 sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(h.clone())))?;
             if result.is_none() {
@@ -244,19 +240,15 @@ pub(super) fn evaluate(
             if *last_ts <= effective_first_ts {
                 return Ok(None);
             }
-            // A synthetic zero *is* the counter's zero point, so nothing is extrapolated before it
-            // and `zero_point` says so with `0`; the counter instead extrapolates towards zero from
-            // its first real sample, and only when that sample is not itself negative.
+            // A synthetic zero is the counter's zero point, so nothing is extrapolated before it.
             let zero_point = if synthetic_zero.is_some() {
                 Some(0.0)
             } else {
                 (is_counter && result.count > 0.0 && first.count >= 0.0)
                     .then(|| first.count / result.count)
             };
-            // The sampled interval runs from the synthetic zero while the average interval is
-            // measured between the real samples, as `native_extrapolated_rate` does: they are two
-            // different spans, and taking one for the other shifts the average by a whole sample
-            // interval.
+            // The sampled interval starts at the synthetic zero; the average interval stays
+            // between the real samples.
             let factor = extrapolation_factor(
                 ExtrapolationSpan {
                     sampled_from: effective_first_ts,
@@ -284,7 +276,6 @@ pub(super) fn evaluate(
             Some(GridSample::Histogram(Box::new(result)))
         }
         Irate | Idelta => {
-            // The annotations read the window before `last_two` consumes it.
             let had_floats = floats.is_some();
             record_mixed_last_two(collector, function, floats.as_ref(), histograms);
             let tail_histograms = &histograms[histograms.len().saturating_sub(2)..];
@@ -310,8 +301,7 @@ pub(super) fn evaluate(
             }
             result
         }
-        // Mixed windows, and rates over fewer than two histograms. The mixed warning was already
-        // recorded above for every function that reaches here, so this branch only answers.
+        // Mixed windows (already warned about above), and rates over too few histograms.
         SumOverTime | AvgOverTime | Rate | Increase | Delta => None,
     })
 }
@@ -370,12 +360,8 @@ fn has_contradictory_reset_hints<'a>(
     saw_counter && saw_not_counter
 }
 
-/// The info a `rate`/`increase`/`delta` window owes when adjacent histograms carry different
-/// custom bucket bounds and the fold has to reconcile them.
-///
-/// The check compares bounds; it does not add the pair. The fold that follows does that work, and
-/// repeating it here would double the histogram arithmetic of every window. This is the same
-/// per-pair check the existing planner's counter UDF makes.
+/// Warns when a counter function reads a gauge histogram, or a gauge function reads a counter
+/// histogram at either end of the window.
 fn record_histogram_flavor_warning(
     collector: Option<&PromqlAnnotationCollector>,
     function: RangeFunction,
@@ -436,8 +422,6 @@ fn record_mixed_last_two(
     floats: Option<&FloatWindow<'_>>,
     histograms: &Histograms,
 ) {
-    // Nothing is recorded without a collector, and the walk below exists only to decide whether
-    // something would be.
     if collector.is_none() {
         return;
     }
@@ -531,18 +515,9 @@ fn edges(
             count += match (previous, current) {
                 (Sample::Float(a), Sample::Float(b)) => count_edges(&[a, b], kind),
                 (Sample::Histogram(a), Sample::Histogram(b)) => u64::from(match kind {
-                    // `resets` counts the restarts the payload alone does not show. A start
-                    // timestamp inside the window witnesses a counter that began again, whose
-                    // counts may have grown across the restart, which is the rule `rate` and
-                    // `increase` already read.
-                    //
-                    // A gauge-to-counter edge is deliberately NOT counted, although the existing
-                    // planner counts one (`NativeHistogramRangeFloatKind::Resets`). Prometheus
-                    // does not: the golden case `resets 25000 0` in `histogram_cases.txt` holds a
-                    // gauge sample followed by a counter sample with identical payloads and
-                    // expects 0. Where the two disagree the golden wins, because the existing
-                    // planner's count there is not a behaviour this route can reproduce and stay
-                    // correct.
+                    // A start timestamp inside the window also witnesses a reset. A
+                    // gauge-to-counter edge is not one, unlike in the legacy planner: Prometheus
+                    // answers 0 for golden case `resets 25000 0` in `histogram_cases.txt`.
                     EdgeKind::Resets => {
                         b.detect_counter_reset_shifted(a, previous_ts, timestamp, offset_ms)
                     }
@@ -583,9 +558,8 @@ fn last_two<const IS_RATE: bool>(
         (Sample::Histogram(prev), Sample::Histogram(last)) => {
             let interval = last_ts - prev_ts;
             let mut result = last.clone();
-            // `irate` drops the counter's accumulations on a reset the way the existing planner's
-            // `idelta_value` does, start timestamp included; `idelta` is a plain difference and
-            // reads no reset at all.
+            // On a reset (start timestamp included) `irate` takes the last histogram as is;
+            // `idelta` is a plain difference.
             if !IS_RATE || !last.detect_counter_reset_shifted(prev, prev_ts, last_ts, offset_ms) {
                 if result.uses_custom_buckets() != prev.uses_custom_buckets() {
                     return Ok(None);
@@ -613,9 +587,8 @@ fn histogram_rate(
     let last = &points[points.len() - 1].1;
     let mut prev = Cow::Borrowed(&points[0].1);
     let mut uses_custom_buckets = prev.uses_custom_buckets();
-    // A reset between the first two samples makes the first one irrelevant, layout included.
-    // The start timestamps witness a reset the counts alone do not, which is what a restarted
-    // counter looks like when it is already above the previous value.
+    // A reset between the first two samples, by counts or start timestamps, makes the first one
+    // irrelevant, layout included.
     if is_counter {
         let (second_ts, second) = &points[1];
         if second.detect_counter_reset_shifted(&prev, points[0].0, *second_ts, offset_ms) {

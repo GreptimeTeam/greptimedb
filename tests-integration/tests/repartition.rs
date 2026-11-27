@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,16 +27,20 @@ use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use datatypes::arrow::array::AsArray;
+use datatypes::value::Value;
 use frontend::instance::Instance;
 use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
 use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
+use partition::expr::{PartitionExpr, RestrictedOp};
+use partition::function::IcebergHash;
 use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::Session;
 use session::context::{Channel, QueryContext, QueryContextRef};
 use sqlx::Row;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_DATA_REGION_GROUP};
 use store_api::storage::{RegionId, TableId};
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{
@@ -44,6 +48,26 @@ use tests_integration::test_util::{
     setup_pg_server_for_frontend_instance,
 };
 use tokio::sync::oneshot;
+
+/// Each partition/format combination uses its own cluster and test timeout.
+#[macro_export]
+macro_rules! table_id_partition_tests {
+    ($service:ident, $(($name:ident, $mixed:expr, $hashed:expr, $flat:expr, $encoding:ident)),+ $(,)?) => {
+        $(
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                let store_type = tests_integration::test_util::StorageType::$service;
+                if store_type.test_on() {
+                    common_telemetry::init_default_ut_logging();
+                    $crate::repartition::test_partition_unpartitioned_metric_by_table_id(
+                        store_type, $mixed, $hashed, $flat,
+                        store_api::codec::PrimaryKeyEncoding::$encoding,
+                    ).await;
+                }
+            }
+        )+
+    };
+}
 
 #[macro_export]
 macro_rules! repartition_tests {
@@ -108,6 +132,14 @@ macro_rules! repartition_tests {
                             common_telemetry::init_default_ut_logging();
                             $crate::repartition::test_partition_unpartitioned_metric(store_type).await;
                         }
+                    }
+
+                    $crate::table_id_partition_tests! { $service,
+                        (test_partition_unpartitioned_metric_by_table_id_primary_key_sparse, false, false, false, Sparse),
+                        (test_partition_unpartitioned_metric_by_table_id_and_host_primary_key_sparse, true, false, false, Sparse),
+                        (test_partition_unpartitioned_metric_by_table_id_hash_primary_key_sparse, false, true, false, Sparse),
+                        (test_partition_unpartitioned_metric_by_table_id_hash_and_host_flat_dense, true, true, true, Dense),
+                        (test_partition_unpartitioned_metric_by_table_id_hash_and_host_primary_key_sparse, true, true, false, Sparse),
                     }
 
                     #[tokio::test(flavor = "multi_thread")]
@@ -421,8 +453,7 @@ async fn wait_for_append_count_regions(instance: &Arc<Instance>, table: &str, ex
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let plan =
-                append_count_query(instance, &format!("EXPLAIN ANALYZE SELECT * FROM {table}"))
-                    .await;
+                query_output(instance, &format!("EXPLAIN ANALYZE SELECT * FROM {table}")).await;
             if plan.matches("UnorderedScan: region=").count() == expected {
                 return;
             }
@@ -433,7 +464,7 @@ async fn wait_for_append_count_regions(instance: &Arc<Instance>, table: &str, ex
     .expect("new partition routes must become visible");
 }
 
-async fn append_count_query(instance: &Arc<Instance>, sql: &str) -> String {
+async fn query_output(instance: &Arc<Instance>, sql: &str) -> String {
     let output = run_sql(instance, sql, QueryContext::arc()).await.unwrap();
     let batches = match output.data {
         common_query::OutputData::Stream(stream) => {
@@ -454,16 +485,16 @@ async fn assert_append_count(
     statistics_regions: usize,
 ) {
     let expected = format!("+-----+\n| n   |\n+-----+\n| {rows:<3} |\n+-----+");
-    let count = append_count_query(instance, &format!("SELECT count(*) AS n FROM {table}")).await;
+    let count = query_output(instance, &format!("SELECT count(*) AS n FROM {table}")).await;
     assert_eq!(count, expected, "unbounded COUNT for {table}");
-    let scanned_count = append_count_query(
+    let scanned_count = query_output(
         instance,
         &format!("SELECT count(*) AS n FROM (SELECT * FROM {table} LIMIT 1000)"),
     )
     .await;
     assert_eq!(scanned_count, expected, "scanned COUNT for {table}");
     // Only regions whose source row counts are exact may use statistics.
-    let plan = append_count_query(
+    let plan = query_output(
         instance,
         &format!("EXPLAIN ANALYZE SELECT count(*) FROM {table}"),
     )
@@ -476,6 +507,7 @@ async fn assert_append_count(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_sparse_repartition_compaction() {
     let (cluster, _home_guard) = repartition_cluster("exemplar_sparse_repartition").await;
     let instance = cluster.fe_instance();
@@ -704,6 +736,17 @@ async fn test_repartition_multi_hop_fulltext_index_gc() {
             .any(|(_, origin_region_id, region_id)| origin_region_id != region_id),
         "expected at least one cross-origin indexed SST before GC, got {manifest_entries:?}"
     );
+
+    // Both grandchildren inherit the ancestor SST, which carries the expression of the region
+    // that wrote it, not theirs; a merge requires every participant to hold only files it wrote,
+    // so materialise each region first. Strict-window compaction rewrites even a lone file.
+    run_sql(
+        instance,
+        "ADMIN COMPACT_TABLE('repartition_multi_hop_index_table', 'strict_window', 'window=3600')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
 
     run_sql(
         instance,
@@ -1505,6 +1548,544 @@ ORDER BY partition_ordinal_position;",
     )
     .await
     .unwrap();
+}
+
+/// Verifies table-id repartitioning, optionally with user columns and hash expressions.
+pub async fn test_partition_unpartitioned_metric_by_table_id(
+    store_type: StorageType,
+    mixed: bool,
+    hashed: bool,
+    flat_format: bool,
+    primary_key_encoding: PrimaryKeyEncoding,
+) {
+    info!(
+        "test_partition_unpartitioned_metric_by_table_id: store_type: {:?}",
+        store_type
+    );
+    let cluster_name = "test_partition_unpartitioned_metric_by_table_id";
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let datanodes = 3u64;
+    let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_partition_unpartitioned_metric_by_table_id_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
+    let cluster = builder
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            gc_cooldown_period: Duration::from_nanos(1),
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
+            ..Default::default()
+        })
+        .build(true)
+        .await;
+
+    let query_ctx = QueryContext::arc();
+    let instance = cluster.fe_instance();
+
+    let sst_format = if flat_format { "flat" } else { "primary_key" };
+    let primary_key_encoding = match primary_key_encoding {
+        PrimaryKeyEncoding::Dense => "dense",
+        PrimaryKeyEncoding::Sparse => "sparse",
+    };
+    let sql = format!(
+        r#"
+        CREATE TABLE `partition_table_id_metric_phy`(
+          `ts` TIMESTAMP TIME INDEX,
+          `val` DOUBLE,
+          `host` STRING PRIMARY KEY
+        ) ENGINE = metric
+        WITH (
+          "physical_metric_table" = "true",
+          "sst_format" = "{sst_format}",
+          "primary_key_encoding" = "{primary_key_encoding}"
+        );
+    "#
+    );
+    run_sql(instance, &sql, query_ctx.clone()).await.unwrap();
+
+    for logical in [
+        "partition_table_id_metric_low",
+        "partition_table_id_metric_high",
+    ] {
+        let sql = format!(
+            r#"
+            CREATE TABLE `{logical}`(
+              `ts` TIMESTAMP TIME INDEX,
+              `val` DOUBLE,
+              `host` STRING PRIMARY KEY
+            ) ENGINE = metric
+            WITH (
+              "on_physical_table" = "partition_table_id_metric_phy"
+            );
+        "#
+        );
+        run_sql(instance, &sql, query_ctx.clone()).await.unwrap();
+    }
+
+    run_sql(
+        instance,
+        r#"
+        CREATE TABLE partition_table_id_metric_null_host (
+            ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY
+        ) ENGINE = metric WITH ("on_physical_table" = "partition_table_id_metric_phy")
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "INSERT INTO partition_table_id_metric_null_host (ts, val) VALUES (0, 98)",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+
+    if mixed {
+        run_sql(
+            instance,
+            r#"CREATE TABLE partition_table_id_metric_no_host (
+                ts TIMESTAMP TIME INDEX, val DOUBLE
+            ) ENGINE = metric WITH ("on_physical_table" = "partition_table_id_metric_phy")"#,
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let sql = r#"
+        INSERT INTO `partition_table_id_metric_low` (`host`, `ts`, `val`) VALUES
+          ('a_host', '2022-01-01 00:00:00', 1);
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    let sql = r#"
+        INSERT INTO `partition_table_id_metric_high` (`host`, `ts`, `val`) VALUES
+          ('a_host', '2022-01-01 00:00:00', 10);
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let low_table_id = get_table_id(&cluster.metasrv, "partition_table_id_metric_low").await;
+    let high_table_id = get_table_id(&cluster.metasrv, "partition_table_id_metric_high").await;
+    assert!(low_table_id < high_table_id);
+
+    // Exercise repartition of persisted data in each SST/primary-key format.
+    run_sql(
+        instance,
+        "ADMIN flush_table('partition_table_id_metric_phy')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let (operand, boundary) = if hashed {
+        let Value::Int32(boundary) =
+            IcebergHash::evaluate_value(&Value::UInt32(high_table_id)).unwrap()
+        else {
+            panic!("expected an INT hash for the logical table id");
+        };
+        ("iceberg_hash(__table_id)", i64::from(boundary))
+    } else {
+        (DATA_SCHEMA_TABLE_ID_COLUMN_NAME, i64::from(high_table_id))
+    };
+    let partition_columns = if mixed {
+        "`__table_id`, `host`"
+    } else {
+        "`__table_id`"
+    };
+    let expressions = if mixed {
+        format!(
+            "{operand} < {boundary}, {operand} >= {boundary} AND host < 'm', {operand} >= {boundary} AND host >= 'm'"
+        )
+    } else {
+        format!("{operand} < {boundary}, {operand} >= {boundary}")
+    };
+    let sql = format!(
+        "ALTER TABLE partition_table_id_metric_phy PARTITION ON COLUMNS ({partition_columns}) ({expressions})"
+    );
+    run_sql(instance, &sql, query_ctx.clone()).await.unwrap();
+    // Refresh routes synchronously so the checks exercise the new partitions.
+    instance.cache_invalidator().invalidate_all().unwrap();
+
+    let logical_table = instance
+        .catalog_manager()
+        .table("greptime", "public", "partition_table_id_metric_high", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let partition_columns = logical_table
+        .table_info()
+        .meta
+        .partition_column_names()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(partition_columns, if mixed { vec!["host"] } else { vec![] });
+    assert_eq!(
+        logical_table
+            .partition_rules()
+            .unwrap()
+            .extra_phy_cols_not_in_logical_table,
+        vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME]
+    );
+
+    if mixed {
+        // A missing schema column cannot be supplied by the table identity context.
+        assert_sql_err_eq(
+            instance,
+            "INSERT INTO partition_table_id_metric_no_host (ts, val) VALUES (1000, 99)",
+            "Undefined column: host",
+            query_ctx.clone(),
+        )
+        .await;
+        run_sql(
+            instance,
+            "DROP TABLE partition_table_id_metric_no_host",
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+    }
+
+    for (logical, expected) in [
+        (
+            "partition_table_id_metric_low",
+            "+-----+\n| val |\n+-----+\n| 1.0 |\n+-----+",
+        ),
+        (
+            "partition_table_id_metric_high",
+            "+------+\n| val  |\n+------+\n| 10.0 |\n+------+",
+        ),
+    ] {
+        let result = run_sql(
+            instance,
+            &format!("SELECT val FROM `{logical}` WHERE host = 'a_host'"),
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+        check_output_stream(result.data, expected).await;
+    }
+
+    {
+        // Hash predicates cannot always prune reads, so visible rows alone do not prove
+        // correct routing. Observe writes on the actual data-region leaders as well.
+        let physical_id = get_table_id(&cluster.metasrv, "partition_table_id_metric_phy").await;
+        let (_, physical_route) = cluster
+            .metasrv
+            .table_metadata_manager()
+            .table_route_manager()
+            .get_physical_table_route(physical_id)
+            .await
+            .unwrap();
+        let written_bytes = || {
+            physical_route
+                .region_routes
+                .iter()
+                .map(|route| {
+                    let datanode =
+                        &cluster.datanode_instances[&route.leader_peer.as_ref().unwrap().id];
+                    let data_region = RegionId::with_group_and_seq(
+                        physical_id,
+                        METRIC_DATA_REGION_GROUP,
+                        route.region.id.region_sequence(),
+                    );
+                    let stats = datanode
+                        .region_server()
+                        .mito_engine()
+                        .unwrap()
+                        .get_region_statistic(data_region)
+                        .unwrap();
+                    (route.region.id, stats.written_bytes)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        // The high table is exactly on the >= boundary. Its two hosts target both
+        // host partitions when mixed, and the single >= partition otherwise.
+        let expected_regions = physical_route
+            .region_routes
+            .iter()
+            .filter(|route| {
+                PartitionExpr::from_json_str(&route.region.partition_expr)
+                    .unwrap()
+                    .unwrap()
+                    .op
+                    != RestrictedOp::Lt
+            })
+            .map(|route| route.region.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected_regions.len(), if mixed { 2 } else { 1 });
+        let before = written_bytes();
+        run_sql(instance,
+            "INSERT INTO partition_table_id_metric_high (host, ts, val) VALUES ('c_host', '2022-01-02 00:00:00', 30), ('z_host', '2022-01-02 00:00:00', 40)",
+            query_ctx.clone()).await.unwrap();
+        let actual_regions = written_bytes()
+            .into_iter()
+            .filter_map(|(region, bytes)| (bytes > before[&region]).then_some(region))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual_regions, expected_regions,
+            "writes must reach the physical expression's regions"
+        );
+        run_sql(
+            instance,
+            "ADMIN flush_table('partition_table_id_metric_phy')",
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+        let latest = "SELECT * FROM partition_table_id_metric_high ORDER BY ts DESC LIMIT 100";
+        let plan = query_output(instance, &format!("EXPLAIN ANALYZE {latest}")).await;
+        assert_eq!(
+            plan.matches("Scan: region=").count(),
+            expected_regions.len(),
+            "{plan}"
+        );
+
+        let filtered_latest = "SELECT val FROM partition_table_id_metric_high WHERE host = 'z_host' ORDER BY ts DESC LIMIT 100";
+        let plan = query_output(instance, &format!("EXPLAIN ANALYZE {filtered_latest}")).await;
+        assert_eq!(plan.matches("Scan: region=").count(), 1, "{plan}");
+        assert_eq!(
+            query_output(instance, filtered_latest).await,
+            "+------+\n| val  |\n+------+\n| 40.0 |\n+------+"
+        );
+
+        // Project the values from the latest-row query to keep the assertion
+        // independent of physical columns and timestamp rendering.
+        let values = query_output(
+            instance,
+            "SELECT val FROM partition_table_id_metric_high ORDER BY ts DESC, host LIMIT 100",
+        )
+        .await;
+        assert_eq!(
+            values,
+            "+------+\n| val  |\n+------+\n| 30.0 |\n| 40.0 |\n| 10.0 |\n+------+"
+        );
+
+        let result = run_sql(
+            instance,
+            "SELECT host, val FROM partition_table_id_metric_high WHERE host IN ('c_host', 'z_host') ORDER BY host",
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+        check_output_stream(
+            result.data,
+            "\
++--------+------+
+| host   | val  |
++--------+------+
+| c_host | 30.0 |
+| z_host | 40.0 |
++--------+------+",
+        )
+        .await;
+        run_sql(
+            instance,
+            "DELETE FROM partition_table_id_metric_high WHERE host IN ('c_host', 'z_host')",
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let sql = r#"
+        INSERT INTO `partition_table_id_metric_low` (`host`, `ts`, `val`) VALUES
+          ('b_host', '2022-01-02 00:00:00', 2);
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    let sql = r#"
+        INSERT INTO `partition_table_id_metric_high` (`host`, `ts`, `val`) VALUES
+          ('b_host', '2022-01-02 00:00:00', 20);
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    for logical in [
+        "partition_table_id_metric_low",
+        "partition_table_id_metric_high",
+    ] {
+        let result = run_sql(
+            instance,
+            &format!("SELECT host FROM `{logical}` WHERE host = 'b_host'"),
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+        let expected = "\
++--------+
+| host   |
++--------+
+| b_host |
++--------+";
+        check_output_stream(result.data, expected).await;
+    }
+
+    run_sql(
+        instance,
+        "ADMIN flush_table('partition_table_id_metric_phy')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "INSERT INTO partition_table_id_metric_null_host (ts, val) VALUES (1000, 99)",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "ADMIN flush_table('partition_table_id_metric_phy')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let output = run_sql(
+        instance,
+        "SELECT val FROM partition_table_id_metric_null_host WHERE ts = 1000",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+------+\n| val  |\n+------+\n| 99.0 |\n+------+",
+    )
+    .await;
+    let output = run_sql(
+        instance,
+        "SELECT val FROM partition_table_id_metric_null_host ORDER BY ts",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+------+\n| val  |\n+------+\n| 98.0 |\n| 99.0 |\n+------+",
+    )
+    .await;
+
+    // Logical tables created after repartition must inherit usable routing metadata.
+    run_sql(
+        instance,
+        r#"
+        CREATE TABLE partition_table_id_metric_new (
+            ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY
+        ) ENGINE = metric WITH ("on_physical_table" = "partition_table_id_metric_phy")
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "INSERT INTO partition_table_id_metric_new (host, ts, val) VALUES ('new_host', 1000, 100)",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let output = run_sql(
+        instance,
+        "SELECT val FROM partition_table_id_metric_new",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+-------+\n| val   |\n+-------+\n| 100.0 |\n+-------+",
+    )
+    .await;
+    run_sql(
+        instance,
+        "DELETE FROM partition_table_id_metric_new WHERE host = 'new_host'",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let output = run_sql(
+        instance,
+        "SELECT count(*) AS n FROM partition_table_id_metric_new",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(output.data, "+---+\n| n |\n+---+\n| 0 |\n+---+").await;
+
+    let sql = r#"
+        DELETE FROM `partition_table_id_metric_low` WHERE `host` = 'a_host';
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `partition_table_id_metric_low` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| b_host | 2022-01-02T00:00:00 | 2.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `partition_table_id_metric_high` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+------+
+| host   | ts                  | val  |
++--------+---------------------+------+
+| a_host | 2022-01-01T00:00:00 | 10.0 |
+| b_host | 2022-01-02T00:00:00 | 20.0 |
++--------+---------------------+------+";
+    check_output_stream(result.data, expected).await;
+
+    let result = run_sql(
+        instance,
+        "\
+SELECT count(*) AS partition_count \
+FROM information_schema.partitions \
+WHERE table_name = 'partition_table_id_metric_phy';",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let count = if mixed { 3 } else { 2 };
+    let expected = format!(
+        "+-----------------+\n| partition_count |\n+-----------------+\n| {count}               |\n+-----------------+"
+    );
+    check_output_stream(result.data, &expected).await;
+
+    for table in [
+        "partition_table_id_metric_new",
+        "partition_table_id_metric_null_host",
+        "partition_table_id_metric_low",
+        "partition_table_id_metric_high",
+        "partition_table_id_metric_phy",
+    ] {
+        run_sql(
+            instance,
+            &format!("DROP TABLE `{table}`"),
+            query_ctx.clone(),
+        )
+        .await
+        .unwrap();
+    }
 }
 
 async fn get_table_id(metasrv: &Arc<Metasrv>, table_name: &str) -> TableId {

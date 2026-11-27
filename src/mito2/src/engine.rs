@@ -108,7 +108,7 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -375,6 +375,15 @@ impl MitoEngine {
             });
     }
 
+    /// Extends the Leader deadline of a region as a Leader or StagingLeader lease that the region
+    /// ignores does. Like [Self::record_granted_lease], it serves a region of a group that received
+    /// the lease as a whole. Does nothing if the region is not open.
+    pub fn extend_leader_deadline(&self, region_id: RegionId, deadline: Instant) {
+        if let Ok(region) = self.inner.find_region(region_id) {
+            region.manifest_ctx.leader_deadline.extend(deadline);
+        }
+    }
+
     /// Freezes the clock of the lease checks at `at`.
     #[cfg(any(test, feature = "test"))]
     pub fn freeze_lease_clock(&self, at: Instant) {
@@ -554,6 +563,25 @@ impl MitoEngine {
             .submit_to_worker(region_id, request)
             .await?;
         rx.await.context(RecvSnafu)?
+    }
+
+    /// Pauses compaction on a loaded region and waits for any active cycle to finish.
+    /// Writes and flushes continue while the caller holds the guard.
+    /// The scheduler discards automatic follow-ups skipped during the pause. After the
+    /// last guard is dropped, a fresh trigger can start another compaction cycle.
+    pub async fn pause_compaction(
+        &self,
+        region_id: RegionId,
+    ) -> Result<crate::compaction::CompactionGuard> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::PauseCompaction { region_id, sender },
+            )
+            .await?;
+        receiver.await.context(RecvSnafu)??.wait().await
     }
 
     /// Handles copy region from request.
@@ -869,10 +897,7 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty()
-        || !edit.files_to_remove.is_empty()
-        || !edit.series_indexes_to_add.is_empty()
-        || !edit.series_indexes_to_remove.is_empty())
+    edit.has_file_changes()
         && matches!(
             edit,
             RegionEdit {
@@ -1379,18 +1404,20 @@ impl EngineInner {
     }
 
     /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
-    /// does not check whether the region waits for a reload.
+    /// does not check whether the region waits for a reload, and unlike a lease it is not held
+    /// back while a catchup runs on the region.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
-        let was_writable = region.is_writable();
         let previous = region.set_role(role);
+        let mut ended_wait = None;
         if role == RegionRole::Leader && !was_leader {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
-            region.manifest_ctx.record_leader_lease(Instant::now());
+            ended_wait = region.manifest_ctx.record_leader_lease(Instant::now());
         }
         self.notify_if_can_no_longer_replay(&region, previous);
-        self.notify_if_became_writable(&region, was_writable);
+        self.notify_if_became_writable(&region, previous);
+        self.notify_if_leader_lease_wait_ended(&region, ended_wait);
         Ok(())
     }
 
@@ -1408,10 +1435,31 @@ impl EngineInner {
         }
     }
 
-    /// Asks the worker to replay the pending tails of `region` if a role change made it
-    /// writable. The worker may already have started an ALTER or an edit of the region.
-    fn notify_if_became_writable(&self, region: &MitoRegionRef, was_writable: bool) {
-        if !was_writable && region.can_replay_tails() {
+    /// Logs the end of the wait of `region` for its Leader lease, which lasted `waited`, and
+    /// tells its worker to start what the wait deferred. Does nothing if the lease ended no wait
+    /// or the region waits again, so a wait ends with one notification.
+    fn notify_if_leader_lease_wait_ended(&self, region: &MitoRegionRef, waited: Option<Duration>) {
+        let Some(waited) = waited else {
+            return;
+        };
+        if region.manifest_ctx.awaits_leader_lease() {
+            return;
+        }
+        info!(
+            "Region {} received its Leader lease {:?} after a catchup made it writable",
+            region.region_id, waited
+        );
+        self.workers.notify_leader_lease_wait_ended(region);
+    }
+
+    /// Tells the worker that a role change outside it made `region` a writable leader from the
+    /// state `replaced`, so it replays the pending tails and runs the work due once the region is
+    /// a writable leader with its Leader lease. The worker may already have started an ALTER or
+    /// an edit of the region. Only a change that replaced a state that cannot replay tails (a
+    /// staging, downgrading or follower region) sends it, so the Leader lease a writable leader
+    /// receives with every heartbeat, which changes no state, sends none.
+    fn notify_if_became_writable(&self, region: &MitoRegionRef, replaced: Option<RegionRoleState>) {
+        if replaced.is_some_and(|state| !state.can_replay_tails()) && region.can_replay_tails() {
             self.workers.notify_writable(region);
         }
     }
@@ -1764,14 +1812,31 @@ impl RegionEngine for MitoEngine {
             region.manifest_ctx.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            let was_writable = region.is_writable();
-            let promoted = region
+            let promotion = region
                 .manifest_ctx
                 .promote_unless_downgrade_started_after(sent_at, region_id);
-            self.inner.notify_if_became_writable(&region, was_writable);
-            return Ok(promoted);
+            self.inner
+                .notify_if_became_writable(&region, promotion.replaced);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, promotion.ended_wait);
+            return Ok(promotion.promoted);
         }
-        let previous = region.set_role(role);
+        // The metasrv grants it to the leader of a region whose route is in staging, and unless a
+        // catchup runs on the region it ends the wait for a Leader lease too.
+        if role == RegionRole::StagingLeader && region.manifest_ctx.awaits_leader_lease() {
+            let ended_wait = region.manifest_ctx.record_staging_leader_lease(sent_at);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, ended_wait);
+        }
+        // A Follower lease carrying a candidate lease id goes to a migration's target. It leaves
+        // the state of a region that awaits its Leader lease unchanged instead of demoting it, and
+        // still counts as applied. Keep this out of `MitoRegion::set_role`, whose other callers
+        // must demote such a region.
+        let previous = if role == RegionRole::Follower && candidate_lease_id.is_some() {
+            region.manifest_ctx.demote_candidate(region_id)
+        } else {
+            region.set_role(role)
+        };
         self.inner.notify_if_can_no_longer_replay(&region, previous);
         Ok(true)
     }
@@ -1823,6 +1888,11 @@ impl RegionEngine for MitoEngine {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.inner.role(region_id)
+    }
+
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.find_region(region_id)
+            .map(|region| region.is_confirmed_leader())
     }
 
     fn as_any(&self) -> &dyn Any {

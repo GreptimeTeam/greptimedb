@@ -43,11 +43,12 @@ use store_api::storage::consts::ReservedColumnId;
 use crate::engine::MetricEngineInner;
 use crate::engine::create::extract_new_columns::extract_new_columns;
 use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
+use crate::engine::region_metadata;
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
-    InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingPhysicalColumnSnafu,
-    MissingRegionOptionSnafu, MultipleFieldColumnSnafu, NoFieldColumnSnafu, ParseRegionIdSnafu,
-    PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
+    InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
+    MultipleFieldColumnSnafu, NoFieldColumnSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu,
+    Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils::{
@@ -292,11 +293,10 @@ impl MetricEngineInner {
         self.add_physical_columns(physical_region_id, new_columns, index_option)
             .await?;
 
-        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
-        let physical_schema_map = physical_columns
-            .iter()
-            .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
-            .collect::<HashMap<_, _>>();
+        let physical_metadata = self
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
         let logical_regions = requests
             .iter()
             .map(|(region_id, _)| *region_id)
@@ -308,37 +308,18 @@ impl MetricEngineInner {
             let mut column_metadata = HashMap::with_capacity(request.column_metadatas.len());
             for metadata in &request.column_metadatas {
                 let name = metadata.column_schema.name.as_str();
-                let physical_metadata =
-                    physical_schema_map.get(name).copied().with_context(|| {
-                        MissingPhysicalColumnSnafu {
-                            name,
-                            region_id: physical_region_id,
-                        }
-                    })?;
-                column_metadata.insert(name, physical_metadata);
+                let column = region_metadata::physical_column(&physical_metadata, name)?;
+                column_metadata.insert(name, column);
             }
             logical_region_columns.push((*region_id, column_metadata));
         }
 
-        let mut new_add_columns = Vec::with_capacity(new_column_indices.len());
-        for name in new_column_indices.keys() {
-            let column_metadata = physical_schema_map.get(name).copied().with_context(|| {
-                MissingPhysicalColumnSnafu {
-                    name: name.to_string(),
-                    region_id: physical_region_id,
-                }
-            })?;
-            new_add_columns.push((name.to_string(), column_metadata.clone()));
-        }
-        // The data region has the new columns, whatever happens to the metadata write.
-        self.state
-            .write()
-            .unwrap()
-            .add_physical_columns(data_region_id, new_add_columns);
+        self.cache_new_physical_columns(&physical_metadata, new_column_indices.keys().copied())?;
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+            ColumnMetadata::encode_list(&physical_metadata.column_metadatas)
+                .context(SerializeColumnMetadataSnafu)?,
         );
 
         // Writes logical regions metadata to metadata region

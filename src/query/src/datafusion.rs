@@ -163,6 +163,16 @@ impl DatafusionQueryEngine {
         Self { state, plugins }
     }
 
+    /// Crate-visible view of the per-query engine context, for tests that
+    /// assert configuration propagation through the real query path.
+    #[cfg(test)]
+    pub(crate) fn engine_context_for_tests(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> QueryEngineContext {
+        self.engine_context(query_ctx).unwrap()
+    }
+
     #[tracing::instrument(skip_all)]
     async fn exec_query_plan(
         &self,
@@ -284,6 +294,10 @@ impl DatafusionQueryEngine {
                             || table_info
                                 .meta
                                 .row_key_column_names()
+                                .any(|name| name == &column.name)
+                            || table_info
+                                .meta
+                                .partition_column_names()
                                 .any(|name| name == &column.name)
                     })
                     .map(|(index, _)| index)
@@ -1565,6 +1579,24 @@ mod tests {
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
             unimplemented!("unexpected discard_unflushed_data_by_table")
+        }
+
+        async fn discard_pending_tails(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _node_id: u64,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            unimplemented!("unexpected discard_pending_tails")
+        }
+
+        async fn discard_pending_tails_by_table(
+            &self,
+            _table_name: table::table_name::TableName,
+            _node_id: u64,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            unimplemented!("unexpected discard_pending_tails_by_table")
         }
     }
 

@@ -381,7 +381,8 @@ pub struct UpgradeRegion {
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
     pub replay_timeout: Duration,
-    /// Legacy WAL index location hint, retained for older datanodes.
+    /// Id of the datanode that led the region before the migration. The datanode passes it to
+    /// the catchup as the source of `last_entry_id`.
     #[serde(default)]
     pub location_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +425,38 @@ pub enum CacheIdent {
     DropFlow(DropFlow),
     /// Indicate change of user metadata.
     User(UserCacheIdent),
+}
+
+impl CacheIdent {
+    pub(crate) fn flow_id_key(&self) -> Option<&FlowId> {
+        match self {
+            Self::FlowId(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn schema_name_key(&self) -> Option<&SchemaName> {
+        match self {
+            Self::SchemaName(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    pub fn table_id_key(&self) -> Option<&TableId> {
+        if let Self::TableId(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    pub fn table_name_key(&self) -> Option<&TableName> {
+        if let Self::TableName(name) = self {
+            Some(name)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -961,7 +994,7 @@ impl Display for SyncRegion {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RemapManifest {
     pub region_id: RegionId,
     /// Regions to remap manifests from.
@@ -970,14 +1003,33 @@ pub struct RemapManifest {
     pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// New partition expressions for the new regions.
     pub new_partition_exprs: HashMap<RegionId, String>,
+    /// Only verify that the remap would be accepted instead of writing staging manifests.
+    ///
+    /// The repartition procedure sends such a request to each *source leader* before it publishes
+    /// the new routes; the datanode then reads the region's persisted manifest and reports whether
+    /// the region holds a file it did not create itself. Nothing is staged and nothing is written.
+    ///
+    /// An older datanode ignores this unknown field (it is `#[serde(default)]`, so it simply
+    /// deserializes as `false`) and performs an ordinary remap. That is still safe: an ordinary
+    /// remap requires the region to be in staging state, and these sources are not staged yet, so
+    /// the datanode answers with the structured stage-required error
+    /// (`mito2::worker::handle_remap` → `InvalidRequest` "region is not in staging state"). Metasrv
+    /// therefore sees an error rather than a silent success, and aborts the group before the
+    /// routes are published.
+    #[serde(default)]
+    pub validate_only: bool,
 }
 
 impl Display for RemapManifest {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "RemapManifest(region_id={}, input_regions={:?}, region_mapping={:?}, new_partition_exprs={:?})",
-            self.region_id, self.input_regions, self.region_mapping, self.new_partition_exprs
+            "RemapManifest(region_id={}, input_regions={:?}, region_mapping={:?}, new_partition_exprs={:?}, validate_only={})",
+            self.region_id,
+            self.input_regions,
+            self.region_mapping,
+            self.new_partition_exprs,
+            self.validate_only
         )
     }
 }
@@ -1002,6 +1054,17 @@ impl Display for ApplyStagingManifest {
             self.region_id, self.partition_expr, self.central_region_id, self.manifest_path
         )
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MetadataCompaction {
+    /// Wait for compaction to drain, then hold the pause for the remaining sync budget.
+    Pause {
+        region_id: RegionId,
+        remaining: Duration,
+    },
+    /// Resume compaction on the source metadata region.
+    Release { region_id: RegionId },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
@@ -1037,6 +1100,8 @@ pub enum Instruction {
     Suspend,
     /// Makes regions enter staging state.
     EnterStagingRegions(Vec<EnterStagingRegion>),
+    /// Controls source metadata compaction during repartition.
+    MetadataCompaction(MetadataCompaction),
     /// Syncs regions.
     SyncRegions(Vec<SyncRegion>),
     /// Remaps manifests for a region.
@@ -1318,6 +1383,7 @@ pub enum InstructionReply {
     GetPackedFileRefs(GetPackedFileRefsReply),
     GcRegions(GcRegionsReply),
     EnterStagingRegions(EnterStagingRegionsReply),
+    MetadataCompaction(SimpleReply),
     SyncRegions(SyncRegionsReply),
     RemapManifest(RemapManifestReply),
     ApplyStagingManifests(ApplyStagingManifestsReply),
@@ -1346,6 +1412,9 @@ impl Display for InstructionReply {
                     "InstructionReply::EnterStagingRegions({:?})",
                     reply.replies
                 )
+            }
+            Self::MetadataCompaction(reply) => {
+                write!(f, "InstructionReply::MetadataCompaction({reply})")
             }
             Self::SyncRegions(reply) => {
                 write!(f, "InstructionReply::SyncRegions({:?})", reply.replies)
@@ -1428,7 +1497,7 @@ impl InstructionReply {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::error::Error as _;
 
     use common_error::mock::MockError;
@@ -1436,6 +1505,32 @@ mod tests {
     use store_api::storage::{FileId, FileRef};
 
     use super::*;
+
+    #[test]
+    fn test_metadata_compaction_mailbox_wire() {
+        let wire = serde_json::json!([
+            {"MetadataCompaction": {"Pause": {
+                "region_id": 4294967298_u64,
+                "remaining": {"secs": 19, "nanos": 500000000}
+            }}},
+            {"MetadataCompaction": {"Release": {
+                "region_id": 4294967298_u64
+            }}}
+        ]);
+        let region_id = RegionId::new(1, 2);
+        let expected = vec![
+            Instruction::MetadataCompaction(MetadataCompaction::Pause {
+                region_id,
+                remaining: Duration::from_millis(19_500),
+            }),
+            Instruction::MetadataCompaction(MetadataCompaction::Release { region_id }),
+        ];
+        assert_eq!(
+            expected,
+            serde_json::from_value::<Vec<Instruction>>(wire.clone()).unwrap()
+        );
+        assert_eq!(wire, serde_json::to_value(expected).unwrap());
+    }
 
     #[test]
     fn test_instruction_error_serde() {
@@ -1486,6 +1581,58 @@ mod tests {
         assert_eq!(decoded.retry_hint, RetryHint::Retryable);
         assert_eq!(error.retry_hint, RetryHint::RetryAfterRouteRefresh);
         assert_eq!(error.retry_hint.as_str(), "retry_after_route_refresh");
+    }
+
+    #[test]
+    fn test_remap_manifest_wire_accepts_a_metasrv_without_validate_only() {
+        // A metasrv that predates the pre-publication check sends no `validate_only` key. A new
+        // datanode has to read that as an ordinary remap - the old behaviour - so a mixed
+        // cluster keeps working: nothing is staged yet, and the remap is refused.
+        let region_id = RegionId::new(1, 2);
+        let new_region_id = RegionId::new(1, 3);
+        let mut wire = serde_json::to_value(Instruction::RemapManifest(RemapManifest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: HashMap::from([(region_id, vec![new_region_id])]),
+            new_partition_exprs: HashMap::from([(
+                new_region_id,
+                "col(x) >= 0 AND col(x) < 100".to_string(),
+            )]),
+            validate_only: true,
+        }))
+        .unwrap();
+        wire["RemapManifest"]
+            .as_object_mut()
+            .unwrap()
+            .remove("validate_only");
+
+        let instruction: Instruction = serde_json::from_value(wire).unwrap();
+        let Instruction::RemapManifest(remap) = instruction else {
+            panic!("expected a remap manifest instruction");
+        };
+        assert!(!remap.validate_only);
+        assert_eq!(remap.region_id, region_id);
+
+        // A validate-only instruction is told apart by the key alone, and an old datanode that
+        // drops it performs an ordinary remap, which fails because nothing is staged: metasrv
+        // never mistakes it for a successful check.
+        let wire = serde_json::to_value(Instruction::RemapManifest(RemapManifest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: HashMap::from([(region_id, vec![new_region_id])]),
+            new_partition_exprs: HashMap::new(),
+            validate_only: true,
+        }))
+        .unwrap();
+        assert_eq!(
+            wire["RemapManifest"]["validate_only"],
+            serde_json::json!(true)
+        );
+        let decoded: Instruction = serde_json::from_value(wire).unwrap();
+        let Instruction::RemapManifest(decoded) = decoded else {
+            panic!("expected a remap manifest instruction");
+        };
+        assert!(decoded.validate_only);
     }
 
     #[test]

@@ -28,11 +28,12 @@ use store_api::storage::RegionId;
 use validate::validate_alter_region_requests;
 
 use crate::engine::MetricEngineInner;
+use crate::engine::region_metadata;
 use crate::error::{
-    AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, MissingPhysicalColumnSnafu,
-    PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
+    AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result,
+    SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
-use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
+use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions};
 
 impl MetricEngineInner {
     pub async fn alter_regions(
@@ -145,7 +146,6 @@ impl MetricEngineInner {
 
             region_state.options().index
         };
-        let data_region_id = to_data_region_id(physical_region_id);
 
         // Acquire logical region locks in a deterministic order to avoid deadlocks when multiple
         // alter operations target overlapping regions concurrently.
@@ -166,11 +166,10 @@ impl MetricEngineInner {
         self.add_physical_columns(physical_region_id, new_columns_to_add, index_options)
             .await?;
 
-        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
-        let physical_schema_map = physical_columns
-            .iter()
-            .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
-            .collect::<HashMap<_, _>>();
+        let physical_metadata = self
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
 
         // The physical region now has every requested column, either because this call
         // added it or because it was already there with the same definition.
@@ -182,35 +181,13 @@ impl MetricEngineInner {
             let mut column_metadata = HashMap::with_capacity(columns.len());
             for col in columns {
                 let column_name = col.column_metadata.column_schema.name.as_str();
-                let metadata =
-                    physical_schema_map
-                        .get(column_name)
-                        .copied()
-                        .with_context(|| MissingPhysicalColumnSnafu {
-                            name: column_name,
-                            region_id: physical_region_id,
-                        })?;
+                let metadata = region_metadata::physical_column(&physical_metadata, column_name)?;
                 column_metadata.insert(column_name, metadata);
             }
             logical_region_columns.push((*region_id, column_metadata));
         }
 
-        let mut new_add_columns = Vec::with_capacity(new_column_indices.len());
-        for name in new_column_indices.keys() {
-            let column_metadata = physical_schema_map.get(name).copied().with_context(|| {
-                MissingPhysicalColumnSnafu {
-                    name: name.to_string(),
-                    region_id: physical_region_id,
-                }
-            })?;
-            new_add_columns.push((name.to_string(), column_metadata.clone()));
-        }
-
-        // The data region has the new columns, whatever happens to the metadata write.
-        self.state
-            .write()
-            .unwrap()
-            .add_physical_columns(data_region_id, new_add_columns);
+        self.cache_new_physical_columns(&physical_metadata, new_column_indices.keys().copied())?;
 
         // Writes logical regions metadata to metadata region
         let result = self
@@ -231,7 +208,8 @@ impl MetricEngineInner {
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+            ColumnMetadata::encode_list(&physical_metadata.column_metadatas)
+                .context(SerializeColumnMetadataSnafu)?,
         );
 
         Ok(0)
@@ -256,21 +234,17 @@ impl MetricEngineInner {
                 continue;
             };
 
-            let mut fields = self
+            let existing_columns = self
                 .load_logical_columns(physical_region_id, *region_id)
-                .await?
-                .into_iter()
-                .filter(|col| col.semantic_type == SemanticType::Field)
-                .collect::<Vec<_>>();
-            fields.extend(
-                added_fields
-                    .into_iter()
-                    .map(|col| col.column_metadata.clone()),
-            );
-
+                .await?;
             ensure!(
-                fields.len() == 1
-                    && is_native_histogram_value_type(&fields[0].column_schema.data_type),
+                added_fields.len() == 1
+                    && is_native_histogram_value_type(
+                        &first_added_field.column_metadata.column_schema.data_type
+                    )
+                    && existing_columns
+                        .iter()
+                        .all(|col| col.semantic_type != SemanticType::Field),
                 AddingFieldColumnSnafu {
                     name: first_added_field.column_metadata.column_schema.name.clone(),
                 }
@@ -294,6 +268,10 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use api::v1::SemanticType;
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
@@ -308,6 +286,13 @@ mod test {
     };
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
+
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::status_code::StatusCode;
+    use mito2::config::MitoConfig;
+    use mito2::engine::listener::EventListener;
+    use mito2::test_util::TestEnv as MitoTestEnv;
+    use tokio::sync::{Notify, mpsc};
 
     use crate::engine::IndexOptions;
     use crate::test_util::{TestEnv, alter_logical_region_request, create_logical_region_request};
@@ -497,6 +482,139 @@ mod test {
         assert_ne!(
             metadata.column_by_name("tag4").unwrap().column_id,
             metadata.column_by_name("tag5").unwrap().column_id
+        );
+    }
+
+    /// Holds the result of an armed physical alter in Mito, after its manifest is
+    /// updated and before the new metadata becomes visible, and reports the requests
+    /// the region worker receives.
+    struct HoldAlterResultListener {
+        armed: AtomicBool,
+        altering: Notify,
+        release: Notify,
+        received: mpsc::UnboundedSender<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl EventListener for HoldAlterResultListener {
+        fn on_recv_requests(&self, request_num: usize) {
+            let _ = self.received.send(request_num);
+        }
+
+        async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                self.altering.notify_one();
+                self.release.notified().await;
+            }
+        }
+    }
+
+    // Pins the residual race documented by #10372: the column-add lock is released
+    // with a dropped caller while Mito still applies its alter, so a request for
+    // another column reads the same metadata, allocates the same column id, and is
+    // rejected once the first alter lands. The rejection is not retryable, while a
+    // manual retry succeeds with the next id. Tracked by #10377.
+    #[tokio::test]
+    async fn test_add_physical_columns_cancelled_while_alter_pending() {
+        common_telemetry::init_default_ut_logging();
+        let mut mito_env = MitoTestEnv::with_prefix("cancel-pending-add-column").await;
+        let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+        let listener = Arc::new(HoldAlterResultListener {
+            armed: AtomicBool::new(false),
+            altering: Notify::new(),
+            release: Notify::new(),
+            received: received_tx,
+        });
+        let mito = mito_env
+            .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+            .await;
+        let env = TestEnv::with_mito_engine(mito_env, mito);
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        let data_region_id = to_data_region_id(physical_region_id);
+        let tag = |name: &str| ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), false),
+        };
+        let inner = env.metric().inner.clone();
+
+        // Request A allocates an id for `x` and its alter is held in Mito.
+        listener.armed.store(true, Ordering::SeqCst);
+        let altering = listener.altering.notified();
+        let request_a = {
+            let inner = inner.clone();
+            let column = tag("x");
+            tokio::spawn(async move {
+                inner
+                    .add_physical_columns(physical_region_id, vec![column], IndexOptions::Inverted)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), altering)
+            .await
+            .expect("alter of request A should reach Mito");
+
+        // Drop the caller of A: its guard is released while Mito still applies A.
+        request_a.abort();
+        assert!(request_a.await.unwrap_err().is_cancelled());
+        let pending_id = {
+            let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+            assert!(metadata.column_by_name("x").is_none());
+            1 + metadata
+                .column_metadatas
+                .iter()
+                .map(|c| c.column_id)
+                .filter(|id| !ReservedColumnId::is_reserved(*id))
+                .max()
+                .unwrap()
+        };
+
+        // Request B, for another column, reads the same metadata and allocates the same
+        // id. Its alter waits in the worker behind the pending alter of A.
+        while received_rx.try_recv().is_ok() {}
+        let request_b = {
+            let inner = inner.clone();
+            let column = tag("y");
+            tokio::spawn(async move {
+                inner
+                    .add_physical_columns(physical_region_id, vec![column], IndexOptions::Inverted)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), received_rx.recv())
+            .await
+            .expect("alter of request B should reach Mito");
+        assert!(!request_b.is_finished());
+
+        // A lands first and takes the id, so Mito rejects B.
+        listener.release.notify_one();
+        let err = tokio::time::timeout(Duration::from_secs(10), request_b)
+            .await
+            .expect("request B should finish once A is applied")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err:?}");
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable, "{err:?}");
+        assert!(
+            format!("{err:?}").contains(&format!("column id {pending_id} already exists")),
+            "{err:?}"
+        );
+
+        let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        assert_eq!(metadata.column_by_name("x").unwrap().column_id, pending_id);
+        assert!(metadata.column_by_name("y").is_none());
+
+        // A manual retry sees `y` absent and allocates the next id.
+        inner
+            .add_physical_columns(physical_region_id, vec![tag("y")], IndexOptions::Inverted)
+            .await
+            .unwrap();
+        let metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        assert_eq!(metadata.column_by_name("x").unwrap().column_id, pending_id);
+        assert_eq!(
+            metadata.column_by_name("y").unwrap().column_id,
+            pending_id + 1
         );
     }
 

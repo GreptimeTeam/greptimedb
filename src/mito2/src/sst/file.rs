@@ -14,7 +14,7 @@
 
 //! Structures to describe metadata of files.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -269,13 +269,59 @@ pub struct NarthexPartMeta {
 /// Common bounds, statistics and sequence semantics remain in [`FileMeta`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarthexSamplesMeta {
-    /// Imported rows use the destination file admission sequence.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub use_file_sequence: bool,
     /// Encoded size of manifest.json.
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
+}
+
+/// Sequence summary of a half-open time window in Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowSequence {
+    pub start: i64,
+    pub end: i64,
+    pub max_sequence: u64,
+}
+
+impl WindowSequence {
+    /// Every fixed window touched by the inclusive SST bounds, including pre-epoch timestamps.
+    pub(crate) fn starts(range: FileTimeRange, width: i64) -> impl Iterator<Item = i64> {
+        let first = range.0.split().0.div_euclid(width);
+        let last = range.1.split().0.div_euclid(width);
+        (first..=last).filter_map(move |n| {
+            n.checked_mul(width)
+                .filter(|s| s.checked_add(width).is_some())
+        })
+    }
+
+    pub(crate) fn intersects(&self, range: FileTimeRange) -> bool {
+        self.start <= range.1.split().0 && range.0.split().0 < self.end
+    }
+}
+
+/// Checks the collective watermark across every window spanned by a sample SST.
+pub(crate) fn series_windows_cover(
+    windows: &BTreeMap<i64, WindowSequence>,
+    file: &FileMeta,
+) -> bool {
+    let Some(seq) = file.sequence else {
+        return false;
+    };
+    let (first, last) = file.time_range;
+    let mut cursor = first.split().0;
+    let Some((&start, _)) = windows.range(..=cursor).next_back() else {
+        return false;
+    };
+    for (_, w) in windows.range(start..) {
+        if w.start > cursor || w.end <= cursor || w.max_sequence < seq.get() {
+            return false;
+        }
+        if last.split().0 < w.end {
+            return true;
+        }
+        cursor = w.end;
+    }
+    false
 }
 
 /// Immutable narthex series index. Coverage identifies samples; it does not own them.
@@ -285,11 +331,8 @@ pub struct NarthexSeriesIndexMeta {
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
-    /// Sample files recorded by the experimental builder. The manifest neither
-    /// validates coverage nor retires indexes when samples are replaced. Both
-    /// policies depend on how production series files will be organized and
-    /// maintained across compaction.
-    pub sources: Vec<RegionFileId>,
+    /// Fixed time window and sequence watermark covered by this index.
+    pub window: WindowSequence,
 }
 
 /// Metadata of a SST file.
@@ -310,6 +353,11 @@ pub struct FileMeta {
     pub file_size: u64,
     /// Maximum uncompressed row group size of the file. 0 means unknown.
     pub max_row_group_uncompressed_size: u64,
+    /// Maximum row group size of the file with string and binary values counted at their decoded
+    /// size, which dictionary encoding hides from `max_row_group_uncompressed_size`. 0 means
+    /// unknown (files written before this field), which is omitted from manifests.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub max_row_group_decoded_size: u64,
     /// Available indexes of the file.
     pub available_indexes: IndexTypes,
     /// Created indexes of the file for each column.
@@ -397,6 +445,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 /// Formats a debug field with a custom closure, as a stable replacement for
 /// the unstable `DebugStruct::field_with`.
 struct DebugFmt<F: Fn(&mut Formatter<'_>) -> fmt::Result>(F);
@@ -438,6 +490,10 @@ impl Debug for FileMeta {
             .field(
                 "max_row_group_uncompressed_size",
                 &ReadableSize(self.max_row_group_uncompressed_size),
+            )
+            .field(
+                "max_row_group_decoded_size",
+                &ReadableSize(self.max_row_group_decoded_size),
             );
         if self.exists_index() {
             debug_struct
@@ -523,6 +579,68 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    pub(crate) fn series_window(&self) -> Option<WindowSequence> {
+        match &self.format {
+            FileFormat::NarthexSeriesIndex(meta) => Some(meta.window),
+            _ => None,
+        }
+    }
+
+    /// Returns the authoritative object path, using the artifact manifest for narthex files.
+    pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
+        match &self.format {
+            FileFormat::Parquet => location::sst_file_path(table_dir, self.file_id(), path_type),
+            _ => {
+                let region_dir =
+                    location::region_dir_from_table_dir(table_dir, self.region_id, path_type);
+                format!(
+                    "{}manifest.json",
+                    location::narthex_file_dir(&region_dir, self.file_id)
+                )
+            }
+        }
+    }
+
+    /// Resolves the ordered part inventory and manifest against the physical owner's directory.
+    pub(crate) fn narthex_objects(
+        &self,
+        region_dir: &str,
+    ) -> Option<Vec<crate::series_index::artifact::ArtifactObject>> {
+        use crate::series_index::artifact::ArtifactObject;
+        let (manifest, parts, extension) = match &self.format {
+            FileFormat::Parquet => return None,
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts, "samples"),
+            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts, "series"),
+        };
+        let dir = location::narthex_file_dir(region_dir, self.file_id);
+        let mut objects = Vec::with_capacity(parts.len() + 1);
+        for (id, part) in parts.iter().enumerate() {
+            objects.push(ArtifactObject {
+                path: format!("{dir}part-{id}.{extension}"),
+                file_size: part.file_size,
+            });
+        }
+        objects.push(ArtifactObject {
+            path: format!("{dir}manifest.json"),
+            file_size: manifest,
+        });
+        Some(objects)
+    }
+
+    /// Checks that a Narthex inventory describes one complete immutable artifact.
+    pub(crate) fn valid_inventory(&self) -> bool {
+        let (manifest, parts) = match &self.format {
+            FileFormat::Parquet => return true,
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts),
+            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts),
+        };
+        !parts.is_empty()
+            && parts
+                .iter()
+                .try_fold(manifest, |total, part| total.checked_add(part.file_size))
+                == Some(self.file_size)
+    }
+
     /// Returns whether this file's row sequences are trusted in the target region.
     ///
     /// Foreign files use their target-local sequence barrier; local files require
@@ -773,7 +891,7 @@ impl FileHandle {
 
     /// Returns the complete file path of the file.
     pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
-        location::sst_file_path(table_dir, self.file_id(), path_type)
+        self.meta_ref().file_path(table_dir, path_type)
     }
 
     /// Returns the time range of the file.
@@ -1117,6 +1235,14 @@ pub(crate) struct UncommittedSsts {
 
 #[async_trait::async_trait]
 impl SstWriteGuard for UncommittedSsts {
+    async fn before_create_narthex(&self, file_id: RegionFileId) -> crate::error::Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(file_id.file_id(), UncommittedFile::Narthex);
+        Ok(())
+    }
+
     async fn before_create(&self, file_id: RegionFileId) -> crate::error::Result<()> {
         // An index can be created before its final metadata is available.
         self.track_before_upload(file_id.file_id(), true);
@@ -1359,6 +1485,80 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
+
+    #[test]
+    fn fixed_windows_cover_spanning_samples() {
+        let file = FileMeta {
+            time_range: (Timestamp::new_millisecond(-1), Timestamp::new_second(10)),
+            sequence: NonZeroU64::new(8),
+            ..Default::default()
+        };
+        let starts = WindowSequence::starts(file.time_range, 10).collect::<Vec<_>>();
+        assert_eq!(starts, [-10, 0, 10]);
+        let mut windows = starts
+            .into_iter()
+            .map(|start| {
+                (
+                    start,
+                    WindowSequence {
+                        start,
+                        end: start + 10,
+                        max_sequence: 8,
+                    },
+                )
+            })
+            .collect();
+        assert!(series_windows_cover(&windows, &file));
+        windows.get_mut(&0).unwrap().max_sequence = 7;
+        assert!(!series_windows_cover(&windows, &file));
+        windows.remove(&0);
+        assert!(!series_windows_cover(&windows, &file));
+    }
+
+    #[test]
+    fn test_narthex_part_paths_follow_inventory_order() {
+        let samples = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+            manifest_size: 5,
+            parts: smallvec::smallvec![
+                NarthexPartMeta { file_size: 11 },
+                NarthexPartMeta { file_size: 7 }
+            ],
+        }));
+        let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
+            window: WindowSequence {
+                start: 0,
+                end: 10,
+                max_sequence: 7,
+            },
+            manifest_size: 5,
+            parts: smallvec::smallvec![
+                NarthexPartMeta { file_size: 11 },
+                NarthexPartMeta { file_size: 7 }
+            ],
+        }));
+        for (format, extension) in [(samples, "samples"), (series, "series")] {
+            let meta = FileMeta {
+                file_size: 23,
+                format,
+                ..Default::default()
+            };
+            assert!(meta.valid_inventory());
+            let dir = format!("owner/{}/", meta.file_id);
+            let objects = meta.narthex_objects("owner/").unwrap();
+            let entries: Vec<_> = objects
+                .into_iter()
+                .map(|object| (object.path, object.file_size))
+                .collect();
+            assert_eq!(
+                entries,
+                [
+                    (format!("{dir}part-0.{extension}"), 11),
+                    (format!("{dir}part-1.{extension}"), 7),
+                    (format!("{dir}manifest.json"), 5),
+                ]
+            );
+        }
+    }
 
     #[test]
     fn test_narthex_file_metadata_compatibility() {

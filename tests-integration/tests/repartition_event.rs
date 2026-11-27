@@ -73,6 +73,15 @@ async fn test_repartition_event() {
     execute_partition(&database).await;
     let partition_procedure_id = assert_repartition_event(instance).await;
     assert_repartition_group_event(instance, &partition_procedure_id).await;
+    // The split left both regions holding the SST the unpartitioned table flushed, which has no
+    // recorded expression; merge requires each participant to hold only its own files, so
+    // materialise them first.
+    database
+        .sql(format!(
+            "ADMIN COMPACT_TABLE('{TABLE_NAME}', 'strict_window', 'window=3600')"
+        ))
+        .await
+        .unwrap();
     execute_merge(&database).await;
     let merge_procedure_id = find_submitted_procedure_id(
         instance,

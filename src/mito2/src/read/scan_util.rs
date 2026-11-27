@@ -195,8 +195,8 @@ pub(crate) struct ScanMetricsSet {
     pruner_cache_miss: usize,
     /// Duration spent waiting for pruner to build file ranges.
     pruner_prune_cost: Duration,
-    /// Number of files filtered by manifest time-range pruning.
-    files_time_range_pruned: usize,
+    /// Number of files pruned by their manifest time range or primary key range.
+    files_manifest_pruned: usize,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
     /// Number of batches decoded from SST.
@@ -323,7 +323,7 @@ impl fmt::Debug for ScanMetricsSet {
             pruner_cache_hit,
             pruner_cache_miss,
             pruner_prune_cost,
-            files_time_range_pruned,
+            files_manifest_pruned,
             num_sst_record_batches,
             num_sst_batches,
             num_sst_rows,
@@ -387,8 +387,8 @@ impl fmt::Debug for ScanMetricsSet {
         }
 
         // Write non-zero filter counters
-        if *files_time_range_pruned > 0 {
-            write!(f, ", \"files_time_range_pruned\":{files_time_range_pruned}")?;
+        if *files_manifest_pruned > 0 {
+            write!(f, ", \"files_manifest_pruned\":{files_manifest_pruned}")?;
         }
         if *rg_fulltext_filtered > 0 {
             write!(f, ", \"rg_fulltext_filtered\":{rg_fulltext_filtered}")?;
@@ -674,7 +674,7 @@ impl ScanMetricsSet {
                     pruner_cache_hit,
                     pruner_cache_miss,
                     pruner_prune_cost,
-                    files_time_range_pruned,
+                    files_manifest_pruned,
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
@@ -692,7 +692,7 @@ impl ScanMetricsSet {
         self.build_parts_cost += *build_cost;
         self.sst_scan_cost += *scan_cost;
 
-        self.files_time_range_pruned += *files_time_range_pruned;
+        self.files_manifest_pruned += *files_manifest_pruned;
 
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
@@ -1487,7 +1487,7 @@ pub(crate) async fn scan_flat_file_ranges(
     index: RowGroupIndex,
     read_type: &'static str,
     partition_pruner: Arc<PartitionPruner>,
-) -> Result<impl Stream<Item = Result<RecordBatch>>> {
+) -> Result<BoxedRecordBatchStream> {
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
@@ -1516,13 +1516,13 @@ pub(crate) async fn scan_flat_file_ranges(
         None
     };
 
-    Ok(build_flat_file_range_scan_stream(
+    Ok(Box::pin(build_flat_file_range_scan_stream(
         stream_ctx,
         part_metrics,
         read_type,
         ranges,
         init_per_file_metrics,
-    ))
+    )))
 }
 
 /// Filters a flat-format record batch by the exact sequence range.
@@ -1568,6 +1568,28 @@ pub(crate) fn filter_flat_batch_by_sequence(
     Ok(Some(filtered_batch))
 }
 
+/// Read one schema-aligned batch from a file range, before merge or deduplication.
+/// Both ordinary scans and lossless compaction use this boundary.
+pub(crate) async fn next_aligned_file_batch(
+    range: &FileRange,
+    reader: &mut crate::read::prune::FlatPruneReader,
+    sequence_range: Option<SequenceRange>,
+    file_sequence_trusted: bool,
+) -> Result<Option<RecordBatch>> {
+    while let Some(batch) = reader.next_batch().await? {
+        let Some(batch) =
+            filter_flat_batch_by_sequence(batch, sequence_range, file_sequence_trusted)?
+        else {
+            continue;
+        };
+        return match range.compat_batch() {
+            Some(compat) => compat.compat(batch).map(Some),
+            None => Ok(Some(batch)),
+        };
+    }
+    Ok(None)
+}
+
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1580,7 +1602,7 @@ pub fn build_flat_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
     mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
-    try_stream! {
+    Box::pin(try_stream! {
         let fetch_metrics = if part_metrics.explain_verbose() {
             Some(Arc::new(ParquetFetchMetrics::default()))
         } else {
@@ -1611,26 +1633,14 @@ pub fn build_flat_file_range_scan_stream(
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
-            let may_compat = range.compat_batch();
             let file_sequence_trusted = range
                 .file_handle()
                 .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
 
-            while let Some(record_batch) = reader.next_batch().await? {
-                let Some(record_batch) = filter_flat_batch_by_sequence(
-                    record_batch,
-                    stream_ctx.input.sequence_range,
-                    file_sequence_trusted,
-                )? else {
-                    continue;
-                };
-
-                if let Some(flat_compat) = may_compat {
-                    let batch = flat_compat.compat(record_batch)?;
-                    yield batch;
-                } else {
-                    yield record_batch;
-                }
+            while let Some(batch) = next_aligned_file_batch(
+                &range, &mut reader, stream_ctx.input.sequence_range, file_sequence_trusted,
+            ).await? {
+                yield batch;
             }
 
             let prune_metrics = reader.metrics();
@@ -1654,7 +1664,7 @@ pub fn build_flat_file_range_scan_stream(
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
-    }
+    })
 }
 
 /// Build the stream of scanning the extension range in flat format denoted by the [`RowGroupIndex`].

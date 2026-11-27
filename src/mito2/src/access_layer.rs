@@ -402,6 +402,21 @@ impl AccessLayer {
             provider.can_merge_inputs &= write_opts.max_file_size.is_none();
         }
         let context = context.unwrap_or_default();
+        if request.sst_write_format == FormatType::Narthex {
+            if context.limits.is_some() {
+                return crate::error::UnsupportedOperationSnafu {
+                    err_msg: "Narthex table compaction is unsupported",
+                }
+                .fail();
+            }
+            return crate::sst::narthex::write_samples(
+                self,
+                request,
+                context.guard,
+                context.cancellation,
+            )
+            .await;
+        }
         let limits = context.limits;
         let guard = context.guard.clone();
         let cancellation = context.cancellation.clone();
@@ -439,12 +454,12 @@ impl AccessLayer {
             // bypass it.
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
-            let puffin_factory = if limits.is_some() {
-                self.puffin_manager_factory
-                    .clone()
-                    .with_write_buffer_size(write_opts.write_buffer_size.as_bytes() as usize)
+            let puffin_factory = self.puffin_manager_factory.clone();
+            #[cfg(feature = "enterprise")]
+            let puffin_factory = if let Some(limits) = limits {
+                puffin_factory.with_upload_limits(limits.upload_limits)
             } else {
-                self.puffin_manager_factory.clone()
+                puffin_factory
             };
             let indexer_builder = IndexerBuilderImpl {
                 index_build_inputs: request.index_build_inputs,
@@ -464,7 +479,7 @@ impl AccessLayer {
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
             // we may have find a way to check whether we need the cleaner.
             let cleaner = TempFileCleaner::new(region_id, self.object_store.clone());
-            let mut writer = ParquetWriter::new_with_object_store(
+            let writer = ParquetWriter::new_with_object_store(
                 self.object_store.clone(),
                 request.metadata,
                 request.index_config,
@@ -482,6 +497,13 @@ impl AccessLayer {
             .with_write_guard(guard)
             .with_cancellation(cancellation)
             .with_memory_limits(limits);
+            #[cfg(feature = "enterprise")]
+            let writer = if let Some(limits) = limits {
+                writer.with_upload_limits(limits.upload_limits)
+            } else {
+                writer
+            };
+            let mut writer = writer;
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
                     writer
@@ -491,6 +513,12 @@ impl AccessLayer {
                             write_opts,
                         )
                         .await?
+                }
+                FormatType::Narthex => {
+                    return crate::error::UnsupportedOperationSnafu {
+                        err_msg: "narthex writer must bypass Parquet cache",
+                    }
+                    .fail();
                 }
                 FormatType::Flat => {
                     writer
@@ -649,7 +677,8 @@ impl AccessLayer {
                 }
 
                 let path = entry.path();
-                if !path.ends_with(".parquet") && !path.ends_with(".puffin") {
+                if !path.ends_with(".parquet") && !path.ends_with(".puffin")
+                    && crate::sst::location::parse_narthex_file_id(path).is_none() {
                     continue;
                 }
 

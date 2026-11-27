@@ -302,6 +302,7 @@ fn file_meta_from_sst_info(
         level: 0,
         file_size: info.file_size,
         max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        max_row_group_decoded_size: info.max_row_group_decoded_size,
         available_indexes: Default::default(),
         indexes: Default::default(),
         index_file_size: 0,
@@ -474,6 +475,9 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
             ..Default::default()
         };
         let infos = match format {
+            FormatType::Narthex => {
+                unimplemented!("direct SST fixtures only support Parquet formats")
+            }
             FormatType::Flat => writer.write_all_flat(source, Some(sequence), &opts).await,
             FormatType::PrimaryKey => {
                 writer
@@ -515,6 +519,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         append_mode: table.append_mode,
         pending_tails: Default::default(),
         series_indexes: Default::default(),
+        series_window_seconds: None,
         handoff_floors: Default::default(),
     };
     let checkpoint = RegionCheckpoint {

@@ -1021,6 +1021,56 @@ pub async fn sql_to_df_plan(
     sql: &str,
     optimize: bool,
 ) -> Result<LogicalPlan, Error> {
+    let query_stmt = parse_flow_query(&query_ctx, sql)?;
+    // The plan's columns are matched against the sink table, so a TQL query must publish the same
+    // columns whichever PromQL route plans it.
+    let plan = engine
+        .planner()
+        .plan_relation(query_stmt, query_ctx.clone())
+        .await
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+    let plan = if optimize {
+        apply_df_optimizer(plan, &query_ctx).await?
+    } else {
+        plan
+    };
+    Ok(plan)
+}
+
+/// The column the native PromQL route publishes each row's metric name under.
+const METRIC_NAME_COLUMN: &str = "__name__";
+
+/// Plans `sql` unoptimized, to be written into a sink table with `sink_schema`.
+///
+/// Before TQL flows were planned with `plan_relation`, a flow on the native PromQL route
+/// auto-created its sink from the native plan's own columns: the value named by that route, the
+/// labels, and `__name__` as a primary key column. A sink with `__name__` is still written from the
+/// statement's own plan, so such a flow keeps writing the same columns and the same series keys.
+/// `plan_relation` and `plan` only differ for a PromQL statement on the native route.
+async fn sql_to_df_plan_for_sink(
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+    sql: &str,
+    sink_schema: &datatypes::schema::Schema,
+) -> Result<LogicalPlan, Error> {
+    if sink_schema
+        .column_schema_by_name(METRIC_NAME_COLUMN)
+        .is_none()
+    {
+        return sql_to_df_plan(query_ctx, engine, sql, false).await;
+    }
+    let query_stmt = parse_flow_query(&query_ctx, sql)?;
+    engine
+        .planner()
+        .plan(query_stmt, query_ctx)
+        .await
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)
+}
+
+fn parse_flow_query(query_ctx: &QueryContextRef, sql: &str) -> Result<QueryStatement, Error> {
     let scheduled_time = query::options::parse_scheduled_time_datetime(&query_ctx.extensions())
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
@@ -1053,7 +1103,7 @@ pub async fn sql_to_df_plan(
                     alias: eval.alias,
                 };
 
-                QueryLanguageParser::parse_promql(&promql, &query_ctx)
+                QueryLanguageParser::parse_promql(&promql, query_ctx)
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?
             }
@@ -1064,19 +1114,7 @@ pub async fn sql_to_df_plan(
         },
         _ => QueryStatement::Sql(stmt),
     };
-    let plan = engine
-        .planner()
-        .plan(query_stmt, query_ctx.clone())
-        .await
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-
-    let plan = if optimize {
-        apply_df_optimizer(plan, &query_ctx).await?
-    } else {
-        plan
-    };
-    Ok(plan)
+    Ok(query_stmt)
 }
 
 /// Generate a plan that matches the schema of the sink table
@@ -1111,7 +1149,7 @@ pub(crate) async fn gen_plan_with_matching_schema_and_values(
     allow_partial: bool,
     values: &BTreeMap<String, ScalarValue>,
 ) -> Result<LogicalPlan, Error> {
-    let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
+    let plan = sql_to_df_plan_for_sink(query_ctx, engine, sql, &sink_table_schema).await?;
 
     let mut add_auto_column = ColumnMatcherRewriter::new_with_values(
         sink_table_schema,

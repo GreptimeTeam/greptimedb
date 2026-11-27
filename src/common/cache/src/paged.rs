@@ -18,23 +18,19 @@
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 use std::hash::Hash;
 use std::io;
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use common_base::range_read::RangeReader;
-use futures::channel::{mpsc, oneshot};
-use futures::{StreamExt, future};
 
 use crate::metrics::{CacheMetrics, CacheSizeMetric, CacheSizeRegistration};
 use crate::page::PageLayout;
-use crate::{Cache, RemovalCause};
+use crate::{Cache, RemovalCause, batch};
 
 /// Business-level events; callers retain their existing hit/miss metric units.
 pub enum PageEvent {
@@ -212,72 +208,14 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             misses: stats.cache_miss,
         });
         if !missing.is_empty() {
-            let (requests, receiver) = mpsc::unbounded();
-            let batch_size = missing.len().max(1);
-            let mut loads = missing
-                .into_iter()
-                .map(|id| {
-                    let requests = requests.clone();
-                    let key = (file.clone(), id);
-                    Box::pin(future::maybe_done(async move {
-                        let range = layout.page_range(id).ok_or_else(invalid_request)?;
-                        let page = self
-                            .cache
-                            .try_get_with(&key, async {
-                                let (send, receive) =
-                                    oneshot::channel::<Result<Bytes, Arc<io::Error>>>();
-                                requests
-                                    .unbounded_send((range.clone(), send))
-                                    .map_err(|_| io::Error::other("Page read batch closed"))?;
-                                let bytes = receive
-                                    .await
-                                    .map_err(|_| io::Error::other("Page read batch cancelled"))?
-                                    .map_err(|error: Arc<io::Error>| {
-                                        io::Error::new(error.kind(), error)
-                                    })?;
-                                if bytes.len() as u64 != range.end - range.start {
-                                    return Err(io::Error::new(
-                                        io::ErrorKind::UnexpectedEof,
-                                        "Invalid page response length",
-                                    ));
-                                }
-                                // Detach readers' shared backing buffers from cache accounting.
-                                Ok(self
-                                    .create_cached_page(file_size, Bytes::copy_from_slice(&bytes)))
-                            })
-                            .await?;
-                        check_file_size(&page, file_size)?;
-                        Ok::<_, Arc<io::Error>>((id, page.bytes.clone()))
-                    }))
+            let loads = |requests: batch::BatchSender<_, _>| {
+                missing.into_iter().map(move |id| {
+                    self.load_page((file.clone(), id), layout, file_size, requests.clone())
                 })
-                .collect::<Vec<_>>();
-            // Poll every page before driving I/O, so executor fairness limits do not
-            // split one fetch's immediately available misses into separate batches.
-            let loads = future::poll_fn(move |cx| {
-                let mut complete = true;
-                for load in &mut loads {
-                    complete &= load.as_mut().poll(cx).is_ready();
-                    if let Some(Err(error)) = load.as_mut().output_mut() {
-                        return Poll::Ready(Err(error.clone()));
-                    }
-                }
-                if !complete {
-                    return Poll::Pending;
-                }
-                Poll::Ready(
-                    loads
-                        .iter_mut()
-                        .map(|load| load.as_mut().take_output().ok_or_else(invalid_request)?)
-                        .collect::<Result<Vec<_>, _>>(),
-                )
-            });
-            // The channel contains only loaders elected by Moka for this fetch. Waiters
-            // enqueue nothing; a waiter promoted after cancellation can enqueue later.
-            drop(requests);
-            let read_batches = async {
-                let mut batches = receiver.ready_chunks(batch_size);
-                while let Some(batch) = batches.next().await {
-                    let (ranges, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+            };
+            batch::load(
+                loads,
+                |ranges, replies| async move {
                     let result = reader.read_vec(&ranges).await.and_then(|bytes| {
                         if bytes.len() == ranges.len() {
                             Ok(bytes)
@@ -301,11 +239,12 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
                             }
                         }
                     }
-                }
-                Ok::<(), Arc<io::Error>>(())
-            };
-            let (loaded, ()) = future::try_join(loads, read_batches).await?;
-            pages.extend(loaded);
+                },
+                |(id, bytes)| {
+                    pages.insert(id, bytes);
+                },
+            )
+            .await?;
         }
         let mut output = Vec::with_capacity(ranges.len());
         for range in ranges {
@@ -345,6 +284,36 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             output.push(assembled.freeze());
         }
         Ok((output, stats))
+    }
+
+    async fn load_page(
+        &self,
+        key: (K, u64),
+        layout: PageLayout,
+        file_size: u64,
+        requests: batch::BatchSender<Range<u64>, Result<Bytes, Arc<io::Error>>>,
+    ) -> Result<(u64, Bytes), Arc<io::Error>> {
+        let range = layout.page_range(key.1).ok_or_else(invalid_request)?;
+        let page = self
+            .cache
+            .try_get_with(&key, async {
+                let bytes = requests
+                    .request(range.clone())
+                    .await
+                    .ok_or_else(|| io::Error::other("Page read batch cancelled"))?
+                    .map_err(|error: Arc<io::Error>| io::Error::new(error.kind(), error))?;
+                if bytes.len() as u64 != range.end - range.start {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Invalid page response length",
+                    ));
+                }
+                // Detach readers' shared backing buffers from cache accounting.
+                Ok(self.create_cached_page(file_size, Bytes::copy_from_slice(&bytes)))
+            })
+            .await?;
+        check_file_size(&page, file_size)?;
+        Ok((key.1, page.bytes.clone()))
     }
 
     fn create_cached_page(&self, file_size: u64, bytes: Bytes) -> Arc<CachedPage> {

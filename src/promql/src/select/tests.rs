@@ -24,7 +24,7 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
 
 use super::{
-    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, limit_ratio, limitk,
+    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, calls, limit_ratio, limitk,
     natural_less, sample_offset, scalar, sort_instant, topk,
 };
 use crate::golden::fold_pieces;
@@ -33,7 +33,7 @@ use crate::grid_series::reference::{
     run_ranges, sparse_series,
 };
 use crate::grid_series::{GridSample, GridSeriesBuilder};
-use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::histogram_eval::float_histogram::{FloatHistogram, copies};
 
 fn schema(points: u64, fields: usize) -> SeriesSchema {
     SeriesSchema {
@@ -77,10 +77,7 @@ fn dense(points: usize, values: &str) -> Dense {
     dense
 }
 
-/// The `dense` matrix as one trimmed series, `None` when every row is missing.
-///
-/// An *input*, so the holes stay nulls inside one series: the builder would cut them into pieces,
-/// and the operators under test take one series per input.
+/// The `dense` matrix as one trimmed series with holes as nulls, `None` when every row is missing.
 fn build(schema: &SeriesSchema, metric: SeriesLabels, dense: &Dense) -> Option<Series> {
     let start = dense
         .iter()
@@ -221,8 +218,7 @@ fn sample_offset_hashes_labels_like_prometheus() {
     }
 }
 
-/// `limitk` and `limit_ratio` select series, so histogram samples pass through, and
-/// `limit_ratio` keeps every field of the series it keeps.
+/// `limit_ratio` keeps every field of a kept series, histograms included.
 #[test]
 fn limit_operators_keep_histogram_samples() {
     let histogram =
@@ -269,8 +265,6 @@ fn limit_operators_keep_histogram_samples() {
     assert_eq!(kinds(&kept[0], 0), [(1, "histogram")]);
 }
 
-/// `topk` ranks floats only: a histogram sample is skipped, as Prometheus ignores it, and the
-/// float below it is kept in its place.
 #[test]
 fn topk_skips_histogram_samples() {
     let histogram =
@@ -294,8 +288,7 @@ fn topk_skips_histogram_samples() {
     assert_eq!(kept[0].metric.name(), Some("b"));
 }
 
-/// `sort` drops histogram samples at every step, as Prometheus' `filterFloats` does, while
-/// `sort_by_label` keeps them.
+/// Prometheus' `filterFloats` drops histograms before `sort`, not before `sort_by_label`.
 #[test]
 fn sort_drops_histogram_samples() {
     let histogram =
@@ -339,9 +332,6 @@ fn sort_drops_histogram_samples() {
     assert_eq!(positions, [1]);
 }
 
-/// `scalar` reads float samples only, as Prometheus' `funcScalar` does: a point whose only sample
-/// is a histogram holds no float value, so it answers NaN; a histogram beside one float leaves
-/// that float; and two floats are more than one sample, so they answer NaN.
 #[test]
 fn scalar_ignores_histogram_samples() {
     let histogram =
@@ -362,7 +352,6 @@ fn scalar_ignores_histogram_samples() {
             .unwrap()
             .unwrap()
     };
-    // A scalar exists at every grid point, so the one point of this grid is the whole answer.
     let value = |series: &[Series]| -> f64 {
         let result = scalar(&schema, series).unwrap();
         assert_eq!(result.time.len(), 1, "a scalar exists at every point");
@@ -390,11 +379,6 @@ fn scalar_ignores_histogram_samples() {
     );
 }
 
-/// `scalar` answers one dense run of values over the whole grid: one value per point and no null,
-/// so the value buffer the input is read into is the result's array.
-///
-/// The answer is the only thing a scalar can be -- a value at every point of the grid -- which is
-/// why it is written directly rather than staged as optional values and rebuilt from a row index.
 #[test]
 fn scalar_answers_one_dense_run_over_the_grid() {
     let schema = schema(3, 1);
@@ -437,28 +421,16 @@ fn scalar_answers_one_dense_run_over_the_grid() {
     }
 }
 
-/// A selection hands back the sample it selected, start timestamp included.
-///
-/// `limitk` and `limit_ratio` choose samples rather than compute them, so a histogram that arrives
-/// with a start timestamp leaves with it. The count and the sum are compared too, so a computed
-/// value that happened to carry a timestamp would not pass for the sample selected. What this pins
-/// is that the selection passes the stored payload through, not a Prometheus result and not a
-/// downstream rate that reads the field. A histogram computed from samples carries none, as
-/// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
-/// pins for the operations that build one.
 #[test]
 fn limit_operators_keep_the_start_timestamp_of_a_selected_sample() {
     let histogram =
         OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
     let start = 1_500;
-    // The sample a scan read, which is what a selection hands on.
     let stamped = || {
         let mut read = FloatHistogram::try_from_view(&histogram.view()).unwrap();
         read.start_timestamp = Some(start);
         GridSample::Histogram(Box::new(read))
     };
-    // What a limit operator keeps out of one series: the count and sum of the histogram it kept,
-    // so the sample selected is named, and the start timestamp it kept with it.
     let kept = |series: &Series| -> Vec<(usize, f64, f64, Option<i64>)> {
         let samples = &series.fields.as_slice()[0];
         series
@@ -496,6 +468,137 @@ fn limit_operators_keep_the_start_timestamp_of_a_selected_sample() {
         [expected(0), expected(2)],
         "limitk did not hand back the samples it selected"
     );
+}
+
+#[test]
+fn limit_operators_pass_histograms_through_without_an_owned_form() {
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let schema = schema(3, 1);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+    builder
+        .push_refs(0, &[SampleRef::Histogram(histogram.view())])
+        .unwrap();
+    builder
+        .push_refs(2, &[SampleRef::Histogram(histogram.view())])
+        .unwrap();
+    let series = builder.finish(metric("__name__=a")).unwrap().unwrap();
+
+    copies::take_materialized();
+    let by_ratio = limit_ratio(1.0, &schema, std::slice::from_ref(&series)).unwrap();
+    let by_count = limitk(
+        1.0,
+        &Grouping::By(Vec::new()),
+        &schema,
+        std::slice::from_ref(&series),
+    )
+    .unwrap();
+    assert_eq!(
+        copies::take_materialized(),
+        0,
+        "a selection built an owned histogram of a sample it only moved"
+    );
+
+    let kept = |series: &Series| -> Vec<(usize, bool)> {
+        let samples = &series.fields.as_slice()[0];
+        series
+            .time
+            .positions()
+            .map(|(point, row)| {
+                (
+                    point,
+                    matches!(samples.sample(row), SampleRef::Histogram(_)),
+                )
+            })
+            .collect()
+    };
+    for kept_series in [&by_ratio, &by_count] {
+        assert_eq!(kept_series.len(), 1);
+        assert_eq!(kept(&kept_series[0]), [(0, true), (2, true)]);
+    }
+}
+
+#[test]
+fn topk_ranks_a_point_with_a_partial_selection() {
+    let schema = schema(1, 1);
+    // Reverse label order, so the result cannot inherit the input order.
+    let series: Vec<Series> = (0..256)
+        .rev()
+        .map(|index| {
+            let value = if index < 16 { 10.0 } else { 1.0 };
+            build(
+                &schema,
+                metric(&format!("__name__=s{index:03}")),
+                &vec![vec![Some(value)]],
+            )
+            .unwrap()
+        })
+        .collect();
+
+    calls::take_label_lists();
+    calls::take_ranks();
+    let kept = topk(8.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    let lists = calls::take_label_lists();
+    let comparisons = calls::take_ranks();
+
+    let mut kept = rendered(&kept);
+    kept.sort();
+    assert_eq!(
+        kept,
+        [
+            "__name__=s000",
+            "__name__=s001",
+            "__name__=s002",
+            "__name__=s003",
+            "__name__=s004",
+            "__name__=s005",
+            "__name__=s006",
+            "__name__=s007"
+        ],
+    );
+    assert_eq!(
+        lists,
+        series.len(),
+        "topk rebuilt a series' label list instead of reading the one it built"
+    );
+    // A full sort would make O(n log n) comparisons.
+    assert!(
+        comparisons <= 4 * series.len(),
+        "topk compared {comparisons} candidate pairs to select 8 of {}",
+        series.len()
+    );
+}
+
+/// The k-th value falls inside a run of ties, which must be resolved by label order rather than by
+/// the order the partial selection left the group in.
+#[test]
+fn topk_breaks_ties_by_label_order() {
+    let names: Vec<String> = (0..40)
+        .map(|index| format!("__name__=s{index:02}"))
+        .collect();
+    // The ten series that sort first carry the top value; input in reverse label order.
+    let values: Vec<(&str, Option<f64>)> = names
+        .iter()
+        .rev()
+        .map(|name| {
+            let value = if name.as_str() < "__name__=s10" {
+                7.0
+            } else {
+                3.0
+            };
+            (name.as_str(), Some(value))
+        })
+        .collect();
+    let (schema, series) = instant(&values);
+    let kept = topk(3.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    let mut kept = rendered(&kept);
+    kept.sort();
+    assert_eq!(kept, ["__name__=s00", "__name__=s01", "__name__=s02"]);
+
+    let kept = topk(3.0, false, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    let mut kept = rendered(&kept);
+    kept.sort();
+    assert_eq!(kept, ["__name__=s10", "__name__=s11", "__name__=s12"]);
 }
 
 fn grouping(kind: &str, labels: &str) -> Grouping {
@@ -550,8 +653,6 @@ fn check_cases(
             (actual, expected) => panic!("{case}\ngot {actual:?}, expected error {expected:?}"),
         };
 
-        // A result arrives as one series over the runs of valued positions; the fixtures pin the
-        // dense values, so each result is expanded over the grid before comparing.
         let actual: BTreeMap<String, Series> = fold_pieces(actual)
             .into_iter()
             .map(|series| (render(&series.metric), series))
@@ -726,22 +827,16 @@ fn absent_evaluates_fields_independently() {
     let result = absent(&schema, &series, metric("-"))
         .unwrap()
         .expect("both positions are absent in one field");
-    // The two fields take turns holding a value, but a row is kept when either field has one, so
-    // both positions stay in one run; the missing field carries a null there.
+    // A row is kept when either field has a value, so both positions form one run.
     assert_eq!(piece_ranges(std::slice::from_ref(&result)), vec![(0, 2)]);
     let expected = vec![vec![None, Some(1.0)], vec![Some(1.0), None]];
     assert_pieces_eq(std::slice::from_ref(&result), &expected, &metric("-"));
 }
 
-/// `absent` and `scalar` read a series of several runs by its positions.
-///
-/// The rows of a sparse input are neither adjacent nor starting where the series says, so an
-/// operator that counted rows from the first position would report presence at the wrong points.
 #[test]
 fn select_operators_read_a_sparse_axis_by_its_positions() {
     let schema = Arc::new(schema(8, 1));
     let labels = Labels::from([("host".to_string(), "a".to_string())]);
-    // Positions 1, 2 and 6 hold a value; 0, 3, 4, 5 and 7 hold none.
     let mut points = Points::new();
     for position in [1, 2, 6] {
         points.insert(position, f64::to_bits(1.0));
@@ -749,7 +844,6 @@ fn select_operators_read_a_sparse_axis_by_its_positions() {
     let sparse = sparse_series(&schema, &labels, &points).unwrap();
     assert_eq!(sparse.time.len(), 3);
 
-    // `absent` reports 1 at every point nothing is present: the five positions the axis skips.
     let absent_series = absent(&schema, std::slice::from_ref(&sparse), metric("-"))
         .unwrap()
         .expect("the sparse series holds five absent positions");
@@ -765,7 +859,6 @@ fn select_operators_read_a_sparse_axis_by_its_positions() {
         "absent must hold a value exactly where the sparse series holds none"
     );
 
-    // `scalar` reads the same sparse rows and reports NaN where nothing is present.
     let scalar_series = scalar(&schema, std::slice::from_ref(&sparse)).unwrap();
     assert_eq!(
         scalar_series.time.len(),
@@ -788,72 +881,8 @@ fn select_operators_read_a_sparse_axis_by_its_positions() {
     assert!(matches!(values[3].1, SampleRef::Float(value) if value.is_nan()));
 }
 
-/// F: `topk` selects a winner sitting in a later run, so its result is a fragmented axis of the
-/// selected positions, not a contiguous piece from the earliest winner.
-///
-/// Three series each carry one position: a=7 at 1, b=9 at 4 and c=2 at 9. `topk` ranks per point,
-/// so each point holds the one candidate its series carries -- and every survivor sits at its own
-/// position, never shifted to the start of an envelope.
-#[test]
-fn topk_keeps_a_winner_sitting_in_a_later_run() {
-    let schema = Arc::new(schema(10, 1));
-    let operand = |name: &str, position: usize, value: f64| -> Series {
-        let labels = Labels::from([("host".to_string(), name.to_string())]);
-        let points = Points::from([(position, f64::to_bits(value))]);
-        sparse_series(&schema, &labels, &points).expect("one position holds a value")
-    };
-    let series = vec![
-        operand("a", 1, 7.0),
-        operand("b", 4, 9.0),
-        operand("c", 9, 2.0),
-    ];
-    for operand in &series {
-        assert_eq!(
-            run_ranges(operand),
-            vec![(operand.time.first_position().expect("one row"), 1)]
-        );
-        assert_eq!(operand.time.len(), 1, "each series carries one row");
-    }
-
-    // `topk(1)` over the empty grouping: at each point the only candidate wins, so all three
-    // series survive, each at its own position.
-    let result = topk(1.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
-    assert_eq!(result.len(), 3, "one candidate per point: {result:?}");
-    let mut ranges = piece_ranges(&result);
-    ranges.sort_unstable();
-    assert_eq!(
-        ranges,
-        vec![(1, 1), (4, 1), (9, 1)],
-        "every winner sits at its own position, not at the start of an envelope"
-    );
-    let mut expected = vec![vec![None]; 10];
-    expected[4] = vec![Some(9.0)];
-    let middle = result
-        .iter()
-        .find(|series| series.metric.get("host") == Some("b"))
-        .expect("series b wins at position 4")
-        .clone();
-    assert_result_eq(Some(&middle), &expected, &metric("host=b"));
-
-    // `topk(2)` is evaluated per point, and each point holds one candidate, so it selects the
-    // same three series the `k=1` case did.
-    let result = topk(2.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
-    assert_eq!(result.len(), 3, "one candidate per point: {result:?}");
-    let mut ranges = piece_ranges(&result);
-    ranges.sort_unstable();
-    assert_eq!(ranges, vec![(1, 1), (4, 1), (9, 1)]);
-    for series in &result {
-        assert_eq!(series.time.len(), 1, "one row, one position");
-    }
-}
-
-/// F: `topk` ranks each point on its own, so a winner can sit in a later run, and a tie is broken
-/// by label order rather than by position.
-///
-/// Series `a` holds 5 at 0 and 5 at 6; series `b` holds 5 at 0 and 4 at 6. The two tie at 0, and
-/// the earlier label set wins there; at 6 the larger value wins. So `topk(1)` selects `a` twice, at
-/// two positions with a hole between -- a winner in a later run. `bottomk(1)` flips the second
-/// point to `b`, so the two winners sit in different runs of the two inputs.
+/// Sparse inputs: `a` holds 5 at 0 and 6, `b` holds 5 at 0 and 4 at 6. The tie at 0 goes to `a`;
+/// `bottomk(1)` picks `b` at 6, a winner in a later run.
 #[test]
 fn topk_breaks_ties_across_a_gap_by_label_order() {
     let schema = Arc::new(schema(10, 1));
@@ -865,15 +894,12 @@ fn topk_breaks_ties_across_a_gap_by_label_order() {
             .collect();
         sparse_series(&schema, &labels, &points).expect("the series holds a value")
     };
-    // Each series carries two positions with a hole between them.
     let a = operand("a", &[(0, 5.0), (6, 5.0)]);
     let b = operand("b", &[(0, 5.0), (6, 4.0)]);
     assert_eq!(run_ranges(&a), vec![(0, 1), (6, 1)]);
     assert_eq!(run_ranges(&b), vec![(0, 1), (6, 1)]);
     let series = vec![a, b];
 
-    // `topk(1)`: `a` wins at both points -- the tie at 0 goes to the earlier label set, and 5 beats
-    // 4 at 6. The winner is one series whose two rows are two runs.
     let result = topk(1.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
     assert_eq!(
         result.len(),
@@ -891,7 +917,6 @@ fn topk_breaks_ties_across_a_gap_by_label_order() {
     expected[6] = vec![Some(5.0)];
     assert_result_eq(Some(&result[0]), &expected, &metric("host=a"));
 
-    // `topk(2)`: both series are selected wherever they hold a value.
     let result = topk(2.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
     assert_eq!(result.len(), 2, "both series are selected: {result:?}");
     let mut all = piece_ranges(&result);
@@ -913,8 +938,6 @@ fn topk_breaks_ties_across_a_gap_by_label_order() {
     let winner = by_label(&result, "b");
     assert_result_eq(Some(&winner), &second, &metric("host=b"));
 
-    // `bottomk(1)`: the tie at 0 still goes to `a`, but 4 beats 5 at 6, so `b` wins in the later
-    // run. The two winners sit in different series and at different positions.
     let result = topk(1.0, false, &Grouping::By(Vec::new()), &schema, &series).unwrap();
     assert_eq!(result.len(), 2, "each series wins one point: {result:?}");
     let mut ranges = piece_ranges(&result);

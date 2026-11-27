@@ -26,7 +26,9 @@ use common_meta::error::{
 };
 use common_meta::kv_backend::read_only::ReadOnlyKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnResponse};
-use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
+use common_meta::kv_backend::{
+    KvBackend, KvBackendCapabilities, KvBackendRef, TxnCapability, TxnService,
+};
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -129,13 +131,17 @@ impl TxnService for CachedKvBackend {
         self.kv_backend.txn(txn).await
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.kv_backend.max_txn_ops()
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        self.kv_backend.txn_capability()
     }
 }
 
 #[async_trait::async_trait]
 impl KvBackend for CachedKvBackend {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        self.kv_backend.capabilities()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -388,10 +394,6 @@ impl TxnService for MetaKvBackend {
             operation: "MetaKvBackend txn",
         }
         .fail()
-    }
-
-    fn max_txn_ops(&self) -> usize {
-        usize::MAX
     }
 }
 
@@ -671,6 +673,7 @@ mod tests {
         let meta_client = Arc::new(MetaClientBuilder::frontend_default_options().build());
         let backend = new_read_only_meta_kv_backend(meta_client);
 
+        assert_eq!(backend.txn_capability(), None);
         let result = backend
             .txn(Txn::new().and_then(vec![TxnOp::Get(b"k1".to_vec())]))
             .await;

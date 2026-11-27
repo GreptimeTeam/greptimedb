@@ -85,12 +85,11 @@ pub(crate) fn segment_bytes(segment: &Samples) -> usize {
             .get_array_memory_size()
             .saturating_add(mixed.histograms().indices().get_array_memory_size())
             .saturating_add(table_bytes(mixed.histograms().batch())),
-        // `segments` hands out dense segments only, so a nested chunk never reaches here.
+        // `segments` yields dense segments only.
         None => 0,
     }
 }
 
-/// The bytes one histogram table holds: the batch struct and the arrays its columns view.
 pub(crate) fn table_bytes(table: &Arc<HistogramBatch>) -> usize {
     std::mem::size_of::<HistogramBatch>().saturating_add(table.as_arrow().get_array_memory_size())
 }
@@ -99,35 +98,21 @@ pub(crate) fn field_builder_bytes(width: usize) -> usize {
     width.saturating_mul(std::mem::size_of::<FieldBuilder>())
 }
 
-/// Builds one grid series from rows pushed at absolute grid indices.
+/// Builds one grid series from rows pushed at increasing absolute grid indices.
 ///
-/// A push names one position and the value each field holds there. Rows are accumulated
-/// compactly: a row is kept only when at least one field holds a value at that position, so an
-/// empty stretch costs one skipped push and no storage at all. Fields stay row-aligned, so a field
-/// with no value at a retained row still gets a null there; the Arrow layout needs one row per
-/// retained position, and the position does hold a value.
+/// A row is kept only when at least one field holds a value; a field without a value at a kept row
+/// gets a null. The rows are handed out as one [`Series`] whose [`TimeAxis`] names their maximal
+/// runs, so positions without a value cost nothing.
 ///
-/// [`GridSeriesBuilder::finish`] hands out all the buffered rows as **one** [`Series`], whose
-/// [`TimeAxis`] names the maximal runs of consecutive positions the rows make up. The rows are not
-/// densified: the axis says where they sit, so a series over two far-apart positions costs two rows
-/// and two spans, not a row per position between them.
-///
-/// A builder serves one series at a time. [`GridSeriesBuilder::begin_series`] starts the next one;
-/// nothing else resets the series state, so [`GridSeriesBuilder::take_buffered`] can hand out the
-/// rows gathered so far and let the same series go on.
+/// A builder serves one series at a time; only [`GridSeriesBuilder::begin_series`] resets it.
 pub struct GridSeriesBuilder {
     schema: Arc<SeriesSchema>,
     grid: Arc<EvalGrid>,
     /// Smallest index the next push may use.
     next: usize,
     /// Grid index of each retained row, ascending.
-    ///
-    /// This vector is the only record of where the gaps are, and it says only where rows sit:
-    /// with `V` entries, `F` fields and `k` runs (`k <= V`) the whole series costs `8*F*V` value
-    /// bytes plus validity bits, one `usize` per retained row and `O(k)` run descriptors. Nothing
-    /// is proportional to the positions holding no value.
     indices: Vec<usize>,
-    /// One row per retained row, per field; empty when nothing is buffered.
+    /// Empty until the first retained row of a hand-out.
     fields: Vec<FieldBuilder>,
 }
 
@@ -164,7 +149,7 @@ pub(crate) fn owned(sample: SampleRef<'_>) -> Result<Option<GridSample>> {
 }
 
 impl GridSeriesBuilder {
-    /// Creates a builder for series of `schema`, which must have an evaluation grid.
+    /// Errors when `schema` has no evaluation grid.
     pub fn try_new(schema: Arc<SeriesSchema>) -> Result<Self> {
         let grid = schema.eval_grid.clone().ok_or_else(|| {
             DataFusionError::Execution("grid series schema requires an evaluation grid".into())
@@ -180,8 +165,8 @@ impl GridSeriesBuilder {
 
     /// Reserves capacity for the exact number of valued rows in the next series.
     ///
-    /// Call after `begin_series` and before its first push. Existing public callers may continue
-    /// to rely on normal growth; callers with a budget can reserve the concrete row capacity first.
+    /// Call after `begin_series` and before its first push; callers that skip it rely on normal
+    /// growth.
     pub(crate) fn reserve_rows(&mut self, rows: usize) -> Result<()> {
         self.indices
             .try_reserve_exact(rows.saturating_sub(self.indices.len()))
@@ -210,7 +195,7 @@ impl GridSeriesBuilder {
 
     /// Pushes the field values at absolute grid `index`; `None` is a missing value.
     ///
-    /// Indices must be strictly increasing; skipped indices are positions that hold no value.
+    /// Errors unless indices strictly increase within the grid and `values` has one entry per field.
     pub fn push(&mut self, index: usize, values: &[Option<f64>]) -> Result<()> {
         if !self.start_row(index, values.len(), values.iter().all(Option::is_none))? {
             return Ok(());
@@ -233,17 +218,38 @@ impl GridSeriesBuilder {
         for (field, value) in self.fields.iter_mut().zip(values) {
             match value {
                 Some(GridSample::Histogram(h)) => {
-                    field.values.push(0.0);
-                    field.nulls.append(false);
-                    let rows = field.values.len() - 1;
-                    let column = field.histograms.get_or_insert_with(|| HistogramColumn {
-                        batch: HistogramBatchBuilder::new(),
-                        indices: vec![None; rows],
-                    });
+                    let column = field.start_histogram();
                     column.indices.push(Some(h.push_to(&mut column.batch)?));
                 }
                 Some(GridSample::Float(value)) => field.push_float(Some(*value)),
                 None => field.push_float(None),
+            }
+        }
+        Ok(())
+    }
+
+    /// Like [`GridSeriesBuilder::push_samples`], copying histograms from their views without an
+    /// owned intermediate.
+    pub(crate) fn push_refs(&mut self, index: usize, values: &[SampleRef<'_>]) -> Result<()> {
+        if !self.start_row(
+            index,
+            values.len(),
+            values
+                .iter()
+                .all(|value| matches!(value, SampleRef::Missing)),
+        )? {
+            return Ok(());
+        }
+        for (field, value) in self.fields.iter_mut().zip(values) {
+            match value {
+                SampleRef::Histogram(view) => {
+                    let column = field.start_histogram();
+                    column
+                        .indices
+                        .push(Some(column.batch.push(*view).map_err(external)?));
+                }
+                SampleRef::Float(value) => field.push_float(Some(*value)),
+                SampleRef::Missing => field.push_float(None),
             }
         }
         Ok(())
@@ -265,8 +271,6 @@ impl GridSeriesBuilder {
         }
         self.next = index + 1;
         if empty {
-            // A position holding no value anywhere is not a row: an index absent from `indices`
-            // already says exactly that, so writing it down would only cost storage.
             return Ok(false);
         }
         if self.fields.is_empty() {
@@ -276,23 +280,14 @@ impl GridSeriesBuilder {
         Ok(true)
     }
 
-    /// Whether rows have been pushed that no caller has taken yet.
-    ///
-    /// Every hand-out drains the buffer, so "rows buffered" and "rows a caller has not taken" are
-    /// the same thing: a `true` here means the next [`Self::finish`] or [`Self::take_buffered`] has
-    /// something to return.
+    /// Whether the next [`Self::finish`] or [`Self::take_buffered`] has rows to return.
     pub fn has_pending(&self) -> bool {
         !self.indices.is_empty()
     }
 
-    /// Starts the series the following pushes belong to.
+    /// Starts the series the following pushes belong to and resets the index cursor.
     ///
-    /// This is the only place that resets the series state, so it is the logical-series boundary:
-    /// [`Self::finish`] hands the rows out but resets nothing, and [`Self::take_buffered`]
-    /// deliberately does not reset anything either.
-    ///
-    /// Panics in debug builds when rows are still pending, which means the previous series was
-    /// left unread.
+    /// Panics in debug builds when rows of the previous series are still pending.
     pub fn begin_series(&mut self) {
         debug_assert!(
             !self.has_pending(),
@@ -303,30 +298,21 @@ impl GridSeriesBuilder {
         self.fields.clear();
     }
 
-    /// Hands out every row buffered so far as one series, without ending the series.
+    /// Hands out the rows pushed since the last hand-out as one [`Series`], or `None` when there
+    /// are none. The index cursor is kept, so later pushes continue the same series.
     ///
-    /// This is a prefix flush: the rows pushed since the last hand-out become one [`Series`] whose
-    /// axis names the runs they make up. `None` means nothing is buffered, and the caller may push
-    /// more rows. Later pushes still belong to the same logical series, so the caller keeps the
-    /// metric and reads the next hand-out as a continuation rather than as a new series.
-    ///
-    /// Nothing is reset: not the metric, not the index cursor, not the position order. A caller
-    /// that wants a new series calls [`Self::begin_series`].
+    /// Same as [`Self::finish`]; the name marks a prefix flush at the call site.
     pub fn take_buffered(&mut self, metric: SeriesLabels) -> Result<Option<Series>> {
         self.collect(metric)
     }
 
-    /// Returns the series the pushed rows make up: one [`Series`] over the runs of consecutive
-    /// positions that hold a value, or `None` when no retained row holds one.
-    ///
-    /// The rows share the one buffer per field, so the result costs a span per run and not a row
-    /// per position between the runs. This ends the logical series; the next one starts with
-    /// [`Self::begin_series`], which is the only reset.
+    /// Hands out the rows pushed since the last hand-out as one [`Series`], or `None` when there
+    /// are none. Same as [`Self::take_buffered`]: neither resets the index cursor, so a caller
+    /// starting another series calls [`Self::begin_series`].
     pub fn finish(&mut self, metric: SeriesLabels) -> Result<Option<Series>> {
         self.collect(metric)
     }
 
-    /// Turns the buffered rows into one series over the runs they make up.
     fn collect(&mut self, metric: SeriesLabels) -> Result<Option<Series>> {
         if self.indices.is_empty() {
             return Ok(None);
@@ -351,8 +337,6 @@ impl GridSeriesBuilder {
             samples.push(sample);
         }
         let fields = SeriesFields::try_from_vec(samples).map_err(external)?;
-        // The runs are all the axis has to remember about the gaps, and the rows are already
-        // compact, so no position holding no value is visited or stored.
         let run_count = count_runs(&indices);
         let spans = spans_of(&indices, run_count)?;
         let time = TimeAxis::from_grid_spans(self.grid.clone(), spans).map_err(external)?;
@@ -362,7 +346,7 @@ impl GridSeriesBuilder {
     }
 }
 
-/// Cuts the retained indices into maximal runs of consecutive positions.
+/// Counts the maximal runs of consecutive positions in ascending `indices`.
 fn count_runs(indices: &[usize]) -> usize {
     indices
         .windows(2)
@@ -404,6 +388,17 @@ impl FieldBuilder {
             column.indices.push(None);
         }
     }
+
+    /// Writes the float side of a histogram row and returns the column its index goes into.
+    fn start_histogram(&mut self) -> &mut HistogramColumn {
+        self.values.push(0.0);
+        self.nulls.append(false);
+        let rows = self.values.len() - 1;
+        self.histograms.get_or_insert_with(|| HistogramColumn {
+            batch: HistogramBatchBuilder::new(),
+            indices: vec![None; rows],
+        })
+    }
 }
 
 /// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
@@ -438,15 +433,10 @@ pub(crate) fn label_set(metric: &SeriesLabels) -> LabelSet {
 }
 
 /// Merges series that share a label set into one, as Prometheus does after a function that
-/// rewrites labels or drops `__name__`; two of them holding one field at one point fail, whether
-/// the samples are floats or native histograms.
+/// rewrites labels or drops `__name__`. Errors when two of them hold the same field at one point.
 ///
-/// The merge rearranges the payloads instead of rewriting them: a merged row takes the value its
-/// member carries at that position -- a float, a NaN, or a native histogram -- and a field another
-/// field's row does not fill keeps a null there. The values keep their storage: a run of rows one
-/// member holds in one dense segment is handed out as a [`Samples::slice`] of that segment, so a
-/// histogram table is shared rather than copied. The result costs one row per position holding a
-/// value, plus the rows the other fields fill, and nothing for a position of the grid holding none.
+/// Values are sliced from their segments rather than copied. Merged series keep the order of their
+/// first member; the first member's metric names the result.
 pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> Result<Vec<Series>> {
     let mut groups: HashMap<LabelSet, Vec<usize>> = HashMap::with_capacity(series.len());
     let mut collided = false;
@@ -465,31 +455,22 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
         return Ok(series);
     }
 
-    // The merged axis and the fields placed on it are the schema's grid: a member of another grid
-    // would land its rows at positions naming other timestamps.
     let grid = schema.eval_grid.clone().ok_or_else(|| {
         DataFusionError::Execution("grid series schema requires an evaluation grid".into())
     })?;
     let mut series: Vec<Option<Series>> = series.into_iter().map(Some).collect();
     let mut output = Vec::with_capacity(groups.len());
-    // The groups in the order their first member arrived: a `HashMap` would hand the merged series
-    // back in an order that changes between runs, and the root's chunk stream exposes exactly this
-    // order, so two executions of one query could report their series differently.
+    // Order by first member so the output order is deterministic across runs.
     let mut groups: Vec<(LabelSet, Vec<usize>)> = groups.into_iter().collect();
     groups.sort_unstable_by_key(|(_, members)| members[0]);
-    // `(absolute position, member slot, compact row)`, sorted by position before merging. The slot
-    // indexes the group's fragments, so a row names its member without a search.
+    // `(absolute position, member slot, compact row)`.
     let mut rows: Vec<(usize, usize, usize)> = Vec::new();
-    // The position of each merged row, ascending, with the positions several fragments share held
-    // once.
     let mut positions: Vec<usize> = Vec::new();
     for (labels, members) in groups {
         if let [member] = members[..] {
             output.extend(series[member].take());
             continue;
         }
-        // Validate every fragment before indexing it: the merge reads its fields and places its
-        // rows on the schema's grid.
         let mut fragments: Vec<&Series> = Vec::with_capacity(members.len());
         for &member in &members {
             let fragment = series[member].as_ref().ok_or_else(|| {
@@ -512,8 +493,6 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
                     fragment.fields.len()
                 )));
             }
-            // The alignment is checked before a row is read: a field of another length would either
-            // run off the axis or leave values the axis never reaches.
             let time_len = fragment.time.len();
             if let Some((field, samples)) = fragment
                 .fields
@@ -531,8 +510,6 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
         }
         rows.clear();
         for (member_slot, fragment) in fragments.iter().enumerate() {
-            // One forward reader per field: the axis names the rows that exist, and a row holding
-            // no value in any field is not a merged row.
             let mut readers: Vec<FieldReader<'_>> =
                 fragment.fields.iter().map(FieldReader::new).collect();
             for (position, row) in fragment.time.positions() {
@@ -546,8 +523,7 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
                 }
             }
         }
-        // By position, then by member slot: the slots follow the order the fragments were collected
-        // in, so a member's rows only go forward and its readers never go back.
+        // Within one member, rows stay ascending, so its `FieldReader`s only move forward.
         rows.sort_unstable();
         positions.clear();
         positions.extend(rows.iter().map(|&(position, _, _)| position));
@@ -560,42 +536,31 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
                 .collect();
             fields.push(merge_field(&mut readers, &rows, &labels)?);
         }
-        // The runs are all the axis remembers about the holes, so a sparse merge stores one span
-        // per run and no row for the positions between them.
         let time =
             TimeAxis::from_grid_spans(grid.clone(), spans_of(&positions, count_runs(&positions))?)
                 .map_err(external)?;
         let fields = SeriesFields::try_from_vec(fields).map_err(external)?;
-        // The first fragment names the output, as it always has: a label set ignores empty values,
-        // so the metric of the first member is the one the merged series keeps.
+        // Members may differ in empty-valued labels; the first member's metric is kept.
         let metric = fragments[0].metric.clone();
         output.push(Series::try_new(schema, metric, time, fields).map_err(external)?);
     }
     Ok(output)
 }
 
-/// Builds one field of the merged series, one sample per merged row.
-///
-/// The rows are walked in output order. A row holding a value of this field in one member continues
-/// the run of rows that member holds in one dense segment, and a run is handed out as one
-/// [`Samples::slice`]; the rows another field fills become one null run, so the field stays aligned
-/// with the merged axis while sharing the values it carries.
+/// Builds one field of the merged series, one sample per merged position: slices of member segments
+/// for values, null runs for positions only other fields fill.
 fn merge_field(
     readers: &mut [FieldReader<'_>],
     rows: &[(usize, usize, usize)],
     labels: &LabelSet,
 ) -> Result<Samples> {
     let mut chunks: Vec<Samples> = Vec::new();
-    // The run of values the last merged row continued, if any.
     let mut run: Option<FieldRun<'_>> = None;
-    // Merged rows this field leaves empty, waiting for the null run that carries them.
     let mut missing = 0;
     let mut start = 0;
     while start < rows.len() {
         let position = rows[start].0;
         let mut end = start;
-        // At most one member may hold this field here; the second value is the collision Prometheus
-        // rejects, since the two label sets became one.
         let mut value: Option<(usize, &Samples, usize)> = None;
         while end < rows.len() && rows[end].0 == position {
             let (_, member, row) = rows[end];
@@ -650,32 +615,21 @@ fn merge_field(
     Samples::try_from_chunks(chunks).map_err(external)
 }
 
-/// A run of merged rows one member field fills out of one dense segment, without copying values.
-///
-/// The run grows only while the next merged row is the same member's next row in the same segment,
-/// so handing it out is one [`Samples::slice`] of that segment: the payload stays where it is, and
-/// the rows a hole skipped are not part of the run.
+/// Consecutive rows of one member's dense segment, handed out as one [`Samples::slice`].
 struct FieldRun<'a> {
-    /// The member slot the run reads, which indexes the [`FieldReader`]s of the field.
     member: usize,
-    /// The dense segment holding the run's values.
     segment: &'a Samples,
-    /// Offset of the run's first row inside `segment`.
     offset: usize,
-    /// How many rows of `segment` the run covers.
     len: usize,
 }
 
 impl FieldRun<'_> {
-    /// Returns whether the value at `offset` of `segment` continues the run: the same member's next
-    /// row in the same dense segment.
     fn continues(&self, member: usize, segment: &Samples, offset: usize) -> bool {
         self.member == member
             && std::ptr::eq(self.segment, segment)
             && self.offset + self.len == offset
     }
 
-    /// Pushes the run as one slice of its dense segment.
     fn push(self, chunks: &mut Vec<Samples>) -> Result<()> {
         chunks.push(
             self.segment
@@ -686,22 +640,16 @@ impl FieldRun<'_> {
     }
 }
 
-/// Reads one field's rows by locating the dense segment each row sits in.
-///
-/// [`Samples::sample`] rescans a chunked field from its first segment on every row, so reading a
-/// field row by row would cost a scan over the segments before it. The rows a merge reads only go
-/// forward, so this walks the segments once and returns the segment with the offset of the row
-/// inside it, which is what a [`FieldRun`] slices.
+/// Forward-only reader over a chunked field. [`Samples::sample`] rescans segments from the first on
+/// every call; this walks them once.
 struct FieldReader<'a> {
     segments: &'a [Samples],
-    /// Index of the segment `start` belongs to.
     segment: usize,
     /// Logical row the current segment starts at.
     start: usize,
 }
 
 impl<'a> FieldReader<'a> {
-    /// Creates a reader at the first row of `samples`.
     fn new(samples: &'a Samples) -> Self {
         Self {
             segments: samples.segments(),
@@ -710,10 +658,8 @@ impl<'a> FieldReader<'a> {
         }
     }
 
-    /// Returns the dense segment holding `row` and the offset of `row` inside it.
-    ///
-    /// Rows must not go backwards. A row past the field is an error rather than a panic: a member is
-    /// only read after its fields are validated to align with its axis.
+    /// Returns the dense segment holding `row` and the offset inside it. `row` must not go
+    /// backwards.
     fn locate(&mut self, row: usize) -> Result<(&'a Samples, usize)> {
         while let Some(segment) = self.segments.get(self.segment) {
             if let Some(offset) = row
@@ -731,7 +677,6 @@ impl<'a> FieldReader<'a> {
     }
 }
 
-/// Pushes the merged rows a field leaves empty as one null run.
 fn push_missing(chunks: &mut Vec<Samples>, missing: &mut usize) {
     if *missing != 0 {
         chunks.push(Samples::from_float(Float64Array::new_null(*missing)));

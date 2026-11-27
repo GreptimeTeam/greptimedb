@@ -34,7 +34,6 @@ impl MetricEngineInner {
         let mut physical_region_options_list = Vec::with_capacity(requests.len());
 
         for (region_id, req) in requests {
-            let metadata_region_id = utils::to_metadata_region_id(region_id);
             let data_region_id = utils::to_data_region_id(region_id);
 
             let physical_region_options = *self
@@ -48,30 +47,7 @@ impl MetricEngineInner {
                 })?
                 .options();
             physical_region_options_list.push((data_region_id, physical_region_options));
-            all_requests.push((
-                metadata_region_id,
-                RegionCatchupRequest {
-                    set_writable: req.set_writable,
-                    entry_id: req.metadata_entry_id,
-                    metadata_entry_id: None,
-                    checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
-                        entry_id: c.metadata_entry_id.unwrap_or_default(),
-                        metadata_entry_id: None,
-                    }),
-                },
-            ));
-            all_requests.push((
-                data_region_id,
-                RegionCatchupRequest {
-                    set_writable: req.set_writable,
-                    entry_id: req.entry_id,
-                    metadata_entry_id: None,
-                    checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
-                        entry_id: c.entry_id,
-                        metadata_entry_id: None,
-                    }),
-                },
-            ));
+            all_requests.extend(mito_catchup_requests(region_id, req));
         }
 
         let mut results = self
@@ -110,5 +86,70 @@ impl MetricEngineInner {
         }
 
         Ok(responses)
+    }
+}
+
+/// Returns the catchups of the metadata and data regions of the physical region `region_id`.
+fn mito_catchup_requests(
+    region_id: RegionId,
+    req: RegionCatchupRequest,
+) -> [(RegionId, RegionCatchupRequest); 2] {
+    [
+        (
+            utils::to_metadata_region_id(region_id),
+            RegionCatchupRequest {
+                set_writable: req.set_writable,
+                entry_id: req.metadata_entry_id,
+                metadata_entry_id: None,
+                checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
+                    entry_id: c.metadata_entry_id.unwrap_or_default(),
+                    metadata_entry_id: None,
+                }),
+                // The engine loads the logical tables from the metadata region once the catchup
+                // ends, so the source's unflushed metadata is not left to a background replay: a
+                // catchup that would need it fails.
+                source_node_id: None,
+            },
+        ),
+        (
+            utils::to_data_region_id(region_id),
+            RegionCatchupRequest {
+                set_writable: req.set_writable,
+                entry_id: req.entry_id,
+                metadata_entry_id: None,
+                checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
+                    entry_id: c.entry_id,
+                    metadata_entry_id: None,
+                }),
+                source_node_id: req.source_node_id,
+            },
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_only_the_data_region_catches_up_from_the_source() {
+        let region_id = RegionId::new(1024, 1);
+        let [(metadata_region_id, metadata), (data_region_id, data)] = mito_catchup_requests(
+            region_id,
+            RegionCatchupRequest {
+                set_writable: true,
+                entry_id: Some(10),
+                metadata_entry_id: Some(5),
+                source_node_id: Some(42),
+                ..Default::default()
+            },
+        );
+        assert_eq!(utils::to_metadata_region_id(region_id), metadata_region_id);
+        assert_eq!(
+            (Some(5), None),
+            (metadata.entry_id, metadata.source_node_id)
+        );
+        assert_eq!(utils::to_data_region_id(region_id), data_region_id);
+        assert_eq!((Some(10), Some(42)), (data.entry_id, data.source_node_id));
     }
 }

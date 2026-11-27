@@ -35,7 +35,7 @@ use table::table_name::TableName;
 use crate::error::{self, Result};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
 use crate::procedure::region_migration::utils::{
-    RegionMigrationAnalysis, RegionMigrationTaskBatch, analyze_region_migration_task,
+    self, RegionMigrationAnalysis, RegionMigrationTaskBatch, analyze_region_migration_task,
 };
 use crate::procedure::region_migration::{
     DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
@@ -356,7 +356,7 @@ impl RegionMigrationManager {
         task: &RegionMigrationProcedureTask,
     ) -> Result<()> {
         ensure!(
-            !region_route.follower_peers.contains(&task.to_peer),
+            !utils::has_peer_conflict(region_route, task.to_peer.id),
             error::InvalidArgumentsSnafu {
                 err_msg: format!(
                     "The `to_peer`({}) is already has a region follower, region: {}",
@@ -1081,7 +1081,8 @@ mod test {
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(3)),
-            follower_peers: vec![Peer::empty(2)],
+            // The follower is the `to_peer` even though its address differs.
+            follower_peers: vec![Peer::new(2, "127.0.0.1:4002")],
             ..Default::default()
         }];
 

@@ -101,13 +101,22 @@ impl BuildPlan {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let timer = Instant::now();
         let table_id = ctx.persistent_ctx.table_id;
+        let table_lock = TableLock::Write(table_id).into();
+        let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         let table_route_value = ctx.get_table_route_value().await?;
-        let mut next_region_number =
-            AllocateRegion::get_next_region_number(table_route_value.max_region_number().unwrap());
+        let to_allocate = AllocateRegion::count_regions_to_allocate(&self.plan_entries);
+        // A crash before the plan is persisted can leave a gap, but no datanode
+        // can create a region until its number has been durably reserved.
+        let mut next_region_number = if to_allocate > 0 {
+            ctx.reserve_region_numbers(&table_route_value, to_allocate)
+                .await?
+        } else {
+            0
+        };
 
         // Converts allocation plan to repartition plan.
         let repartition_plan_entries = AllocateRegion::convert_to_repartition_plans(
@@ -117,14 +126,13 @@ impl BuildPlan {
             table_route_value.region_routes().unwrap(),
         )?;
         let plan_count = repartition_plan_entries.len();
-        let to_allocate = AllocateRegion::count_regions_to_allocate(&repartition_plan_entries);
         info!(
             "Repartition allocate regions start, table_id: {}, groups: {}, regions_to_allocate: {}",
             table_id, plan_count, to_allocate
         );
 
         // If no region to allocate, directly dispatch the plan.
-        if AllocateRegion::count_regions_to_allocate(&repartition_plan_entries) == 0 {
+        if to_allocate == 0 {
             ctx.persistent_ctx.plans = repartition_plan_entries;
             ctx.update_allocate_region_elapsed(timer.elapsed());
             return Ok((Box::new(Dispatch), Status::executing(true)));
@@ -189,9 +197,23 @@ impl ExecutePlan {
                 .context(error::AllocateRegionRoutesSnafu { table_id })?;
             new_allocated_region_routes.extend(routes);
         }
+        // Older Execute checkpoints can contain region numbers that Build did not reserve.
+        let table_route_value = ctx.get_table_route_value().await?;
+        let current = table_route_value
+            .max_region_number()
+            .context(error::TableMetadataManagerSnafu)?;
+        if let Some(required) = allocate_regions
+            .iter()
+            .map(|r| r.region_id.region_number())
+            .max()
+            && required > current
+        {
+            ctx.reserve_region_numbers(&table_route_value, (required - current) as usize)
+                .await?;
+        }
+
         let skip_wal = table_info_value.table_info.meta.options.skip_wal;
         let allocate_noop = if skip_wal {
-            let table_route_value = ctx.get_table_route_value().await?;
             let region_wal_options =
                 get_region_wal_options(&ctx.table_metadata_manager, &table_route_value, table_id)
                     .await
@@ -410,16 +432,11 @@ impl AllocateRegion {
     }
 
     /// Calculates the total number of regions that need to be allocated.
-    fn count_regions_to_allocate(repartition_plan_entries: &[RepartitionPlanEntry]) -> usize {
-        repartition_plan_entries
+    fn count_regions_to_allocate(plan_entries: &[AllocationPlanEntry]) -> usize {
+        plan_entries
             .iter()
-            .map(|p| p.allocated_region_ids.len())
+            .map(|plan| plan.targets_to_allocate().len())
             .sum()
-    }
-
-    /// Gets the next region number from the physical table route.
-    fn get_next_region_number(max_region_number: RegionNumber) -> RegionNumber {
-        max_region_number + 1
     }
 
     async fn allocate_regions(
@@ -897,7 +914,6 @@ mod tests {
     #[test]
     fn test_count_regions_to_allocate() {
         let table_id = 1024;
-        let mut next_region_number = 10;
 
         let plan_entries = vec![
             create_allocation_plan_entry(table_id, &[1], &[(0, 50), (50, 100)]), // 1 allocation
@@ -905,15 +921,7 @@ mod tests {
             create_allocation_plan_entry(table_id, &[4], &[(200, 250), (250, 300)]), // 1 allocation
         ];
 
-        let repartition_plans = AllocateRegion::convert_to_repartition_plans(
-            table_id,
-            &mut next_region_number,
-            &plan_entries,
-            &create_current_region_routes(table_id, &[1, 2, 3, 4]),
-        )
-        .unwrap();
-
-        let count = AllocateRegion::count_regions_to_allocate(&repartition_plans);
+        let count = AllocateRegion::count_regions_to_allocate(&plan_entries);
         assert_eq!(count, 2);
     }
 
@@ -958,6 +966,56 @@ mod tests {
         // Verify partition expressions are serialized
         assert!(!result[0].1.is_empty());
         assert!(!result[1].1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_build_plan_reserves_numbers_before_region_creation() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let routes = create_current_region_routes(table_id, &[1]);
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            routes.clone(),
+            test_region_wal_options(&[1]),
+        )
+        .await;
+        let mut ctx = new_parent_context(&env, Arc::new(MockDatanodeManager::new(())), table_id);
+        let mut build = BuildPlan {
+            plan_entries: vec![create_allocation_plan_entry(
+                table_id,
+                &[1],
+                &[(0, 50), (50, 100), (100, 150)],
+            )],
+        };
+        // Replaying Build after a crash before the procedure checkpoint only
+        // skips numbers. Neither attempt has published routes or created regions.
+        for first in [2, 4] {
+            build
+                .next(&mut ctx, &TestingEnv::procedure_context())
+                .await
+                .unwrap();
+            assert_eq!(
+                ctx.persistent_ctx.plans[0].allocated_region_ids,
+                [
+                    RegionId::new(table_id, first),
+                    RegionId::new(table_id, first + 1),
+                ]
+            );
+            let current = ctx.get_table_route_value().await.unwrap();
+            assert_eq!(current.region_routes().unwrap(), &routes);
+            assert_eq!(current.max_region_number().unwrap(), first + 1);
+        }
+        let previous = ctx.get_table_route_value().await.unwrap();
+        let mut build = BuildPlan {
+            plan_entries: vec![create_allocation_plan_entry(table_id, &[1], &[(0, 100)])],
+        };
+        let (next, _) = build
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(next.as_any().is::<Dispatch>());
+        let current = ctx.get_table_route_value().await.unwrap();
+        assert_eq!(previous.get_raw_bytes(), current.get_raw_bytes());
     }
 
     #[tokio::test]

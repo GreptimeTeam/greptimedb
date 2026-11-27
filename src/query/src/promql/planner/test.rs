@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::promql::planner::native::{
+    take_native_attempts, take_reported_decline, take_reported_unproved_labelset_check,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,6 +47,7 @@ use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, is_metric_name_field};
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::SeriesFrameDeclaration;
 use promql::extension_plan::FieldKind;
 use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
@@ -521,6 +525,7 @@ async fn plan_direct_or(
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     planner
         .or_operator(
@@ -611,6 +616,7 @@ async fn mixed_direct_or(histogram_on_left: bool) -> (PromPlanner, LogicalPlan) 
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left_context = direct_or_context("lhs", &["job", "k"], "v");
     let right_context = direct_or_context("rhs", &["job", "k"], "v");
@@ -684,6 +690,7 @@ async fn mixed_aggregate_input(histograms: Vec<NativeHistogram>) -> (PromPlanner
         },
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     (planner, plan)
 }
@@ -1371,6 +1378,66 @@ async fn native_engine_temporality_marker_provider() -> DfTableSourceProvider {
     )
 }
 
+/// One Mito table of one float field whose only tag is a nullable primary-key column.
+///
+/// A metric-engine table is built with nullable tags, so one series of such a table can hold `NULL`
+/// in the tag where another holds `''` - the pair a metadata drop normalizes into one label set and
+/// that the drop's proof does not cover. Nothing is collected for it - see
+/// [`a_nullable_key_statement_records_the_pair_it_leaves_unproved`] - so this fixture states the
+/// case the labels alone decide.
+async fn build_test_table_provider_with_nullable_tag(table_name: &str) -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "tag_0".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            "timestamp".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "field_0".to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ]));
+    let table_meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .engine(NATIVE_ENGINE.to_string())
+        .primary_key_indices(vec![0])
+        .value_indices(vec![2])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = TableInfoBuilder::default()
+        .name(table_name.to_string())
+        .meta(table_meta)
+        .build()
+        .unwrap();
+    assert!(
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                table_id: 1024,
+                table: EmptyTable::from_table_info(&table_info),
+            })
+            .is_ok()
+    );
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_test_table_provider_with_options(
     table_name_tuples: &[(String, String)],
@@ -1457,21 +1524,61 @@ async fn build_test_native_histogram_table_provider(table_name: &str) -> DfTable
     build_test_native_histogram_table_provider_with_marker(table_name, false).await
 }
 
+/// The same table with tag columns that always decode a value.
+///
+/// A nullable key column is not what a metadata drop is proved by - see
+/// `build_test_native_histogram_table_provider_with_metadata_tag` for the tag that is - so this
+/// fixture states the table the labels alone prove the drop over: nothing has to be collected.
+async fn build_test_native_histogram_table_provider_with_stable_keys(
+    table_name: &str,
+) -> DfTableSourceProvider {
+    build_test_native_histogram_tables_with_marker(&[table_name], false, true).await
+}
+
+/// The same table with `__unit__` among its tags.
+///
+/// `__unit__` leaves with the metric name when a kernel drops it, and it is a label a scan can hold
+/// two series apart by, so a fixed metric name proves nothing about the drop: the canonical pass
+/// collects it (`native_fused_metadata_tag_in_the_binding_keeps_the_collection` states the same fact
+/// for a float table). That is the collision the histogram boundary below is carried by, since a
+/// nullable key column is not one.
+async fn build_test_native_histogram_table_provider_with_metadata_tag(
+    table_name: &str,
+) -> DfTableSourceProvider {
+    build_test_native_histogram_tables_with_flags(&[table_name], false, false, true).await
+}
+
 /// Several Mito tables of native histograms, for the multi-input gates.
 async fn build_test_native_histogram_tables(table_names: &[&str]) -> DfTableSourceProvider {
-    build_test_native_histogram_tables_with_marker(table_names, false).await
+    build_test_native_histogram_tables_with_marker(table_names, false, false).await
 }
 
 async fn build_test_native_histogram_table_provider_with_marker(
     table_name: &str,
     temporality_marker: bool,
 ) -> DfTableSourceProvider {
-    build_test_native_histogram_tables_with_marker(&[table_name], temporality_marker).await
+    build_test_native_histogram_tables_with_marker(&[table_name], temporality_marker, false).await
 }
 
 async fn build_test_native_histogram_tables_with_marker(
     table_names: &[&str],
     temporality_marker: bool,
+    stable_keys: bool,
+) -> DfTableSourceProvider {
+    build_test_native_histogram_tables_with_flags(
+        table_names,
+        temporality_marker,
+        stable_keys,
+        false,
+    )
+    .await
+}
+
+async fn build_test_native_histogram_tables_with_flags(
+    table_names: &[&str],
+    temporality_marker: bool,
+    stable_keys: bool,
+    metadata_tag: bool,
 ) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     let mut columns = vec![
@@ -1480,12 +1587,22 @@ async fn build_test_native_histogram_tables_with_marker(
             ConcreteDataType::string_datatype(),
             false,
         ),
+        // `le` is a nullable tag on a metric-engine table; `stable_keys` states the table whose key
+        // columns always decode a value. Neither is what a drop is proved by - see
+        // `build_test_native_histogram_table_provider_with_metadata_tag` for the tag that is.
         ColumnSchema::new(
             LE_COLUMN_NAME.to_string(),
             ConcreteDataType::string_datatype(),
-            true,
+            !stable_keys,
         ),
     ];
+    if metadata_tag {
+        columns.push(ColumnSchema::new(
+            "__unit__".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ));
+    }
     if temporality_marker {
         columns.push(ColumnSchema::new(
             OTLP_AGGREGATION_TEMPORALITY_LABEL.to_string(),
@@ -2430,6 +2547,129 @@ async fn native_metric_discovery_without_a_matching_metric_answers_absent_and_or
     );
 }
 
+/// A `__field__` matcher on a selection that matches no table declares the field it names.
+///
+/// The matcher is what decides which of a scan's field columns a selection keeps, and no metric
+/// table matched this one, so the only field names this input can be given are the ones the matcher
+/// states itself. The empty frame declares exactly those and the statement answers the empty
+/// vector, with the layout any one-field selection publishes: the time index, the value named after
+/// the expression, and the labels. The frame is what the matcher decides, not the answer.
+///
+/// A matcher whose answer is a set over a table's field columns - `!=`, `=~`, `!~` - has no such
+/// columns to read here, so that selection keeps the existing plan rather than claiming a layout
+/// nothing decided; `native_empty_discovery_keeps_a_field_operator_it_cannot_apply` holds that.
+#[tokio::test]
+async fn native_empty_discovery_declares_the_field_its_matcher_names() {
+    let layout = |plan: &LogicalPlan| {
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>()
+    };
+    // The same statement without a matcher: the value column is named after the expression, so the
+    // rows layouts are compared by the types they carry rather than by that name.
+    let (plain, _) = execute_no_match_discovery(r#"{job="api"}"#).await;
+    for (query, field) in [
+        (r#"{__field__="field_0", job="api"}"#, "field_0"),
+        // The matcher decides the name: the input declares the field the statement asks for, not
+        // the default one this route gives a selection that names no field.
+        (r#"{__field__="measured", job="api"}"#, "measured"),
+    ] {
+        let (plan, batches) = execute_no_match_discovery(query).await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("`{query}` left the native route: {plan:?}"));
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a selection that matches no metric: {plan:?}"
+        );
+        // The one input is the typed empty frame, and it declares the field the matcher names.
+        let [LogicalPlan::EmptyRelation(relation)] = fused.children() else {
+            panic!("`{query}`: the empty input is the node's only child: {plan:?}");
+        };
+        let declaration = SeriesFrameDeclaration::parse(relation.schema.as_arrow())
+            .unwrap_or_else(|error| panic!("`{query}` declares no raw series frame: {error}"));
+        assert_eq!(
+            vec![field.to_string()],
+            declaration
+                .series()
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect::<Vec<_>>(),
+            "`{query}`: the empty frame declares the field the matcher names"
+        );
+        assert_eq!(
+            layout(&plain),
+            layout(&plan),
+            "`{query}` publishes the layout a selection of one field publishes: {plan:?}"
+        );
+        assert_eq!(
+            METRIC_NAME,
+            plan.schema().fields().last().unwrap().name(),
+            "`{query}`: {plan:?}"
+        );
+    }
+}
+
+/// The zero-match answer of a `__field__` operator this route cannot apply keeps the existing plan.
+///
+/// The field operators other than `=` keep or drop columns by a rule over every field a table
+/// carries, and an input that reads no table has none: there is no layout to state, so the
+/// selection is not one this route answers and the statement is planned the way it was without the
+/// route - the existing planner's own answer, including the refusal it raises when it has no table
+/// to bind.
+#[tokio::test]
+async fn native_empty_discovery_keeps_a_field_operator_it_cannot_apply() {
+    for query in [
+        r#"{__field__=~"field.*", job="api"}"#,
+        r#"{__field__!="field_0", job="api"}"#,
+    ] {
+        let native = PromPlanner::stmt_to_plan_with_annotations(
+            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            true,
+        )
+        .await;
+        let without_flag = PromPlanner::stmt_to_plan_with_annotations(
+            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await;
+        match (native, without_flag) {
+            (Ok(native), Ok(without_flag)) => {
+                assert!(
+                    find_fused_series(&native).is_none(),
+                    "`{query}` claimed a field layout nothing decided: {}",
+                    native.display_indent()
+                );
+                assert_eq!(
+                    without_flag.display_indent().to_string(),
+                    native.display_indent().to_string(),
+                    "`{query}` must keep the existing plan"
+                );
+            }
+            // The existing planner has no table to bind, which is the answer this route leaves it.
+            (Err(native), Err(without_flag)) => assert_eq!(
+                without_flag.to_string(),
+                native.to_string(),
+                "`{query}` reports the existing planner's own refusal"
+            ),
+            (native, without_flag) => panic!(
+                "`{query}`: the route answered {} where the existing planner answered {}",
+                native.is_ok(),
+                without_flag.is_ok()
+            ),
+        }
+    }
+}
+
 /// A zero-match discovery selector is a real input even when another selector reads a metric.
 #[tokio::test]
 async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
@@ -2486,6 +2726,455 @@ async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
         assert!(
             contains_alpha(&fused.children()[1 - empty_index]),
             "{query}: {plan:?}"
+        );
+    }
+}
+
+/// A fixture whose `x` and `exists` tables exist, so any other metric a selector names has no table
+/// to bind.
+async fn named_missing_table_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "x".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "exists".to_string()),
+        ],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await
+}
+
+/// Whether `plan` holds the typed empty input a selector that read no table is planned as.
+fn contains_typed_empty_input(plan: &LogicalPlan) -> bool {
+    super::native::is_empty_discovered_input(plan)
+        || plan
+            .inputs()
+            .iter()
+            .any(|child| contains_typed_empty_input(child))
+}
+
+/// A selector that names a metric whose table does not exist is planned natively, as the typed
+/// empty input a nameless selector that matches nothing is.
+///
+/// Prometheus answers each statement below over an empty input, so handing the statement back to
+/// the existing planner - which has no table to bind and raises `TableNameNotFound` - is not an
+/// answer. `x` and `exists` do exist, and the statements reading them keep the plan they had: an
+/// existing table is read through its scan whether or not it holds rows.
+#[tokio::test]
+async fn native_named_selector_over_a_missing_table_plans_as_an_empty_input() {
+    // `(query, reads an existing table)`.
+    for (query, reads_existing) in [
+        // The selection itself.
+        ("nonexistent_metric", false),
+        ("nonexistent_metric @ 300", false),
+        ("nonexistent offset 5m", false),
+        // An operator over the empty input keeps its own answer for zero series.
+        ("rate(nonexistent[5m])", false),
+        ("sum(nonexistent)", false),
+        ("count(nonexistent)", false),
+        ("topk(3, nonexistent)", false),
+        ("sum by (__name__) (nonexistent)", false),
+        // The two shapes whose answer over zero series is a row rather than none.
+        ("absent(nonexistent_metric)", false),
+        (r#"absent(nonexistent_metric{job="x"})"#, false),
+        (r#"absent_over_time(nonexistent{job="x"}[5m])"#, false),
+        // A set operation pairs the empty input with a real one, on either side and in either
+        // position, and a statement whose selectors are all missing has no real side at all.
+        ("nonexistent or exists", true),
+        ("nonexistent and exists", true),
+        ("nonexistent unless exists", true),
+        ("exists or nonexistent", true),
+        ("a1 or a2", false),
+        // A table that exists is read through its scan, with and without rows.
+        ("x", true),
+        ("sum(x)", true),
+        ("x or nonexistent", true),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        let display = plan.display_indent().to_string();
+        if reads_existing {
+            assert!(display.contains("TableScan"), "{query}: {display}");
+        } else {
+            assert!(
+                contains_typed_empty_input(&plan),
+                "`{query}` is not planned over the typed empty input: {plan:?}"
+            );
+            assert!(
+                !display.contains("TableScan"),
+                "`{query}` reads a table it has none of: {display}"
+            );
+        }
+    }
+
+    // A `__field__` matcher still declines over a table this route can read: the matcher narrows the
+    // field set of the scan below the node, and the raw series scan reports every field the scan
+    // carries. That refusal is about the scan, not about the table existing - a missing table has no
+    // field set to narrow and is admitted as the empty input, which
+    // `native_missing_table_with_a_field_matcher_answers_the_empty_vector` asserts beside its rows.
+    let query = r#"x{__field__="field_0"}"#;
+    let plan =
+        build_native_fused_plan_with_provider(query, true, named_missing_table_provider().await)
+            .await;
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "`{query}` claimed a field layout its scan does not report: {plan:?}"
+    );
+}
+
+/// The same statements plan natively when the engine plans distributed statements.
+///
+/// Such a planner reads every input above the regions, so each occurrence is source-backed and the
+/// typed empty input is the one input that stays itself. The route is the same one the statements
+/// above take; what changes is only where the node is placed.
+#[tokio::test]
+async fn native_named_missing_table_plans_with_the_distributed_planner() {
+    let state = QueryEngineState::new(
+        new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+        Plugins::default(),
+        QueryOptions::default(),
+    );
+    for query in [
+        "nonexistent_metric",
+        "absent(nonexistent_metric)",
+        "nonexistent or exists",
+        "exists or nonexistent",
+    ] {
+        let stmt = build_eval_stmt(query);
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &state,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route with the distributed planner: {plan:?}"
+        );
+    }
+}
+
+/// A named selector over a missing table answers what Prometheus answers, executed.
+///
+/// Prometheus answers the empty vector for a selector that names a metric it holds no samples for,
+/// and the operators above it report their own answer for zero series: `sum` and `count` report no
+/// group, `absent` reports one series holding 1 named by the selector's equality matchers, and an
+/// `or`, `and` or `unless` against an empty side keeps, drops or ignores what the other side holds.
+///
+/// The rows layout is asserted beside the rows: the answer names no series, so the nullable
+/// `__name__` column the native rows root declares stays null rather than naming the metric the
+/// selector wrote.
+#[tokio::test]
+async fn native_named_selector_over_a_missing_table_answers_what_prometheus_answers() {
+    /// Runs `query` on the native route over the fixture whose only tables are `x` and `exists`.
+    ///
+    /// `steps` is the number of five-second steps after the first, so zero is one evaluation
+    /// instant and two is a three-point range.
+    async fn execute_missing(query: &str, steps: u64) -> (LogicalPlan, Vec<RecordBatch>) {
+        let stmt = EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(5 * steps))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &build_query_engine_state(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        execute(plan, &build_query_engine_state()).await
+    }
+
+    // A selection over a table that does not exist answers no rows, and its declared layout still
+    // names the time index, one value column and the nullable name column.
+    for query in [
+        "nonexistent_metric",
+        "rate(nonexistent[5m])",
+        "sum(nonexistent)",
+        "topk(3, nonexistent)",
+        "count(nonexistent)",
+        "sum by (__name__) (nonexistent)",
+        // Two missing tables in one statement: neither side has a table to read.
+        "a1 or a2",
+        // A set operation against an empty side keeps, drops or ignores the other side's series,
+        // and the empty side has none to contribute.
+        "nonexistent and vector(7)",
+        "nonexistent unless vector(7)",
+    ] {
+        let (plan, batches) = execute_missing(query, 0).await;
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a table that does not exist: {plan:?}"
+        );
+    }
+
+    /// The column a native rows answer names its value after: the statement it answers.
+    fn value_column(query: &str) -> String {
+        parser::parse(query).unwrap().to_string()
+    }
+
+    // The rows layout of the empty answer: the time index, one value column and the name column
+    // the rows root declares, which is nullable because a row that names no series leaves it null.
+    // The value column is named after the statement, as it is for every native rows answer: the
+    // empty input's own field name is internal to the tree.
+    let (plan, _) = execute_missing("nonexistent_metric", 0).await;
+    let columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    let value = value_column("nonexistent_metric");
+    assert_eq!(
+        vec![DEFAULT_TIME_INDEX_COLUMN, value.as_str(), METRIC_NAME],
+        columns,
+        "{plan:?}"
+    );
+    assert!(
+        plan.schema()
+            .field_with_name(None, METRIC_NAME)
+            .expect("the rows root declares the name column")
+            .is_nullable(),
+        "{plan:?}"
+    );
+
+    // `absent` reports the absence of what it read as one series holding 1. The selector names no
+    // equality label, so the row names nothing - not even the metric the selector wrote.
+    let (plan, batches) = execute_missing("absent(nonexistent_metric)", 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(&batches, &value_column("absent(nonexistent_metric)")),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let name = batch
+            .column_by_name(METRIC_NAME)
+            .expect("the rows root declares the name column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("the name column is Utf8");
+        assert_eq!(1, name.len(), "{batch:?}");
+        assert!(name.is_null(0), "`absent` names no series: {batch:?}");
+    }
+
+    // A matcher that must be set is a label of the answer, as in Prometheus.
+    let (plan, batches) = execute_missing(r#"absent(nonexistent_metric{job="x"})"#, 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent(nonexistent_metric{job="x"})"#)
+        ),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let job = batch
+            .column_by_name("job")
+            .expect("absent reports the selector's equality labels")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(Some("x"), job.iter().next().flatten(), "{batch:?}");
+    }
+
+    // `absent_over_time` answers the same way over a missing table.
+    let (plan, batches) = execute_missing(r#"absent_over_time(nonexistent{job="x"}[5m])"#, 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent_over_time(nonexistent{job="x"}[5m])"#)
+        ),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let job = batch
+            .column_by_name("job")
+            .expect("absent_over_time reports the selector's equality labels")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(Some("x"), job.iter().next().flatten(), "{batch:?}");
+    }
+
+    // A range statement evaluates the same empty input on a grid of its own: three points, each
+    // answering the absence of what the selector named.
+    let (plan, batches) = execute_missing(r#"absent(nonexistent_metric{job="x"})"#, 2).await;
+    assert_eq!(3, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0, 1.0, 1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent(nonexistent_metric{job="x"})"#)
+        ),
+        "{plan:?}"
+    );
+
+    // An `or` keeps the side that holds a series, in either position.
+    for query in ["nonexistent or vector(7)", "vector(7) or nonexistent"] {
+        let (plan, batches) = execute_missing(query, 0).await;
+        assert_eq!(1, batch_rows(&batches), "`{query}`: {plan:?}");
+        assert_eq!(
+            vec![7.0],
+            numeric_values(&batches, &value_column(query)),
+            "`{query}`: {plan:?}"
+        );
+    }
+}
+
+/// A matcher named after the grid column does not make a missing table fall back.
+///
+/// `absent(missing{time="x"})` publishes a label named `time` while the route would name its grid
+/// column `time` too, so the synthetic name has to be chosen before the segmented root is built -
+/// otherwise schema construction fails first and the statement leaves the route. The answer is the
+/// one Prometheus gives for an absent selector: one sample of 1 carrying the matcher's label.
+#[tokio::test]
+async fn native_absent_over_a_missing_table_names_its_grid_beside_a_time_label() {
+    let query = r#"absent(missing{time="x"})"#;
+    // One evaluation instant, so the answer is one sample rather than one per step of a range.
+    let stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH,
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(1),
+    };
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        named_missing_table_provider().await,
+        &stmt,
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`{query}` did not take the native route: {plan:?}"
+    );
+    let value = parser::parse(query).unwrap().to_string();
+    let columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec!["native_time_0", value.as_str(), "time", METRIC_NAME],
+        columns,
+        "`{query}`: the grid takes a free name beside the matcher's label: {plan:?}"
+    );
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    assert_eq!(1, batch_rows(&batches), "`{query}`: {batches:?}");
+    assert_eq!(vec![1.0], numeric_values(&batches, &value), "`{query}`");
+}
+
+/// A field selection over a missing table is empty, so a `__field__` matcher answers the empty
+/// vector on the native route.
+///
+/// A `__field__` matcher narrows the field set of the table its selector reads. A missing table has
+/// no field set to narrow, so every field selection over it is empty whichever field the matcher
+/// names: the answer does not depend on whether the table happens to exist. The existing planner
+/// answers these statements with the empty vector for the same reason - a missing table is planned
+/// as `EmptyMetric` before the projection a `__field__` matcher builds, so the matcher is never
+/// resolved against a fabricated layout.
+///
+/// The rows layout is the one every empty native answer publishes: the synthetic `time` grid, one
+/// value column named after the statement and the nullable `__name__` column. The placeholder field
+/// of the typed empty input is internal to the tree, so neither it nor the field the matcher names
+/// is ever published.
+#[tokio::test]
+async fn native_missing_table_with_a_field_matcher_answers_the_empty_vector() {
+    for query in [
+        // The placeholder field the empty input declares, a field no fabricated layout holds, a
+        // regex that would select several fields of a real table, and a negative matcher.
+        r#"nonexistent_metric{__field__="value"}"#,
+        r#"nonexistent_metric{__field__="field_0"}"#,
+        r#"nonexistent{__field__=~"field_.*"}"#,
+        r#"nonexistent_metric{__field__!="value"}"#,
+        // The same empty answer through the nameless spelling: it reaches the zero-match branch
+        // rather than the named one, and a field selection over a table with no rows is empty
+        // either way.
+        r#"{__name__="nonexistent", __field__="v"}"#,
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        assert!(
+            contains_typed_empty_input(&plan),
+            "`{query}` is not planned over the typed empty input: {plan:?}"
+        );
+        // No row names a field, so the published layout is the empty answer's: the grid, one value
+        // column named after the statement, and the nullable name column.
+        let columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        let value = parser::parse(query).unwrap().to_string();
+        assert_eq!(
+            vec![DEFAULT_TIME_INDEX_COLUMN, value.as_str(), METRIC_NAME],
+            columns,
+            "`{query}`: {plan:?}"
+        );
+        assert!(
+            plan.schema()
+                .field_with_name(None, METRIC_NAME)
+                .expect("the rows root declares the name column")
+                .is_nullable(),
+            "`{query}`: {plan:?}"
+        );
+        let state = build_query_engine_state();
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a table that does not exist: {batches:?}"
         );
     }
 }
@@ -2582,7 +3271,7 @@ async fn native_zero_match_takes_the_layout_of_its_set_operand() {
 async fn native_absent_over_time_plans_over_discovered_metrics() {
     // Only one of the two metrics carries `no_such_label`, so the matcher that wants a value of it
     // narrows the discovery to that one metric and the route plans. A selector that narrowed to
-    // both would decline: its presence read keeps the names, and one segment could not bind them.
+    // both - checked below - plans as well, since each discovered metric answers for itself.
     let specs = ["alpha_total", "beta_total"]
         .into_iter()
         .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), name.to_string()), 2, 1))
@@ -2656,9 +3345,9 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
         "a selector that matched no table still answers its matchers: {tree}"
     );
 
-    // The same selector over metrics that all carry the label narrows to several: the presence
-    // read keeps their names and one segment cannot bind them, so the route declines rather than
-    // planning a tree that cannot be built or one that would read two metrics as one series.
+    // The same selector over metrics that all carry the label narrows to several, and it plans: each
+    // discovered metric is read through its own raw source, so the presence read keeps every name
+    // and the fused node is handed the union of those sources rather than a scan to bind.
     let specs = ["alpha_total", "beta_total"]
         .into_iter()
         .map(|name| ((DEFAULT_SCHEMA_NAME.to_string(), name.to_string()), 2, 1))
@@ -2668,19 +3357,72 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
         vec!["tag_0".to_string(), "no_such_label".to_string()],
     ];
     let provider = build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await;
-    let error = PromPlanner::stmt_to_plan_with_annotations(
-        provider,
-        &build_eval_stmt(r#"absent_over_time({no_such_label="x", tag_0="api"}[5m])"#),
-        &build_query_engine_state(),
-        None,
+    let plan = build_native_fused_plan_with_provider(
+        r#"absent_over_time({no_such_label="x", tag_0="api"}[5m])"#,
         true,
+        provider,
     )
-    .await
-    .expect_err("a nameless selector over several metrics must decline");
+    .await;
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("FusedSeries"), "{display}");
     assert!(
-        error.to_string().contains("metric matcher"),
-        "the decline keeps the existing plan's answer: {error}"
+        !display.contains("prom_absent_over_time"),
+        "the answer must not be the existing per-series UDF: {display}"
     );
+    let fused = find_fused_series(&plan).expect("fused plan");
+    // One input holds the whole discovery: the two metrics are the union's sources, not two inputs.
+    assert_eq!(1, fused.inputs().len(), "{plan:?}");
+    // Each discovered metric is read through its own source, and that source names the metric it
+    // reads: this is why the binding below needs no name of its own.
+    fn source_metrics(plan: &LogicalPlan, out: &mut Vec<String>) {
+        if let LogicalPlan::Extension(extension) = plan
+            && let Some(source) = extension.node.as_any().downcast_ref::<RawSeriesSource>()
+        {
+            out.push(source.metric_name().to_string());
+        }
+        for input in plan.inputs() {
+            source_metrics(input, out);
+        }
+    }
+    let mut sources = Vec::new();
+    for input in fused.inputs() {
+        source_metrics(input, &mut sources);
+    }
+    sources.sort();
+    assert_eq!(vec!["alpha_total", "beta_total"], sources, "{plan:?}");
+    // The tree reads presence through a fold that keeps the name, which is what tells two metrics
+    // apart at runtime; a fold that dropped it would read them as one series.
+    let trees = fused_trees(&plan).join("\n");
+    assert!(
+        trees.contains(r#"Vector: absent {no_such_label="x", tag_0="api"}"#),
+        "the labels are the selector's matchers: {trees}"
+    );
+    assert!(
+        trees.contains("Window: last_over_time [300000ms]"),
+        "the presence read folds the window: {trees}"
+    );
+    assert!(
+        !trees.contains("present_over_time"),
+        "the fold keeps the name rather than dropping it: {trees}"
+    );
+    // The layout still declares the per-row name column, and an `absent` answer names no row: the
+    // column is the nullable one every row leaves empty.
+    let names = plan.schema().fields();
+    let last = names.last().expect("the plan publishes a name column");
+    assert_eq!(METRIC_NAME, last.name().as_str(), "{names:?}");
+    assert_eq!(&ArrowDataType::Utf8, last.data_type(), "{names:?}");
+    assert!(last.is_nullable(), "{names:?}");
+    assert_eq!(
+        1,
+        names
+            .iter()
+            .filter(|field| field.name() == METRIC_NAME)
+            .count(),
+        "the name column is declared once: {names:?}"
+    );
+    // The binding below the node names no metric: the frames it reads name their own, so the lifted
+    // assumption - that such a tree does not need the binding's name - is what is being pinned here.
+    assert!(fused.binding().metric_name.is_none(), "{plan:?}");
 
     // A selector that names its metric answers with that metric's other equality matchers alone.
     let plan =
@@ -2693,6 +3435,33 @@ async fn native_absent_over_time_plans_over_discovered_metrics() {
         tree.contains(r#"Vector: absent {tag_0="x"}"#),
         "a named metric is not a label of the answer: {tree}"
     );
+}
+
+/// Whether any canonical merge in `plan` asks to hand histogram frames across a boundary.
+///
+/// A merge hands on the samples it was given, so its answer kind is its child's - which is the fact
+/// the admission gate this route used to carry read, and the reason it kept such a statement on the
+/// existing plan. This reads the same fact off the plan the route now builds, so a test says
+/// "histogram frames cross this boundary" about the node that carries them rather than about the
+/// statement's answer kind.
+fn fused_merges_answer_histograms(plan: &LogicalPlan) -> bool {
+    fn visit(plan: &LogicalPlan, found: &mut bool) {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        {
+            *found |= fused.tree().root().any(&|node| {
+                matches!(node.expr, NativeExpr::Merge { .. })
+                    && node.output_field_kind(Some(FieldKind::Histogram))
+                        == Some(FieldKind::Histogram)
+            });
+        }
+        for input in plan.inputs() {
+            visit(input, found);
+        }
+    }
+    let mut found = false;
+    visit(plan, &mut found);
+    found
 }
 
 /// Every native tree the plan carries, outermost first: one per stage the plan splits into.
@@ -3234,6 +4003,180 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     );
 }
 
+/// A single-metric `rate` streams: the window drops the metric name, but every series the scan
+/// hands over is named the same one, so the drop tells none of them apart. Nothing has to collect
+/// what the window hands out, and the plan keeps the one node over the scan.
+#[tokio::test]
+async fn native_fused_single_metric_rate_streams_without_a_canonical_merge() {
+    let query = "rate(some_metric[5m])";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("the native route answers the query");
+    assert_eq!(
+        Some("some_metric"),
+        fused.binding().metric_name.as_deref(),
+        "the binding names the one metric the scan reads"
+    );
+    assert!(
+        !fused.is_canonical_producer(),
+        "`{query}` needs no canonical boundary: {plan}"
+    );
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::Window { .. }),
+        "`{query}`: the root stays the window: {:?}",
+        fused.tree().root().expr
+    );
+    let [child] = fused.children() else {
+        panic!("`{query}` reads one input: {plan}");
+    };
+    assert!(
+        matches!(child, LogicalPlan::TableScan(_)),
+        "`{query}`: the window reads the scan itself: {plan}"
+    );
+}
+
+/// A `rate` over a selector that discovered several metrics keeps its collection: two of those
+/// metrics can agree on every ordinary label, so the name the window drops is the only thing
+/// telling them apart - and the merge is what reports the collision.
+#[tokio::test]
+async fn native_fused_multi_metric_rate_keeps_its_canonical_merge() {
+    let query = r#"rate({tag_0="x"}[5m])"#;
+    let plan = build_native_fused_plan_with_provider(
+        query,
+        true,
+        metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+    )
+    .await;
+    let consumer =
+        find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}` is not native: {plan}"));
+    let [child] = consumer.children() else {
+        panic!("`{query}`: the boundary has one producer: {plan}");
+    };
+    let producer = find_fused_series(child).unwrap_or_else(|| panic!("`{query}`: {plan}"));
+    assert!(producer.is_canonical_producer(), "`{query}`: {plan}");
+    assert!(
+        matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "`{query}`: the window's pieces are collected: {:?}",
+        producer.tree().root().expr
+    );
+}
+
+/// A statement whose scan keys its series by a nullable column is not collected for it, and the
+/// counter says the pair was left unproved once per statement.
+///
+/// The labels are the whole of the drop's proof, and they hold here: `rate(some_metric[5m])` over
+/// one metric proves the name it drops is the one every series of the scan shares. The scan's key
+/// columns are the one thing they cannot state - this fixture's tag is a nullable primary key, so
+/// one series can hold `NULL` there and another `''`, which decode to no label once the drop removes
+/// the empty value with the name - and that pair is deliberately outside the proof, because
+/// collecting for it costs every statement whose kernel drops the metadata labels a canonical merge.
+/// Nothing is collected, and the count is what keeps the statements it would have covered
+/// observable.
+///
+/// A window that keeps the name drops nothing, so it relies on nothing and counts nothing.
+#[tokio::test]
+async fn a_nullable_key_statement_records_the_pair_it_leaves_unproved() {
+    let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
+    let plan =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
+    let trees = fused_trees(&plan);
+    assert!(
+        !trees.is_empty(),
+        "`rate(some_metric[5m])` left the native route"
+    );
+    assert!(
+        !trees.iter().any(|tree| tree.contains("Merge")),
+        "the nullable key is not what the drop is proved by, so nothing is collected: {trees:?}"
+    );
+    assert_eq!(
+        Some("nullable_key"),
+        take_reported_unproved_labelset_check(),
+        "the pair the labels cannot state went uncounted: {}",
+        plan.display_indent_schema()
+    );
+
+    let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "last_over_time(some_metric[5m])",
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`last_over_time(some_metric[5m])` left the native route: {}",
+        plan.display_indent_schema()
+    );
+    assert_eq!(
+        None,
+        take_reported_unproved_labelset_check(),
+        "a window that keeps the name collects nothing for the keys: {}",
+        plan.display_indent_schema()
+    );
+}
+
+/// A fold already answers one series per group, so a drop above it has nothing left to collect.
+///
+/// `sum(x) * 2`, `-sum(x)` and `abs(sum by (tag_0) (x))` each drop the metadata labels above a fold,
+/// and what the fold hands over is one series per group under its grouping labels - no name among
+/// them. The proof therefore holds on the labels the fold reports, and the scan's key columns are not
+/// what decides it: a metric-engine table, whose tag columns are all nullable, plans these
+/// statements without a `Merge`, at the root or anywhere below it.
+#[tokio::test]
+async fn a_drop_above_a_fold_needs_no_collection() {
+    for query in [
+        "sum(some_metric) * 2",
+        "-sum(some_metric)",
+        "abs(sum by (tag_0) (some_metric))",
+    ] {
+        let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let trees = fused_trees(&plan);
+        assert!(
+            !trees.is_empty(),
+            "`{query}` left the native route: {}",
+            plan.display_indent_schema()
+        );
+        assert!(
+            !trees.iter().any(|tree| tree.contains("Merge")),
+            "`{query}` collected a drop the fold's own labels already told apart: {trees:?}"
+        );
+    }
+}
+
+/// A scan that carries `__type__` or `__unit__` as a tag can hold two series that agree on
+/// everything else, and a range function drops those two along with the name. A fixed metric name
+/// proves nothing about them, so the collection stays.
+#[tokio::test]
+async fn native_fused_metadata_tag_in_the_binding_keeps_the_collection() {
+    for metadata in ["__type__", "__unit__"] {
+        let query = "rate(some_metric[5m])";
+        let specs = vec![(
+            (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+            2,
+            1,
+        )];
+        let tags = vec![vec!["tag_0".to_string(), metadata.to_string()]];
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            build_test_table_provider_with_tsid_tag_names(&specs, &tags, None).await,
+        )
+        .await;
+        let consumer = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{metadata}: `{query}` is not native: {plan}"));
+        let [child] = consumer.children() else {
+            panic!("{metadata}: `{query}`: the boundary has one producer: {plan}");
+        };
+        let producer =
+            find_fused_series(child).unwrap_or_else(|| panic!("{metadata}: `{query}`: {plan}"));
+        assert!(
+            matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+            "{metadata}: `{query}` keeps the collection: {:?}",
+            producer.tree().root().expr
+        );
+    }
+}
+
 #[tokio::test]
 async fn native_fused_time_partitioned_table_reads_through_a_raw_source() {
     let table_provider = native_engine_provider(vec![1]).await;
@@ -3395,36 +4338,51 @@ async fn label_functions_reject_a_destination_label_that_names_a_value_field() {
     }
 }
 
-/// A label rewrite that collapses the partition column cannot be answered by one region.
+/// A label rewrite that collapses the partition column runs as a canonical boundary.
 ///
-/// The canonical boundary's router only collects the pieces its own region's producer holds, so a
-/// table split into several regions would answer a canonical label set from whichever region held a
-/// piece of it. The route therefore declines that tree - and only that tree: `rate` on the same
-/// partitioned table keeps fusing, which the test above asserts. Declining means the existing
-/// planner's plan, exactly.
+/// The rewrite gives series from different regions one label set, so the pieces of that set have to
+/// meet before the answer is written. A region-local producer only sees the partitions of the region
+/// it runs in, which is why this shape used to keep the existing plan. Reading the occurrence through
+/// its own `RawSeriesSource` instead puts the merge's producer on the frontend, above every region,
+/// with its canonical router above all of them - the placement the distributed planner already used -
+/// so each label set is collected from every region's contribution.
+///
+/// Only a tree with a canonical merge claims a label-set answer: `rate` on the same partitioned table
+/// keeps fusing over the bare scan it read, which the tag-partitioned test above asserts.
 #[tokio::test]
-async fn native_fused_partitioned_table_label_rewrite_falls_back() {
+async fn native_fused_partitioned_table_label_rewrite_plans_a_canonical_boundary() {
     let query = r#"label_replace(some_metric, "tag_0", "same", "tag_0", ".*")"#;
-    let native =
+    let plan =
         build_native_fused_plan_with_provider(query, true, native_engine_provider(vec![0]).await)
             .await;
-    let fallback =
-        build_native_fused_plan_with_provider(query, false, native_engine_provider(vec![0]).await)
-            .await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| {
+        panic!(
+            "a collapsing rewrite over a partitioned table must fuse: {}",
+            plan.display_indent()
+        )
+    });
+    // The boundary is the two nodes: the producer merges the pieces of one label set on the
+    // frontend, and the consumer above it publishes the rows.
     assert!(
-        find_fused_series(&native).is_none(),
-        "a collapsing rewrite over a partitioned table must keep the existing plan: {}",
-        native.display_indent()
+        matches!(fused.tree().root().expr, NativeExpr::Input(_)),
+        "the statement's rows are read from the boundary below: {}",
+        plan.display_indent()
     );
+    let trees = fused_trees(&plan);
     assert!(
-        !native.display_indent().to_string().contains("FusedSeries"),
-        "{}",
-        native.display_indent()
+        trees
+            .iter()
+            .any(|tree| tree.contains("Merge: canonical label-set merge")),
+        "{query} answers without the boundary the rewrite needs: {trees:?}\n{}",
+        plan.display_indent()
     );
+    // The occurrence reads through its own raw source, which is what the producer above the regions
+    // reads: a bare scan would be read region-locally and the frame would never reach the producer.
     assert_eq!(
-        native.display_indent().to_string(),
-        fallback.display_indent().to_string(),
-        "the native setting must plan exactly what the existing planner plans"
+        vec![("some_metric".to_string(), vec!["field_0".to_string()])],
+        fused_sources(&plan),
+        "{query}: the boundary reads the occurrence through its own source: {}",
+        plan.display_indent()
     );
 }
 
@@ -3446,16 +4404,23 @@ async fn native_fused_partitioned_table_label_rewrite_falls_back() {
 /// route, and dropping it from the predicate makes this test fail. (The `@` half of the same
 /// arithmetic is pinned one level down, in `native::plan::tests`, because a statement whose anchor
 /// and start are that far apart is refused by the planner's own at-modifier rewrite first.)
+///
+/// A platform whose `SystemTime` cannot represent the `5e18 ms` start skips the high-level
+/// shape; the platform-independent `native_tree_supported_declines_the_instants_that_overflow`
+/// still covers the admission predicate there.
 #[tokio::test]
 async fn native_fused_windows_whose_instants_overflow_fall_back() {
-    // The far end of the `i64` millisecond range, one step apart.
+    // The far end of the `i64` millisecond range, one step apart. Windows' `SystemTime` and
+    // 32-bit `time_t` targets cannot represent it, so they cannot build this statement.
+    let Some(far_start) = UNIX_EPOCH.checked_add(Duration::from_millis(5_000_000_000_000_000_000))
+    else {
+        return;
+    };
     let plan_for = |query: &str, native_fused| {
         let query = query.to_string();
         async move {
             let mut eval_stmt = build_eval_stmt(&query);
-            eval_stmt.start = UNIX_EPOCH
-                .checked_add(Duration::from_millis(5_000_000_000_000_000_000))
-                .unwrap();
+            eval_stmt.start = far_start;
             eval_stmt.end = eval_stmt
                 .start
                 .checked_add(Duration::from_millis(10_000))
@@ -3811,6 +4776,130 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
     }
 }
 
+/// Every statement is offered to the native route once, and a statement the flag leaves alone is
+/// offered none.
+///
+/// The count is what bounds planning: one offer compiles the whole tree below it, so a route that
+/// re-offered a subtree for every operator below it would cost the square of the expression's size.
+#[tokio::test]
+async fn native_offer_is_counted_once_per_statement() {
+    let _ = take_native_attempts();
+    let plan = build_native_fused_plan("rate(some_metric[5m])", true).await;
+    assert!(find_fused_series(&plan).is_some(), "{plan}");
+    assert_eq!(
+        1,
+        take_native_attempts(),
+        "the statement is offered exactly once"
+    );
+
+    let plan = build_native_fused_plan("rate(some_metric[5m])", false).await;
+    assert!(find_fused_series(&plan).is_none(), "{plan}");
+    assert_eq!(
+        0,
+        take_native_attempts(),
+        "the flag off offers nothing to the native route"
+    );
+}
+
+/// A propagated matcher is offered once for the operand it rewrote, and nothing below it.
+///
+/// `matching_filters::propagate` writes a matcher into an operand's scan, which makes that operand
+/// an expression the offer spent at its parent never compiled: that offer read the statement as it
+/// was written, and the matcher reached the scan afterwards. The rewrite is therefore offered of
+/// its own, and the offer it is handed is spent again by the rewritten operand's own subtree,
+/// exactly as this one was. So `N` operators below the rewrite buy one offer - not `N`, and not the
+/// `N` positions times `N` subtrees an unconditional re-offer would compile.
+#[tokio::test]
+async fn native_offer_counts_a_propagated_operand_once() {
+    // The same match with the rewritten operand two operators deep and six deep: the matcher
+    // crosses in both, and the four extra operators are the operand's subtree rather than more
+    // expressions to offer.
+    let shallow = "((some_metric * 2) * 2) / on(tag_0) \
+                   some_metric{tag_0=\"x\",__field__=\"field_0\"}";
+    let deep = "((((((some_metric * 2) * 2) * 2) * 2) * 2) * 2) / on(tag_0) \
+                some_metric{tag_0=\"x\",__field__=\"field_0\"}";
+    let mut counts = Vec::new();
+    for query in [shallow, deep] {
+        let _ = take_native_attempts();
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        // The count below is only a bound if the matcher really crossed to the other operand.
+        assert!(
+            display.contains("some_metric.tag_0 = Utf8(\"x\")"),
+            "{query}: the matcher reached the other operand's scan: {display}"
+        );
+        counts.push(take_native_attempts());
+    }
+    // Seven offers either way: the statement, its root's own retry under the legacy-only
+    // `__field__` matcher, the frame operands the composed attempts beside those two read, and the
+    // propagated operand itself. The four operators that make the deep statement deeper are inside
+    // that operand's subtree, so they buy no offer of their own - an offer that was not spent again
+    // by the rewrite would compile each of them, and the deep statement would cost four more.
+    assert_eq!(
+        (7, 7),
+        (counts[0], counts[1]),
+        "a propagated operand is offered once whatever its depth: seven offers at both depths"
+    );
+}
+
+/// The same matcher-propagating match, with its rewritten operand `depth` operators deep.
+fn propagation_query(depth: usize) -> String {
+    let operand = (0..depth).fold("some_metric".to_string(), |inner, _| {
+        format!("({inner} * 2)")
+    });
+    format!("{operand} / on(tag_0) some_metric{{tag_0=\"x\",__field__=\"field_0\"}}")
+}
+
+/// How a statement of [`propagation_query`] plans: whether a native node answers the rewritten
+/// operand, and whether the propagated matcher reached the other operand's scan.
+async fn propagation_route(depth: usize) -> (bool, bool) {
+    let plan = build_native_fused_plan(&propagation_query(depth), true).await;
+    let display = plan.display_indent().to_string();
+    (
+        find_fused_series(&plan).is_some(),
+        display.contains("some_metric.tag_0 = Utf8(\"x\")"),
+    )
+}
+
+/// A chain under a propagated matcher plans on the stack a query worker has, however deep it is.
+///
+/// The planner recurses once per operator and charges every level's frame to the stack of the level
+/// above it, so a chain of constant multiplications deep enough - eight operators was enough on a
+/// two-megabyte thread before the descent grew its own stack - aborted the process rather than
+/// answering. nextest's own test thread is not a worker's, so the depths are planned on a thread
+/// this test sizes like one.
+#[test]
+fn a_deep_propagated_operand_plans_within_a_worker_stack() {
+    let route = std::thread::Builder::new()
+        .name("deep_propagated_operand".to_string())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime");
+            runtime.block_on(async {
+                let shallow = propagation_route(2).await;
+                for depth in [8, 10, 12] {
+                    assert_eq!(
+                        shallow,
+                        propagation_route(depth).await,
+                        "an operand {depth} operators deep plans as one 2 operators deep does"
+                    );
+                }
+                shallow
+            })
+        })
+        .expect("a thread with a worker's stack")
+        .join()
+        .expect("operands 2, 8, 10 and 12 operators deep plan on a two-megabyte stack");
+    assert_eq!(
+        (true, true),
+        route,
+        "the rewritten operand is native and the matcher reached the other operand's scan"
+    );
+}
+
 /// A metric table without logical-table metadata declines to the legacy plan.
 #[tokio::test]
 async fn native_fused_metric_table_without_logical_metadata_falls_back() {
@@ -3902,48 +4991,190 @@ async fn native_fused_engine_without_raw_series_falls_back() {
         without_flag.display_indent().to_string(),
         "a file-engine table must keep the existing plan"
     );
+    // The refusal is reported with its cause, not a bare Ok(None).
+    assert_eq!(
+        take_reported_decline(),
+        Some("engine_without_raw_series_scanner"),
+        "the refusal names the engine's missing raw-series scanner"
+    );
+}
+
+/// The plan `query` gets, or `None` when the planner refuses it.
+///
+/// A field the raw series scan cannot read must not change what the statement answers, and some of
+/// these statements the existing planner refuses outright: that refusal is its answer, so a test has
+/// to be able to hold the route to it instead of unwrapping a plan.
+async fn plan_or_refusal(
+    query: &str,
+    native_fused: bool,
+    table_provider: DfTableSourceProvider,
+) -> Option<LogicalPlan> {
+    PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+        None,
+        native_fused,
+    )
+    .await
+    .ok()
 }
 
 /// A value field the raw-series readers cannot serve keeps the existing plan.
 ///
 /// The route admits two kinds: a `Float64`, which every reader serves, and the canonical native
 /// histogram struct, which the ordinary scan reads while the columnar samples - `Float64` only -
-/// are skipped for that selection. Everything else, including numeric types the columnar samples
-/// do not store, has no raw representation and keeps the existing plan; a bare selector over such
-/// a field answered normally before this route existed.
+/// are skipped for that selection. Everything else - a string, a boolean, a decimal - has no raw
+/// representation and keeps the existing plan whatever the shape of the statement, including the
+/// shapes that publish a `Float64` for a numeric field: `some_metric * 2` casts a string as readily
+/// as an integer, and the route still refuses it because no raw frame can hold the values.
 #[tokio::test]
 async fn native_fused_unsupported_field_type_falls_back() {
     for field_type in [
         ConcreteDataType::string_datatype(),
         ConcreteDataType::boolean_datatype(),
-        // Arrow's `is_numeric` includes the decimals while the region's preflight does not, so
-        // asking Arrow would let a decimal field through to a planning error.
+        // Arrow's `is_numeric` includes the decimals, so a decimal field only stays out because
+        // the route's own numeric set leaves the decimals out; asking Arrow would let it through.
         ConcreteDataType::decimal128_datatype(10, 2),
-        // Numeric, but not the `Float64` the columnar samples store.
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::float32_datatype(),
+    ] {
+        for query in [
+            "some_metric",
+            "some_metric * 2",
+            "sum(some_metric)",
+            "min(some_metric)",
+            "rate(some_metric[5m])",
+        ] {
+            let native = plan_or_refusal(
+                query,
+                true,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+            )
+            .await;
+            let without_flag = plan_or_refusal(
+                query,
+                false,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+            )
+            .await;
+            match (&native, &without_flag) {
+                (Some(native_plan), Some(legacy_plan)) => {
+                    assert!(
+                        find_fused_series(native_plan).is_none(),
+                        "{field_type} must not reach the native route: {query}"
+                    );
+                    assert_eq!(
+                        native_plan.display_indent().to_string(),
+                        legacy_plan.display_indent().to_string(),
+                        "{field_type} must keep the existing plan: {query}"
+                    );
+                }
+                _ => assert_eq!(
+                    native.is_some(),
+                    without_flag.is_some(),
+                    "{field_type}: the route must answer what the existing planner answers for \
+                     {query}"
+                ),
+            }
+        }
+    }
+}
+
+/// A numeric field the raw scan casts is admitted only under the shapes whose existing plan
+/// publishes a `Float64` for it too.
+///
+/// The scan hands the node a `Float64` (`series_scan/raw.rs` casts every numeric field), while the
+/// fused node declares one `Float64` value column per field. The existing planner publishes that same
+/// float for an arithmetic argument, for `min`/`max`/`avg`/`stddev`/`stdvar`/`quantile`/`group` and for
+/// a range function, but copies the field's own type through a bare selector, `sum` over an integer,
+/// `count`, `count_values`, `abs` and the other math functions. Admission therefore follows the shape,
+/// and a shape whose existing plan publishes the field's own type keeps that plan.
+#[tokio::test]
+async fn native_fused_numeric_field_admission_follows_the_shape() {
+    use ConcreteDataType as Dt;
+
+    for (field_type, query, admitted) in [
+        // A bare selector reports the field's own type, so it keeps the existing plan.
+        (Dt::int64_datatype(), "some_metric", false),
+        (Dt::float32_datatype(), "some_metric", false),
+        (Dt::uint64_datatype(), "some_metric", false),
+        // Arithmetic casts both operands, so the answer is a float under either route.
+        (Dt::int64_datatype(), "some_metric * 2", true),
+        (Dt::int64_datatype(), "some_metric + some_metric", true),
+        (Dt::float32_datatype(), "some_metric * 2", true),
+        (Dt::uint64_datatype(), "some_metric + some_metric", true),
+        // An aggregate whose UDAF answers a float for every numeric input.
+        (Dt::int64_datatype(), "min(some_metric)", true),
+        (Dt::int64_datatype(), "max(some_metric)", true),
+        (Dt::int64_datatype(), "avg(some_metric)", true),
+        (Dt::int64_datatype(), "stddev(some_metric)", true),
+        (Dt::uint64_datatype(), "quantile(0.5, some_metric)", true),
+        (Dt::int64_datatype(), "group(some_metric)", true),
+        // `sum` folds a float as a `Float64` and keeps an integer's own type.
+        (Dt::float32_datatype(), "sum(some_metric)", true),
+        (Dt::int64_datatype(), "sum(some_metric)", false),
+        (Dt::uint64_datatype(), "sum(some_metric)", false),
+        // `sum` publishes what it folds, so an integer answer one level down stays out as well.
+        (
+            Dt::float32_datatype(),
+            r#"sum(count_values("v", some_metric))"#,
+            false,
+        ),
+        // A range function answers a `Float64` for every numeric input.
+        (Dt::int64_datatype(), "rate(some_metric[5m])", true),
+        (Dt::int64_datatype(), "increase(some_metric[5m])", true),
+        (Dt::int64_datatype(), "sum_over_time(some_metric[5m])", true),
+        (Dt::uint64_datatype(), "changes(some_metric[5m])", true),
+        (Dt::float32_datatype(), "rate(some_metric[5m])", true),
+        // A count is an `Int64` whatever the field holds.
+        (Dt::int64_datatype(), "count(some_metric)", false),
+        (
+            Dt::float32_datatype(),
+            r#"count_values("v", some_metric)"#,
+            false,
+        ),
+        // A math function keeps the type it is given, and so does a negation.
+        (Dt::int64_datatype(), "abs(some_metric)", false),
+        (Dt::int64_datatype(), "-some_metric", false),
+        // A comparison without `bool` filters on the field's own column.
+        (Dt::int64_datatype(), "some_metric > 2", false),
     ] {
         let native = build_native_fused_plan_with_provider(
-            "some_metric",
+            query,
             true,
             build_test_table_provider_with_field_type(field_type.clone()).await,
         )
         .await;
-        let without_flag = build_native_fused_plan_with_provider(
-            "some_metric",
-            false,
-            build_test_table_provider_with_field_type(field_type.clone()).await,
-        )
-        .await;
-        assert!(
-            find_fused_series(&native).is_none(),
-            "{field_type} must not reach the native route"
-        );
-        assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "{field_type} must keep the existing plan"
-        );
+        if admitted {
+            let fused = find_fused_series(&native).unwrap_or_else(|| {
+                panic!(
+                    "{query} over {field_type} must reach the native route: {}",
+                    native.display_indent_schema()
+                )
+            });
+            // The value column is the one kind the node publishes, which is what the existing plan
+            // publishes for this shape too.
+            assert_eq!(
+                &ArrowDataType::Float64,
+                native_value_field(fused, query).data_type(),
+                "{query} over {field_type} publishes a float"
+            );
+        } else {
+            let without_flag = build_native_fused_plan_with_provider(
+                query,
+                false,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+            )
+            .await;
+            assert!(
+                find_fused_series(&native).is_none(),
+                "{query} over {field_type} must not reach the native route"
+            );
+            assert_eq!(
+                native.display_indent().to_string(),
+                without_flag.display_indent().to_string(),
+                "{query} over {field_type} must keep the existing plan"
+            );
+        }
     }
 }
 
@@ -4880,44 +6111,22 @@ async fn native_composed_binary_admits_complex_operands() {
 /// because the existing route answers them.
 #[tokio::test]
 async fn native_composed_binary_declines_to_the_existing_plan() {
-    // A comparison between a histogram and a float has no kernel, so the pair is not admitted, and
-    // nothing below it composes either: the whole statement stays on the existing plan.
-    let query = "hist > on(tag_0) floats";
-    let plan =
-        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
-            .await;
-    let display = plan.display_indent().to_string();
-    let legacy = PromPlanner::stmt_to_plan_with_annotations(
-        native_mixed_kind_provider().await,
-        &build_eval_stmt(query),
-        &build_query_engine_state(),
-        None,
-        false,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("`{query}`: the existing route must answer it: {error}"));
-    assert!(
-        find_fused_series(&plan).is_none(),
-        "`{query}` has no native answer: {display}"
-    );
-    assert_eq!(
-        legacy.display_indent().to_string(),
-        display,
-        "`{query}` must keep the existing plan"
-    );
-
     // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
-    // refused, so the existing plan answers the statement while the operand that does compose keeps
-    // its own answer below it.
+    // refused, so the existing plan answers the statement. The offer is the statement's, and the
+    // binary that makes it spends it for the whole subtree below: the operand is planned by the
+    // existing path too, because a refused chain of n operators would otherwise compile its
+    // subtrees again at every operator.
     for query in [
         // A scalar root is not a frame: composing it by vector matching would broadcast it as if it
         // were a one-series vector, which is not what the query asked for.
         "(hist * on(tag_0) floats) * 2",
         // Neither is a scalar function, however it is written.
         "(hist * on(tag_0) floats) / time()",
-        // A comparison between a histogram and a float has no kernel at this pair either, so the
-        // operand's own answer stops where it was admitted.
-        "(hist * on(tag_0) floats) > on(tag_0) floats",
+        // A comparison between a histogram and a float is not a refusal: its two sides pair no
+        // sample, so the column is the empty float layout and the statement composes.
+        // `native_fused_mixed_comparison_answers_the_empty_float_layout` states that shape, and
+        // `native_promql_kind_rules_match_legacy` (tests-integration) holds both routes' rows to
+        // the same empty answer.
     ] {
         let plan =
             build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
@@ -4928,8 +6137,111 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
             "`{query}` has no composed answer: {display}"
         );
         assert!(
-            find_fused_series(&plan).is_some(),
-            "`{query}` keeps the operand's own answer: {display}"
+            find_fused_series(&plan).is_none(),
+            "`{query}` spends its one offer above the operand: {display}"
+        );
+        let legacy = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("`{query}`: the existing route must answer it: {error}"));
+        assert_eq!(
+            legacy.display_indent().to_string(),
+            display,
+            "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// A ranking hands on the samples it ranked, so `topk` over a histogram metric stays a histogram.
+///
+/// The constant-`k` ranking is a whole-vector node, and the walk that names a statement's output
+/// column answered nothing for it - which kept every statement whose sources carry native histograms
+/// on the existing plan, since a column the walk cannot name is not a float by default. Naming it
+/// admits the statement and keeps the histogram column it read.
+///
+/// What the answer is worth is checked row for row against the existing plan in
+/// `native_promql_kind_rules_match_legacy` (tests-integration), which runs both routes over one
+/// fixture: this harness's in-memory scan is not a region scan, so a region-backed native plan
+/// cannot execute here.
+#[tokio::test]
+async fn native_fused_topk_over_a_histogram_keeps_its_histogram_column() {
+    let query = "topk(1, hist)";
+    let native =
+        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = native.display_indent().to_string();
+    let fused = find_fused_series(&native)
+        .unwrap_or_else(|| panic!("`{query}` must run natively: {display}"));
+    assert!(
+        matches!(
+            fused.tree().root().expr,
+            NativeExpr::Vector {
+                op: BoundVectorOp::TopK { .. },
+                ..
+            }
+        ),
+        "`{query}` binds the ranking: {display}"
+    );
+    // The ranking keeps the kind it read, so the statement declares a histogram column rather than
+    // the float layout an answer that can emit no sample keeps.
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        native_value_field(fused, query).data_type(),
+        "`{query}` keeps its histogram column: {display}"
+    );
+
+    let legacy =
+        build_native_fused_plan_with_provider(query, false, native_mixed_kind_provider().await)
+            .await;
+    assert!(
+        find_fused_series(&legacy).is_none(),
+        "the existing plan answers `{query}`: {legacy}"
+    );
+}
+
+/// A comparison over two kinds answers no sample, so its one column is a float.
+///
+/// `hist > on(tag_0) floats` pairs a native histogram with a float at every point, and the kernel
+/// reports such a pair as unsupported and skips it without keeping the left element
+/// (`vector_match::elem_binop`). The answer is therefore empty rather than mixed, and the column the
+/// statement declares is the empty float layout - which is what admits the statement to this route
+/// instead of leaving it on the existing plan.
+///
+/// Both routes' answers are compared row for row in `native_promql_kind_rules_match_legacy`
+/// (tests-integration), for the reason the ranking test above states.
+#[tokio::test]
+async fn native_fused_mixed_comparison_answers_the_empty_float_layout() {
+    for query in [
+        // Two operands of their own, which the composition binds as two frames.
+        "hist > on(tag_0) floats",
+        // The same pair with the left side computed by a composed binary: the comparison is what a
+        // statement stops at, so the nested shape must be admitted through the same rule.
+        "(hist * on(tag_0) floats) > on(tag_0) floats",
+    ] {
+        let native =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = native.display_indent().to_string();
+        let fused = find_fused_series(&native)
+            .unwrap_or_else(|| panic!("`{query}` must run natively: {display}"));
+        assert_eq!(
+            &ArrowDataType::Float64,
+            native_value_field(fused, query).data_type(),
+            "`{query}` declares the empty float layout: {display}"
+        );
+        assert!(!display.contains("Join:"), "{query}: {display}");
+
+        let legacy =
+            build_native_fused_plan_with_provider(query, false, native_mixed_kind_provider().await)
+                .await;
+        assert!(
+            find_fused_series(&legacy).is_none(),
+            "the existing plan answers `{query}`: {legacy}"
         );
     }
 }
@@ -5206,6 +6518,9 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                     sources(right, out);
                 }
                 NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                }
+                | NativeExpr::ParameterizedAggregate {
                     input, parameter, ..
                 } => {
                     sources(input, out);
@@ -5839,7 +7154,6 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
         "1 - some_metric / some_metric",
         "(some_metric / some_metric) * 100",
         "abs(some_metric - on(tag_0) some_metric)",
-        "(some_metric > some_metric) * 100",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
@@ -5851,6 +7165,44 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
             "{query}"
         );
         assert_eq!(2, fused.inputs().len(), "{query}");
+    }
+
+    // A filtering comparison keeps the metric name, so it hands its series over under a label set
+    // that still tells them apart; the arithmetic broadcast above it drops that name, and the drop
+    // is only injective when the name it removes is one value over every series below it. The label
+    // walk cannot prove that across a match - a match reports its operands' labels, not one
+    // metric's - so the broadcast is collected, and the collection turns the statement into a
+    // canonical boundary over one segment that reads each occurrence through its own source.
+    let query = "(some_metric > some_metric) * 100";
+    let plan = build_native_fused_plan(query, true).await;
+    let consumer = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert!(
+        matches!(consumer.tree().root().expr, NativeExpr::Input(_)),
+        "{query}: the consumer reads the collected boundary: {plan}"
+    );
+    let [child] = consumer.children() else {
+        panic!("{query}: the boundary has one producer: {plan}");
+    };
+    let producer = find_fused_series(child).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert!(producer.is_canonical_producer(), "{query}: {plan}");
+    assert!(
+        matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "{query} collects the broadcast's name drop: {:?}",
+        producer.tree().root().expr
+    );
+    // The merge collects what the two occurrences produced, so the work below the boundary is one
+    // segment reading each occurrence through its own source.
+    let [segment] = producer.children() else {
+        panic!("{query}: the producer reads one segment: {plan}");
+    };
+    let segment = find_fused_series(segment).unwrap_or_else(|| panic!("{query}: {plan}"));
+    assert_eq!(2, segment.inputs().len(), "{query}: {plan}");
+    for input in segment.inputs() {
+        assert!(
+            matches!(input, LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<RawSeriesSource>()),
+            "{query}: each occurrence reads its own source: {plan}"
+        );
     }
 
     let query = "ceil(some_metric)";
@@ -5950,6 +7302,9 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
                     }
                 }
                 NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                }
+                | NativeExpr::ParameterizedAggregate {
                     input, parameter, ..
                 } => {
                     child(input);
@@ -6282,6 +7637,35 @@ async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
         assert!(
             find_final_split(&plan).is_none(),
             "`{query}` must not split: {display}"
+        );
+    }
+}
+
+/// A whole-vector operator standing on an evaluated aggregate is the shape it is over a bare scan:
+/// it reads the whole vector at a point, so it runs in the one node above the cut and the fold
+/// below it is that node's own input rather than a split boundary.
+#[tokio::test]
+async fn native_fused_whole_vector_operators_over_an_aggregate_stay_native() {
+    for query in [
+        "topk(1, sum(some_metric))",
+        "bottomk(2, avg(some_metric))",
+        // The two rankings the existing planner cannot answer at all are admitted here too: the
+        // shape is the operator, not the ranking it computes.
+        "limitk(2, sum(some_metric))",
+        "limit_ratio(0.5, sum(some_metric))",
+        "sort(sum by (tag_0) (some_metric))",
+        // The same ranking over a bare scan, which was never the refused shape.
+        "topk(1, some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent_schema().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` ranks the whole vector, so it must stay native: {display}"
+        );
+        assert!(
+            find_final_split(&plan).is_none(),
+            "`{query}` needs a whole-vector boundary, so it must not split: {display}"
         );
     }
 }
@@ -6841,7 +8225,7 @@ async fn native_fused_limitk_over_a_windowed_aggregate_keeps_its_shape() {
     );
     assert_eq!(
         Some(true),
-        unifies_its_own_contributions(window_node),
+        unifies_its_own_contributions(window_node, &[], &[]),
         "`{query}`: the window emits one series per label set, so `limitk` collects nothing"
     );
     let NativeExpr::Aggregate {
@@ -7189,6 +8573,256 @@ async fn native_fused_quantile_is_a_complete_aggregate() {
         );
         // The quantile answers a float per group, under the fields and labels it read.
         assert_eq!(columns, sorted_column_names(&plan), "`{query}`");
+    }
+}
+
+/// A `quantile` whose argument the query evaluates binds that argument beside the fold, and answers
+/// per point.
+///
+/// Prometheus reads the parameter at every step, so `quantile(scalar(foo), m)` is not the quantile of
+/// a number bound before the query ran: the tree holds one `Complete` fold with its argument as a
+/// second operand, the fold's input first. Neither route splits it - a quantile exports no state to
+/// combine and a partition's quantile is not part of the group's - and a constant written as an
+/// expression stays the number it folds to, exactly as it was.
+#[tokio::test]
+async fn native_fused_quantile_reads_a_per_point_parameter() {
+    // A constant the statement decides - a literal or arithmetic over literals - is bound on the
+    // fold, so the tree keeps the constant path it always had.
+    for (query, quantile) in [
+        (
+            "quantile(0.25 + 0.1 + 0.15, some_metric)",
+            0.25 + 0.1 + 0.15,
+        ),
+        (
+            "quantile(pi() / 4, some_metric)",
+            std::f64::consts::PI / 4.0,
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        let NativeExpr::Aggregate { op, .. } = &fused.tree().root().expr else {
+            panic!("`{query}`: the folded constant left the constant path: {display}");
+        };
+        assert!(
+            matches!(
+                op.kind,
+                AggregateKind::Quantile { quantile: value } if value.to_bits() == quantile.to_bits()
+            ),
+            "`{query}`: {:?}",
+            op.kind
+        );
+    }
+
+    // An argument the statement evaluates: the fold reads it once per grid point. The columns are
+    // the grouping's either way, which is why the ungrouped statements publish no tag at all.
+    for (query, tags, grouped) in [
+        (
+            "quantile(scalar(some_metric), some_metric)",
+            &["__name__"][..],
+            false,
+        ),
+        (
+            "quantile(time() / 150 + 0.5, some_metric)",
+            &["__name__"][..],
+            false,
+        ),
+        (
+            "quantile(scalar(some_metric), some_metric) by (tag_0)",
+            &["__name__", "tag_0"][..],
+            true,
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        // A quantile exports no state, so there is no split half for it, with an argument or without.
+        assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+        let NativeExpr::ParameterizedAggregate {
+            input,
+            op,
+            parameter,
+        } = &fused.tree().root().expr
+        else {
+            panic!("`{query}`: the root is not a per-point fold: {display}");
+        };
+        assert!(
+            matches!(op.kind, AggregateKind::Quantile { .. })
+                && op.stage == AggregateStage::Complete,
+            "`{query}`: {display}"
+        );
+        assert_eq!(
+            grouped,
+            matches!(&op.group, Grouping::By(labels) if !labels.is_empty()),
+            "`{query}`: {display}"
+        );
+        // The fold reads the vector, the argument the scalar expression beside it.
+        assert!(
+            matches!(
+                input.expr,
+                NativeExpr::Instant { .. } | NativeExpr::Input(_)
+            ),
+            "`{query}`: {display}"
+        );
+        assert!(
+            matches!(parameter.output, NativeType::Scalar(_)),
+            "`{query}`: the argument is not a scalar: {display}"
+        );
+        assert_eq!(
+            // The value column the statement publishes is the expression it wrote, and the argument
+            // adds no column of its own: a scalar carries no labels.
+            expected_native_column_names(query, tags),
+            sorted_column_names(&plan),
+            "`{query}`"
+        );
+    }
+}
+
+/// A fold that reads its argument per point keeps the canonical boundary below it.
+///
+/// `label_replace` rewrites the label set two series can share, so the fragments it produces meet
+/// at a canonical merge before anything folds them. The fold above that merge reads the whole
+/// vector - a `quantile` answers from its group's whole sample set, with a `φ` the statement
+/// evaluates or with a number bound on it - so it is a global consumer of the same kind the bound
+/// fold is, and the segmentation has to read it as one: the fold is cut out as its own segment and
+/// the merge below it keeps its own boundary. Read as a per-partition node instead, the whole
+/// subtree would be cut over the scans in one go, and the label-set merge would run once per
+/// partition with nothing above it to collect the pieces.
+#[tokio::test]
+async fn native_fused_nested_per_point_quantile_keeps_its_canonical_boundary() {
+    let query = r#"quantile(time() / 2400, label_replace(some_metric, "tag_0", "same", "tag_0", ".*")) + 0"#;
+    let plan = build_native_fused_plan(query, true).await;
+    let display = plan.display_indent().to_string();
+    fn segment_of(plan: &LogicalPlan) -> &FusedSeries {
+        let LogicalPlan::Extension(Extension { node }) = plan else {
+            panic!("a segment is an extension node");
+        };
+        node.as_any()
+            .downcast_ref::<FusedSeries>()
+            .expect("the extension is not a fused segment")
+    }
+    // The root is the pointwise rewrite, and what it reads is the fold as a segment of its own.
+    let root = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+    let [fold] = root.children() else {
+        panic!("`{query}`: the rewrite must read the fold and nothing else: {display}");
+    };
+    let fold = segment_of(fold);
+    assert!(
+        matches!(
+            fold.tree().root().expr,
+            NativeExpr::ParameterizedAggregate { .. }
+        ),
+        "`{query}`: the fold is not a segment of its own: {display}"
+    );
+    // Below the fold is the canonical boundary the label rewrite needs, as its own segment over the
+    // scan it reads.
+    let [producer] = fold.children() else {
+        panic!("`{query}`: the fold must read the canonical boundary: {display}");
+    };
+    let producer = segment_of(producer);
+    assert!(
+        producer.is_canonical_producer()
+            && matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "`{query}`: the label-set merge is not a boundary below the fold: {display}"
+    );
+    let [source] = producer.children() else {
+        panic!("`{query}`: the producer must read the scan it merges: {display}");
+    };
+    assert!(
+        find_fused_series(source).is_none(),
+        "`{query}`: the producer reads the scan itself, not another segment: {display}"
+    );
+    assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+}
+
+/// A `quantile` whose argument reads a second table still runs as one native execution.
+///
+/// The argument is a scalar expression over another metric, so the statement reads two tables: the
+/// fold reads one and its argument the other, and one execution above both is what folds them.
+#[tokio::test]
+async fn native_fused_quantile_parameter_over_a_second_table() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
+    let query = "quantile(scalar(some_metric), other_metric)";
+    let plan = build_native_fused_plan_with_provider(query, true, provider().await).await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+    assert_eq!(None, fused.binding().metric_name, "`{query}`: {display}");
+    assert!(
+        matches!(
+            fused.tree().root().expr,
+            NativeExpr::ParameterizedAggregate { .. }
+        ),
+        "`{query}`: {display}"
+    );
+    // The fold's input is bound first and its argument second, which is the order the sources are
+    // read in, and the statement still reads both tables.
+    assert_eq!(
+        vec!["other_metric", "some_metric"],
+        fused_input_metrics(&plan),
+        "`{query}`: {display}"
+    );
+    assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+}
+
+/// An argument that ranks its series in input order is refused by the native route.
+///
+/// `scalar()` hands the fold one value per grid point, so the `limitk` inside the argument ranks the
+/// argument's own source, and a tree over more than one input reads its inputs in whichever order the
+/// gather finishes them: which series the ranking keeps would be the schedule's answer rather than the
+/// statement's. The gate that refuses such a tree reads the fold's argument as well as the vector it
+/// folds, and the argument is the only place an order-dependent selection sits here - the same
+/// statement with an order-independent argument plans natively in
+/// [`native_fused_quantile_parameter_over_a_second_table`].
+///
+/// The refusal is asserted on the native attempt alone rather than on the plan the statement gets: the
+/// existing planner binds a `quantile` argument only as a literal and answers a per-point one with
+/// `Invalid function argument for quantile`, so a tree this gate refuses has no other route - the
+/// statement is answered natively or not at all.
+#[tokio::test]
+async fn native_fused_declines_an_order_dependent_quantile_argument() {
+    let state = build_query_engine_state();
+    for (query, native) in [
+        // The argument keeps the first series `limitk` is handed, so which one survives two gathered
+        // inputs is the schedule's answer.
+        (
+            "quantile(scalar(limitk(1, some_metric)), other_metric)",
+            false,
+        ),
+        // Neither fold reads its source in arrival order, so the argument is what the refusal turns
+        // on rather than the two-table shape or a per-point argument as such.
+        (
+            "quantile(scalar(max by (tag_0) (some_metric)), other_metric)",
+            true,
+        ),
+    ] {
+        let tables = [
+            (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+        ];
+        let stmt = build_eval_stmt(query);
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_tsid(&tables, 1, 1).await,
+            ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
+            promql_annotations: None,
+            native_fused: true,
+            native_binary_offer: true,
+        };
+        let planned = planner
+            .try_plan_native_fused(&stmt.expr, &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            native,
+            planned.is_some(),
+            "`{query}`: the gate must read the fold's argument as well as its vector: {}",
+            planned
+                .map(|plan| plan.display_indent().to_string())
+                .unwrap_or_default()
+        );
     }
 }
 
@@ -9541,6 +11175,7 @@ async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
         ctx: PromPlannerContext::from_eval_stmt(&eval_stmt).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let plan = planner
         .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
@@ -10166,6 +11801,136 @@ async fn native_sum_by_name_separates_discovered_metrics() {
     );
 }
 
+/// Every raw source the plan reads, as the metric it names and the field columns it declares.
+///
+/// A source's tags are the scan's own columns, which never hold `__name__`: the name is the metric
+/// the source binds, which the frame reports as a label of its own.
+fn fused_sources(plan: &LogicalPlan) -> Vec<(String, Vec<String>)> {
+    fn visit(plan: &LogicalPlan, sources: &mut Vec<(String, Vec<String>)>) {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>()
+        {
+            sources.push((source.metric_name().to_string(), source.fields().to_vec()));
+        }
+        for input in plan.inputs() {
+            visit(input, sources);
+        }
+    }
+    let mut sources = Vec::new();
+    visit(plan, &mut sources);
+    sources
+}
+
+/// A tree reading more than one metric-bound input declares the name each input reports.
+///
+/// `__name__` is not a column of any scan: it is the name every series of a metric-bound input
+/// carries, so a source names it and nothing else. A statement reading one input can only ever
+/// report the one name it binds, which no grouping by the name can use to tell two of its groups
+/// apart - but a statement reading two binds two names, and `by (__name__)` groups by exactly that
+/// identity. Each of those sources therefore declares the name it reports, as a discovered source
+/// does, and the output layout names the label the grouping keeps instead of publishing the two
+/// metrics under one label set.
+#[tokio::test]
+async fn native_multi_input_grouping_by_name_declares_each_input_name() {
+    for query in [
+        // Two aggregates, one per metric table, in one binary.
+        "sum by (__name__) (some_metric) + sum by (__name__) (other_metric)",
+        // The same pair through set membership, which keeps the left side's answer.
+        "sum by (__name__) (some_metric) or sum by (__name__) (other_metric)",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_two_table_provider(vec![]).await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` left the native route: {}",
+            plan.display_indent()
+        );
+        // Each occurrence is bound to the metric table it reads, which is the name the grouping
+        // above it groups by.
+        let mut metrics = fused_input_metrics(&plan);
+        metrics.sort();
+        assert_eq!(
+            vec!["other_metric".to_string(), "some_metric".to_string()],
+            metrics,
+            "`{query}`: one input per metric table: {}",
+            plan.display_indent()
+        );
+        // The tree groups by the name on both sides, which is the label the declaration has to
+        // carry: `by (__name__)` keeps a label no scan column holds.
+        let fused = find_fused_series(&plan).expect("a fused node");
+        let (left, right) = match &fused.tree().root().expr {
+            NativeExpr::Binary { left, right, .. } => (left, right),
+            NativeExpr::Set { left, right, .. } => (left, right),
+            other => panic!(
+                "`{query}` reads both inputs in one node, not {other:?}: {}",
+                plan.display_indent()
+            ),
+        };
+        for side in [left, right] {
+            let NativeExpr::Aggregate { op, .. } = &side.expr else {
+                panic!(
+                    "`{query}`: an operand is not the aggregate it was written as: {}",
+                    plan.display_indent()
+                );
+            };
+            assert_eq!(
+                Grouping::By(Arc::new([Arc::from(METRIC_NAME)])),
+                op.group,
+                "`{query}`: both sides group by the name: {}",
+                plan.display_indent()
+            );
+        }
+        let declared_names = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| is_metric_name_field(field))
+            .count();
+        assert_eq!(
+            1,
+            declared_names,
+            "`{query}`: the rows layout declares the name once: {:?}",
+            plan.schema()
+        );
+        assert_eq!(
+            METRIC_NAME,
+            plan.schema().fields().last().unwrap().name(),
+            "`{query}`: the name column comes after the labels: {}",
+            plan.display_indent()
+        );
+    }
+}
+
+/// A statement reading one metric-bound input keeps the layout it had: its one name cannot tell
+/// two of its own groups apart, so the column stays the appended one rather than a group label.
+#[tokio::test]
+async fn native_single_input_grouping_by_name_keeps_the_appended_column() {
+    let query = "sum by (__name__) (some_metric)";
+    let plan =
+        build_native_fused_plan_with_provider(query, true, native_two_table_provider(vec![]).await)
+            .await;
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`{query}` left the native route: {}",
+        plan.display_indent()
+    );
+    let expression = parser::parse(query).unwrap().to_string();
+    assert_eq!(
+        vec!["timestamp", expression.as_str(), METRIC_NAME],
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        "{query}: {}",
+        plan.display_indent()
+    );
+}
+
 /// An `or` reports each row's own name, so its column carries the side the row came from rather
 /// than the statement's single name.
 #[tokio::test]
@@ -10531,11 +12296,11 @@ async fn native_histogram_plan(query: &str) -> String {
 #[tokio::test]
 async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     for query in [
-        "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
         "sum(some_metric or some_metric)",
         "sum(some_metric and some_metric)",
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         assert!(
@@ -10561,19 +12326,60 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
             pending.extend(node.inputs());
         }
     }
-    // A float-producing window still permits the aggregate itself to split natively: its count,
-    // not the input histogram, reaches the fold.
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    // `sum(label_replace(...))` is one of the shapes above. The rewrite collapses every series onto
+    // one `tag_0`, so the canonical pass collects it with a `Merge` on the fold's own input side -
+    // and a split keeps that merge inside its per-partition prefix, where the pieces of one label
+    // set are collected a partition at a time: two colliding series that landed in different
+    // partitions are each folded apart, their states are added above the router, and the statement
+    // answers a value where Prometheus reports `vector cannot contain metrics with the same
+    // labelset`. The split therefore refuses a merge, and no other execution of this route folds a
+    // histogram state: the chain built above a boundary folds floats, and what carries a histogram
+    // fold across a partition boundary is the split's state alone. So the statement keeps the
+    // existing plan - the plan it had before the split carried a merge - and the collision is the
+    // existing route's to report.
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
+        "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        true,
+        table_provider,
+    )
+    .await;
+    let display = plan.display_indent_schema().to_string();
+    assert!(
+        display.contains("Aggregate: groupBy=")
+            && display.contains("prom_native_histogram_agg_sum("),
+        "the collected histogram fold kept the existing plan: {display}"
+    );
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "the collected histogram fold ran a native fold per segment: {display}"
+    );
+
+    // A float-producing window still answers on the route: its count, not the input histogram,
+    // reaches the fold. The name `count_over_time` drops is the one every series of a single-metric
+    // scan shares, and these tables' key columns always decode a value, so the labels are the whole
+    // proof and nothing collects the prefix - and a prefix nothing collects is exactly what the
+    // split folds: the statement runs as a region-side partial aggregate and a final fold above it.
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
         "sum(count_over_time(some_metric[5m]))",
         true,
         table_provider,
     )
     .await;
+    let display = plan.display_indent_schema().to_string();
+    let partial = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("the float prefix left the native route: {display}"));
     assert!(
         find_final_split(&plan).is_some(),
-        "the float prefix no longer splits natively: {}",
-        plan.display_indent_schema()
+        "the uncollected prefix did not split: {display}"
+    );
+    assert!(
+        matches!(partial.tree().root().expr, NativeExpr::Aggregate { .. }),
+        "the state-exporting producer folds: {}\n{display}",
+        partial.tree()
     );
 }
 
@@ -10581,80 +12387,135 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
 ///
 /// The canonicalization pass wraps a collapsed rewrite in a merge, which the kind walk used to
 /// leave undescribed. "Cannot name it" then read as "possibly a histogram", so
-/// `label_replace(histogram_count(h), ...)` and its aggregated form kept the existing plan even
-/// though both answer floats. The walk now names a merge (it concatenates samples of one field)
-/// and a set operation (its sides agree on the kind), so those statements stay on the route while
-/// a histogram that really does enter an aggregate still keeps the existing plan.
+/// `label_replace(histogram_count(h), ...)` kept the existing plan even though it answers floats.
+/// The walk now names a merge (it concatenates samples of one field) and a set operation (its sides
+/// agree on the kind), so that statement stays on the route - while a fold above the collection the
+/// same rewrite's input needs, and a histogram that really does enter an aggregate or stand on a
+/// canonical merge, still keep the existing plan.
 #[tokio::test]
 async fn a_label_rewrite_keeps_a_float_answer_on_the_route() {
-    for query in [
-        "label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\")",
-        "sum(label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+    let query = "label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\")";
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
+    // The value column is resolved by its type: the expression names it, so the compiled field
+    // name is not what a reader can address.
+    let field = native_value_field(fused, &format!("{query}: {display}"));
+    assert_eq!(
+        &ArrowDataType::Float64,
+        field.data_type(),
+        "{query} declared a histogram column for a float answer: {display}"
+    );
+    // A histogram answer standing on the same collection crosses it: the merge carries histogram
+    // frames, and where the statement answers a float the map reducing them sits above the boundary.
+    // Both orderings are admitted because the merge only concatenates one field's samples - what it
+    // carries is its child's business - so each of these names the kind it publishes.
+    for (query, histogram) in [
+        (
+            "label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")",
+            true,
+        ),
+        (
+            "histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+            false,
+        ),
+        (
+            "sum(histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
+            false,
+        ),
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let fused = find_fused_series(&plan)
             .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
-        let field = native_value_field(fused, &format!("{query}: {display}"));
         assert_eq!(
-            &ArrowDataType::Float64,
-            field.data_type(),
-            "{query} declared a histogram column for a float answer: {display}"
+            if histogram {
+                native_histogram_value_type().as_arrow_type()
+            } else {
+                ArrowDataType::Float64
+            },
+            *native_value_field(fused, &format!("{query}: {display}")).data_type(),
+            "{query} declared the wrong column kind: {display}"
         );
-    }
-    // A histogram answer standing on a canonical merge is out of this route's reach for now: the
-    // canonical boundary carrying histogram frames is the follow-up's subject. Both orderings
-    // count - the merge at the root, and a merge below a map that answers floats - because a merge
-    // anywhere in the tree is a boundary that would carry histograms.
-    for query in [
-        "label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")",
-        "histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
-        "sum(histogram_count(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
-    ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let trees = fused_trees(&plan);
         assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} took a histogram answer through the canonical boundary: {}",
-            plan.display_indent_schema()
+            trees
+                .iter()
+                .any(|tree| tree.contains("Merge: canonical label-set merge")),
+            "{query} answers without the merge the rewrite needs: {trees:?}"
         );
     }
+    // The map inside the rewrite answers a float, so the one collection left is the rewrite's own,
+    // and a fold above that merge does not carry a histogram: the name `histogram_count` drops is
+    // the one every series of a single-metric scan shares, which the labels alone prove. The
+    // statement therefore stays on the route, where it was collected twice before.
+    let query =
+        "sum(label_replace(histogram_count(some_metric), \"tag_0\", \"x\", \"tag_0\", \".*\"))";
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("{query} left the route instead of answering: {display}"));
+    let field = native_value_field(fused, &format!("{query}: {display}"));
+    assert_eq!(
+        &ArrowDataType::Float64,
+        field.data_type(),
+        "{query} declared a histogram column for a float answer: {display}"
+    );
 }
 
 #[tokio::test]
 async fn a_segmented_parent_answers_the_kind_of_the_uncut_root() {
-    for (query, histogram) in [
-        (
-            "count_over_time(some_metric[5m]) + on (__name__) count_over_time(some_metric[5m])",
-            false,
-        ),
-        (
-            "histogram_count(some_metric) + on (__name__) histogram_count(some_metric)",
-            false,
-        ),
-        // The same segmentation over a tree that does answer histograms keeps the histogram
-        // column, which is what tells the two derivations apart: a kind forced to `Float` would
-        // pass the two cases above and fail this one.
-        ("some_metric * 2 + on (__name__) some_metric * 2", true),
+    // Both operands answer floats, so the parent's column is the float one whatever the segments
+    // below it read: a kind taken from the scan's histogram field would declare the wrong column.
+    for query in [
+        "count_over_time(some_metric[5m]) + on (__name__) count_over_time(some_metric[5m])",
+        "histogram_count(some_metric) + on (__name__) histogram_count(some_metric)",
     ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         let fused = find_fused_series(&plan).unwrap_or_else(|| {
             panic!("{query} left the native route instead of segmenting: {display}")
         });
         let field = native_value_field(fused, &format!("{query}: {display}"));
-        let expected = if histogram {
-            native_histogram_value_type().as_arrow_type()
-        } else {
-            ArrowDataType::Float64
-        };
         assert_eq!(
-            &expected,
+            &ArrowDataType::Float64,
             field.data_type(),
             "{query} declared the wrong column kind: {display}"
         );
+    }
+    // A histogram answer through the same match stays on the route as long as nothing collects it:
+    // `some_metric * 2` drops the metadata labels over one metric, which the labels prove, so no
+    // merge carries histogram frames and the gate that refuses one is never reached.
+    let query = "some_metric * 2 + on (__name__) some_metric * 2";
+    let table_provider =
+        build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "{query} left the native route although nothing collects it: {display}"
+    );
+    let mut pending = vec![&plan];
+    while let Some(node) = pending.pop() {
+        if let LogicalPlan::Extension(Extension { node }) = node
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        {
+            assert!(
+                !matches!(fused.tree().root().expr, NativeExpr::Merge { .. }),
+                "{query} collects a histogram answer: {}\n{display}",
+                fused.tree()
+            );
+        }
+        pending.extend(node.inputs());
     }
 }
 
@@ -10675,6 +12536,164 @@ async fn native_histogram_selector_plans_a_native_producer() {
     );
 }
 
+/// A metadata tag in the binding collects a histogram statement onto a canonical boundary.
+///
+/// `__unit__` leaves with the metric name a kernel drops, and a scan that carries it can hold two
+/// series that agree on everything else, so the drop is not proved and is collected - and for a
+/// histogram answer that collection is a canonical merge carrying histogram frames. It is the
+/// boundary a float answer gets: a producer running the statement's own tree per partition, the
+/// router collecting one label set from every partition with the kernel that merges floats as it
+/// merges histograms, and a consumer answering the histogram column above it. The same statement
+/// over a table whose tags carry no metadata label is proved by its labels, so nothing is collected
+/// and the histogram answer is one node.
+#[tokio::test]
+async fn a_metadata_tag_in_the_binding_answers_a_histogram_statement_over_a_canonical_boundary() {
+    for query in ["rate(some_metric[5m])", "some_metric * 2"] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_metadata_tag("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("`{query}` left the route instead of answering: {display}"));
+        assert_eq!(
+            &native_histogram_value_type().as_arrow_type(),
+            native_value_field(fused, &format!("`{query}`: {display}")).data_type(),
+            "`{query}` declared something other than the histogram it answers: {display}"
+        );
+        // The merge is the collection the drop is paid for, and it answers what its child answers:
+        // the statement's kind, histograms included.
+        let trees = fused_trees(&plan);
+        assert!(
+            trees
+                .iter()
+                .any(|tree| tree.contains("Merge: canonical label-set merge")),
+            "`{query}` answers without the merge its drop is collected into: {trees:?}"
+        );
+        // What crosses the boundary is the histogram payload itself: the merge that collected the
+        // drop answers histograms, so the frames the producer hands over are histogram frames.
+        assert!(
+            fused_merges_answer_histograms(&plan),
+            "`{query}` collected a field that is not the histogram it answers: {display}"
+        );
+    }
+    // Over a table whose tags carry no metadata label the labels alone prove the drop, so the
+    // answer is one node and nothing collects it.
+    for query in ["rate(some_metric[5m])", "some_metric * 2"] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let trees = fused_trees(&plan);
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}`: the proved drop left the route: {display}"
+        );
+        assert!(
+            !trees.iter().any(|tree| tree.starts_with("Merge")),
+            "`{query}` collected a proved drop: {trees:?}"
+        );
+    }
+}
+
+/// A float answer reduces the histograms a boundary carried, and the boundary stays below it.
+///
+/// `histogram_count(rate(h[5m]))` answers a float, so nothing about its root kind says how the
+/// window below it is carried: `rate` drops the metadata labels over a binding that carries
+/// `__unit__`, so the window is collected into a canonical merge that hands histogram frames across
+/// the boundary, and
+/// `histogram_count` maps those histograms to floats above it. The frames the producer publishes are
+/// still histogram frames - the payload struct is what says so - and the consumer answers the float
+/// column.
+#[tokio::test]
+async fn a_float_answer_reduces_the_histograms_a_boundary_carried() {
+    let query = "histogram_count(rate(some_metric[5m]))";
+    let table_provider =
+        build_test_native_histogram_table_provider_with_metadata_tag("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("`{query}` left the route instead of answering: {display}"));
+    assert_eq!(
+        &ArrowDataType::Float64,
+        native_value_field(fused, &format!("`{query}`: {display}")).data_type(),
+        "`{query}` declared a histogram column for a float answer: {display}"
+    );
+    let trees = fused_trees(&plan);
+    let boundary = trees
+        .iter()
+        .find(|tree| tree.contains("Merge: canonical label-set merge"))
+        .unwrap_or_else(|| panic!("`{query}` answers without the collected window: {trees:?}"));
+    // What the merge collects is the window that dropped the name, and the field it hands over is
+    // the histogram payload: the native frame schema carries the histogram struct's own columns.
+    // The window runs below the boundary - in its tree when the segment holds both, in the segment
+    // the boundary reads when the plan splits them - and either way this is the window it collects.
+    assert!(
+        boundary.contains("Window: rate ")
+            || trees.iter().any(|tree| tree.contains("Window: rate ")),
+        "`{query}`: the boundary collects something other than the window: {boundary} {trees:?}"
+    );
+    // The frames the boundary hands over hold histograms, which is what says the map above it reads
+    // histograms rather than floats handed to it in their place.
+    assert!(
+        fused_merges_answer_histograms(&plan),
+        "`{query}`: the boundary carries a field that is not a histogram: {display}"
+    );
+    // The map that answers the float reads the collected frames, so it sits above the boundary.
+    let reducing = trees
+        .iter()
+        .position(|tree| tree.contains("histogram_count"))
+        .unwrap_or_else(|| panic!("`{query}` has no map that reduces the histograms: {trees:?}"));
+    let collecting = trees
+        .iter()
+        .position(|tree| tree.contains("Merge: canonical label-set merge"))
+        .expect("the boundary was found above");
+    assert!(
+        reducing != collecting,
+        "`{query}`: the reduction is the boundary itself: {trees:?}"
+    );
+}
+
+/// A histogram answer that crosses a collected drop still segments.
+///
+/// The tree's two operands each drop the metadata labels over a binding that carries `__unit__`, so
+/// each is collected, and the match above them reads a histogram from each side. Segmentation cuts the tree into
+/// segments that run where their inputs are read and keeps the collected boundary as a frame stage,
+/// exactly as it does for a float answer - so the histogram frames cross a boundary that is not the
+/// statement's own root.
+#[tokio::test]
+async fn a_segmented_histogram_answer_crosses_its_collected_boundary() {
+    let query = "some_metric * 2 + on (__name__) some_metric * 2";
+    let table_provider =
+        build_test_native_histogram_table_provider_with_metadata_tag("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent_schema().to_string();
+    let fused = find_fused_series(&plan)
+        .unwrap_or_else(|| panic!("`{query}` left the route instead of answering: {display}"));
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        native_value_field(fused, &format!("`{query}`: {display}")).data_type(),
+        "`{query}` declared something other than the histogram it answers: {display}"
+    );
+    let trees = fused_trees(&plan);
+    assert!(
+        trees.len() > 1,
+        "`{query}` answers in one node, so nothing was segmented: {trees:?}"
+    );
+    let collected = trees
+        .iter()
+        .filter(|tree| tree.contains("Merge: canonical label-set merge"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        2,
+        collected.len(),
+        "`{query}`: each operand pays for its own drop: {trees:?}"
+    );
+    assert!(
+        fused_merges_answer_histograms(&plan),
+        "`{query}` collected a field that is not a histogram: {display}"
+    );
+}
+
 /// A histogram fold is admitted below a pointwise operator.
 ///
 /// The gate cannot look at the root alone: `sum(h) * 2` has a binary root and the fold sits below
@@ -10692,6 +12711,8 @@ async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
         "avg(some_metric) + 1",
         "-sum(some_metric)",
     ] {
+        // A metric-engine table, whose tag columns are all nullable: the fixture the statements
+        // below ran against before the drop's proof changed, and the one this test pins.
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
@@ -10787,18 +12808,77 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
             "{query} ran a native fold over histograms: {}",
             plan.display_indent_schema()
         );
+        // The two-aggregate cut declines the split, and a tree that folds histogram state has no
+        // segment execution here, so this is the refusal that answers it - recorded, not silent.
+        assert_eq!(
+            Some("histogram_state_above_a_segment_boundary"),
+            take_reported_decline(),
+            "{query}: {}",
+            plan.display_indent_schema()
+        );
+    }
+}
+
+/// The split a histogram fold needs is planned over a table whose keys always decode a value too.
+///
+/// The other fixture (`a_histogram_sum_or_avg_folds_natively`) states the nullable key, where the
+/// canonical pass inserts the merge the split now carries; this one states the table where nothing
+/// is collected, so a regression on either side is told apart from the other.
+#[tokio::test]
+async fn a_histogram_sum_over_stable_keys_keeps_its_split() {
+    for query in ["sum(some_metric)", "sum(rate(some_metric[5m]))"] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let final_node = find_final_split(&plan)
+            .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
+        assert!(
+            partial_below(final_node).is_some(),
+            "{query} lost the partial half of its split: {display}"
+        );
+        assert_eq!(
+            None,
+            take_reported_decline(),
+            "{query} declined although its split is planned: {display}"
+        );
+    }
+}
+
+/// A float function above a split histogram fold publishes a float column: the state crossing the
+/// boundary is a histogram, but the statement's value columns follow its root.
+#[tokio::test]
+async fn a_float_function_over_a_split_histogram_fold_publishes_floats() {
+    for query in [
+        "histogram_count(sum(some_metric))",
+        "histogram_quantile(0.9, sum(rate(some_metric[2m])))",
+    ] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let final_node = find_final_split(&plan)
+            .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
+        assert!(
+            partial_below(final_node).is_some(),
+            "{query} lost the partial half of its split: {display}"
+        );
+        let field = native_value_field(final_node, query);
+        assert_eq!(
+            &ArrowDataType::Float64,
+            field.data_type(),
+            "{query}: {display}"
+        );
     }
 }
 
 #[tokio::test]
 async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
-    for query in [
-        "some_metric",
-        "rate(some_metric[5m])",
-        "sum_over_time(some_metric[5m])",
-        "some_metric * 2",
-    ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    // A bare scan drops nothing, and `last_over_time` keeps the metric name, so neither hands out a
+    // label set two of its series could meet under.
+    for query in ["some_metric", "last_over_time(some_metric[5m])"] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         assert!(
             find_fused_series(&plan).is_some(),
@@ -10806,8 +12886,32 @@ async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
             plan.display_indent_schema()
         );
     }
-    // `rate` answers histograms, so an aggregate over it folds histograms - and that folds now
-    // runs here, which is what `a_histogram_sum_or_avg_folds_natively` covers.
+    // `rate`, `sum_over_time` and `some_metric * 2` all answer a histogram, and each drops the
+    // metadata labels over one metric - which the labels alone prove, whatever the scan's `le`
+    // column can hold. Nothing collects them, so no merge carries a histogram frame and the gate
+    // that refuses one is never reached: all three stay on the route.
+    for query in [
+        "rate(some_metric[5m])",
+        "sum_over_time(some_metric[5m])",
+        "some_metric * 2",
+    ] {
+        let table_provider =
+            build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| {
+            panic!("{query} left the native route although nothing collects it: {display}")
+        });
+        assert!(
+            !matches!(fused.tree().root().expr, NativeExpr::Merge { .. }),
+            "{query} collects a histogram answer: {}\n{display}",
+            fused.tree()
+        );
+    }
+    // An aggregate over a histogram now folds it natively - `sum(some_metric)` and
+    // `sum(rate(some_metric[5m]))` - which is what `a_histogram_sum_or_avg_folds_natively`
+    // covers; the histogram shapes the split still declines are pinned by
+    // `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`.
 }
 
 /// An instant selection over a native histogram keeps the histogram, so its output column stays the
@@ -11565,6 +13669,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
         },
         promql_annotations: Some(collector.clone()),
         native_fused: false,
+        native_binary_offer: true,
     };
     let input = LogicalPlan::Extension(Extension {
         node: Arc::new(
@@ -13055,6 +15160,7 @@ async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
         ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")).unwrap(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     planner.ctx.time_index_column = Some("timestamp".to_string());
     planner.ctx.start = 1_000;
@@ -13925,6 +16031,7 @@ async fn test_direct_or_numeric_value_types() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left_context = direct_or_context("lhs", &["job"], "v");
     let right_context = direct_or_context("rhs", &["job"], "v");
@@ -15159,6 +17266,7 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
         native_fused: false,
+        native_binary_offer: true,
     };
     let left = LogicalPlanBuilder::from(scan(&left))
         .project(vec![
@@ -15912,6 +18020,10 @@ async fn a_histogram_sum_or_avg_folds_natively() {
         "sum(rate(some_metric[5m]))",
         "avg by (tag_0) (some_metric)",
     ] {
+        // The metric-engine table every drop over it collects for: its `le` tag is nullable, so
+        // the canonical pass inserts a `Merge` above the window and the split has to carry one.
+        // This is the fixture the regression this test guards appeared on: a split that declined
+        // across that merge sent `sum(rate(h[5m]))` back to the existing plan.
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
@@ -15978,11 +18090,6 @@ async fn native_composed_binary_admits_a_source_free_frame_operand() {
 /// shape that did not would decline to the existing plan; neither may re-offer the same expression.
 #[tokio::test]
 async fn native_composed_binary_recursion_terminates_on_a_deep_expression() {
-    fn count_fused(plan: &LogicalPlan) -> usize {
-        usize::from(is_fused_series(plan))
-            + plan.inputs().into_iter().map(count_fused).sum::<usize>()
-    }
-
     let depth = 32;
     let mut query = "hist * on(tag_0) floats".to_string();
     for _ in 1..depth {
@@ -15999,9 +18106,80 @@ async fn native_composed_binary_recursion_terminates_on_a_deep_expression() {
     assert!(!display.contains("Join:"), "{depth}-deep: {display}");
     // One composition per operator, plus the leaf frames below them.
     assert!(
-        count_fused(&plan) > depth,
+        count_fused_nodes(&plan) > depth,
         "{depth}-deep: {} fused nodes: {display}",
-        count_fused(&plan)
+        count_fused_nodes(&plan)
+    );
+}
+
+/// The same match over two field kinds, `depth` binary operators deep.
+fn composition_query(depth: usize) -> String {
+    let mut query = "hist * on(tag_0) floats".to_string();
+    for _ in 1..depth {
+        query = format!("({query}) / on(tag_0) floats");
+    }
+    query
+}
+
+fn count_fused_nodes(plan: &LogicalPlan) -> usize {
+    usize::from(is_fused_series(plan))
+        + plan
+            .inputs()
+            .into_iter()
+            .map(count_fused_nodes)
+            .sum::<usize>()
+}
+
+/// A deep native composition plans on the stack a query worker has.
+///
+/// `try_plan_native` and `try_plan_native_composed_binary` call each other once per binary operator,
+/// and every level's frames are charged to the stack of the level above it. A left-deep chain of
+/// matches over two field kinds 64 operators deep aborted the process - a stack overflow, not a
+/// declined plan - on the two megabytes a query worker has, before `try_plan_native` grew its stack
+/// for the poll of its future; 56 operators deep still planned. nextest's own test thread is not a
+/// worker's, so the depths here are planned on a thread this test sizes like one, and the deepest of
+/// them is twice the depth that aborted.
+#[test]
+fn a_deep_native_composition_plans_within_a_worker_stack() {
+    let depths = [10, 24, 48, 64, 128];
+    let planned = std::thread::Builder::new()
+        .name("deep_native_composition".to_string())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime");
+            runtime.block_on(async {
+                let mut planned = Vec::new();
+                for depth in depths {
+                    let query = composition_query(depth);
+                    let plan = build_native_fused_plan_with_provider(
+                        &query,
+                        true,
+                        native_mixed_kind_provider().await,
+                    )
+                    .await;
+                    let display = plan.display_indent().to_string();
+                    assert!(!display.contains("Join:"), "{depth}-deep: {display}");
+                    // One composition per operator, plus the leaf frames below them.
+                    assert!(
+                        count_fused_nodes(&plan) > depth,
+                        "{depth}-deep: {} fused nodes: {display}",
+                        count_fused_nodes(&plan)
+                    );
+                    planned.push(depth);
+                }
+                planned
+            })
+        })
+        .expect("a thread with a worker's stack")
+        .join()
+        .expect("compositions 10, 24, 48, 64 and 128 operators deep plan on a two-megabyte stack");
+    assert_eq!(
+        depths.to_vec(),
+        planned,
+        "every depth plans as a native composition"
     );
 }
 
@@ -16019,6 +18197,7 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
         ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
         promql_annotations: None,
         native_fused: true,
+        native_binary_offer: true,
     };
     let before = format!("{:?}", planner.ctx);
     let refused = planner
@@ -16081,20 +18260,37 @@ async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
 /// execution: a canonical merge carrying histograms.
 #[tokio::test]
 async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
-    // A canonical merge inside the tree routes whole label sets, and the pieces of one set arrive in
-    // different partitions: the merge would carry histogram frames through that boundary.
-    for query in [
+    // A `Merge` on the aggregate's own input side is such a shape. The merge answers one series per
+    // label set from pieces that are spread over the scan's partitions, and a split keeps it in the
+    // per-partition prefix, where two colliding pieces from different partitions are folded apart
+    // instead of reported. A histogram fold has no execution above a boundary either - the chain
+    // this route builds there folds floats - so the statement keeps the existing plan.
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
         "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
+        true,
+        table_provider,
+    )
+    .await;
+    let display = plan.display_indent_schema().to_string();
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "the collected histogram fold ran a native fold: {display}"
+    );
+    // Two aggregates are two cuts, which this split still cannot carry: the inner one would have to
+    // be replanned as its own pair above the outer one's answer.
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan = build_native_fused_plan_with_provider(
         "sum(sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
-    ] {
-        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
-        assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} carried histograms through a canonical merge: {}",
-            plan.display_indent_schema()
-        );
-    }
+        true,
+        table_provider,
+    )
+    .await;
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "the two-aggregate shape ran a native fold: {}",
+        plan.display_indent_schema()
+    );
     // Two histogram tables are a multi-input tree, but each fold is its own subtree: the binary
     // above them combines two already-folded histograms, so no aggregate state crosses the pairing
     // and the statement runs. The state gate is about an aggregate reading several inputs, not
@@ -16140,5 +18336,56 @@ async fn a_float_tree_still_segments_next_to_the_histogram_gates() {
             "{query} left the native route: {}",
             plan.display_indent_schema()
         );
+    }
+}
+
+/// A statement named after the column its own layout publishes keeps the answer it owes.
+///
+/// A table that does not exist has no column of its own to name the grid after, so the planner
+/// fabricates the existing planner's synthetic `time` column for it. `time` is therefore both the
+/// metric's name - which names the value column - and that grid, and `__name__` is both a metric
+/// name and the row-name column every samples layout publishes. Prometheus answers both statements
+/// with the empty vector: the first publishes its grid under a free synthetic name, and the second
+/// is a layout the rows contract cannot name, so it keeps the existing plan, which answers empty.
+#[tokio::test]
+async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vector() {
+    for (query, native) in [("time", true), ("__name__", false)] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert_eq!(
+            native,
+            find_fused_series(&plan).is_some(),
+            "`{query}`: {plan:?}"
+        );
+        let columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        if native {
+            assert_eq!(
+                vec!["native_time_0", query, METRIC_NAME],
+                columns,
+                "`{query}`: the grid takes a free synthetic name"
+            );
+        }
+        let stmt = build_eval_stmt(query);
+        let state = build_query_engine_state();
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &state,
+            None,
+            true,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("`{query}` is not planned at all: {error}"));
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
     }
 }

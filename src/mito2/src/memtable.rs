@@ -167,6 +167,11 @@ impl RangesOptions {
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
     pub estimated_bytes: usize,
+    /// Estimated bytes of the rows once decoded, for sizing reads and counting written data.
+    /// `None` means `estimated_bytes`, as the memtable keeps its rows decoded. A memtable that
+    /// encodes rows in memory reports the bytes written into it, including rows deduplicated
+    /// later.
+    pub decoded_bytes: Option<usize>,
     /// The inclusive time range that this memtable contains. It is None if
     /// and only if the memtable is empty.
     pub time_range: Option<(Timestamp, Timestamp)>,
@@ -201,6 +206,11 @@ impl MemtableStats {
     /// Returns the estimated bytes allocated by this memtable.
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
+    }
+
+    /// Returns the estimated bytes of the rows once decoded.
+    pub fn decoded_bytes(&self) -> usize {
+        self.decoded_bytes.unwrap_or(self.estimated_bytes)
     }
 
     /// Returns the time range of the memtable.
@@ -356,6 +366,9 @@ pub struct AllocTracker {
     bytes_allocated: AtomicUsize,
     /// Whether allocating is done.
     is_done_allocating: AtomicBool,
+    /// Serializes [Self::done_allocating] with charging and releasing, which all decide how
+    /// much of the allocated memory counts as mutable memory of the write buffer.
+    release: std::sync::Mutex<()>,
 }
 
 impl fmt::Debug for AllocTracker {
@@ -374,6 +387,7 @@ impl AllocTracker {
             write_buffer_manager,
             bytes_allocated: AtomicUsize::new(0),
             is_done_allocating: AtomicBool::new(false),
+            release: std::sync::Mutex::new(()),
         }
     }
 
@@ -391,6 +405,7 @@ impl AllocTracker {
     ///
     /// The region MUST ensure that it calls this method inside the region writer's write lock.
     pub(crate) fn done_allocating(&self) {
+        let _release = self.release.lock().unwrap();
         if let Some(write_buffer_manager) = &self.write_buffer_manager
             && self
                 .is_done_allocating
@@ -398,6 +413,40 @@ impl AllocTracker {
                 .is_ok()
         {
             write_buffer_manager.schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
+        }
+    }
+
+    /// Charges `bytes` to this tracker until the returned charge drops.
+    ///
+    /// Memtables that replace their data, or hand it to readers, keep a charge with the data so
+    /// the write buffer stays charged until the last holder releases it.
+    pub(crate) fn charge(self: &Arc<Self>, bytes: usize) -> MemoryCharge {
+        let _release = self.release.lock().unwrap();
+        self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
+        WRITE_BUFFER_BYTES.add(bytes as i64);
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            write_buffer_manager.reserve_mem(bytes);
+            // Frozen memory no longer counts as mutable memory.
+            if self.is_done_allocating.load(Ordering::Relaxed) {
+                write_buffer_manager.schedule_free_mem(bytes);
+            }
+        }
+        MemoryCharge {
+            tracker: self.clone(),
+            bytes,
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        let _release = self.release.lock().unwrap();
+        self.bytes_allocated.fetch_sub(bytes, Ordering::Relaxed);
+        WRITE_BUFFER_BYTES.sub(bytes as i64);
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            // Freezing already removed the frozen bytes from the mutable memory.
+            if !self.is_done_allocating.load(Ordering::Relaxed) {
+                write_buffer_manager.schedule_free_mem(bytes);
+            }
+            write_buffer_manager.release_mem(bytes);
         }
     }
 
@@ -425,6 +474,36 @@ impl Drop for AllocTracker {
         if let Some(write_buffer_manager) = &self.write_buffer_manager {
             write_buffer_manager.free_mem(bytes_allocated);
         }
+    }
+}
+
+/// Memory charged to an [AllocTracker] until this charge drops.
+///
+/// The charge keeps its tracker alive, so data still held by readers stays charged after its
+/// memtable is dropped. Ranges, and the iterators and encoded data built from them, hold the
+/// charge; batches that an iterator passes on without copying are not covered once it drops.
+pub(crate) struct MemoryCharge {
+    tracker: Arc<AllocTracker>,
+    bytes: usize,
+}
+
+impl MemoryCharge {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl fmt::Debug for MemoryCharge {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("MemoryCharge")
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
+impl Drop for MemoryCharge {
+    fn drop(&mut self) {
+        self.tracker.release(self.bytes);
     }
 }
 
@@ -527,6 +606,9 @@ impl MemtableBuilderProvider {
                     .with_config(config.clone())
                     .with_row_group_size(options.row_group_size())
                     .with_float_field_encoding(options.float_field_encoding)
+                    .with_narthex_format(
+                        options.sst_format == Some(crate::sst::FormatType::Narthex),
+                    )
                     .with_compact_dispatcher(self.compact_dispatcher.clone()),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
@@ -552,6 +634,7 @@ impl MemtableBuilderProvider {
         .with_config(self.default_bulk_memtable_config.clone())
         .with_row_group_size(options.row_group_size())
         .with_float_field_encoding(options.float_field_encoding)
+        .with_narthex_format(options.sst_format == Some(crate::sst::FormatType::Narthex))
         .with_compact_dispatcher(self.compact_dispatcher.clone());
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
@@ -618,13 +701,24 @@ pub struct EncodedRange {
     pub data: Bytes,
     /// Metadata of the encoded range.
     pub sst_info: SstInfo,
+    /// Keeps the write buffer charged for `data`.
+    pub(crate) _charges: Vec<Arc<MemoryCharge>>,
 }
+
+/// Conservative exact-key discovery without decoding sample columns.
+pub type BoxedPrimaryKeyIterator = Box<dyn Iterator<Item = Bytes> + Send>;
 
 /// Builder to build an iterator to read the range.
 /// The builder should know the projection and the predicate to build the iterator.
 pub trait IterBuilder: Send + Sync {
     /// Returns the iterator to read the range.
     fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator>;
+
+    /// Returns exact keys directly when the range has a separate key representation.
+    /// Keys may repeat and may include rows excluded by query visibility.
+    fn primary_keys(&self) -> Option<BoxedPrimaryKeyIterator> {
+        None
+    }
 
     /// Returns whether the iterator is a record batch iterator.
     fn is_record_batch(&self) -> bool {
@@ -789,6 +883,10 @@ impl MemtableRange {
         )))
     }
 
+    pub(crate) fn primary_keys(&self) -> Option<BoxedPrimaryKeyIterator> {
+        self.context.builder.primary_keys()
+    }
+
     /// Builds an iterator to read all rows in range.
     pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
         self.context.builder.build(None)
@@ -893,6 +991,37 @@ mod tests {
             }
         }
 
+        assert_eq!(0, manager.memory_usage());
+        assert_eq!(0, manager.mutable_usage());
+    }
+
+    #[test]
+    fn test_memory_charge_before_and_after_freezing() {
+        let manager = Arc::new(WriteBufferManagerImpl::new(1000));
+        let tracker = Arc::new(AllocTracker::new(Some(
+            manager.clone() as WriteBufferManagerRef
+        )));
+        let mutable = tracker.charge(100);
+        let released_after_freeze = tracker.charge(60);
+        assert_eq!(160, manager.memory_usage());
+        assert_eq!(160, manager.mutable_usage());
+        // Releasing a mutable charge frees both its total and its mutable usage.
+        drop(mutable);
+        assert_eq!(60, manager.mutable_usage());
+
+        tracker.done_allocating();
+        assert_eq!(0, manager.mutable_usage());
+        // Charges taken or released after freezing only change the total usage.
+        let frozen = tracker.charge(30);
+        drop(released_after_freeze);
+        assert_eq!(30, tracker.bytes_allocated());
+        assert_eq!(30, manager.memory_usage());
+        assert_eq!(0, manager.mutable_usage());
+
+        // A charge outlives the tracker's owner and keeps the memory charged.
+        drop(tracker);
+        assert_eq!(30, manager.memory_usage());
+        drop(frozen);
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
     }

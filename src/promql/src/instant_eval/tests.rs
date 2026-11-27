@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::arrow::buffer::ScalarBuffer;
@@ -28,8 +29,8 @@ use datatypes::series::samples::{
 use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
-    InstantCandidateSpan, info_sample_times, instant_candidate_span, select_instants,
-    timestamp_of_evaluated, timestamp_of_selection,
+    AXIS_ROWS_READ, InstantCandidateSpan, info_sample_times, instant_candidate_span,
+    select_instants, timestamp_of_evaluated, timestamp_of_selection,
 };
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{Labels, labels_of, metric_of};
@@ -218,10 +219,8 @@ fn offset_extreme_timestamps_are_checked_without_large_fixture() {
         (vec![0], vec![110])
     );
 
-    // A grid of a million and one points used to be refused by a point limit of the kernel's own.
-    // The kernel decides it now, and the reservation its caller grows before the call is what
-    // stands in for that limit; the stale marker still suppresses the points row zero would answer,
-    // so only the one sample after it is selected.
+    // A million-point grid has no kernel-side limit; the stale marker at row zero suppresses
+    // every point before the second sample.
     let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
         Some(f64::from_bits(
             common_query::prometheus::PROMETHEUS_STALE_NAN_BITS,
@@ -233,10 +232,36 @@ fn offset_extreme_timestamps_are_checked_without_large_fixture() {
     assert_eq!(times, [1_000_000]);
 }
 
+/// A second pass over the axis would select the same rows, so the read count is what is checked.
+#[test]
+fn a_selection_reads_its_axis_once() {
+    let rows = 5_000;
+    let times: Vec<i64> = (0..rows).map(|row| row as i64).collect();
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; rows])));
+    let read = |range: RangeInclusive<i64>, step: i64| -> u64 {
+        AXIS_ROWS_READ.store(0, Ordering::Relaxed);
+        let (selected, _) = select(&times, &fields, range, step, 10, 0).unwrap();
+        assert!(!selected.is_empty(), "the selection is what reads the axis");
+        AXIS_ROWS_READ.load(Ordering::Relaxed)
+    };
+    assert_eq!(
+        read(0..=rows as i64 - 1, 1),
+        rows as u64,
+        "the axis was walked more than once"
+    );
+    for step in [10, 499] {
+        let visited = read(0..=rows as i64 - 1, step);
+        assert!(
+            visited <= rows as u64,
+            "step {step} read {visited} rows of a {} row axis",
+            rows
+        );
+    }
+}
+
 #[test]
 fn instant_candidate_span_preserves_unaligned_and_wide_ranges() {
-    // The query end is not on the start's lattice. The scan bound is 125, but stepping from 100
-    // visits only 100, 110 and 120, as it did before clipping was shared.
+    // The query end is off the start's lattice: the scan bound is 125, the points 100, 110, 120.
     let span = instant_candidate_span(Some((100, 120)), 100..=125, 10, 1, 0);
     assert_eq!(
         span,
@@ -251,8 +276,7 @@ fn instant_candidate_span_preserves_unaligned_and_wide_ranges() {
     assert_eq!(rows, [0, 1, 2]);
     assert_eq!(timestamps, [100, 110, 120]);
 
-    // This count exceeds usize on 64-bit platforms. Computing the bound must neither allocate nor
-    // truncate it; each caller retains its own existing conversion when consuming the result.
+    // The count exceeds u64; it must not be truncated.
     let wide = instant_candidate_span(Some((i64::MIN, i64::MAX)), i64::MIN..=i64::MAX, 1, 0, 0);
     assert_eq!(wide.start, i64::MIN as i128);
     assert_eq!(wide.end, i64::MAX as i128);
@@ -265,8 +289,7 @@ fn invalid_manual_inputs_are_rejected() {
         Some(1.0),
         Some(2.0),
     ])));
-    // `RawTimestamps` validates at construction, so duplicate or descending axes are
-    // rejected before `select_instants` can receive them.
+    // Duplicate or descending axes cannot reach `select_instants`.
     assert!(RawTimestamps::try_new(ScalarBuffer::from(vec![10, 10])).is_err());
     assert!(RawTimestamps::try_new(ScalarBuffer::from(vec![20, 10])).is_err());
 
@@ -384,8 +407,7 @@ fn timestamp_matches_prometheus() {
                             &timestamps,
                         )
                     } else {
-                        // Any evaluated series holding the selected points: only where it holds
-                        // values matters to `timestamp`.
+                        // `timestamp` reads only where the series holds values.
                         let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
                         for at in &timestamps {
                             builder

@@ -49,12 +49,20 @@ of one request to several regions (one message per worker) → worker loop
 writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest
 (`manifest/manager.rs`).
 
+When reconstructing primary key bytes, follow the writer's ordering. Mito encodes
+raw tags in declared primary key order. Metric-engine sparse keys encode table ID
+and TSID first, then non-null labels in label-name order.
+
 ## Read path
 
 `MitoEngine::handle_query` (`engine.rs`) → `read/scan_region.rs` takes an
 immutable `Version` (`region/version.rs`) → scans memtables and Parquet SSTs
 (`sst/parquet.rs`) → merges (`read/`) and dedups by sequence → projected,
 filtered `RecordBatch` stream.
+
+Compaction SST scans share a read path. Multi-region compaction retains raw
+versions and routes each row before merging. Sparse routing temporarily
+materializes only the columns used by the partition rule.
 
 Internal series merges use the query runtime pool forwarded through
 `QueryScanContext`; reader and output-batch accounting uses the separate scan
@@ -89,7 +97,8 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Index extensions**: shared contracts and provider validation live in `sst/index/registry.rs`;
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
-  `engine/index_build_test.rs` and `compaction/`.
+  `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file
+  that carries extension indexes (`worker/handle_rebuild_index.rs::needs_background_indexes`).
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may
@@ -99,10 +108,10 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   compaction-window width and SST summaries keyed by aligned start in both catalogs and Parquet footers.
 - **Local index cache**: startup checks a root layout version before workers start; missing or incompatible versions reset the whole rebuildable cache, including catalogs and range indexes. Samples use one generation directory; source SST identity stays in metadata.
 - **Columnar samples**: `series_index/samples.rs` implements opt-in sample artifacts,
-  including nullable Float64 fields and preserved sequence/delete rows. Its wire
+  including nullable Float64 and native histogram fields and preserved sequence/delete rows. Its wire
   contract is `docs/formats/mito-samples.md`; time/ID bounds may overlap across
   leaves and parts. Both columnar backends share cancellation-safe output ownership
-  in `series_index/artifact_writer.rs`. Format readers do not apply query visibility; the prepared-source adapter applies visibility and the existing merge/dedup pipeline. Eligible sample merges use identity-only keys and omit tag columns; candidates retain memory-accounted series batch/row labels, and the raw adapter attaches explicit labels with region-qualified identities. Scanner preflight declares that representation so lazy streams and planned frames agree. Non-separable tag/sample residuals retain the full flat schema. Manual reconciliation covers all snapshot SSTs regardless of maintenance eligibility, but retains the soft disk limit. Manual builds validate columnar sample and tag schemas before reuse. Columnar reconciliation consolidates snapshot SSTs into UTC-day sample generations; catalogs record all source IDs. Grouped reads require complete daily coverage and all sources still visible, open each artifact once, and fall back for source-sequence-pruned scans. SST replacement invalidates a whole affected generation; catalog publication and reader handles govern retirement.
+  in `series_index/artifact_writer.rs`. Format readers do not apply query visibility; the prepared-source adapter applies visibility and the existing merge/dedup pipeline. Eligible sample merges use identity-only keys and omit tag columns; candidates retain memory-accounted series batch/row labels, and the raw adapter attaches explicit labels to exact-key identities that are not region-qualified, so fragments of one series from different regions share an identity. Scanner preflight declares that representation so lazy streams and planned frames agree. Non-separable tag/sample residuals retain the full flat schema. Manual reconciliation covers all snapshot SSTs regardless of maintenance eligibility, but retains the soft disk limit. Manual builds validate columnar sample and tag schemas before reuse. Columnar reconciliation consolidates snapshot SSTs into UTC-day sample generations; catalogs record all source IDs. Grouped reads require complete daily coverage and all sources still visible, open each artifact once, and fall back for source-sequence-pruned scans. SST replacement invalidates a whole affected generation; catalog publication and reader handles govern retirement.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
 - **WAL/memtable encoding** (`wal/`, `memtable/`): breaks replay if changed incompatibly.
 
@@ -117,9 +126,23 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 ## Gotchas
 
+- Parquet versus Narthex storage is fixed at region creation. ALTER cannot cross
+  that boundary; COPY, remap, and imported edits must reject mismatches before
+  publication. Readers and compaction select storage from region options, not
+  by inspecting individual files. Parquet flat/primary-key layouts may coexist.
+
+- Native series-index maintenance and scans share fixed-window sequence watermarks over manifest-tracked index files. The coverage contract lives in `docs/formats/mito-series.md`. Keep the samples and series format specs focused on persisted layout, field semantics, and compatibility. Native index selection and scheduling policy lives in `series_index/task.rs`.
+
 - Parquet row groups have uniform row counts except for the final group
   (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create
   arbitrary partial groups: readers and index row IDs rely on this layout.
+- Append-mode Narthex raw-series reads apply LastRow dedup after merging;
+  non-append reads use the configured merge mode, and batch reads retain append
+  semantics. Physical COPY follows Parquet's
+  untrusted source-sequence semantics; repartition still assigns admission sequences.
+  The region worker owns COPY locks; task guards hold them through publication and
+  installation so retries cannot race failure cleanup, including across region reopen.
+  The last active or queued task removes its lock entry, including on cancellation.
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it. Staging takes no version:
@@ -134,13 +157,16 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   it until the worker swaps in an instance reloaded from the new manifest
   (`worker/handle_reload.rs`). A tail replay round that fails while the storage holds a newer
   manifest fences a writable leader the same way. Never await a worker sender while holding a
-  manifest guard.
+  manifest guard. The catchup commit (`ManifestContext::commit_catchup_locked`, which
+  `commit_catchup` wraps) is the exception: it commits as a Follower without the deadline
+  check, and a conflict fails the catchup retryably without fencing the region; a retry reopens
+  it from the newer manifest.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
-  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open, after
-  a flush, and on close stay below this node's tails (`cap_wal_release`); truncate,
-  drop, offline cleanup and catchup release without that cap. Handoff floors are
-  dropped once the flushed entry id reaches them, in
+  WAL after `RegionManifest::wal_replay_start`, and so does a catchup's replay. The WAL
+  releases at open, after a flush, on close, after a catchup's replay and after a handover
+  stay below this node's tails (`cap_wal_release`); truncate, drop and offline cleanup
+  release without that cap. Handoff floors are dropped once the flushed entry id reaches them, in
   `RegionManifestBuilder::try_build`. While a
   region has pending tails, scans and memtable/SST stats fail with
   `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
@@ -148,6 +174,14 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   without a default or changing options; compaction pauses. These checks run
   before any region state changes. Full-listing GC skips a region that has pending
   tails or whose manifest `has_update()` reports newer, or fails to check.
+- A catchup with `set_writable` and the source's last entry, of a region whose manifest is
+  published conditionally and that does not await its Leader lease, hands the region over
+  without replaying: see `hand_over` and `HANDOVER_SEQUENCE_GAP` in `region/catchup.rs`. It
+  refuses a region with rows in its memtable or a tail replay that has not reported its end;
+  the worker applies the committed edit (`handle_handed_over`). A manifest sync and a
+  follower's skip-WAL change are refused while the instance is in a catchup, or is fenced while
+  the worker holds a catchup or reload registration for the region (`is_catching_up_or_reloading`);
+  a follower opened after a close is not refused for its predecessor's catchup.
 - A leader that is writable, altering or editing replays its pending tails in one
   background task (`tail_replay.rs`), started by the worker when a lease, catchup or
   role change makes the region writable, or when it registers a region created or opened
@@ -161,7 +195,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   flushed entry id skips them. A node bounds its replays' concurrency and SST writes apart
   from flushes, and their chunk memory within the global write buffer (`TailReplayLimits`).
   Replayed SSTs build indexes as flushed ones (`IndexBuildType::Flush`), under
-  `create_on_flush`.
+  `create_on_flush`. `RegionRequest::DiscardPendingTails` discards one node's tails
+  without replaying them; it commits through `update_manifest_for_tails` too
+  (`worker/handle_tail_replay.rs`) and raises the flushed entry id to the largest
+  discarded `upto`, so the same entry id rule applies.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
@@ -199,17 +236,40 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Staging regions, ending staging included, never flush: a flush would stage its SST and
   release the rows' WAL, losing them if staging does not end successfully. Every flush
   trigger in `worker/handle_flush.rs` must skip them: background triggers test `is_writable()`
-  and `is_staging()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
+  and `defers_background_flush()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
   `is_flushable()` are false while ending staging). `handle_close` leaves staging first.
   Tail replays never run for them: entering staging fails while tails are pending.
 - Direct SST imports without a staging binding cannot publish into staging.
   `worker/handle_manifest.rs` seals edit admission while EnterStaging drains accepted
   edits. Scheduler-owned DDLs resume through execution, bypassing initial admission.
+- On a node whose writes need a lease, a region that a catchup made writable waits for a
+  Leader or StagingLeader lease sent after the catchup (`awaits_leader_lease`). Until then
+  `ManifestContext::update_locked` refuses its commits unless they are staged or the region is
+  downgrading (a close that must flush downgrades first); only a replay of tails
+  (`TailsEditor::Replay`) skips the check, a discard does not, and ending staging checks it
+  before `commit_staged_locked`. `ManifestContext::commit_catchup` commits an empty edit (a
+  handover's edit through `commit_catchup_locked`) as a Follower; fire its hook only after
+  every manifest guard is dropped, including the old instance's read guard held by
+  `handle_caught_up_again`. No flush or compaction trigger starts work for a
+  waiting region except a downgrade's flush. The lease that ends the wait wakes the worker
+  (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
+  region is then a writable leader, start a compaction. The missing indexes, the refused index
+  build retries and the backfilled metadata wait in `deferred_lease_work`, which the worker
+  sweeps after each batch (`sweep_deferred_lease_work`). A catchup of a waiting
+  region catches it up again into an unregistered replacement while the region stays registered,
+  demoted unless it is in a transient leader state. The replacement replaces it only if the
+  replay succeeds, the region took no write and made no commit meanwhile and, for a catchup that
+  makes it writable, the replacement's catchup commit succeeds; otherwise the region keeps its
+  memtable for the next Leader lease (`catch_up_again`, `handle_caught_up_again`); the datanode
+  upgrade handler sends that catchup unless `RegionEngine::is_confirmed_leader` is true, so an
+  engine wrapping mito must implement that method from mito's answers (the metric engine requires
+  both regions of the pair). A Follower lease that carries a `candidate_lease_id` leaves a waiting
+  region alone (`ManifestContext::demote_candidate`); other Follower leases demote it.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
-  a worker's region map must also remove its record: `RegionWorkerLoop::remove_region`
-  (`worker/handle_close.rs`, also used after a close-time flush), `drop_region`
-  (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
+  a worker's region map must also remove its record and its deferred lease work:
+  `RegionWorkerLoop::remove_region` (`worker/handle_close.rs`, also used after a close-time
+  flush), `drop_region` (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
 
 ## Maintenance contract
 

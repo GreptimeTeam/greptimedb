@@ -33,7 +33,7 @@ use store_api::mito_engine_options::MAX_ROW_GROUP_ROW_COUNT_LIMIT;
 use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, RegionBusySnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
 use crate::memtable::ensure_json2_uses_flat_format;
@@ -76,6 +76,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Followers only accept skip-WAL changes, which are in-memory option changes and must
         // never enter the leader path that may flush memtables.
         if let Some(skip_wal) = follower_skip_wal {
+            // A catchup reads the region's skip_wal option outside the worker, when it decides
+            // whether to hand the region's WAL over, and a reload reopens the region with the
+            // options it read when it began.
+            if self.is_catching_up_or_reloading(&region) {
+                warn!(
+                    "Region {region_id} is in a catchup or reload, refusing to change its options"
+                );
+                sender.send(Err(RegionBusySnafu { region_id }.build()));
+                return;
+            }
             if let Err(e) = validate_skip_wal_change(&region, skip_wal) {
                 sender.send(Err(e).context(InvalidMetadataSnafu));
                 return;
@@ -151,6 +161,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
+            // A region that awaits its Leader lease cannot commit the flush.
+            if let Err(e) = region
+                .manifest_ctx
+                .ensure_leader_lease_or_downgrading(region_id)
+            {
+                sender.send(Err(e));
+                return;
+            }
             // If memtable is not empty, we can't alter it directly and need to flush
             // all memtables first.
             info!("Flush region: {} before alteration", region_id);
@@ -208,7 +226,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
-        if let Err(e) = options.validate_column_compression(&new_meta) {
+        if let Err(e) = options.validate_schema(&new_meta) {
             sender.send(Err(e));
             return;
         }
@@ -285,6 +303,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         }
                         .build()
                     })?;
+                    ensure!(
+                        new_format == current_options.sst_format.unwrap_or_default()
+                            || (new_format != FormatType::Narthex
+                                && current_options.sst_format != Some(FormatType::Narthex)),
+                        store_api::metadata::InvalidRegionRequestSnafu {
+                            region_id: region.region_id,
+                            err: "Changing an existing region to or from Narthex is unsupported",
+                        }
+                    );
                     // If the format is unchanged, we also consider the option is altered.
                     if new_format != current_options.sst_format.unwrap_or_default() {
                         all_options_altered = false;
@@ -377,15 +404,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             .build()
         })?;
-        candidate
-            .validate_column_compression(&version.metadata)
-            .map_err(|e| {
-                store_api::metadata::InvalidRegionRequestSnafu {
-                    region_id: region.region_id,
-                    err: e.to_string(),
-                }
-                .build()
-            })?;
+        candidate.validate_schema(&version.metadata).map_err(|e| {
+            store_api::metadata::InvalidRegionRequestSnafu {
+                region_id: region.region_id,
+                err: e.to_string(),
+            }
+            .build()
+        })?;
         if all_options_altered {
             region.version_control.alter_options(candidate);
             Ok(None)

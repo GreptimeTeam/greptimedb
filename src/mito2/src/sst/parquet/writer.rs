@@ -63,8 +63,10 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
+    large_value_fields, max_row_group_decoded_size, max_row_group_uncompressed_size,
+    skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -181,6 +183,13 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
         }
     }
 
+    fn append_key_value_metadata(&mut self, kv: KeyValue) {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.append_key_value_metadata(kv),
+            SstArrowWriter::Parallel(writer) => writer.append_key_value_metadata(kv),
+        }
+    }
+
     async fn finish(&mut self) -> parquet::errors::Result<ParquetMetaData> {
         match self {
             SstArrowWriter::Serial(writer) => writer.finish().await,
@@ -202,6 +211,8 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
 pub(crate) struct SstWriteLimits {
     pub(crate) working_bytes: usize,
     pub(crate) metadata_bytes: usize,
+    #[cfg(feature = "enterprise")]
+    pub(crate) upload_limits: upload::buffered::UploadLimits,
 }
 
 /// Tracks retained footer memory across rolled files as well as the current file.
@@ -253,12 +264,21 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     write_guard: Option<Arc<dyn SstWriteGuard>>,
     cancellation: Option<CancellationToken>,
     memory: WriteMemory,
+    /// Field columns of the current file that skip min/max statistics, picked from its first batch.
+    large_value_columns: Vec<String>,
+    /// Decoded value bytes per row group of the current file.
+    row_group_value_bytes: Option<RowGroupValueBytes>,
 }
 
 /// Registers output ownership before either an SST or its index is created in storage.
 #[async_trait::async_trait]
 pub trait SstWriteGuard: Send + Sync {
     async fn before_create(&self, file_id: RegionFileId) -> Result<()>;
+
+    /// Registers a multi-object output before its first object is created.
+    async fn before_create_narthex(&self, file_id: RegionFileId) -> Result<()> {
+        self.before_create(file_id).await
+    }
 }
 
 /// Optional ownership, cancellation, and resource limits for an SST write.
@@ -289,12 +309,15 @@ pub trait WriterFactory {
 }
 
 /// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
-/// the number of bytes successfully submitted to the object store.
+/// the number of bytes accepted for upload. Bounded uploads stage bytes in a
+/// local part buffer before submitting them to the object store.
 pub struct ObjectStoreWriter {
     inner: Writer,
     output_bytes: u64,
     write_buffer_size: usize,
     cancellation: Option<CancellationToken>,
+    #[cfg(feature = "enterprise")]
+    buffered_upload: Option<upload::buffered::UploadBuffer>,
 }
 
 impl ObjectStoreWriter {
@@ -308,6 +331,8 @@ impl ObjectStoreWriter {
             output_bytes: 0,
             write_buffer_size,
             cancellation,
+            #[cfg(feature = "enterprise")]
+            buffered_upload: None,
         }
     }
 
@@ -318,24 +343,30 @@ impl ObjectStoreWriter {
     pub(crate) fn into_inner(self) -> Writer {
         self.inner
     }
+
+    async fn write_bytes(&mut self, bytes: Bytes) -> parquet::errors::Result<u64> {
+        #[cfg(feature = "enterprise")]
+        if let Some(buffer) = &mut self.buffered_upload {
+            return buffer
+                .write(&mut self.inner, bytes, self.cancellation.as_ref())
+                .await
+                .map_err(map_buffered_upload_error);
+        }
+        upload::write(
+            &mut self.inner,
+            bytes.into(),
+            self.write_buffer_size,
+            self.cancellation.as_ref(),
+        )
+        .await
+        .map_err(map_upload_error)
+    }
 }
 
 impl AsyncFileWriter for ObjectStoreWriter {
     fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
-            let written = upload::write(
-                &mut self.inner,
-                bytes.into(),
-                self.write_buffer_size,
-                self.cancellation.as_ref(),
-            )
-            .await
-            .map_err(|error| match error {
-                UploadError::Cancelled => ParquetError::External(Box::new(Cancelled)),
-                UploadError::Read { source } | UploadError::Write { source } => {
-                    ParquetError::External(Box::new(source))
-                }
-            })?;
+            let written = self.write_bytes(bytes).await?;
             self.output_bytes += written;
             Ok(())
         })
@@ -343,6 +374,13 @@ impl AsyncFileWriter for ObjectStoreWriter {
 
     fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
+            #[cfg(feature = "enterprise")]
+            if let Some(buffer) = &mut self.buffered_upload {
+                buffer
+                    .write_tail(&mut self.inner)
+                    .await
+                    .map_err(|error| ParquetError::External(Box::new(error)))?;
+            }
             self.inner
                 .close()
                 .await
@@ -352,9 +390,30 @@ impl AsyncFileWriter for ObjectStoreWriter {
     }
 }
 
+fn map_upload_error(error: UploadError) -> ParquetError {
+    match error {
+        UploadError::Cancelled => ParquetError::External(Box::new(Cancelled)),
+        UploadError::Read { source } | UploadError::Write { source } => {
+            ParquetError::External(Box::new(source))
+        }
+    }
+}
+
+#[cfg(feature = "enterprise")]
+fn map_buffered_upload_error(error: upload::buffered::BufferedWriteError) -> ParquetError {
+    match error {
+        upload::buffered::BufferedWriteError::ObjectLimit(error) => {
+            ParquetError::External(Box::new(error))
+        }
+        upload::buffered::BufferedWriteError::Upload(error) => map_upload_error(error),
+    }
+}
+
 pub struct ObjectStoreWriterFactory {
     object_store: ObjectStore,
     concurrency: usize,
+    #[cfg(feature = "enterprise")]
+    upload_limits: Option<upload::buffered::UploadLimits>,
 }
 
 impl WriterFactory for ObjectStoreWriterFactory {
@@ -366,12 +425,25 @@ impl WriterFactory for ObjectStoreWriterFactory {
         write_buffer_size: usize,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Self::Writer> {
+        #[cfg(feature = "enterprise")]
+        let write_buffer_size = self
+            .upload_limits
+            .map_or(write_buffer_size, |limits| limits.chunk_bytes);
         self.object_store
             .writer_with(file_path)
             .chunk(write_buffer_size)
             .concurrent(self.concurrency)
             .await
-            .map(|writer| ObjectStoreWriter::new(writer, write_buffer_size, cancellation.cloned()))
+            .map(|writer| {
+                let writer =
+                    ObjectStoreWriter::new(writer, write_buffer_size, cancellation.cloned());
+                #[cfg(feature = "enterprise")]
+                let writer = ObjectStoreWriter {
+                    buffered_upload: self.upload_limits.map(upload::buffered::UploadBuffer::new),
+                    ..writer
+                };
+                writer
+            })
             .context(OpenDalSnafu)
     }
 
@@ -390,6 +462,14 @@ where
         self
     }
 
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn with_upload_limits(mut self, limits: upload::buffered::UploadLimits) -> Self {
+        self.writer_factory.upload_limits = Some(limits);
+        // Upload admission accounts for the serial OpenDAL writer.
+        self.writer_factory.concurrency = 1;
+        self
+    }
+
     pub async fn new_with_object_store(
         object_store: ObjectStore,
         metadata: RegionMetadataRef,
@@ -402,6 +482,8 @@ where
             ObjectStoreWriterFactory {
                 object_store,
                 concurrency: DEFAULT_WRITE_CONCURRENCY,
+                #[cfg(feature = "enterprise")]
+                upload_limits: None,
             },
             metadata,
             index_config,
@@ -451,6 +533,8 @@ where
             metrics,
             write_guard: None,
             cancellation: None,
+            large_value_columns: Vec::new(),
+            row_group_value_bytes: None,
         }
     }
 
@@ -544,15 +628,18 @@ where
             self.check_cancelled()?;
             // Keep the upload owned until finalization succeeds, so an error
             // still reaches the common abort path.
-            let parquet_metadata = self
-                .writer
-                .as_mut()
-                .context(UnexpectedSnafu {
-                    reason: "Missing SST writer during finalization",
-                })?
-                .finish()
-                .await
-                .map_err(map_write_error)?;
+            let writer = self.writer.as_mut().context(UnexpectedSnafu {
+                reason: "Missing SST writer during finalization",
+            })?;
+            for kv in self
+                .row_group_value_bytes
+                .take()
+                .map(RowGroupValueBytes::into_key_values)
+                .unwrap_or_default()
+            {
+                writer.append_key_value_metadata(kv);
+            }
+            let parquet_metadata = writer.finish().await.map_err(map_write_error)?;
             self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
@@ -568,23 +655,16 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size: u64 = parquet_metadata
-                .row_groups()
-                .iter()
-                .map(|rg| {
-                    rg.columns()
-                        .iter()
-                        .map(|c| c.uncompressed_size() as u64)
-                        .sum::<u64>()
-                })
-                .max()
-                .unwrap_or(0);
+            let max_row_group_uncompressed_size =
+                max_row_group_uncompressed_size(&parquet_metadata);
+            let max_row_group_decoded_size = max_row_group_decoded_size(&parquet_metadata);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
                 file_size,
                 max_row_group_uncompressed_size,
+                max_row_group_decoded_size,
                 num_rows: stats.num_rows,
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),
@@ -754,11 +834,21 @@ where
             let arrow_batch = converter.convert_batch(batch)?;
             self.check_cancelled()?;
             let start = Instant::now();
+            if self.writer.is_none() {
+                // The first non-empty batch of a file decides which columns skip statistics.
+                if arrow_batch.num_rows() == 0 {
+                    return Ok(());
+                }
+                self.large_value_columns = large_value_fields(&self.metadata, &arrow_batch);
+            }
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
                 .await?
                 .write(&arrow_batch)
                 .await
                 .map_err(map_write_error)?;
+            if let Some(value_bytes) = &mut self.row_group_value_bytes {
+                value_bytes.update(&arrow_batch);
+            }
             self.metrics.write_batch += start.elapsed();
 
             self.check_cancelled()?;
@@ -831,6 +921,9 @@ where
                 .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
             let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
+            let props_builder =
+                skip_statistics(props_builder, &mem::take(&mut self.large_value_columns));
+            self.row_group_value_bytes = Some(RowGroupValueBytes::new(opts.row_group_size));
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,
@@ -911,15 +1004,21 @@ where
 
 /// Keeps cancellation inside the SST write error contract, including nested encoder errors.
 fn map_write_error(error: ParquetError) -> Error {
-    let cancelled = std::iter::successors(Some(&error as &(dyn StdError + 'static)), |source| {
+    for source in std::iter::successors(Some(&error as &(dyn StdError + 'static)), |source| {
         (*source).source()
-    })
-    .any(|source| source.is::<Cancelled>());
-    if cancelled {
-        crate::error::SstWriteCancelledSnafu.build()
-    } else {
-        WriteParquetSnafu.into_error(error)
+    }) {
+        if source.is::<Cancelled>() {
+            return crate::error::SstWriteCancelledSnafu.build();
+        }
+        #[cfg(feature = "enterprise")]
+        if let Some(error) = source.downcast_ref::<upload::buffered::UploadObjectLimit>() {
+            return crate::error::MultiRegionCompactionResourceSnafu {
+                reason: error.to_string(),
+            }
+            .build();
+        }
     }
+    WriteParquetSnafu.into_error(error)
 }
 
 #[derive(Default)]
@@ -1319,6 +1418,7 @@ mod tests {
         .await;
         let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
         let converter = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
                 metadata.clone(),
                 &FlatSchemaOptions::default(),
@@ -1354,6 +1454,7 @@ mod tests {
         let source =
             FlatSource::new_stream(batch.schema(), Box::pin(futures::stream::iter([Ok(batch)])));
         let error = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
             FormatType::PrimaryKey => {
                 writer
@@ -1413,6 +1514,7 @@ mod tests {
         };
         let mut write = Box::pin(async {
             match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer
@@ -1474,6 +1576,7 @@ mod tests {
                 ..Default::default()
             };
             let result = match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer
@@ -1529,6 +1632,7 @@ mod tests {
         let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
         let retained_field = Arc::downgrade(batch.column(2));
         let converter = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
                 metadata.clone(),
                 &FlatSchemaOptions::default(),
@@ -1594,6 +1698,7 @@ mod tests {
         let mut write = Box::pin(async {
             let _budget = budget;
             match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer

@@ -60,7 +60,7 @@ pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_chann
 pub use crate::series_index::searcher::SeriesIndexSearcher;
 pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
 pub(crate) use crate::series_index::version::{
-    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl,
+    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl, narthex_series_entry,
 };
 pub use crate::series_index::writer::{
     SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,

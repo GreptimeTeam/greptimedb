@@ -77,7 +77,7 @@ pub(crate) async fn batch_update_table_info_values(
     table_metadata_manager: &TableMetadataManager,
     table_info_values: Vec<(DeserializedValueWithBytes<TableInfoValue>, TableInfo)>,
 ) -> Result<()> {
-    let chunk_size = table_metadata_manager.batch_update_table_info_value_chunk_size();
+    let chunk_size = table_metadata_manager.max_txn_ops()?;
     if table_info_values.len() > chunk_size {
         let chunks = table_info_values
             .into_iter()

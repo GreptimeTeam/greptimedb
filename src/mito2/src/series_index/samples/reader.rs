@@ -23,6 +23,7 @@ use datatypes::arrow::array::{
     ArrayRef, BinaryArray, Float64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt32Array, UInt64Array,
 };
+use datatypes::arrow::compute::take;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use futures::stream::BoxStream;
@@ -30,20 +31,18 @@ use object_store::{ObjectStore, Reader};
 use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::columnar::{
-    self as metadata_cache, MetadataCache, PayloadCache, PayloadPartCache,
-};
-use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result};
+use crate::cache::columnar::{self as metadata_cache, MetadataCache};
+use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesReadRequest};
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
-use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
 };
 use crate::series_index::samples::{
-    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
+    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, codec, histogram, invalid,
+    require, unsupported,
 };
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
@@ -52,7 +51,6 @@ pub(crate) struct SamplesReader {
     manifest: Arc<Manifest>,
     schema: SchemaRef,
     cache: Option<MetadataCache>,
-    payload_cache: Option<PayloadCache>,
     handle: SamplesFileHandle,
     parts: Arc<Vec<OnceCell<Reader>>>,
 }
@@ -93,13 +91,7 @@ impl SamplesReader {
             manifest: descriptor.0.clone(),
             schema: descriptor.1.clone(),
             cache,
-            payload_cache: None,
         })
-    }
-
-    pub(crate) fn with_payload_cache(mut self, cache: Option<PayloadCache>) -> Self {
-        self.payload_cache = cache;
-        self
     }
 
     pub async fn open(store: ObjectStore, handle: SamplesFileHandle) -> Result<Self> {
@@ -114,10 +106,7 @@ impl SamplesReader {
             handle.file_id().file_id() == entry.file_id,
             "samples source handle mismatch",
         )?;
-        let path = format!(
-            "{}manifest.json",
-            crate::series_index::samples::samples_prefix(region, artifact.generation)
-        );
+        let path = handle.manifest_path();
         let mut objects = HashMap::new();
         for object in &artifact.objects {
             require(
@@ -137,11 +126,16 @@ impl SamplesReader {
         let bytes = read_range(&store, &path, 0, length).await?;
         // A manifest that the current format cannot read predates exact identity or is
         // corrupt; either way it must never be reused.
-        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
+        let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
             invalid(format!(
                 "samples manifest is not readable; rebuild the artifact: {error}"
             ))
         })?;
+        manifest.prefix = Some(
+            path.strip_suffix("manifest.json")
+                .ok_or_else(|| invalid("invalid narthex manifest path"))?
+                .to_string(),
+        );
         if manifest.version != VERSION {
             return Err(unsupported("samples manifest version"));
         }
@@ -199,7 +193,6 @@ impl SamplesReader {
             parts: Arc::new((0..manifest.files.len()).map(|_| OnceCell::new()).collect()),
             schema: manifest.schema(),
             cache: None,
-            payload_cache: None,
             manifest: Arc::new(manifest),
             handle,
         })
@@ -265,7 +258,6 @@ impl SamplesFormatReader for SamplesReader {
         let store = self.store.clone();
         let handle = self.handle.clone();
         let parts = self.parts.clone();
-        let payload_cache = self.payload_cache.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let _handle = &handle;
             let mut metrics = ColumnarReadMetrics::default();
@@ -319,12 +311,6 @@ impl SamplesFormatReader for SamplesReader {
                 let trailer = Trailer::decode(&bytes, part.file_size)?;
                     Ok(trailer)
                 }).await?;
-                let payload_reader = PayloadReader {
-                    reader,
-                    cache: payload_cache.as_ref().map(|cache| cache.part(handle.entry().artifact.generation, part.part_id, size)),
-                    end: trailer.payload_end,
-                    key_end: trailer.key_end,
-                };
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
@@ -353,7 +339,7 @@ impl SamplesFormatReader for SamplesReader {
                     // hold hundreds of short series, and one read per series would multiply
                     // this scan's I/O by the number of series it touches.
                     load_page_keys(
-                        &payload_reader,
+                        reader,
                         trailer.areas(),
                         blocks,
                         &request,
@@ -398,7 +384,7 @@ impl SamplesFormatReader for SamplesReader {
                                 // this series has no copy cached for the part yet. This path
                                 // reserves its own read before issuing it.
                                 let key = load_block_key(
-                                    &payload_reader,
+                                    reader,
                                     trailer.areas(),
                                     block,
                                     keys_reservation.as_ref(),
@@ -456,11 +442,11 @@ impl SamplesFormatReader for SamplesReader {
                             if block_index >= prefetched.end {
                                 // Release the previous window before reserving the next one.
                                 drop(std::mem::take(&mut prefetched));
-                                prefetched = prefetch_blocks(&payload_reader, blocks, block_index, &field_ids, &request, ids.as_ref(), &projection, trailer.payload_end, &mut metrics).await?;
+                                prefetched = prefetch_blocks(reader, blocks, block_index, &field_ids, &request, ids.as_ref(), &projection, trailer.payload_end, &mut metrics).await?;
                             }
                             *metrics.counts.entry("blocks").or_default() += 1;
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
-                            read_block(&payload_reader, block, &manifest, &request, buffers_consumer.as_ref(), &projection, &field_ids, projected.clone(), &mut prefetched, &mut scratch, &mut decoder, &mut metrics).await?
+                            read_block(reader, block, &manifest, &request, buffers_consumer.as_ref(), &projection, &field_ids, projected.clone(), &mut prefetched, &mut scratch, &mut decoder, &mut metrics).await?
                         } else { None };
                         // The block's payload slices are shared with the read-ahead window and
                         // the part cache, so they are dropped before the yield: the block's
@@ -620,7 +606,7 @@ fn verified_key(entry: &[u8], length: u32) -> Result<&[u8]> {
 /// fetched entry, whatever alignment or assembly that fetch costs, and the owned key built from
 /// it. Reading first and refusing the key afterwards would leave the bytes already fetched.
 async fn load_block_key(
-    reader: &PayloadReader<'_>,
+    reader: &Reader,
     areas: Areas,
     block: &Block,
     reservation: Option<&MemoryReservation>,
@@ -631,31 +617,13 @@ async fn load_block_key(
     let retained = retained_key_bytes(block.key.length);
     let range = block.key.offset..block.key.checksum_end()?;
     let ranges = std::slice::from_ref(&range);
-    // The aligned cache turns one key into a whole aligned block plus whatever assembling it
-    // needs, so a warm part is asked for that peak first. A pool that cannot cover it gets an
-    // explicitly cache-less reader instead, whose peak is the key entry alone; only then does the
-    // read run.
-    let mut aligned = reader.cache.is_some();
-    let mut peak = fetch_peak(reader, ranges, areas.keys.end, aligned) + retained;
-    if !try_reserve_keys(reservation, peak) {
-        // Alignment is optional. Retrying on the smaller budget also reports exhaustion when even
-        // one key entry does not fit.
-        aligned = false;
-        peak = fetch_peak(reader, ranges, areas.keys.end, false) + retained;
-        reserve_keys(reservation, peak)?;
-    }
+    let peak = fetch_peak(ranges) + retained;
+    reserve_keys(reservation, peak)?;
     let _peak = KeyPeak {
         reservation,
         transient: peak - retained,
     };
-    let uncached = PayloadReader {
-        reader: reader.reader,
-        cache: None,
-        end: reader.end,
-        key_end: reader.key_end,
-    };
-    let target = if aligned { reader } else { &uncached };
-    let mut fetched = fetch_ranges(target, areas.keys.end, ranges, metrics).await?;
+    let mut fetched = fetch_ranges(reader, ranges, metrics).await?;
     let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;
@@ -674,23 +642,11 @@ async fn load_block_key(
 /// The merge rule bounds one read, not a whole fetch: every merged range comes back as its own
 /// buffer and all of them are live together. With the aligned cache, the aligned copies and any
 /// range assembled from several of them coexist as well.
-fn fetch_peak(
-    reader: &PayloadReader<'_>,
-    ranges: &[std::ops::Range<u64>],
-    area_end: u64,
-    aligned: bool,
-) -> usize {
-    if !aligned {
-        return merge_read_ranges(ranges)
-            .iter()
-            .map(|range| (range.end - range.start) as usize)
-            .sum();
-    }
-    reader.reservation_bytes(ranges, area_end)
-        + ranges
-            .iter()
-            .map(|range| (range.end - range.start) as usize)
-            .sum::<usize>()
+fn fetch_peak(ranges: &[std::ops::Range<u64>]) -> usize {
+    merge_read_ranges(ranges)
+        .iter()
+        .map(|r| (r.end - r.start) as usize)
+        .sum()
 }
 
 /// Fetches the exact keys of the blocks of one metadata page that survive coarse selection.
@@ -708,7 +664,7 @@ fn fetch_peak(
 /// fetched.
 #[allow(clippy::too_many_arguments)]
 async fn load_page_keys(
-    reader: &PayloadReader<'_>,
+    reader: &Reader,
     areas: Areas,
     blocks: &[Block],
     request: &SamplesReadRequest,
@@ -736,15 +692,6 @@ async fn load_page_keys(
     if wanted.is_empty() {
         return Ok(());
     }
-    // The same range fetch the column chunks use: aligned blocks of the part are shared with the
-    // payload cache, so a part that is already cached costs no key read at all. Alignment is the
-    // first choice and the first victim: it costs a whole aligned block per key area touched.
-    let uncached = PayloadReader {
-        reader: reader.reader,
-        cache: None,
-        end: reader.end,
-        key_end: reader.key_end,
-    };
     let mut window = wanted.len();
     let mut attempt = None;
     while window > 0 {
@@ -757,36 +704,23 @@ async fn load_page_keys(
             .iter()
             .map(|block| retained_key_bytes(block.key.length))
             .sum::<usize>();
-        let mut candidates = Vec::with_capacity(2);
-        if reader.cache.is_some() {
-            candidates.push(true);
-        }
-        candidates.push(false);
-        for aligned in candidates {
-            // The fetched entries and the owned keys they become are live together; the fetch
-            // peak already covers the entries themselves.
-            let peak = fetch_peak(reader, &ranges, areas.keys.end, aligned) + retained;
-            if try_reserve_keys(reservation, peak) {
-                attempt = Some((aligned, peak, retained, ranges));
-                break;
-            }
-        }
-        if attempt.is_some() {
+        let peak = fetch_peak(&ranges) + retained;
+        if try_reserve_keys(reservation, peak) {
+            attempt = Some((peak, retained, ranges));
             break;
         }
         // Halve the window rather than give up: the keys left out keep their own, smaller,
         // on-demand reservation.
         window /= 2;
     }
-    let Some((aligned, peak, retained, ranges)) = attempt else {
+    let Some((peak, retained, ranges)) = attempt else {
         return Ok(());
     };
     let _peak = KeyPeak {
         reservation,
         transient: peak - retained,
     };
-    let target = if aligned { reader } else { &uncached };
-    let fetched = fetch_ranges(target, areas.keys.end, &ranges, metrics).await?;
+    let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (block, entry) in wanted.iter().take(window).zip(fetched) {
         let key =
             ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
@@ -879,7 +813,7 @@ fn load_column_chunk<'a>(
         1 => matches!(column.payload.encoding, 1 | 2),
         2 => matches!(column.payload.encoding, 3 | 4),
         3 => matches!(column.payload.encoding, 6 | 7),
-        4 => column.payload.encoding == 5,
+        4 => matches!(column.payload.encoding, 5 | histogram::ENCODING),
         _ => false,
     };
     if !allowed {
@@ -969,7 +903,7 @@ fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> Ar
 }
 #[allow(clippy::too_many_arguments)]
 async fn read_block(
-    reader: &PayloadReader<'_>,
+    reader: &Reader,
     block: &Block,
     manifest: &Manifest,
     request: &SamplesReadRequest,
@@ -1015,7 +949,7 @@ async fn read_block(
     // cannot add output rows, so no per-row term is needed for identity at all.
     let key_bytes =
         std::mem::size_of::<ExactSeriesKey>() + block.key.length as usize + BUFFER_ALIGNMENT;
-    let base_bytes = 2 * gap_bytes as usize
+    let bytes = 2 * gap_bytes as usize
         + columns
             .iter()
             .map(|column| column.payload.stored as usize + column.payload.decoded as usize)
@@ -1028,35 +962,14 @@ async fn read_block(
         // term that keeps its array accounted for.
         + projection.len() * (ARRAY_HEADER_BYTES + BUFFER_ALIGNMENT)
         + columns.len() * 128;
-    let bytes = base_bytes + reader.reservation_bytes(&scratch.ranges, reader.end);
-    let mut bypass_cache = false;
     if let Some(reservation) = &reservation {
         let mut result = reservation.try_grow(bytes);
         if result.is_err() && !prefetched.buffers.is_empty() {
-            // Read-ahead must not prevent a block that fits on its own from being read.
-            // Drop every shared slice and its reservation before retrying, and avoid
-            // attempting the same window again on the next block.
-            *prefetched = PrefetchedBlocks {
-                end: prefetched.end,
-                ..Default::default()
-            };
+            release_read_ahead(prefetched, &mut scratch.buffers);
             result = reservation.try_grow(bytes);
-        }
-        if result.is_err() && reader.cache.is_some() {
-            // Alignment is optional. A block that fits without it must remain readable,
-            // including on cache hits, whose shared backing buffers still need accounting.
-            result = reservation.try_grow(base_bytes);
-            bypass_cache = result.is_ok();
         }
         result.context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
-    let uncached = PayloadReader {
-        reader: reader.reader,
-        cache: None,
-        end: reader.end,
-        key_end: reader.key_end,
-    };
-    let reader = if bypass_cache { &uncached } else { reader };
     // The map keeps its allocation; the previous block's slices were already released.
     scratch.buffers.clear();
     for column in &columns {
@@ -1169,7 +1082,60 @@ async fn read_block(
                         .get(field - 5)
                         .ok_or_else(|| invalid("unknown sample field"))?;
                     let id = field.column_id;
-                    if let Some(column) = block.columns.iter().find(|c| c.role == 4 && c.id == id) {
+                    let column = block.columns.iter().find(|c| c.role == 4 && c.id == id);
+                    if field.is_histogram() {
+                        let data_type = schema
+                            .field(
+                                projection
+                                    .iter()
+                                    .position(|&p| p == index)
+                                    .ok_or_else(|| invalid("unprojected sample field"))?,
+                            )
+                            .data_type();
+                        match column {
+                            Some(column) => {
+                                let mut bytes =
+                                    load_column_chunk(&scratch.buffers, column, decoder)?;
+                                // Decoded histograms outgrow their chunk by far more than the
+                                // per-row terms reserved above, so their values are charged
+                                // from the chunk's own counts before they are built.
+                                if let Some(reservation) = &reservation {
+                                    let decoded =
+                                        histogram::decoded_bytes(bytes, block.rows as usize)?;
+                                    if reservation.try_grow(decoded).is_err() {
+                                        release_read_ahead(prefetched, &mut scratch.buffers);
+                                        reservation
+                                            .try_grow(decoded)
+                                            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+                                        // The release replaced the slices `bytes` borrowed.
+                                        bytes =
+                                            load_column_chunk(&scratch.buffers, column, decoder)?;
+                                    }
+                                }
+                                let array: ArrayRef = Arc::new(histogram::decode(
+                                    bytes,
+                                    data_type,
+                                    block.rows as usize,
+                                    column.nulls,
+                                )?);
+                                if selected.len() == array.len() {
+                                    array
+                                } else {
+                                    take(
+                                        &array,
+                                        &UInt32Array::from_iter_values(
+                                            selected.iter().map(|&i| i as u32),
+                                        ),
+                                        None,
+                                    )
+                                    .context(ComputeArrowSnafu)?
+                                }
+                            }
+                            None => {
+                                datatypes::arrow::array::new_null_array(data_type, selected.len())
+                            }
+                        }
+                    } else if let Some(column) = column {
                         let values = codec::decode_float(
                             load_column_chunk(&scratch.buffers, column, decoder)?,
                             block.rows as usize,
@@ -1223,7 +1189,7 @@ async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes:
 /// The read window and scan reservation bound retained buffers;
 /// OpenDAL bounds concurrency to 8.
 async fn fetch_columns(
-    reader: &PayloadReader<'_>,
+    reader: &Reader,
     columns: &[&Column],
     buffers: &mut HashMap<u64, bytes::Bytes>,
     metrics: &mut ColumnarReadMetrics,
@@ -1240,22 +1206,16 @@ async fn fetch_columns(
         .iter()
         .map(|column| Ok(column.payload.offset..column.payload.end()?))
         .collect::<Result<Vec<_>>>()?;
-    let fetched = fetch_ranges(reader, reader.end, &ranges, metrics).await?;
+    let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (column, bytes) in columns.iter().zip(fetched) {
         buffers.insert(column.payload.offset, bytes);
     }
     Ok(())
 }
 
-/// Fetch arbitrary byte ranges of one part, reusing its aligned block cache when it has one.
-///
-/// `end` is where the ranges' area ends (the payload area or the key area), so an aligned block
-/// never extends past the area it belongs to. Keys use the same path as column chunks: a part
-/// whose blocks are already cached issues no read at all, which is why a second series in the
-/// same part can be served from the over-read that the first one paid for.
+/// Fetches nearby ranges in bounded merged reads.
 async fn fetch_ranges(
-    reader: &PayloadReader<'_>,
-    end: u64,
+    reader: &Reader,
     ranges: &[std::ops::Range<u64>],
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Vec<bytes::Bytes>> {
@@ -1265,173 +1225,43 @@ async fn fetch_ranges(
     if ranges.is_empty() {
         return Ok(Vec::new());
     }
-    let Some(cache) = &reader.cache else {
-        // Merging is bounded by [`MAX_READ_BYTES`], and a requested range never exceeds that, so
-        // every range lies inside exactly one merged read.
-        let merged = merge_read_ranges(ranges);
-        *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
-        let started = Instant::now();
-        let fetched = reader
-            .reader
-            .fetch(merged.clone())
-            .await
-            .context(OpenDalSnafu)?;
-        metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
-        require(
-            fetched.len() == merged.len(),
-            "sample fetch response count mismatch",
-        )?;
-        let mut result = Vec::with_capacity(ranges.len());
-        let mut index = 0;
-        for (range, buffer) in merged.iter().zip(fetched) {
-            let bytes = buffer.to_bytes();
-            require(
-                bytes.len() as u64 == range.end - range.start,
-                "sample range length mismatch",
-            )?;
-            *metrics.bytes.entry("fetched").or_default() += bytes.len() as u64;
-            while let Some(requested) = ranges.get(index) {
-                if requested.start >= range.end {
-                    break;
-                }
-                require(
-                    requested.start >= range.start && requested.end <= range.end,
-                    "sample range outside fetched range",
-                )?;
-                result.push(bytes.slice(
-                    (requested.start - range.start) as usize
-                        ..(requested.end - range.start) as usize,
-                ));
-                index += 1;
-            }
-        }
-        require(index == ranges.len(), "missing sample range response")?;
-        return Ok(result);
-    };
-    let aligned = aligned_ranges(ranges, end);
-    let mut blocks: HashMap<u64, bytes::Bytes> = HashMap::new();
-    let mut missing = Vec::new();
-    for range in &aligned {
-        if let Some(bytes) = cache.get(range) {
-            *metrics.bytes.entry("cache_hit").or_default() += bytes.len() as u64;
-            blocks.insert(range.start, bytes);
-        } else {
-            missing.push(range.clone());
-        }
-    }
-    let merged = merge_read_ranges(&missing);
-    if !merged.is_empty() {
-        *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
-        let started = Instant::now();
-        let fetched = reader
-            .reader
-            .fetch(merged.clone())
-            .await
-            .context(OpenDalSnafu)?;
-        metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
-        require(
-            fetched.len() == merged.len(),
-            "sample fetch response count mismatch",
-        )?;
-        let mut missing = missing.iter().peekable();
-        for (range, buffer) in merged.iter().zip(fetched) {
-            let bytes = buffer.to_bytes();
-            require(
-                bytes.len() as u64 == range.end - range.start,
-                "sample range length mismatch",
-            )?;
-            *metrics.bytes.entry("fetched").or_default() += bytes.len() as u64;
-            while let Some(block) = missing.peek() {
-                if block.start >= range.end {
-                    break;
-                }
-                require(
-                    block.start >= range.start && block.end <= range.end,
-                    "aligned block outside fetched range",
-                )?;
-                let data = bytes.slice(
-                    (block.start - range.start) as usize..(block.end - range.start) as usize,
-                );
-                cache.insert(block, &data);
-                blocks.insert(block.start, data);
-                missing.next();
-            }
-        }
-        require(missing.next().is_none(), "missing aligned block response")?;
-    }
+
+    // Merging is bounded by [`MAX_READ_BYTES`], and a requested range never exceeds that, so
+    // every range lies inside exactly one merged read.
+    let merged = merge_read_ranges(ranges);
+    *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
+    let started = Instant::now();
+    let fetched = reader.fetch(merged.clone()).await.context(OpenDalSnafu)?;
+    metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
+    require(
+        fetched.len() == merged.len(),
+        "sample fetch response count mismatch",
+    )?;
     let mut result = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        let start = range.start / PAYLOAD_BLOCK_BYTES * PAYLOAD_BLOCK_BYTES;
-        let first = blocks
-            .get(&start)
-            .ok_or_else(|| invalid("missing cached payload block"))?;
-        let offset = (range.start - start) as usize;
-        let len = (range.end - range.start) as usize;
-        let bytes = if offset + len <= first.len() {
-            first.slice(offset..offset + len)
-        } else {
-            let mut assembled = bytes::BytesMut::with_capacity(len);
-            let mut position = range.start;
-            while position < range.end {
-                let start = position / PAYLOAD_BLOCK_BYTES * PAYLOAD_BLOCK_BYTES;
-                let block = blocks
-                    .get(&start)
-                    .ok_or_else(|| invalid("missing cached payload block"))?;
-                let offset = (position - start) as usize;
-                let take = ((range.end - position) as usize).min(block.len() - offset);
-                require(take > 0, "empty cached payload block")?;
-                assembled.extend_from_slice(&block[offset..offset + take]);
-                position += take as u64;
+    let mut index = 0;
+    for (range, buffer) in merged.iter().zip(fetched) {
+        let bytes = buffer.to_bytes();
+        require(
+            bytes.len() as u64 == range.end - range.start,
+            "sample range length mismatch",
+        )?;
+        *metrics.bytes.entry("fetched").or_default() += bytes.len() as u64;
+        while let Some(requested) = ranges.get(index) {
+            if requested.start >= range.end {
+                break;
             }
-            assembled.freeze()
-        };
-        result.push(bytes);
+            require(
+                requested.start >= range.start && requested.end <= range.end,
+                "sample range outside fetched range",
+            )?;
+            result.push(bytes.slice(
+                (requested.start - range.start) as usize..(requested.end - range.start) as usize,
+            ));
+            index += 1;
+        }
     }
+    require(index == ranges.len(), "missing sample range response")?;
     Ok(result)
-}
-
-/// Stable cache units; adjacent missing units still use bounded merged reads.
-const PAYLOAD_BLOCK_BYTES: u64 = 16 * 1024;
-
-struct PayloadReader<'a> {
-    reader: &'a Reader,
-    cache: Option<PayloadPartCache>,
-    /// End of the column payload area; aligned payload blocks are clipped here.
-    end: u64,
-    /// End of the key area; aligned key blocks are clipped here.
-    key_end: u64,
-}
-
-impl PayloadReader<'_> {
-    /// Aligned and assembled bytes that serving `ranges` inside `area_end` can hold at once.
-    fn reservation_bytes(&self, ranges: &[std::ops::Range<u64>], area_end: u64) -> usize {
-        if self.cache.is_none() {
-            return 0;
-        }
-        // Aligned read allocations and assembly can coexist. Cache-owned copies
-        // are separately charged to the shared page-cache budget.
-        2 * aligned_ranges(ranges, area_end)
-            .iter()
-            .map(|r| (r.end - r.start) as usize)
-            .sum::<usize>()
-    }
-}
-
-/// Aligned cache units covering `ranges`, clipped at `end`.
-fn aligned_ranges(ranges: &[std::ops::Range<u64>], end: u64) -> Vec<std::ops::Range<u64>> {
-    let mut offsets = std::collections::BTreeSet::new();
-    for range in ranges {
-        if range.start >= range.end {
-            continue;
-        }
-        for block in range.start / PAYLOAD_BLOCK_BYTES..=(range.end - 1) / PAYLOAD_BLOCK_BYTES {
-            offsets.insert(block * PAYLOAD_BLOCK_BYTES);
-        }
-    }
-    offsets
-        .into_iter()
-        .map(|start| start..start.saturating_add(PAYLOAD_BLOCK_BYTES).min(end))
-        .collect()
 }
 
 const MAX_READ_GAP: u64 = 4 * 1024;
@@ -1468,6 +1298,23 @@ fn merge_read_ranges_into(ranges: &[std::ops::Range<u64>], merged: &mut Vec<std:
     }
 }
 
+/// Drops the read-ahead window so a block that fits on its own can retry its reservation, and
+/// keeps the next blocks from attempting the same window again.
+///
+/// A slice retains its whole shared fetch, whose charge leaves with the window, so the current
+/// block's slices are copied out first. The block's own reservation already covers them.
+fn release_read_ahead(prefetched: &mut PrefetchedBlocks, buffers: &mut HashMap<u64, bytes::Bytes>) {
+    for (offset, bytes) in buffers.iter_mut() {
+        if prefetched.buffers.contains_key(offset) {
+            *bytes = bytes::Bytes::copy_from_slice(bytes);
+        }
+    }
+    *prefetched = PrefetchedBlocks {
+        end: prefetched.end,
+        ..Default::default()
+    };
+}
+
 /// A bounded read-ahead window. Byte slices retain the shared fetched allocation;
 /// the reservation therefore lives until the whole window is replaced or cancelled.
 #[derive(Default)]
@@ -1479,7 +1326,7 @@ struct PrefetchedBlocks {
 
 #[allow(clippy::too_many_arguments)]
 async fn prefetch_blocks(
-    reader: &PayloadReader<'_>,
+    reader: &Reader,
     blocks: &[Block],
     start: usize,
     field_ids: &HashSet<u32>,
@@ -1493,7 +1340,7 @@ async fn prefetch_blocks(
     let mut columns = Vec::new();
     let mut bytes = 0usize;
     let mut last_range: Option<std::ops::Range<u64>> = None;
-    let mut payload_ranges = Vec::new();
+
     let mut end = start;
     for block in blocks.iter().skip(start).take(MAX_BLOCKS) {
         if !matches(block.bounds(), request, ids) {
@@ -1537,20 +1384,7 @@ async fn prefetch_blocks(
                 next_range = Some(range);
             }
         }
-        let previous_len = payload_ranges.len();
-        for column in &selected {
-            payload_ranges.push(column.payload.offset..column.payload.end()?);
-        }
-        let fetch_bytes = if reader.cache.is_some() {
-            aligned_ranges(&payload_ranges, reader.end)
-                .iter()
-                .map(|range| (range.end - range.start) as usize)
-                .sum()
-        } else {
-            next_bytes
-        };
-        if fetch_bytes > MAX_READ_BYTES as usize {
-            payload_ranges.truncate(previous_len);
+        if next_bytes > MAX_READ_BYTES as usize {
             break;
         }
         bytes = next_bytes;
@@ -1567,17 +1401,7 @@ async fn prefetch_blocks(
     // Include aligned payload buffers in the optional read-ahead reservation.
     if let Some(reservation) = &reservation
         && reservation
-            .try_grow(
-                2 * bytes
-                    + columns.len() * 256
-                    + reader.reservation_bytes(
-                        &columns
-                            .iter()
-                            .map(|c| Ok(c.payload.offset..c.payload.end()?))
-                            .collect::<Result<Vec<_>>>()?,
-                        reader.end,
-                    ),
-            )
+            .try_grow(2 * bytes + columns.len() * 256)
             .is_err()
     {
         return Ok(PrefetchedBlocks {

@@ -51,11 +51,11 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
-use crate::compaction::{CompactionExecution, CompactionPickFinished};
+use crate::compaction::{CompactionExecution, CompactionGuard, CompactionPickFinished};
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
     FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
-    Result, UnexpectedSnafu,
+    RecvSnafu, Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
@@ -173,6 +173,19 @@ impl WriteRequest {
         infer_primary_key_encoding_from_hint(self.hint.as_ref())
     }
 
+    /// Rejects raw row keys for sparse destinations before WAL admission.
+    pub(crate) fn check_primary_key_encoding(&self, metadata: &RegionMetadata) -> Result<()> {
+        ensure!(
+            metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse
+                || self.primary_key_encoding() == PrimaryKeyEncoding::Sparse,
+            InvalidRequestSnafu {
+                region_id: self.region_id,
+                reason: "sparse regions require pre-encoded primary keys",
+            }
+        );
+        Ok(())
+    }
+
     /// Returns estimated size of the request.
     pub(crate) fn estimated_size(&self) -> usize {
         let row_size = self
@@ -196,6 +209,7 @@ impl WriteRequest {
     pub(crate) fn check_schema(&self, metadata: &RegionMetadata) -> Result<()> {
         debug_assert_eq!(self.region_id, metadata.region_id);
 
+        self.check_primary_key_encoding(metadata)?;
         let region_id = self.region_id;
         // Index all columns in rows.
         let rows_columns = self
@@ -565,9 +579,11 @@ impl RequestColumn for BulkColumn<'_> {
 /// [WriteRequest::check_schema] applies to rows: column names are unique, every
 /// column is a column of the region with its Arrow type and contains nulls only
 /// if the region column is nullable, and a missing column is nullable or has a
-/// default value. Tags may use any string encoding. Sparse batches may carry the
-/// tags in one encoded primary key column instead. Returns whether the batch
-/// misses columns that the writer fills.
+/// default value. Tags may use any string encoding. Sparse batches must carry the
+/// tags in one encoded primary key column. Companion tag columns (for example,
+/// `__table_id` for partition expressions) are allowed and checked against the
+/// region schema; the encoded key remains authoritative for storage. Returns
+/// whether the batch misses columns that the writer fills.
 pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -> Result<bool> {
     let region_id = metadata.region_id;
     let sparse = metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
@@ -589,6 +605,13 @@ pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -
             }
         );
     }
+    ensure!(
+        !sparse || primary_key.is_some(),
+        InvalidRequestSnafu {
+            region_id,
+            reason: "sparse regions require a pre-encoded __primary_key column",
+        }
+    );
     if let Some(primary_key) = primary_key {
         // The writer casts the encoded primary key to a dictionary of binary.
         let type_matches = match primary_key.data_type() {
@@ -763,6 +786,22 @@ impl WorkerRequestWithTime {
     }
 }
 
+/// The requester owns the guard even while an active compaction is draining.
+#[derive(Debug)]
+pub(crate) struct PauseCompactionResponse {
+    pub(crate) guard: CompactionGuard,
+    pub(crate) idle: Option<Receiver<Result<()>>>,
+}
+
+impl PauseCompactionResponse {
+    pub(crate) async fn wait(self) -> Result<CompactionGuard> {
+        if let Some(idle) = self.idle {
+            idle.await.context(RecvSnafu)??;
+        }
+        Ok(self.guard)
+    }
+}
+
 /// Request sent to a worker
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {
@@ -793,10 +832,23 @@ pub(crate) enum WorkerRequest {
         sender: Sender<SetRegionRoleStateResponse>,
     },
 
+    /// Stops admitting compactions and reports when the active cycle ends.
+    PauseCompaction {
+        region_id: RegionId,
+        sender: Sender<Result<PauseCompactionResponse>>,
+    },
+
     /// Cancels one live compaction on its owning worker.
     CancelCompaction {
         region_id: RegionId,
         task_id: String,
+        sender: OptionOutputTx,
+    },
+
+    /// Discards the region's pending WAL tails that node `node_id` wrote.
+    DiscardPendingTails {
+        region_id: RegionId,
+        node_id: u64,
         sender: OptionOutputTx,
     },
 
@@ -936,6 +988,11 @@ impl WorkerRequest {
                 task_id: v.task_id,
                 sender: sender.into(),
             },
+            RegionRequest::DiscardPendingTails(v) => WorkerRequest::DiscardPendingTails {
+                region_id,
+                node_id: v.node_id,
+                sender: sender.into(),
+            },
             RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
@@ -1028,6 +1085,7 @@ impl WorkerRequest {
             input_regions,
             region_mapping,
             new_partition_exprs,
+            validate_only,
         }: store_api::region_engine::RemapManifestsRequest,
     ) -> Result<(WorkerRequest, Receiver<Result<HashMap<RegionId, String>>>)> {
         let (sender, receiver) = oneshot::channel();
@@ -1048,6 +1106,7 @@ impl WorkerRequest {
             input_regions,
             region_mapping,
             new_partition_exprs,
+            validate_only,
             sender,
         };
 
@@ -1157,8 +1216,22 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
-    /// The region became writable and may have pending tails to replay.
+    /// The catchup again of a region that awaited its Leader lease has finished.
+    CaughtUpAgain(CaughtUpAgain),
+    /// A catchup committed the handover of a region, whose edit the worker applies.
+    HandedOver(HandedOver),
+    /// The region became writable and may have pending tails to replay, or work due once it is a
+    /// writable leader with its Leader lease.
     RegionBecameWritable,
+    /// A lease ended the region's wait for its Leader lease, so the work the wait deferred may
+    /// start.
+    LeaderLeaseWaitEnded,
+    /// A save of the region's backfilled metadata found it not a writable leader with its
+    /// Leader lease, so it saved nothing.
+    BackfillDeferred {
+        /// The instance the save ran on.
+        region: MitoRegionRef,
+    },
     /// A role change left the region unable to replay its tails (see
     /// [MitoRegion::can_replay_tails](crate::region::MitoRegion::can_replay_tails)); a running
     /// replay is cancelled.
@@ -1177,6 +1250,19 @@ pub(crate) enum BackgroundNotify {
     },
     /// A tail replay ended.
     TailReplayEnded,
+    /// An edit that discards pending tails was published in the manifest.
+    PendingTailsDiscarded {
+        /// The instance the tails were discarded from.
+        region: MitoRegionRef,
+        /// The published edit.
+        edit: RegionEdit,
+        /// The tails the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
+        /// The number of tails the edit removed.
+        discarded: usize,
+        /// Receives `discarded`.
+        sender: OptionOutputTx,
+    },
 }
 
 impl BackgroundNotify {
@@ -1210,10 +1296,15 @@ impl BackgroundNotify {
             | Self::CopyRegionFromFinished(_)
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
+            | Self::CaughtUpAgain(_)
+            | Self::HandedOver(_)
             | Self::RegionBecameWritable
+            | Self::LeaderLeaseWaitEnded
+            | Self::BackfillDeferred { .. }
             | Self::RegionCannotReplay { .. }
             | Self::TailReplayCommitted { .. }
-            | Self::TailReplayEnded => false,
+            | Self::TailReplayEnded
+            | Self::PendingTailsDiscarded { .. } => false,
         }
     }
 }
@@ -1497,7 +1588,15 @@ impl RegionEditRequest {
     }
 }
 
-/// Notifies the regin the result of editing region.
+/// Whether the worker needs to install the edit in the in-memory version.
+#[derive(Debug)]
+pub(crate) enum RegionEditOutcome {
+    Written,
+    #[cfg(feature = "enterprise")]
+    AlreadyApplied,
+}
+
+/// Notifies the region of the result of editing its manifest.
 #[derive(Debug)]
 pub(crate) struct RegionEditResult {
     /// Region id.
@@ -1509,7 +1608,7 @@ pub(crate) struct RegionEditResult {
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
-    pub(crate) result: std::result::Result<(), Arc<Error>>,
+    pub(crate) result: std::result::Result<RegionEditOutcome, Arc<Error>>,
     /// Whether region state need to be set to Writable after handling this request.
     pub(crate) update_region_state: bool,
     /// The region is in staging mode before handling this request.
@@ -1524,6 +1623,37 @@ pub(crate) struct BuildIndexRequest {
     pub(crate) file_metas: Vec<FileMeta>,
     /// Waiters carried over from a previous build of the same files.
     pub(crate) result_senders: Vec<ResultMpscSender>,
+}
+
+/// The result of a catchup again, see `RegionWorkerLoop::catch_up_again`.
+#[derive(Debug)]
+pub(crate) struct CaughtUpAgain {
+    /// The instance registered when the catchup began, which the catchup demoted unless it was
+    /// in a transient leader state.
+    pub(crate) old: MitoRegionRef,
+    /// The manifest version of the old instance when the catchup began.
+    pub(crate) manifest_version: ManifestVersion,
+    /// The last sequence of the old instance when the catchup began, which every write moves.
+    pub(crate) last_sequence: SequenceNumber,
+    /// The replacement, caught up, or why the catchup failed.
+    pub(crate) result: Result<MitoRegionRef>,
+    /// Whether the catchup promotes the region.
+    pub(crate) set_writable: bool,
+    /// Receives the result of the catchup.
+    pub(crate) sender: OptionOutputTx,
+}
+
+/// The handover a catchup committed for a region, see
+/// [hand_over](crate::region::catchup::hand_over).
+#[derive(Debug)]
+pub(crate) struct HandedOver {
+    /// The instance the catchup handed over.
+    pub(crate) region: MitoRegionRef,
+    /// The committed edit, None for a region that skips the WAL, whose catchup committed an
+    /// empty one.
+    pub(crate) edit: Option<RegionEdit>,
+    /// Receives the result of the catchup.
+    pub(crate) sender: OptionOutputTx,
 }
 
 #[derive(Debug)]
@@ -1544,6 +1674,8 @@ pub(crate) struct RemapManifestsRequest {
     pub(crate) region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// New partition expressions for the new regions.
     pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
+    /// Only verify the ownership rule of [`Self::region_id`] instead of remapping.
+    pub(crate) validate_only: bool,
     /// Sender for the result of the remap operation.
     ///
     /// The result is a map from region IDs to their corresponding staging manifest paths.
@@ -1576,6 +1708,37 @@ mod tests {
     use crate::error::Error;
     use crate::test_util::ts_ms_value;
 
+    #[test]
+    fn test_sparse_write_requires_encoded_keys() {
+        let metadata = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        );
+        for op in [OpType::Put, OpType::Delete] {
+            for cached in [false, true] {
+                let mut request = WriteRequest::new(
+                    metadata.region_id,
+                    op,
+                    Rows::default(),
+                    cached.then(|| Arc::new(metadata.clone())),
+                )
+                .unwrap();
+                assert!(matches!(
+                    request.check_primary_key_encoding(&metadata),
+                    Err(Error::InvalidRequest { .. })
+                ));
+                request.hint = Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                });
+                request.check_primary_key_encoding(&metadata).unwrap();
+            }
+        }
+        let empty = RecordBatch::new_empty(Arc::new(datatypes::arrow::datatypes::Schema::empty()));
+        assert!(matches!(
+            check_bulk_insert_batch(&metadata, &empty),
+            Err(Error::InvalidRequest { .. })
+        ));
+    }
+
     #[tokio::test]
     async fn test_cancel_compaction_is_worker_control_request() {
         let region_id = RegionId::new(7, 3);
@@ -1601,6 +1764,31 @@ mod tests {
         assert_eq!(task_id, "task-1");
         sender.send(Ok(1));
         assert_eq!(receiver.await.unwrap().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_is_worker_control_request() {
+        let region_id = RegionId::new(7, 3);
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            region_id,
+            RegionRequest::DiscardPendingTails(
+                store_api::region_request::RegionDiscardPendingTailsRequest { node_id: 5 },
+            ),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::DiscardPendingTails {
+            region_id: actual_region_id,
+            node_id,
+            sender,
+        } = request
+        else {
+            panic!("a pending tails discard must bypass the DDL queue");
+        };
+        assert_eq!(actual_region_id, region_id);
+        assert_eq!(node_id, 5);
+        sender.send(Ok(2));
+        assert_eq!(receiver.await.unwrap().unwrap(), 2);
     }
 
     fn new_column_schema(

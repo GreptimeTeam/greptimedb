@@ -21,8 +21,8 @@ use std::time::Duration;
 use catalog::kvbackend::new_table_cache;
 use common_meta::cache::{
     CacheRegistry, CacheRegistryBuilder, LayeredCacheRegistry, LayeredCacheRegistryBuilder,
-    new_schema_cache, new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
-    new_table_route_cache, new_table_schema_cache, new_view_info_cache,
+    new_flow_info_cache, new_schema_cache, new_table_flownode_set_cache, new_table_info_cache,
+    new_table_name_cache, new_table_route_cache, new_table_schema_cache, new_view_info_cache,
 };
 use common_meta::kv_backend::KvBackendRef;
 use moka::future::{Cache, CacheBuilder};
@@ -43,6 +43,7 @@ fn default_cache<K: Send + Sync + Hash + Eq + 'static, V: Send + Sync + Clone + 
         .build()
 }
 
+pub const FLOW_INFO_CACHE_NAME: &str = "flow_info_cache";
 pub const TABLE_INFO_CACHE_NAME: &str = "table_info_cache";
 pub const VIEW_INFO_CACHE_NAME: &str = "view_info_cache";
 pub const TABLE_NAME_CACHE_NAME: &str = "table_name_cache";
@@ -165,6 +166,11 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
         cache,
         kv_backend.clone(),
     ));
+    let flow_info_cache = Arc::new(new_flow_info_cache(
+        FLOW_INFO_CACHE_NAME.to_string(),
+        default_cache(),
+        kv_backend.clone(),
+    ));
     // Builds the view info cache
     let cache = default_cache();
     let view_info_cache = Arc::new(new_view_info_cache(
@@ -191,6 +197,7 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
         .add_cache(table_name_cache)
         .add_cache(table_route_cache)
         .add_cache(view_info_cache)
+        .add_cache(flow_info_cache)
         .add_cache(table_flownode_set_cache)
         .add_cache(schema_cache)
         .add_cache(table_id_schema_cache)

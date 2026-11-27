@@ -640,7 +640,13 @@ fn invalid(reason: impl Into<String>) -> DataFusionError {
 /// the previous owned key (not an Arrow buffer), timestamp, metric, and finality. An `Interleaved`
 /// chain releases that state on closure, so later fragment chains may recur with the same key,
 /// labels, and timestamps independently.
-struct SequenceValidator {
+///
+/// Both frame streams run it - [`pack_raw_series`] over what a producer publishes and
+/// [`unpack_raw_series`] over what a consumer receives - and it is reachable on its own for the one
+/// reader that has neither a frame nor a batch in between: a consumer handed the chunks in process
+/// runs exactly this check over exactly the same sequence, so the shortcut validates what the frame
+/// would have carried instead of trusting it.
+pub struct SequenceValidator {
     ordering: SeriesOrdering,
     previous_key: Option<Vec<u8>>,
     previous_timestamp: Option<i64>,
@@ -649,7 +655,8 @@ struct SequenceValidator {
 }
 
 impl SequenceValidator {
-    fn new(ordering: SeriesOrdering) -> Self {
+    /// A validator for a raw stream that declares `ordering`.
+    pub fn new(ordering: SeriesOrdering) -> Self {
         Self {
             ordering,
             previous_key: None,
@@ -659,14 +666,16 @@ impl SequenceValidator {
         }
     }
 
-    fn finish(&self) -> datafusion_common::Result<()> {
+    /// Checks that the stream ended between chains, and not inside one.
+    pub fn finish(&self) -> datafusion_common::Result<()> {
         if self.previous_key.is_some() && !self.previous_is_last {
             return Err(invalid("raw series stream ended before key was final"));
         }
         Ok(())
     }
 
-    fn validate(&mut self, chunk: &RawSeriesChunk) -> datafusion_common::Result<()> {
+    /// Checks `chunk` against the chain this validator has read so far.
+    pub fn validate(&mut self, chunk: &RawSeriesChunk) -> datafusion_common::Result<()> {
         let key = chunk.primary_key.as_slice();
         let timestamp = chunk
             .time
@@ -732,17 +741,28 @@ impl SequenceValidator {
 /// them closes itself, so a closed chain may be followed by another chain whose labels happen to be
 /// equal. Only the still-open chain is remembered, which is what keeps such a contribution from being
 /// refused as a re-opened series while still refusing a chain that changes identity before it closes.
-struct EvaluatedSequenceValidator {
+///
+/// Like [`SequenceValidator`] it is the check both evaluated frame streams run and is reachable on
+/// its own for a consumer that is handed the chunks in process.
+pub struct EvaluatedSequenceValidator {
     /// The labels of the open chain and the last grid position it carried.
     open: Option<(SeriesLabels, usize)>,
 }
 
+impl Default for EvaluatedSequenceValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EvaluatedSequenceValidator {
-    fn new() -> Self {
+    /// A validator with no open chain.
+    pub fn new() -> Self {
         Self { open: None }
     }
 
-    fn finish(&self) -> datafusion_common::Result<()> {
+    /// Checks that the stream ended between chains, and not inside one.
+    pub fn finish(&self) -> datafusion_common::Result<()> {
         if self.open.is_some() {
             return Err(invalid(
                 "evaluated series stream ended before a chain closed",
@@ -751,7 +771,8 @@ impl EvaluatedSequenceValidator {
         Ok(())
     }
 
-    fn validate(&mut self, series: &Series, is_last: bool) -> datafusion_common::Result<()> {
+    /// Checks `series` against the chain this validator has read so far.
+    pub fn validate(&mut self, series: &Series, is_last: bool) -> datafusion_common::Result<()> {
         let (Some(first), Some(last)) = (series.time.first_position(), series.time.last_position())
         else {
             // No carried position: only a closing chunk may be empty, and it closes the chain it

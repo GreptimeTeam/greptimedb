@@ -327,18 +327,36 @@ fn explicit_label_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::{self, Formatter};
     use std::sync::Arc;
 
+    use common_error::ext::BoxedError;
     use common_query::series_frame::{
         raw_series_frame_schema_with_ordering, series_frame_ordering,
     };
+    use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+    use datafusion::common::DFSchema;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::physical_plan::union::UnionExec;
+    use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, SchemaRef as DatatypesSchemaRef};
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::region_engine::{
+        PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    };
+    use store_api::storage::{RegionId, ScanRequest};
+    use table::table::scan::RegionScanExec;
 
-    use super::normalize_raw_union;
+    use super::{METRIC_NAME, normalize_raw_union, plan_fused_series};
+    use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
+    use crate::native::plan::{BoundInput, NativeExpr, NativeNode, NativeTree, NativeType};
 
     fn raw_frame(ordering: SeriesOrdering) -> Arc<datafusion::arrow::datatypes::Schema> {
         let series = SeriesSchema {
@@ -397,6 +415,173 @@ mod tests {
             series_frame_ordering(normalized.schema().as_ref()).unwrap(),
             SeriesOrdering::Contiguous,
             "nothing is lowered when every member is complete"
+        );
+    }
+
+    /// A region whose only column is the time index: the scan below publishes an ordinary region
+    /// schema, not a series frame.
+    fn region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: api::v1::SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![]);
+        Arc::new(builder.build().expect("the fixture metadata is valid"))
+    }
+
+    /// The scanner of [`bare_region_scan`], which never answers a chunk here.
+    #[derive(Debug)]
+    struct BareScanner {
+        metadata: RegionMetadataRef,
+        properties: ScannerProperties,
+    }
+
+    impl DisplayAs for BareScanner {
+        fn fmt_as(&self, _format: DisplayFormatType, f: &mut Formatter<'_>) -> fmt::Result {
+            write!(f, "BareScanner")
+        }
+    }
+
+    impl RegionScanner for BareScanner {
+        fn name(&self) -> &str {
+            "BareScanner"
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            &self.properties
+        }
+
+        fn schema(&self) -> DatatypesSchemaRef {
+            Arc::clone(&self.metadata.schema)
+        }
+
+        fn metadata(&self) -> RegionMetadataRef {
+            Arc::clone(&self.metadata)
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+            self.properties.prepare(request);
+            Ok(())
+        }
+
+        fn scan_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics: &ExecutionPlanMetricsSet,
+            _partition: usize,
+        ) -> Result<SendableRecordBatchStream, BoxedError> {
+            Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
+                &self.metadata.schema,
+            ))))
+        }
+
+        fn set_logical_region(&mut self, logical_region: bool) {
+            self.properties.set_logical_region(logical_region);
+        }
+
+        fn set_query_load_region_id(&mut self, region_id: RegionId) {
+            self.properties.set_query_load_region_id(region_id);
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            true
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filter_exprs: Vec<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
+        ) -> Vec<bool> {
+            vec![false; filter_exprs.len()]
+        }
+    }
+
+    /// A bare region scan: the input of a node that runs inside the region it reads.
+    fn bare_region_scan() -> Arc<dyn ExecutionPlan> {
+        let scanner = BareScanner {
+            metadata: region_metadata(),
+            properties: ScannerProperties::default(),
+        };
+        Arc::new(
+            RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None)
+                .expect("the fixture scanner scans"),
+        )
+    }
+
+    /// The compiled tree a region-local node runs: one source, evaluated on the statement grid.
+    fn one_source_tree() -> (NativeTree, Arc<EvalGrid>) {
+        let grid = Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(0, 60_000, 2).expect("the grid spec is legal"))
+                .expect("the grid is legal"),
+        );
+        let samples = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("val"),
+            }]
+            .into(),
+            eval_grid: Some(Arc::clone(&grid)),
+        }));
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: samples.clone(),
+                source_index: 0,
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output: samples,
+        })
+        .expect("the fixture tree is legal");
+        (tree, grid)
+    }
+
+    /// The narrowed admission guard's premise: the bare-scan arm still needs the binding's own
+    /// metric name, because it asks a region scan for the series of that one metric.
+    ///
+    /// A discovered selector never reaches that arm - its prepared input is a `Union` of raw sources
+    /// that each name the metric they read - so this refusal only has to hold for a scan.
+    #[test]
+    fn a_bare_region_scan_without_a_bound_metric_name_is_refused() {
+        let (tree, grid) = one_source_tree();
+        let node = FusedSeries::try_new(
+            Arc::from(r#"absent_over_time({job="api"}[5m])"#),
+            tree,
+            FusedSeriesBinding {
+                grid,
+                metric_name: None,
+                time_index: "time".to_string(),
+                tags: vec![METRIC_NAME.to_string()],
+            },
+            vec![LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(
+                    DFSchema::try_from(raw_frame(SeriesOrdering::Contiguous).as_ref().clone())
+                        .expect("the frame is a legal schema"),
+                ),
+            })],
+            Arc::new(
+                DFSchema::try_from(datafusion::arrow::datatypes::Schema::new(vec![
+                    datafusion::arrow::datatypes::Field::new(
+                        "val",
+                        datafusion::arrow::datatypes::DataType::Float64,
+                        true,
+                    ),
+                ]))
+                .expect("the output is a legal schema"),
+            ),
+        )
+        .expect("one source binds one child");
+        assert_eq!(1, node.children().len(), "the node has its one input");
+        let error = plan_fused_series(&node, &[bare_region_scan()], 4)
+            .expect_err("a region scan has no series to answer without the bound name");
+        assert!(
+            error.to_string().contains("binds no metric name"),
+            "the refusal names what is missing: {error}"
         );
     }
 }

@@ -14,15 +14,13 @@
 
 //! Segmenting a native tree, so each per-series prefix runs where its input is read.
 //!
-//! A tree that reads across series answers one partition and gathers whatever it reads. Its
-//! per-series prefixes do not need that gather, so each is cut out as a [`FusedSeries`] node of its
-//! own and keeps the partitions it was scanned with: `cut_as_segment` decides what can be cut,
-//! [`cut_segments`] rewrites the tree into one segment per cut, and [`segment_tree`] builds the
-//! nodes, recursing into a cut that wraps a whole-vector consumer.
+//! A tree that reads across series runs in one partition. Its per-series prefixes are cut out as
+//! [`FusedSeries`] nodes of their own so they keep their scan partitions: `cut_as_segment` decides
+//! what is cut, [`cut_segments`] rewrites the tree into one segment per cut, and [`segment_tree`]
+//! builds the nodes.
 //!
-//! Everything here reads the bound tree alone. The columns a node publishes are the planner's
-//! answer, so the builders ask for them through [`OutputTags`], [`FieldNames`] and [`RootSchema`]
-//! instead of deriving them a second time.
+//! Output columns are the planner's answer, read through [`OutputTags`], [`FieldNames`] and
+//! [`RootSchema`].
 
 use std::sync::Arc;
 
@@ -43,52 +41,31 @@ use crate::extension_plan::{
 };
 use crate::native::plan::native_tree_supported;
 use crate::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, METRIC_NAME, NativeExpr, NativeNode,
-    NativeTree, NativeType, reads_across_series,
+    BoundInput, METRIC_NAME, NativeExpr, NativeNode, NativeTree, NativeType, reads_across_series,
 };
 use crate::vector_match::Cardinality;
 
-/// Derives the output tag columns a node publishes, from the tag columns each source declares.
-///
-/// The planner that owns the result layout names those columns with its own walk over the tree. A
-/// segment only reads that answer - it never renames a column - so it asks through this leaf
-/// rather than deriving the columns a second time.
+/// The planner's output tag columns for a node, given each source's tag columns.
 pub type OutputTags = fn(&NativeNode, &[Vec<String>]) -> Option<Vec<String>>;
 
-/// Derives the value column names a statement's expression gives the compiled `fields`.
-///
-/// Like [`OutputTags`], this is the planner's answer: a segment publishes the values its tree
-/// computes under the names the statement gave them, so the builders ask through this leaf instead
-/// of publishing the compiler's own field names. The tree alone does not carry the statement's
-/// expression, which is why the expression text is an input rather than something derived here.
+/// The planner's value column names for the compiled `fields` of a statement's expression.
 pub type FieldNames = fn(&str, &[String]) -> Vec<String>;
 
-/// The row schema a statement root publishes for `promql`, or `None` when its columns cannot be
-/// named once.
-///
-/// Like [`OutputTags`], this is the caller's answer: a segment that publishes rows publishes
-/// exactly the columns the planner would have published for the same statement.
+/// The planner's row schema for a statement root over `promql`, or `None` when its columns cannot
+/// be named once.
 pub type RootSchema = fn(&str, &NativeTree, &[Vec<String>], &str, FieldKind) -> Option<DFSchemaRef>;
 
-/// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
-///
-/// A node's output type is not checked here: [`NativeNode::validate`] already refuses a selection,
-/// a map or a binary operation whose operands are not evaluated vectors, so every branch below is
-/// one that produces values rather than raw samples.
+/// Whether `node` evaluates each series on its own, directly over a scan, so one partitioned
+/// execution is one answer.
 pub fn pointwise_operand(node: &NativeNode) -> bool {
     match &node.expr {
-        // A selection reads the raw samples below it; anything else below it is a value computed
-        // from a whole series, not a scan.
         NativeExpr::Instant { input, .. } | NativeExpr::Window { input, .. } => {
             matches!(input.expr, NativeExpr::Input(_))
         }
         NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => pointwise_operand(input),
-        // A parameter that reads no data has the same value in every execution.
         NativeExpr::ParameterizedMap {
             input, parameters, ..
         } => pointwise_operand(input) && parameters.iter().all(NativeNode::is_data_free),
-        // A scalar that reads no data is broadcast over the vector side's positions. Two vectors
-        // are a match between two series sets, which is the shape this route cannot split.
         NativeExpr::Binary {
             left,
             right,
@@ -102,9 +79,6 @@ pub fn pointwise_operand(node: &NativeNode) -> bool {
                     _ => false,
                 }
         }
-        // An aggregate folds a group, a vector operation reads the whole vector, and a bare input or
-        // scalar is not a per-series evaluation. A parameterized topk or histogram reads the whole
-        // vector, and `scalar()` answers from it.
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
@@ -112,6 +86,7 @@ pub fn pointwise_operand(node: &NativeNode) -> bool {
         | NativeExpr::ScalarOf { .. }
         | NativeExpr::ParameterizedTopK { .. }
         | NativeExpr::ParameterizedHistogram { .. }
+        | NativeExpr::ParameterizedAggregate { .. }
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
@@ -145,111 +120,39 @@ fn scan_operand(node: &NativeNode) -> bool {
     pointwise_operand(node) || independent_scan_pair(node)
 }
 
-/// Whether a grouping in `node` keeps a label the existing planner's column list cannot name.
-///
-/// An aggregate's `by(...)` keeps the labels it lists that its input carries, and `__name__` is one
-/// of them: the aggregate folds its groups by the metric name as by any other label. It is not a
-/// column of any scan, though - it is the name the raw frame carries - so the existing planner's
-/// `by(__name__)` finds no such column and reports no label at all. A schema taken from that list
-/// would drop the metric name the native aggregate kept, and two groups differing only in their
-/// metric would come out as two rows under one label set, which is a series identity lost rather
-/// than an answer given.
-///
-/// `without(...)` needs no such check: both routes drop `__name__` there. Nor does a tree with one
-/// source: a discovered selector's source declares `__name__` per metric, and a named one folds one
-/// metric whose name cannot merge two groups. What the check is for is the tree reading more than one
-/// source, where only a discovered source can report a name at all.
-pub fn groups_by_metric_name(node: &NativeNode) -> bool {
-    let grouping_names_metric = |op: &BoundAggregate| matches!(&op.group, Grouping::By(names) if names.iter().any(|name| name.as_ref() == METRIC_NAME));
-    match &node.expr {
-        NativeExpr::Input(_)
-        | NativeExpr::Scalar(_)
-        | NativeExpr::EvalTime { .. }
-        | NativeExpr::VectorOf { .. } => false,
-        // `scalar()` answers one value with no labels at all, so a grouping by the metric name
-        // below it cannot leave two groups under one label set: the walk stops there.
-        NativeExpr::ScalarOf { .. } => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input } => groups_by_metric_name(input),
-        NativeExpr::Aggregate { input, op } => {
-            grouping_names_metric(op) || groups_by_metric_name(input)
-        }
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => groups_by_metric_name(input) || groups_by_metric_name(parameter),
-        NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
-        NativeExpr::Vector { input, op } => {
-            matches!(op, BoundVectorOp::CountValues { group: Grouping::By(names), .. }
-                if names.iter().any(|name| name.as_ref() == METRIC_NAME))
-                || groups_by_metric_name(input)
-        }
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            groups_by_metric_name(left) || groups_by_metric_name(right)
-        }
-        NativeExpr::Info { base, info, .. } => {
-            groups_by_metric_name(base) || groups_by_metric_name(info)
-        }
-    }
-}
-
-/// Whether a segment can hand `node`'s values to another segment.
-///
-/// A boundary carries an evaluated series frame: values addressed on a grid, under the labels of
-/// the series they belong to. A scalar is broadcast rather than carried, aggregate state is
-/// internal, and raw samples are what a scan produces - none of them is a frame, so a subtree
-/// producing one stays inside the segment that reads it.
+/// Whether `node` answers an evaluated vector, the only thing a segment boundary carries.
 fn exportable(node: &NativeNode) -> bool {
     node.output
         .samples()
         .is_some_and(|schema| schema.eval_grid.is_some())
 }
 
-/// Whether `node` is a window over an evaluated input - the shape a subquery over anything but a
-/// bare selection compiles to.
+/// Whether `node` is a window over an evaluated input (a subquery).
 fn evaluated_input_window(node: &NativeNode) -> bool {
     matches!(&node.expr, NativeExpr::Window { op, .. } if op.input_grid.is_some())
 }
 
-/// Whether the dist analyzer places a segment over `node` region-locally.
+/// Whether the dist analyzer places a segment over `node` below the `MergeScan`.
 ///
-/// A segment is a `FusedSeries` node the analyzer has to move below the `MergeScan` for the physical
-/// planner to read the scans it names. The `FusedSeries` arm of `Categorizer::check_extension_plan`
-/// (`src/query/src/dist_plan/commutativity.rs`) is what decides that, from the bound tree alone: a
-/// root that [`reads_across_series`] is `NonCommutative` unless it is a per-series evaluation or the
-/// `Partial` half of a split fold. A segment it refuses stays above the merge, where the physical
-/// planner finds neither a region scan nor an explicit-label frame below it, so the statement fails
-/// while being planned instead of keeping the plan it had. Segmentation therefore asks that question
-/// before it cuts, and `cut_as_segment` declines the nodes this refuses.
+/// Mirrors the tree-shape check of the `FusedSeries` arm of `Categorizer::check_extension_plan`
+/// (`src/query/src/dist_plan/commutativity.rs`). A segment left above the merge has no scan the
+/// physical planner can read, so `cut_as_segment` must not cut it.
 pub fn region_local_segment(node: &NativeNode) -> bool {
     !reads_across_series(node) || pointwise_operand(node) || independent_scan_pair(node)
 }
 
 /// Whether `node` becomes a segment of its own under a parent that must gather.
 ///
-/// Cut local prefixes, global consumers and canonical merges separately so the prefix keeps its
-/// scan width, and every global consumer sees the canonical boundary below it. A pointwise wrapper
+/// Local prefixes, global consumers and canonical merges are cut separately, so a prefix keeps its
+/// scan width and every global consumer sees the canonical boundary below it. A pointwise wrapper
 /// of a global consumer is cut as well, so it cannot hide that consumer from recursive lowering.
 fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
-    // A window over an evaluated input answers per series on its own grid, so its own shape says
-    // nothing about where a segment over it can go: it drops the metric name, so two of the series
-    // it answers can end under one label set, and the dist analyzer reads it as cross-series
-    // ([`region_local_segment`]). Cutting one where the analyzer will not place it leaves a
-    // `FusedSeries` above the `MergeScan` that the physical planner cannot build, so the segment is
-    // only taken where the analyzer places it region-locally; otherwise the per-series prefix
-    // inside the window is cut instead, and where there is none the statement keeps the plan it had.
+    // Where the analyzer will not place a subquery window region-locally, the per-series prefix
+    // inside it is cut instead.
     if evaluated_input_window(node) && !region_local_segment(node) {
         return false;
     }
-    // A window over an evaluated input is answered per series on its own grid, so it is not the
-    // global gather a raw window's locality reports.
+    // A subquery window answers per series on its own grid, whatever its locality reports.
     let evaluated_window = evaluated_input_window(node);
     if !exportable(node)
         || matches!(node.expr, NativeExpr::Input(_))
@@ -262,25 +165,10 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
     if canonical_segmentation && (contains_global_consumer(node) || is_canonical_cut(node)) {
         return true;
     }
-    // A segment builder needs an input, so data-free subtrees stay with their parent.
+    // Data-free subtrees stay with their parent.
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
     !sources.is_empty()
-}
-
-/// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
-/// carries.
-///
-/// A merge collects the pieces of one label set and hands on the samples it was given, so its answer
-/// kind is its child's. A histogram answer standing on a merge would travel through the canonical
-/// boundary carrying histogram frames, a pairing no execution exercises yet: the planner keeps such
-/// a statement on the existing plan until that pairing is covered, and it has to look at every
-/// merge, not only a root one.
-pub fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    node.any(&|node| {
-        matches!(node.expr, NativeExpr::Merge { .. })
-            && node.output_field_kind(Some(input_kind)) == Some(FieldKind::Histogram)
-    })
 }
 
 /// Whether the merge producer's entire prefix can run on each scan partition independently.
@@ -312,31 +200,30 @@ pub fn contains_global_consumer(node: &NativeNode) -> bool {
     node.any(&is_global_consumer)
 }
 
-/// Whole-vector consumers remain global, but can be cut out as evaluated segments so a pointwise
-/// parent does not inherit their single-partition placement.
+/// Whole-vector consumers stay global, but are cut out as evaluated segments so a pointwise parent
+/// does not inherit their single-partition placement.
 fn is_global_consumer(node: &NativeNode) -> bool {
     matches!(
         node.expr,
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. }
+        NativeExpr::Aggregate { .. }
+            | NativeExpr::ParameterizedAggregate { .. }
+            | NativeExpr::Vector { .. }
     ) && matches!(input_locality(node), InputLocality::SinglePartition)
 }
 
-/// Whether a subtree can be cut without inheriting its parent's global gather.
-///
-/// A local prefix stays on its source partitions. A canonical merge becomes its own routed
-/// boundary, and a parent reads the assembled frames rather than gathering the scan.
+/// Whether a subtree can be cut without inheriting its parent's global gather: a local prefix, or
+/// a canonical merge that becomes its own routed boundary.
 fn is_canonical_cut(node: &NativeNode) -> bool {
     matches!(node.expr, NativeExpr::Merge { .. })
         || !matches!(input_locality(node), InputLocality::SinglePartition)
         || canonical_local_prefix(node)
 }
 
-/// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
-/// subtrees cut out of it.
+/// One segment: its tree rewritten to its own index space, the scans it reads, and the subtrees cut
+/// out of it.
 ///
-/// A segment has one index space of its own - the scans it reads first, in the order it first names
-/// them, then the subtrees cut out of it - because `FusedSeries` requires its source indices to be
-/// dense over its children.
+/// `FusedSeries` requires dense source indices, so a segment numbers its scans first, in the order
+/// it first names them, then its cut subtrees.
 pub struct Segment {
     pub node: NativeNode,
     /// Original scan indices, in the order this segment's indices name them.
@@ -471,22 +358,12 @@ pub fn cut_segments(node: &NativeNode, canonical_segmentation: bool) -> Segment 
     }
 }
 
-/// Appends the per-row name column to a rows layout's tag list.
-///
-/// A scalar root declares no name column: it publishes one value and no series, so the row it
-/// answers has no name to report. The column is appended, so the layout keeps its order - the time
-/// index, then the value fields, then the tags - and a label set that already reports the name keeps
-/// the one column it has.
+/// Moves or appends `__name__` to the end of a rows layout's tag list. A scalar root gets no name
+/// column.
 pub fn with_row_name_column(node: &NativeNode, mut tags: Vec<String>) -> Vec<String> {
     if !matches!(&node.output, NativeType::Samples(_)) {
         return tags;
     }
-    // A layout can already report the name: a set operation takes it from its sides, and a
-    // discovered source sorts its tags for the union. Neither leaves that column last - `or` keeps
-    // the left operand's order and only appends the right side's unseen tags, and sorting puts the
-    // name wherever its bytes fall - so the existing one is removed and appended instead: every rows
-    // layout then answers one order, the time index, the value fields, the labels, and the name
-    // last.
     if let Some(index) = tags.iter().position(|tag| tag == METRIC_NAME) {
         tags.remove(index);
     }
@@ -494,32 +371,13 @@ pub fn with_row_name_column(node: &NativeNode, mut tags: Vec<String>) -> Vec<Str
     tags
 }
 
-/// The ordering this route compiles its trees against: the weakest both scanners provide.
-///
-/// A native scan declares `KeyThenTime` and a two-phase scan `Contiguous`, and the logical planner
-/// cannot read which one a statement will get. `Contiguous` is the weaker of the two - every
-/// series' samples contiguous, the series themselves unordered - and a native evaluation only
-/// refuses `Interleaved`, so a tree compiled against this ordering runs on either scanner.
+/// The ordering trees are compiled against: the weaker of a native scan's `KeyThenTime` and a
+/// two-phase scan's `Contiguous`, since the logical planner cannot tell which a statement gets.
 pub const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
-/// The columns a [`FusedSeries`] node produces.
-///
-/// With `experimental_native_promql` enabled, a value column is named by the caller's [`FieldNames`]
-/// answer for the statement's expression, not legacy planner expression text. Legacy headers in
-/// `tests/cases/**` are unaffected because the native route is opt-in and off by default.
-///
-/// The shape is the one the existing unary pipeline consumes — the time index, then the series
-/// fields, then the tags — and each column is declared the way the node's own conversion reads it
-/// back:
-/// the time column is a non-nullable millisecond timestamp with no timezone, because every
-/// evaluated chunk is addressed on the statement's grid and carries one; a field is a nullable
-/// `Float64`, because a grid point inside the statement's interval can have no sample; and a tag is
-/// a nullable `Utf8`, because a range function drops the metric name and a series can be missing a
-/// label entirely.
-/// The output schema of a fused node: its time index, one column per field, then its tags.
-///
-/// `field_kind` says what a field column carries. The physical conversion reads the same kind off
-/// this schema and dispatches on it, so the schema and the batch it describes cannot disagree.
+/// The output schema of a fused node: a non-nullable millisecond time index, one nullable column
+/// of `field_kind` per field, then nullable `Utf8` tags. Value columns are named by the caller's
+/// [`FieldNames`].
 pub fn fused_output_schema(
     fields: &[String],
     tags: &[String],
@@ -531,10 +389,7 @@ pub fn fused_output_schema(
         FieldKind::Histogram => native_histogram_value_type().as_arrow_type(),
     };
     let mut columns = Vec::with_capacity(fields.len() + tags.len() + 1);
-    // The time index is marked as one, the way the existing planner's plans mark the table's own
-    // time index: what a plan publishes is a result either way, and a reader of the marker - a
-    // `RANGE` query over the plan, a schema converted back to GreptimeDB's - has to see the same
-    // column on both routes.
+    // Marked as the existing planner marks it, for `RANGE` queries and schema conversion.
     columns.push((
         None,
         Arc::new(
@@ -554,18 +409,13 @@ pub fn fused_output_schema(
     }
     for name in tags {
         let mut field = Field::new(name, ArrowDataType::Utf8, true);
-        // The runtime answers `__name__` from the metric name of the series it reports, so a tag
-        // column of that name is the name of each row rather than one name for the whole result.
-        // Declaring it keeps the response layer from naming every row after the statement.
+        // Tells the response layer each row carries its own name.
         if name == METRIC_NAME {
             field = field.with_metadata(datatypes::schema::metric_name_field_metadata());
         }
         columns.push((None, Arc::new(field)));
     }
 
-    // GreptimeDB's schemas carry their version, and a result schema is no different: a schema
-    // read back from this plan is one, exactly as the existing planner's answer for the same
-    // statement is.
     let metadata = std::collections::HashMap::from([(
         datatypes::schema::VERSION_KEY.to_string(),
         datatypes::schema::Schema::INITIAL_VERSION.to_string(),
@@ -573,51 +423,24 @@ pub fn fused_output_schema(
     Ok(Arc::new(DFSchema::new_with_metadata(columns, metadata)?))
 }
 
-/// The grid one `FusedSeries` publishes on: the grid its root declares it produces, or the
-/// statement's grid when the root declares none.
-///
-/// A root that produces one value per grid point says which grid that is, and that declared grid is
-/// the one its consumer reads it on: a window over an evaluated input - a subquery - produces on the
-/// window's own output grid, and a non-window root inside such a window, like the `Map` an
-/// expression of a subquery compiles to, produces on the subquery's grid rather than on the
-/// statement's. A statement root declares the statement's grid, so the two agree there. A root with
-/// no declared grid - raw samples - is read where it was scanned and keeps the caller's grid.
-/// Every lowering path binds the effective grid (the subquery's child grid for a matrix root, the
-/// statement's grid otherwise), so a window root answers that same grid here.
+/// The grid a `FusedSeries` publishes on: its root's grid, which inside a subquery is the
+/// subquery's grid, or `statement_grid` for a root without one.
 fn fused_publish_grid(root: &NativeNode, statement_grid: &Arc<EvalGrid>) -> Arc<EvalGrid> {
     root.output
         .grid()
         .map_or_else(|| Arc::clone(statement_grid), Arc::clone)
 }
 
-/// Lowers a tree whose root is a canonical merge into a producer and a canonical router.
+/// Lowers a tree whose root is a canonical merge into a producer and a canonical router, and
+/// returns the plan with the tags its frames carry.
 ///
-/// The tree says the statement answers one series per canonical label set; what it cannot say is
-/// where the pieces of one set are, because a rewrite created them after the scan split the rows.
-/// So the pieces have to meet before the answer is written, and there are only two honest ways to
-/// make them meet: read every partition in one execution, or route each label set to one owner. The
-/// first takes the caller's parallelism away for the whole query; this is the second.
+/// - The producer runs the merge on every scan partition, so a same-partition collision fails
+///   there, and exports one series per label set as a frame.
+/// - The router is `SeriesRepartitionExec`'s canonical routing: it publishes a label set once every
+///   producer contributed it or ended, and reports a second piece holding a taken position.
 ///
-/// Two stages come out of it, and each has one job:
-///
-/// - the **producer** runs the tree's root merge on every scan partition. Its merge collects the
-///   pieces that partition holds - which is what makes a same-partition collision an error here,
-///   before anything is routed - and it exports one series per label set as a series frame. It is
-///   explicitly partition-local: the same node without that distinction would gather its inputs and
-///   answer everything in one execution.
-/// - the **router** is `SeriesRepartitionExec`'s canonical routing, which collects the pieces of one
-///   label set from *every* input partition. It is the conservative router - a label set is
-///   published only once every producer contributed it or ended - because a producer promises one
-///   series per set *per partition*, not that each set lives in one partition. A second piece of one
-///   set that holds a position another piece already holds is the same error, reported while that
-///   label set is assembled, and each output of the router then holds whole label sets: one series
-///   per set, complementary points joined.
-///
-/// `None` when the boundary cannot be built, so the caller keeps the plan it would have chosen.
-/// The stages of a canonical boundary over `tree`, and the columns its frames carry.
-///
-/// `format` says what the caller above reads: a statement root reads the boundary's rows, and
-/// anything else reads the assembled frames as an ordinary evaluated input.
+/// `format` is what the caller reads: rows for a statement root, frames otherwise. `None` when the
+/// boundary cannot be built, so the caller keeps its plan.
 #[allow(clippy::too_many_arguments)]
 pub fn canonical_boundary_stages(
     promql: Arc<str>,
@@ -649,19 +472,11 @@ pub fn canonical_boundary_stages(
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
     let output_tags = output_tags_of(tree.root(), source_tags)?;
-    // The terminal rows of this boundary report the name of each row they publish, so the schema
-    // declares it exactly as the other rows layouts do. The tags stay the walk's own: they name the
-    // labels the frames carry, and the binding below is built from them.
     let row_tags = with_row_name_column(tree.root(), output_tags.clone());
-    // The values are named after the expression, as in every other rows layout of this statement.
-    // A schema this boundary cannot declare declines here: the caller's error type is not one this
-    // crate can build, so a name collision is reported by declining rather than as an internal
-    // error, and the caller keeps the plan it would have chosen.
+    // A column-name collision declines, so the caller keeps its plan.
     let value_names = field_names(&promql, &fields);
     let output_schema = fused_output_schema(&value_names, &row_tags, time_index, root_kind).ok()?;
 
-    // The producer: the statement's own tree, run per partition, exporting a frame. It runs above
-    // the regions, where its router collects each label set from every region's contribution.
     let producer = FusedSeries::try_new_canonical_producer(
         Arc::clone(&promql),
         tree.clone(),
@@ -678,10 +493,8 @@ pub fn canonical_boundary_stages(
         node: Arc::new(producer),
     });
 
-    // What reads the router depends on where this boundary sits. A consumer still above it reads
-    // whole label sets, and the router already merged the pieces of one label set into one series,
-    // so that consumer is an ordinary evaluated input of its own and needs no merge. The statement's
-    // root instead publishes rows, which is this boundary's own frame converted as usual.
+    // A consumer above reads the routed frames as an ordinary evaluated input; the statement root
+    // converts them to rows.
     if format == FusedOutputFormat::SeriesFrame {
         return Some((producer, output_tags));
     }
@@ -730,19 +543,20 @@ fn is_raw_series_source(plan: &LogicalPlan) -> bool {
     }
 }
 
+/// Whether `plan` is a discovered selector's [`RawSeriesSource`], or the `Union` of several. It is
+/// used as is: wrapping it in another source is refused by the physical planner.
+fn is_sourced_plan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Union(_)) || is_raw_series_source(plan)
+}
+
 fn find_input_node(node: &NativeNode, source_index: usize) -> Option<&BoundInput> {
     node.inputs()
         .into_iter()
         .find(|input| input.source_index == source_index)
 }
 
-/// Whether `plan` is the typed empty input a discovered selector that matched no table gets.
-///
-/// It reads no region and holds no scan, so it is not one of the tables a node's binding is derived
-/// from: two selectors are "of one table" only if the tables they scan are one. The remote
-/// admission gate reads the same shape back, to tell a node with nothing to ship from one that does
-/// read regions, so the declared frame is part of the check: an empty relation that does not
-/// declare the raw explicit-label frame is some other plan, not this input.
+/// Whether `plan` is the typed empty input of a discovered selector that matched no table: an
+/// `EmptyRelation` declaring the raw explicit-label frame.
 pub fn is_empty_discovered_input(plan: &LogicalPlan) -> bool {
     let LogicalPlan::EmptyRelation(relation) = plan else {
         return false;
@@ -798,10 +612,7 @@ fn build_evaluated_segment(
             .output
             .samples()
             .is_some_and(|schema| schema.eval_grid.is_some())
-            || is_raw_series_source(&child)
-            // The typed empty frame of a selector that matched no table is an input in its own
-            // right: it reads no region and carries no metric, so there is nothing to wrap it in.
-            // A segment over it is still an explicit-label frame with no series.
+            || is_sourced_plan(&child)
             || is_empty_discovered_input(&child)
         {
             inputs.push(child);
@@ -828,9 +639,6 @@ fn build_evaluated_segment(
             local_tags.push(tags.clone());
         }
     }
-    // A canonical merge is not a segment: it is the middle of a boundary whose two frame nodes and
-    // router are what answer one series per label set across partitions, so it is built as that
-    // boundary and read as a frame.
     if matches!(tree.root().expr, NativeExpr::Merge { .. }) {
         let (plan, tags) = canonical_boundary_stages(
             Arc::clone(&promql),
@@ -877,10 +685,8 @@ fn build_evaluated_segment(
     ))
 }
 
-/// Builds one segment's plan from a subtree, binding its scan inputs without cutting again.
-///
-/// Returns the plan and the output columns the segment reports, which its parent names its own
-/// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
+/// Builds one segment's plan from a subtree without cutting again, and returns it with its output
+/// tags. `None` when any part cannot be built.
 #[allow(clippy::type_complexity)]
 fn build_inner_segment(
     node: &NativeNode,
@@ -904,25 +710,24 @@ fn build_inner_segment(
         .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
     let output_tags = output_tags_of(tree.root(), &source_tags)?;
-    // A segment publishes on the grid its own root declares, which is the grid its parent reads it
-    // on: the segments of a subquery's inner expression are evaluated on the subquery's grid, not on
-    // the statement's, whatever their root computes. The statement's grid is only the fallback for a
-    // root that declares none.
     let segment_grid = fused_publish_grid(tree.root(), grid);
     let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
         let (metric, time_index, tags) = per_source.get(*index)?;
         (scans, metric.clone(), time_index.clone(), tags.clone())
     } else {
-        // A binding cannot describe different source identities. Give each child the existing
-        // explicit-label source boundary used for separate metric tables.
+        // One binding cannot describe several sources, so each child gets its own
+        // explicit-label source.
         let source_fields = tree_source_fields(&tree).ok()?;
         let mut children = Vec::with_capacity(sources.len());
         for (local_index, &source_index) in sources.iter().enumerate() {
-            let (Some((Some(metric), _, source_tags)), Some(fields), Some(scan)) = (
-                per_source.get(source_index),
-                source_fields.get(local_index),
-                scans.get(local_index),
-            ) else {
+            let scan = scans.get(local_index)?;
+            if is_sourced_plan(scan) {
+                children.push(scan.clone());
+                continue;
+            }
+            let (Some((Some(metric), _, source_tags)), Some(fields)) =
+                (per_source.get(source_index), source_fields.get(local_index))
+            else {
                 return None;
             };
             children.push(LogicalPlan::Extension(Extension {
@@ -967,14 +772,11 @@ fn build_inner_segment(
     ))
 }
 
-/// Plans `tree` as several segments, or `None` when it is one node already.
+/// Plans `tree` as several segments, or `None` when there is nothing to cut or a segment cannot be
+/// built; the caller then keeps the unsegmented plan.
 ///
-/// A tree that reads across series answers one partition and gathers whatever it reads. Its
-/// per-series prefixes do not need that gather, so each becomes a segment of its own and keeps the
-/// partitions it was scanned with. Global consumers and canonical merges are cut in their original
-/// order, and recursive segments publish frames for their parents to consume. Only the statement
-/// root publishes rows, and it does so under the statement's own value names: [`FieldNames`]
-/// answers those, and the rows schema asks [`RootSchema`] for the rest of the layout.
+/// Nested segments publish frames for their parents; only the statement root publishes rows, named
+/// through [`FieldNames`] and [`RootSchema`].
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn segment_tree(
     promql: Arc<str>,
@@ -995,31 +797,11 @@ pub fn segment_tree(
     field_names: FieldNames,
     root_schema: RootSchema,
 ) -> Option<LogicalPlan> {
-    // Only a tree the analyzer gathers is worth splitting: its per-series prefixes then run where
-    // their input is read. A window over an evaluated input can need that split even where
-    // [`input_locality`] reports a local tree - it drops the metric name, so [`reads_across_series`]
-    // reads it as cross-series - and the per-series prefix inside it is what keeps the partitions it
-    // scanned. Proceeding only admits the attempt: every cut is admitted by `cut_as_segment`
-    // individually, which is where the analyzer's placement is asked.
+    // A subquery window root may read across series even where `input_locality` reports a local
+    // tree, so it is attempted too; `cut_as_segment` admits each cut.
     if !matches!(input_locality(tree.root()), InputLocality::SinglePartition)
         && !evaluated_input_window(tree.root())
     {
-        return None;
-    }
-    // A segment boundary has to carry something, and the only thing it can carry is a per-series
-    // prefix: a subtree that answers each series on its own and can be recomputed. A tree with no
-    // such subtree inside it has nothing to cut, and cutting anything else - an aggregate's own
-    // state, a constant - is either impossible or a plain recomputation of the same work in one
-    // more node. Cutting on locality alone would accept one here.
-    //
-    // The window this tree may be rooted at is not one of those consumers, but it is no boundary
-    // either: `cut_as_segment` never cuts one, and what keeps its input's partitions is the
-    // per-series prefix below it, which the cuts below are admitted for.
-    // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
-    // name it. With multiple sources, groups differing only by metric name would therefore be
-    // reported under one label set. A single-source tree cannot merge distinct metric-name groups
-    // this way, so this restriction is specific to multi-source segmentation.
-    if children.len() > 1 && groups_by_metric_name(tree.root()) {
         return None;
     }
     let mut current_tree = tree.clone();
@@ -1029,8 +811,6 @@ pub fn segment_tree(
     let mut first_iteration = true;
     let mut changed = false;
     loop {
-        // A tree the analyzer keeps partition-local needs no segment; a window over an evaluated
-        // input is still worth attempting one for, so its per-series prefix keeps its partitions.
         if !matches!(
             input_locality(current_tree.root()),
             InputLocality::SinglePartition
@@ -1055,9 +835,8 @@ pub fn segment_tree(
             .map(|&index| current_source_ids.get(index).copied().flatten())
             .collect::<Vec<_>>();
         for cut in &segment.cut {
-            // A cut may wrap a global consumer in a pointwise rewrite or a later merge. Segment
-            // that subtree first so its inner canonical boundary stays below the consumer. A local
-            // canonical merge instead goes directly to the boundary builder.
+            // A cut wrapping a global consumer is segmented recursively, so its inner canonical
+            // boundary stays below the consumer.
             let canonical = matches!(cut.expr, NativeExpr::Merge { .. });
             let built = if first_iteration && contains_global_consumer(cut) {
                 let cut_tree = NativeTree::try_new(cut.clone()).ok()?;
@@ -1095,12 +874,7 @@ pub fn segment_tree(
             if built.is_none() && contains_global_consumer(cut) {
                 return None;
             }
-            // A cut the first iteration cannot build from the scans is built from the frames this
-            // loop has already published: the canonical pass inserts a merge under a label rewrite,
-            // and that boundary - rebuilt here as a producer, a frame and a router - is what answers
-            // one series per label set across partitions. Which cuts are taken is
-            // `cut_as_segment`'s decision, and it declines the evaluated-input window the analyzer
-            // will not place region-locally, so this fallback only ever sees the cuts it admitted.
+            // Otherwise the cut is built over the frames this loop has already published.
             let built = built.or_else(|| {
                 build_evaluated_segment(
                     Arc::clone(&promql),
@@ -1133,12 +907,9 @@ pub fn segment_tree(
         return None;
     }
     let parent = current_tree;
-    // Segmentation is useful even when the resulting parent is still single-partition: each
-    // exported per-series subtree remains a separate input and is bound to its own source.
     let mut inputs = current_children;
     let mut child_tags = current_tags;
-    // A merge at this segment's root still needs its own boundary. An outer rewrite above a
-    // recursively cut ranking runs after the ranking, then is canonicalized before its caller.
+    // A merge at this segment's root still needs its own boundary.
     if let NativeExpr::Merge { input } = &parent.root().expr {
         let source_fields = tree_source_fields(&parent).ok();
         for index in 0..inputs.len() {
@@ -1186,9 +957,7 @@ pub fn segment_tree(
         )
         .map(|(plan, _)| plan);
     }
-    // Nothing below can fall back once physical planning starts, so every tree this route commits
-    // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
-    // field, an operation with no kernel - therefore keeps the plan it had.
+    // Physical planning cannot fall back, so refuse here what the runtime would refuse.
     if !native_tree_supported(&parent) {
         return None;
     }
@@ -1206,9 +975,7 @@ pub fn segment_tree(
             Arc::new(schema)
         }
     };
-    // A recursively constructed segment still has its original source binding. Its parent may
-    // combine another metric; giving the segment that parent's metric would relabel both inputs.
-    // Direct scan segments keep their established builder and binding unchanged.
+    // A recursive segment keeps its own source's metric; its parent's would relabel both inputs.
     let segment_binding = |source_ids: &[Option<usize>]| -> (Option<Arc<str>>, String) {
         let mut sources = source_ids.iter().flatten().copied();
         let Some(source) = sources.next() else {
@@ -1223,11 +990,8 @@ pub fn segment_tree(
         )
     };
     let (segment_metric, segment_time_index) = segment_binding(&current_source_ids);
-    // A segment publishes on the grid its root declares, which is the grid its consumer reads it
-    // on. Segmentation recurses into a cut subtree with the caller's grid, and that subtree can sit
-    // inside a subquery window: the canonical segmentation of a collapsing rewrite cuts the window's
-    // input while its caller still holds the statement's grid. Binding the caller's grid here
-    // rejects such a segment, and the rejection aborts the whole route.
+    // Recursion reaches a cut inside a subquery window with the statement's grid, not the
+    // subquery's, so the root's own grid is bound.
     let publish_grid = fused_publish_grid(parent.root(), grid);
     let Ok(plan) = FusedSeries::try_new_with_format(
         Arc::clone(&promql),
@@ -1247,4 +1011,113 @@ pub fn segment_tree(
     Some(LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+
+    use super::*;
+    use crate::map::MathOp;
+    use crate::native::plan::{
+        AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap,
+        Grouping, InstantValue, MapOp,
+    };
+
+    fn grid() -> Arc<EvalGrid> {
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 4).unwrap()).unwrap())
+    }
+
+    fn evaluated(grid: &Arc<EvalGrid>) -> NativeType {
+        NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("value"),
+            }]
+            .into(),
+            eval_grid: Some(Arc::clone(grid)),
+        }))
+    }
+
+    fn map_over(inner: NativeNode) -> NativeNode {
+        let output = inner
+            .output
+            .grid()
+            .expect("a map reads an evaluated vector")
+            .clone();
+        NativeNode {
+            expr: NativeExpr::Map {
+                input: Box::new(inner),
+                op: BoundMap {
+                    ops: vec![MapOp::Math(MathOp::Abs)].into(),
+                },
+            },
+            output: evaluated(&output),
+        }
+    }
+
+    fn selection(inner: NativeNode, output: NativeType) -> NativeNode {
+        let grid = output
+            .grid()
+            .expect("a selection answers on a grid")
+            .clone();
+        NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(inner),
+                op: BoundInstant {
+                    lookback_ms: 300_000,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: grid,
+                },
+            },
+            output,
+        }
+    }
+
+    #[test]
+    fn a_fold_that_reads_its_parameter_is_a_global_consumer() {
+        let grid = grid();
+        let output = evaluated(&grid);
+        let source = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: output.clone(),
+                source_index: 0,
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output: output.clone(),
+        };
+        let fold = NativeNode {
+            expr: NativeExpr::ParameterizedAggregate {
+                input: Box::new(selection(source.clone(), output.clone())),
+                op: BoundAggregate {
+                    kind: AggregateKind::Quantile { quantile: 0.0 },
+                    group: Grouping::By(Arc::from([])),
+                    stage: AggregateStage::Complete,
+                    field_kind: FieldKind::Float,
+                },
+                parameter: Box::new(NativeNode {
+                    expr: NativeExpr::EvalTime { date: None },
+                    output: NativeType::Scalar(Arc::clone(&grid)),
+                }),
+            },
+            output: output.clone(),
+        };
+        assert!(
+            contains_global_consumer(&fold),
+            "a fold that reads its `φ` per point reads the whole vector"
+        );
+        assert!(
+            contains_global_consumer(&map_over(fold)),
+            "a pointwise parent must not hide the fold's gather"
+        );
+        assert!(
+            !contains_global_consumer(&map_over(selection(source, output))),
+            "a selection is not a whole-vector consumer"
+        );
+    }
 }

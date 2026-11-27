@@ -24,6 +24,7 @@ pub mod error;
 pub mod factory;
 pub mod layers;
 pub mod manager;
+pub mod remote_access;
 pub mod secure_fs;
 #[cfg(feature = "hdfs-object-store")]
 pub mod temp_file;

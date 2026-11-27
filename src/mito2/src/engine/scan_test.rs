@@ -46,16 +46,18 @@ use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
 use datatypes::json::value::JsonValue;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use datatypes::vectors::json::array::JsonArray;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
+    AddColumn, AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -68,47 +70,543 @@ use crate::error::Error;
 use crate::manifest::action::RegionEdit;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
+use crate::series_index::format::{FormatReader, SamplesFormatReader};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
-use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
+use crate::test_util::{
+    CreateRequestBuilder, TestEnv, build_series_index_request, reopen_region,
+    sparse_metric_create_request,
+};
 
 #[tokio::test]
 async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
+    check_sparse_upsert_after_adding_nullable_tag("flat").await
+}
+
+#[tokio::test]
+async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
+    check_sparse_upsert_after_adding_nullable_tag("narthex").await
+}
+
+/// A Narthex region refuses a native histogram sample too large for one samples chunk before it
+/// accepts the write, so flushes never meet a sample they cannot store.
+#[tokio::test]
+async fn test_narthex_rejects_oversized_histogram_sample() -> WhateverResult<()> {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use api::v1::{Row, Value};
+    use common_query::native_histogram::{
+        encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
+    };
+    use store_api::region_request::RegionPutRequest;
 
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1024, 0);
-    let mut request = CreateRequestBuilder::new()
-        .tag_num(1)
-        .field_num(1)
-        .insert_option("primary_key_encoding", "sparse")
-        .build();
-    let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
-    request
+    let mut request = sparse_metric_create_request("narthex");
+    let field = request
         .column_metadatas
-        .extend(reserved.column_metadatas.into_iter().take(2));
-    request
-        .primary_key
-        .splice(0..0, reserved.primary_key.into_iter().take(2));
-    let schema = test_util::rows_schema(&request);
+        .iter_mut()
+        .find(|c| c.semantic_type == SemanticType::Field)
+        .unwrap();
+    field.column_schema = ColumnSchema::new(
+        field.column_schema.name.clone(),
+        native_histogram_value_type().clone(),
+        true,
+    );
+    let field = field.column_schema.name.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await?;
-    let mut rows = Rows {
-        schema,
-        rows: vec![row(vec![
-            ValueData::StringValue("api".into()),
-            ValueData::F64Value(1.0),
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    let key = new_sparse_primary_key(&["api"], &metadata, 42, 7);
+    let mut histogram_schema = native_histogram_column_schema().unwrap();
+    histogram_schema.column_name = field;
+    let put = |buckets: u32| {
+        let mut deltas = vec![0; buckets as usize];
+        deltas[0] = 1;
+        // Custom buckets: exponential bucket indexes are bounded, custom bounds are not.
+        let histogram = Histogram {
+            schema: -53,
+            custom_values: (1..buckets).map(f64::from).collect(),
+            count: Some(Count::CountInt(u64::from(buckets))),
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: buckets,
+            }],
+            positive_deltas: deltas,
+            timestamp: 1000,
+            ..Default::default()
+        };
+        let schema = vec![
+            api::v1::ColumnSchema {
+                column_name: "__primary_key".into(),
+                datatype: ColumnDataType::Binary as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            api::v1::ColumnSchema {
+                column_name: "ts".into(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            histogram_schema.clone(),
+        ];
+        let values = [
+            ValueData::BinaryValue(key.clone()),
             ValueData::TimestampMillisecondValue(1000),
-            ValueData::U32Value(42),
-            ValueData::U64Value(7),
-        ])],
+            encode_native_histogram(&histogram).unwrap(),
+        ]
+        .into_iter()
+        .map(|value| Value {
+            value_data: Some(value),
+        })
+        .collect();
+        RegionRequest::Put(RegionPutRequest {
+            rows: Rows {
+                schema,
+                rows: vec![Row { values }],
+            },
+            hint: Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            }),
+            skip_wal: false,
+            partition_expr_version: None,
+        })
     };
-    test_util::put_rows(&engine, region_id, rows.clone()).await;
+    let Err(error) = engine.handle_request(region_id, put(100_000)).await else {
+        panic!("an oversized histogram sample must be refused");
+    };
+    assert!(error.to_string().contains("chunk limit"), "{error}");
+    engine.handle_request(region_id, put(8)).await?;
+    test_util::flush_region(&engine, region_id, None).await;
+    let rows = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?,
+    )
+    .await?;
+    assert_eq!(1, rows.iter().map(|b| b.num_rows()).sum::<usize>());
+    Ok(())
+}
+
+/// The bulk path refuses an oversized native histogram sample before its WAL entry or memtable
+/// write, while a sample that fits takes the same path to the memtable and a flushed file.
+#[tokio::test]
+async fn test_narthex_bulk_rejects_oversized_histogram_sample() -> WhateverResult<()> {
+    use common_query::native_histogram::native_histogram_value_type;
+    use datatypes::arrow::array::Array;
+
+    use crate::series_index::samples::{TestHistogram, histogram_array};
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let mut request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    let field = request
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.semantic_type == SemanticType::Field)
+        .unwrap();
+    field.column_schema = ColumnSchema::new(
+        field.column_schema.name.clone(),
+        native_histogram_value_type().clone(),
+        true,
+    );
+    let field = field.column_schema.name.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    let key = new_sparse_primary_key(&["api"], &metadata, 42, 7);
+    let bulk = |buckets: u32, ts: i64| {
+        let histogram = histogram_array(&[Some(TestHistogram {
+            schema: -53,
+            custom_values: Some((1..buckets).map(f64::from).collect()),
+            positive_spans: vec![(0, buckets as i32)],
+            floats: Some((f64::from(buckets), 0.0, vec![1.0; buckets as usize], vec![])),
+            ..Default::default()
+        })]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("__primary_key", DataType::Binary, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(&field, histogram.data_type().clone(), true),
+        ]));
+        let payload = DfRecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values([
+                    key.as_slice(),
+                ])) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values([ts])),
+                Arc::new(histogram),
+            ],
+        )
+        .unwrap();
+        let (schema, record_batch) = encode_to_flight_data(payload.clone());
+        RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+            skip_wal: false,
+            region_id,
+            payload,
+            raw_data: ArrowIpc {
+                schema: schema.data_header,
+                data_header: record_batch.data_header,
+                payload: record_batch.data_body,
+            },
+            partition_expr_version: None,
+            aligned_schema_version: None,
+        })
+    };
+    let Err(error) = engine.handle_request(region_id, bulk(100_000, 1000)).await else {
+        panic!("an oversized histogram sample must be refused");
+    };
+    assert!(error.to_string().contains("chunk limit"), "{error}");
+    engine.handle_request(region_id, bulk(8, 2000)).await?;
+    let rows = |engine: crate::engine::MitoEngine| async move {
+        let batches = RecordBatches::try_collect(
+            engine
+                .scan_to_stream(region_id, ScanRequest::default())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        batches.iter().map(|b| b.num_rows()).sum::<usize>()
+    };
+    // The replayed WAL holds the accepted sample only.
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert_eq!(1, rows(engine.clone()).await);
+    test_util::flush_region(&engine, region_id, None).await;
+    assert_eq!(1, rows(engine.clone()).await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> {
+    let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reads.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".series") {
+                captured.lock().unwrap().push(path.to_owned());
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            schedule_compaction_after_edit: false,
+            sst_meta_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let region = engine.get_region(id).unwrap();
+    let old = new_sparse_primary_key(&["old"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(id, test_util::sparse_metric_put(old, 1000, Some(1.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let snapshot = region.version();
+    let index = snapshot.ssts.series_indexes().values().next().unwrap();
+    let part = index
+        .meta_ref()
+        .narthex_objects(&region.access_layer.build_region_dir(id))
+        .unwrap()
+        .into_iter()
+        .find(|o| o.path.ends_with(".series"))
+        .unwrap()
+        .path;
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "tag_1",
+                                ConcreteDataType::string_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await?;
+    let new = new_sparse_primary_key(&["new", "west"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(id, test_util::sparse_metric_put(new, 2000, Some(2.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    assert!(
+        region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(&index.meta_ref().file_id)
+    );
+    for (filter, label) in [
+        (col("tag_1").eq(lit("west")), "new"),
+        (col("tag_1").is_null().or(col("tag_1").eq(lit(""))), "old"),
+    ] {
+        reads.lock().unwrap().clear();
+        let batches = RecordBatches::try_collect(
+            engine
+                .scan_to_stream(
+                    id,
+                    ScanRequest {
+                        filters: vec![filter],
+                        ..Default::default()
+                    },
+                )
+                .await?,
+        )
+        .await?;
+        assert_eq!(1, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+        assert!(batches.pretty_print()?.contains(label));
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.trim_start_matches('/') == part.trim_start_matches('/'))
+        );
+    }
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_build_threshold_counts_uncovered_files_per_window() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 4,
+            experimental_series_index_bucket_width: Duration::from_secs(10),
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let pause = engine.pause_compaction(id).await?;
+    let region = engine.get_region(id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    // The first window starts at 0, the second at 10 seconds.
+    for (times, expected_indexes) in [
+        (&[1000, 2000, 3000, 10000][..], 0),
+        (&[4000][..], 1),
+        (&[5000, 6000, 7000][..], 1),
+        (&[8000][..], 2),
+    ] {
+        for &ts in times {
+            engine
+                .handle_request(id, test_util::sparse_metric_put(key.clone(), ts, Some(1.0)))
+                .await?;
+            test_util::flush_region(&engine, id, None).await;
+        }
+        engine
+            .handle_request(id, build_series_index_request())
+            .await?;
+        assert_eq!(
+            region.version().ssts.series_indexes().len(),
+            expected_indexes
+        );
+    }
+    drop(pause);
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_spanning_sample_keeps_window_width_on_reopen() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let config = MitoConfig {
+        experimental_enable_series_index: true,
+        experimental_series_index_min_files: 1,
+        experimental_series_index_bucket_width: Duration::from_secs(10),
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let id = RegionId::new(1, 0);
+    let request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(id, RegionRequest::Create(request))
+        .await?;
+    let key = new_sparse_primary_key(&["api"], &engine.get_region(id).unwrap().metadata(), 42, 7);
+    for ts in [9000, 10000] {
+        engine
+            .handle_request(id, test_util::sparse_metric_put(key.clone(), ts, Some(1.0)))
+            .await?;
+    }
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let region = engine.get_region(id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(1, manifest.files.len());
+    assert_eq!(2, manifest.series_indexes.len());
+    assert_eq!(Some(10), manifest.series_window_seconds);
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                experimental_series_index_bucket_width: Duration::from_secs(60),
+                ..config
+            },
+        )
+        .await;
+    reopen_region(&engine, id, table_dir, true, HashMap::new()).await;
+    engine
+        .handle_request(id, test_util::sparse_metric_put(key, 21000, Some(2.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let manifest = engine.get_region(id).unwrap().manifest_ctx.manifest().await;
+    let mut bounds: Vec<_> = manifest
+        .series_indexes
+        .values()
+        .map(|file| {
+            let w = file.series_window().unwrap();
+            (w.start, w.end)
+        })
+        .collect();
+    bounds.sort_unstable();
+    assert_eq!(bounds, [(0, 10), (10, 20), (20, 30)]);
+    let rows = RecordBatches::try_collect(engine.scan_to_stream(id, ScanRequest::default()).await?)
+        .await?;
+    assert_eq!(3, rows.iter().map(|b| b.num_rows()).sum::<usize>());
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let budget = ReadableSize(1024);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            experimental_series_index_max_size: budget,
+            ..Default::default()
+        })
+        .await;
+    let native = RegionId::new(1024, 0);
+    let local = RegionId::new(1025, 0);
+    for (id, format) in [(local, "flat"), (native, "narthex")] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(sparse_metric_create_request(format)),
+            )
+            .await?;
+        let region = engine.find_region(id).unwrap();
+        let series = if id == local { 64 } else { 1 };
+        for tsid in 0..series {
+            let tag = uuid::Uuid::new_v4().to_string();
+            let key = new_sparse_primary_key(&[&tag], &region.metadata(), 42, tsid);
+            engine
+                .handle_request(id, test_util::sparse_metric_put(key, 1000, Some(1.0)))
+                .await?;
+        }
+        test_util::flush_region(&engine, id, None).await;
+        engine
+            .handle_request(id, build_series_index_request())
+            .await?;
+        if id == native {
+            assert_eq!(1, region.version().ssts.series_indexes().len());
+        } else {
+            assert!(region.series_index_version().disk_usage() >= budget.as_bytes());
+        }
+    }
+    engine.stop().await?;
+    Ok(())
+}
+
+async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let request = sparse_metric_create_request(format);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    let key = new_sparse_primary_key(&["api"], &metadata, 42, 7);
+    let put = |value| test_util::sparse_metric_put(key.clone(), 1000, Some(value));
+    engine.handle_request(region_id, put(1.0)).await?;
+    if format == "narthex" {
+        engine.handle_request(region_id, put(1.0)).await?;
+        for memtable in engine
+            .find_region(region_id)
+            .unwrap()
+            .version()
+            .memtables
+            .list_memtables()
+        {
+            memtable.compact(false)?;
+            let ranges = memtable.ranges(None, crate::memtable::RangesOptions::default())?;
+            assert_eq!(ranges.ranges.len(), 1);
+            let range = ranges.ranges.values().next().unwrap();
+            // Two input parts were merged and encoded, but narthex parts cannot
+            // use the Parquet direct-upload shortcut.
+            assert!(range.encoded().is_none());
+            let decoded = range
+                .build_record_batch_iter(None, None)?
+                .collect::<crate::error::Result<Vec<_>>>()?;
+            assert_eq!(
+                decoded.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                1
+            );
+        }
+    }
+    if format == "narthex" {
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?;
+        let batches = RecordBatches::try_collect(stream).await?;
+        assert!(batches.pretty_print()?.contains("1.0"));
+    }
     test_util::flush_region(&engine, region_id, None).await;
     engine
         .handle_request(
@@ -133,8 +631,7 @@ async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
         .await?;
 
     // The old SST and the new write must still identify the same series before compaction.
-    rows.rows[0].values[1].value_data = Some(ValueData::F64Value(2.0));
-    test_util::put_rows(&engine, region_id, rows).await;
+    engine.handle_request(region_id, put(2.0)).await?;
     for flush in [false, true] {
         if flush {
             test_util::flush_region(&engine, region_id, None).await;
@@ -162,10 +659,626 @@ async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
 }
 
 #[tokio::test]
+async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let region = engine.find_region(id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    for timestamps in [&[1000, 2000][..], &[3000]] {
+        for &ts in timestamps {
+            engine
+                .handle_request(id, test_util::sparse_metric_put(key.clone(), ts, Some(1.0)))
+                .await?;
+        }
+        test_util::flush_region(&engine, id, None).await;
+    }
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let version = region.version();
+    let file = version.ssts.series_indexes().values().next().unwrap();
+    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
+        file.clone(),
+        &region.access_layer.build_region_dir(id),
+    )?;
+    let reader = crate::series_index::columnar::reader::ColumnarReader::open(
+        region.access_layer.object_store().clone(),
+        handle,
+    )
+    .await?;
+    let mut stream = reader.read(crate::series_index::format::SeriesReadRequest {
+        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
+        ..Default::default()
+    })?;
+    let batch = stream.try_next().await?.unwrap();
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+        .unwrap();
+    assert_eq!(counts.values().as_ref(), &[3]);
+    assert!(stream.try_next().await?.is_none());
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
+    use crate::series_index::SeriesIndexFileHandle;
+    use crate::series_index::columnar::reader::ColumnarReader;
+    use crate::series_index::format::SeriesReadRequest;
+    use crate::sst::file::WindowSequence;
+
+    let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reads.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            captured.lock().unwrap().push(path.to_owned());
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            experimental_enable_series_index: true,
+            experimental_series_index_bucket_width: Duration::from_secs(10),
+            experimental_series_index_min_files: 100,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1234, 0);
+    let request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(id, RegionRequest::Create(request))
+        .await?;
+    // Opening a region wakes periodic maintenance on this worker.
+    let other = RegionId::new(1234, 1);
+    let other_request = sparse_metric_create_request("narthex");
+    let other_dir = other_request.table_dir.clone();
+    engine
+        .handle_request(other, RegionRequest::Create(other_request))
+        .await?;
+    let region = engine.get_region(id).unwrap();
+    let pause = engine.pause_compaction(id).await?;
+    let dir = region.access_layer.build_region_dir(id);
+    let store = region.access_layer.object_store().clone();
+    // Seed one index per sample SST, as incremental builds leave them.
+    // There are enough covered inputs for two successive merges.
+    let mut seed = RegionEdit::default();
+    let mut sample_paths = Vec::new();
+    for (n, ts) in [11000, 1000, 2000, 3000, 4000, 5000, 6000, 7000]
+        .into_iter()
+        .enumerate()
+    {
+        if n == 4 {
+            engine
+                .handle_request(
+                    id,
+                    RegionRequest::Alter(RegionAlterRequest {
+                        kind: AlterKind::AddColumns {
+                            columns: vec![AddColumn {
+                                column_metadata: ColumnMetadata {
+                                    column_schema: ColumnSchema::new(
+                                        "tag_1",
+                                        ConcreteDataType::string_datatype(),
+                                        true,
+                                    ),
+                                    semantic_type: SemanticType::Tag,
+                                    column_id: 3,
+                                },
+                                location: None,
+                            }],
+                        },
+                    }),
+                )
+                .await?;
+        }
+        let tags: &[&str] = if n >= 4 { &["api", "west"] } else { &["api"] };
+        let key = new_sparse_primary_key(tags, &region.metadata(), 42, 7);
+        engine
+            .handle_request(id, test_util::sparse_metric_put(key, ts, Some(1.0)))
+            .await?;
+        test_util::flush_region(&engine, id, None).await;
+        let version = region.version();
+        let source = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|l| l.files.values())
+            .max_by_key(|f| f.meta_ref().sequence)
+            .unwrap();
+        sample_paths.extend(
+            source
+                .meta_ref()
+                .narthex_objects(&dir)
+                .unwrap()
+                .into_iter()
+                .map(|o| o.path),
+        );
+        let start = if n == 0 { 10 } else { 0 };
+        let window = WindowSequence {
+            start,
+            end: start + 10,
+            max_sequence: source.meta_ref().sequence.unwrap().get(),
+        };
+        seed.series_indexes_to_add.push(
+            crate::sst::narthex::write_series(
+                &region.access_layer,
+                region.metadata(),
+                std::slice::from_ref(source),
+                window,
+            )
+            .await?,
+        );
+    }
+    let scan = async || -> WhateverResult<String> {
+        let rows =
+            RecordBatches::try_collect(engine.scan_to_stream(id, ScanRequest::default()).await?)
+                .await?;
+        Ok(sort_batches_and_print(&rows, &["ts"]))
+    };
+    let discovery = scan().await?;
+    let neighbor = seed.series_indexes_to_add[0].clone();
+    let watermark = seed
+        .series_indexes_to_add
+        .last()
+        .unwrap()
+        .series_window()
+        .unwrap()
+        .max_sequence;
+    let truncated = region.version().truncated_entry_id;
+    region
+        .manifest_ctx
+        .publish_series_indexes(&seed, truncated, &HashMap::new())
+        .await?;
+    region
+        .version_control
+        .apply_edit(Some(seed), &[], region.file_purger.clone());
+    let pins = region.version();
+    let old = pins
+        .ssts
+        .series_indexes()
+        .values()
+        .find(|f| f.meta_ref().series_window().unwrap().start == 0)
+        .unwrap();
+    let open = |file: &FileHandle| SeriesIndexFileHandle::from_narthex(file.clone(), &dir);
+    let retired_id = old.file_id();
+    let old_path = old.meta_ref().narthex_objects(&dir).unwrap()[0]
+        .path
+        .clone();
+    let pinned_reader = ColumnarReader::open(store.clone(), open(old)?).await?;
+    for expected in [5, 2] {
+        reads.lock().unwrap().clear();
+        if expected == 5 {
+            engine
+                .handle_request(id, build_series_index_request())
+                .await?;
+        } else {
+            reopen_region(&engine, other, other_dir.clone(), true, HashMap::new()).await;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while region.version().ssts.series_indexes().len() != expected {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("periodic reconciliation did not compact the remaining inputs");
+        }
+        assert_eq!(expected, region.version().ssts.series_indexes().len());
+        let paths = reads.lock().unwrap();
+        assert!(paths.iter().any(|p| p.ends_with(".series")));
+        assert!(!paths.iter().any(|p| {
+            sample_paths
+                .iter()
+                .any(|s| p.trim_start_matches('/') == s.trim_start_matches('/'))
+        }));
+    }
+    let count_request = || SeriesReadRequest {
+        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
+        ..Default::default()
+    };
+
+    let merged = region
+        .version()
+        .ssts
+        .series_indexes()
+        .values()
+        .find(|f| f.meta_ref().series_window().unwrap().start == 0)
+        .unwrap()
+        .clone();
+    let window = merged.meta_ref().series_window().unwrap();
+    assert_eq!(window.max_sequence, watermark);
+    let reader = ColumnarReader::open(store.clone(), open(&merged)?).await?;
+    let mut stream = reader.read(count_request())?;
+    let mut counts = Vec::new();
+    while let Some(batch) = stream.try_next().await? {
+        counts.extend_from_slice(batch.column(0).as_primitive::<UInt64Type>().values());
+    }
+    counts.sort_unstable();
+    assert_eq!(counts, [3, 4]);
+    // Replaying the old selection sees the same watermark but missing inputs.
+    let stale = RegionEdit {
+        series_indexes_to_add: vec![merged.meta_ref().clone()],
+        series_indexes_to_remove: pins
+            .ssts
+            .series_indexes()
+            .values()
+            .filter(|f| f.meta_ref().series_window().unwrap().start == 0)
+            .take(4)
+            .map(FileHandle::file_id)
+            .collect(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        region
+            .manifest_ctx
+            .publish_series_indexes(&stale, truncated, &HashMap::from([(0, watermark)]))
+            .await,
+        Err(Error::RegionBusy { .. })
+    ));
+    drop(pins);
+    assert!(
+        pinned_reader
+            .read(count_request())?
+            .try_next()
+            .await?
+            .is_some()
+    );
+    drop(pinned_reader);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while store.exists(&old_path).await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retired input was not purged after releasing its last reader");
+    drop(pause);
+    reopen_region(&engine, id, table_dir, true, HashMap::new()).await;
+    let manifest = engine.get_region(id).unwrap().manifest_ctx.manifest().await;
+    assert_eq!(manifest.series_indexes.len(), 2);
+    assert_eq!(
+        manifest.series_indexes[&neighbor.file_id].series_window(),
+        neighbor.series_window()
+    );
+    assert_eq!(
+        manifest.series_indexes[&merged.meta_ref().file_id].series_window(),
+        Some(window)
+    );
+    assert_eq!(scan().await?, discovery);
+    // Fail the second discovery reader after the first window supplied candidates.
+    // Both windows contain the same TSID, and the main window has two exact keys.
+    let snapshot = engine.get_region(id).unwrap().version();
+    let parts: Vec<_> = snapshot
+        .ssts
+        .series_indexes()
+        .values()
+        .map(|handle| {
+            handle
+                .meta_ref()
+                .narthex_objects(&dir)
+                .unwrap()
+                .into_iter()
+                .find(|object| object.path.ends_with(".series"))
+                .unwrap()
+                .path
+        })
+        .collect();
+    let [healthy, missing] = parts.as_slice() else {
+        panic!("expected two index parts")
+    };
+    let saved = store.read(missing).await.unwrap().to_bytes();
+    store.delete(missing).await.unwrap();
+    reads.lock().unwrap().clear();
+    assert_eq!(scan().await?, discovery);
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.trim_start_matches('/') == healthy.trim_start_matches('/'))
+    );
+    store.write(missing, saved).await.unwrap();
+    let error = engine
+        .edit_region(
+            id,
+            RegionEdit {
+                series_indexes_to_remove: vec![neighbor.file_id(), retired_id],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status_code(), StatusCode::RegionBusy);
+    let region = engine.get_region(id).unwrap();
+    let current = region.manifest_ctx.manifest().await;
+    assert_eq!(current.series_indexes, manifest.series_indexes);
+    let replacement = current
+        .series_indexes
+        .values()
+        .find(|f| f.series_window() == Some(window))
+        .unwrap();
+    engine
+        .edit_region(
+            id,
+            RegionEdit {
+                series_indexes_to_remove: vec![replacement.file_id()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    let current = region.manifest_ctx.manifest().await;
+    assert_eq!(current.series_indexes.len(), 1);
+    assert_eq!(
+        current.series_indexes[&neighbor.file_id].series_window(),
+        neighbor.series_window()
+    );
+    assert_eq!(scan().await?, discovery);
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()> {
+    let series_reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reads = series_reads.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            reads.lock().unwrap().push(path.to_owned());
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            sst_meta_cache_size: ReadableSize(0),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    let request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    let region = engine.find_region(region_id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    for value in [1.0, 2.0] {
+        engine
+            .handle_request(
+                region_id,
+                test_util::sparse_metric_put(key.clone(), 1000, Some(value)),
+            )
+            .await?;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let unindexed = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?,
+    )
+    .await?
+    .pretty_print()?;
+    engine
+        .handle_request(region_id, build_series_index_request())
+        .await?;
+    let snapshot = region.version();
+    let index = snapshot.ssts.series_indexes().values().next().unwrap();
+    let index_id = index.meta_ref().file_id;
+    let window = index.meta_ref().series_window().unwrap();
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+    let region = engine.find_region(region_id).unwrap();
+    assert!(
+        region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(&index_id)
+    );
+    let indexed = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await?;
+    assert_eq!(
+        RecordBatches::try_collect(indexed).await?.pretty_print()?,
+        unindexed
+    );
+    let old_samples = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .unwrap()
+        .clone();
+    let samples_reader = crate::series_index::samples::reader::SamplesReader::open(
+        region.access_layer.object_store().clone(),
+        crate::series_index::artifact::SamplesFileHandle::from_narthex(
+            old_samples,
+            &region.access_layer.build_region_dir(region_id),
+        )?,
+    )
+    .await?;
+    let inputs: std::collections::HashSet<_> = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.keys().copied())
+        .collect();
+    assert_eq!(inputs.len(), 2);
+    crate::engine::compaction_test::compact(&engine, region_id).await;
+    let outputs: Vec<_> = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values().cloned())
+        .collect();
+    assert!(!outputs.is_empty());
+    assert!(
+        region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(&index_id)
+    );
+    assert!(
+        samples_reader
+            .read(Default::default())?
+            .try_next()
+            .await?
+            .is_some()
+    );
+
+    assert!(
+        outputs
+            .iter()
+            .all(|file| !inputs.contains(&file.meta_ref().file_id))
+    );
+    assert!(outputs.iter().all(|file| matches!(
+        file.meta_ref().format,
+        crate::sst::file::FileFormat::NarthexSamples(_)
+    )));
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let region = engine.find_region(region_id).unwrap();
+    let objects = index
+        .meta_ref()
+        .narthex_objects(&region.access_layer.build_region_dir(region_id))
+        .unwrap();
+    let part = &objects
+        .iter()
+        .find(|object| object.path.ends_with(".series"))
+        .unwrap()
+        .path;
+    series_reads.lock().unwrap().clear();
+    let scan = async || -> WhateverResult<String> {
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?;
+        Ok(RecordBatches::try_collect(stream).await?.pretty_print()?)
+    };
+    assert_eq!(scan().await?, unindexed);
+    assert!(
+        series_reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.trim_start_matches('/') == part.trim_start_matches('/')),
+        "scan preparation must read the original index for compacted samples"
+    );
+    let late = new_sparse_primary_key(&["late"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(
+            region_id,
+            test_util::sparse_metric_put(late, 1000, Some(3.0)),
+        )
+        .await?;
+    test_util::flush_region(&engine, region_id, None).await;
+    let rows = scan().await?;
+    assert!(rows.contains("late") && rows.contains("api"), "{rows}");
+    series_reads.lock().unwrap().clear();
+    engine
+        .handle_request(region_id, build_series_index_request())
+        .await?;
+    let covered_paths: Vec<_> = outputs
+        .iter()
+        .flat_map(|file| {
+            file.meta_ref()
+                .narthex_objects(&region.access_layer.build_region_dir(region_id))
+                .unwrap()
+        })
+        .collect();
+    assert!(!series_reads.lock().unwrap().iter().any(|path| {
+        covered_paths
+            .iter()
+            .any(|obj| path.trim_start_matches('/') == obj.path.trim_start_matches('/'))
+    }));
+    let indexed = region.version();
+    assert_eq!(indexed.ssts.series_indexes().len(), 2);
+    assert!(indexed.ssts.series_indexes().contains_key(&index_id));
+    assert!(indexed.ssts.series_indexes().values().any(|file| matches!(
+        &file.meta_ref().format, crate::sst::file::FileFormat::NarthexSeriesIndex(meta)
+            if meta.window.start == window.start && meta.window.max_sequence > window.max_sequence
+    )));
+    series_reads.lock().unwrap().clear();
+    engine
+        .handle_request(region_id, build_series_index_request())
+        .await?;
+    assert!(
+        series_reads.lock().unwrap().is_empty(),
+        "covered build read an object"
+    );
+    assert!(
+        indexed.ssts.series_indexes().keys().all(|id| region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(id))
+    );
+    assert_eq!(scan().await?, rows);
+    region
+        .access_layer
+        .object_store()
+        .delete(part)
+        .await
+        .unwrap();
+    assert_eq!(scan().await?, rows);
+    // An index that cannot be opened still falls back to sample discovery.
+    let manifest = objects
+        .iter()
+        .find(|object| object.path.ends_with("manifest.json"))
+        .unwrap();
+    region
+        .access_layer
+        .object_store()
+        .delete(&manifest.path)
+        .await
+        .unwrap();
+    assert_eq!(scan().await?, rows);
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                series_indexes_to_remove: vec![index.file_id()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(
+        region
+            .manifest_ctx
+            .manifest()
+            .await
+            .series_indexes
+            .is_empty()
+    );
+    assert_eq!(scan().await?, rows);
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
     use store_api::storage::consts::ReservedColumnId;
 
     for default_flat_format in [false, true] {
@@ -216,33 +1329,45 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
         engine
             .handle_request(region_id, RegionRequest::Create(request))
             .await?;
-        let mut rows = Rows {
-            schema: schema.clone(),
-            rows: vec![row(vec![
-                ValueData::StringValue("metric".into()),
-                ValueData::StringValue("api".into()),
+        let metadata = engine.get_region(region_id).unwrap().metadata();
+        let make_row = |table_id, tags: &[&str]| {
+            row(vec![
+                ValueData::BinaryValue(new_sparse_primary_key(tags, &metadata, table_id, 7)),
+                ValueData::TimestampMillisecondValue(1),
                 ValueData::F64Value(1.5),
                 ValueData::JsonValue(encode_json_value(JsonValue::from(
                     json!({"trace_id":"abc"}),
                 ))),
-                ValueData::TimestampMillisecondValue(1),
-            ])],
+            ])
         };
-        rows.rows[0].values.extend([
-            ValueData::U32Value(42).into(),
-            ValueData::U64Value(7).into(),
-        ]);
-        // Equal series/timestamp observations are preserved in append mode.
-        rows.rows.push(rows.rows[0].clone());
-        let mut null_row = rows.rows[0].clone();
-        null_row.values[0].value_data = None;
-        null_row.values[1].value_data = None;
-        // Different source metrics can have the same TSID.
-        null_row.values[5] = ValueData::U32Value(43).into();
-        rows.rows.push(null_row);
-        test_util::put_rows(&engine, region_id, rows.clone()).await;
+        let metric = make_row(42, &["metric", "api"]);
+        let rows = Rows {
+            schema: vec![
+                api::v1::ColumnSchema {
+                    column_name: "__primary_key".into(),
+                    datatype: ColumnDataType::Binary as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                schema[4].clone(),
+                schema[2].clone(),
+                schema[3].clone(),
+            ],
+            rows: vec![metric.clone(), metric, make_row(43, &[])],
+        };
+        let put = || {
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+                }),
+                skip_wal: false,
+                partition_expr_version: None,
+            })
+        };
+        engine.handle_request(region_id, put()).await?;
 
-        // Reopen without encoding options, replaying raw rows from WAL.
+        // Reopen without encoding options and replay the writes from WAL.
         reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
         assert_eq!(
             engine.get_primary_key_encoding(region_id).unwrap(),
@@ -271,7 +1396,7 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
             )
             .await?;
         // A stale writer omits the newly added nullable tag.
-        test_util::put_rows(&engine, region_id, rows).await;
+        engine.handle_request(region_id, put()).await?;
         test_util::flush_region(&engine, region_id, None).await;
         engine
             .handle_request(
@@ -545,6 +1670,82 @@ async fn test_compound_time_filters_before_last_row() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn test_sparse_time_filters_before_last_row() -> WhateverResult<()> {
+    for format in ["flat", "narthex"] {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(MitoConfig::default()).await;
+        let region_id = RegionId::new(1024, 0);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(sparse_metric_create_request(format)),
+            )
+            .await?;
+        let metadata = engine.get_region(region_id).unwrap().metadata();
+        let key = new_sparse_primary_key(&["series"], &metadata, 42, 7);
+        for ts in [0, 1, 2, 4] {
+            engine
+                .handle_request(
+                    region_id,
+                    test_util::sparse_metric_put(key.clone(), ts, Some(ts as f64)),
+                )
+                .await?;
+        }
+        let ts = |value| lit(ScalarValue::TimestampMillisecond(Some(value), None));
+        // Neither filter is a plain range: the newest row inside the derived
+        // time range is rejected, so LastRow must select an older matching row.
+        let cases = [
+            (col("ts").not_eq(ts(4)), 2),
+            (col("ts").eq(ts(1)).or(col("ts").eq(ts(3))), 1),
+        ];
+        for flushed in [false, true] {
+            if flushed {
+                test_util::flush_region(&engine, region_id, None).await;
+            }
+            for (filter, expected) in &cases {
+                for distribution in [None, Some(TimeSeriesDistribution::PerSeries)] {
+                    for selector in [
+                        TimeSeriesRowSelector::LastRow { after_merge: false },
+                        TimeSeriesRowSelector::LastRow { after_merge: true },
+                    ] {
+                        let stream = engine
+                            .scan_to_stream(
+                                region_id,
+                                ScanRequest {
+                                    filters: vec![filter.clone()],
+                                    distribution,
+                                    series_row_selector: Some(selector),
+                                    ..Default::default()
+                                },
+                            )
+                            .await?;
+                        let batches = RecordBatches::try_collect(stream).await?;
+                        let actual = batches
+                            .iter()
+                            .flat_map(|batch| {
+                                batch
+                                    .column_by_name("ts")
+                                    .unwrap()
+                                    .as_primitive::<TimestampMillisecondType>()
+                                    .values()
+                                    .to_vec()
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            actual,
+                            vec![*expected],
+                            "format={format}, flushed={flushed}, distribution={distribution:?}, selector={selector:?}, {filter}"
+                        );
+                    }
+                }
+            }
+        }
+        engine.stop().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -2072,7 +3273,7 @@ async fn check_two_phase_series_scan(
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(2001),
-            source_file_ids: Vec::new(),
+            source_file_ids: Some(Vec::new()),
             min_file_sequence: sequence,
             max_file_sequence: sequence,
             compaction_window_secs: 1,
@@ -3151,6 +4352,8 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
     // sequence fails closed in `files_allow_exact_sequence_range`, covered by
     // the unit test.)
     let edit = RegionEdit {
+        series_indexes_to_add: Vec::new(),
+        series_indexes_to_remove: Vec::new(),
         files_to_add: vec![FileMeta {
             region_id,
             file_id: FileId::random(),
@@ -3239,6 +4442,8 @@ async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
         .edit_region(
             region_id,
             RegionEdit {
+                series_indexes_to_add: Vec::new(),
+                series_indexes_to_remove: Vec::new(),
                 files_to_add: vec![FileMeta {
                     region_id: RegionId::new(1, 2),
                     file_id: FileId::random(),
@@ -4361,6 +5566,8 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
         .edit_region(
             region_id,
             RegionEdit {
+                series_indexes_to_add: Vec::new(),
+                series_indexes_to_remove: Vec::new(),
                 files_to_add: vec![unmarked],
                 files_to_remove: vec![],
                 timestamp_ms: None,
@@ -7718,4 +8925,152 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
             .execute(0, Arc::new(TaskContext::default()))
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn test_seq_scan_reads_files_with_disjoint_keys_in_parallel() {
+    let mut env = TestEnv::with_prefix("test_seq_scan_disjoint_keys").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let put_flush = async |key: &str, start, end, value_start| {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows_for_key(key, start, end, value_start),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    };
+    // Three files over the same time range. The last one overwrites a row of the first.
+    put_flush("a", 0, 3, 0).await;
+    put_flush("b", 0, 3, 10).await;
+    put_flush("a", 1, 2, 100).await;
+    // A memtable outside the files' time range gets its own range.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows_for_key("c", 10, 11, 20),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let Scanner::Seq(scanner) = scanner else {
+        panic!("Scanner should be seq scan");
+    };
+    // Files of key "a" share a range; the file of key "b" gets its own.
+    assert_eq!(
+        3,
+        scanner.properties().partitions[0].len(),
+        "unexpected ranges: {:?}",
+        scanner.properties().partitions
+    );
+    let batches = RecordBatches::try_collect(scanner.build_stream().unwrap())
+        .await
+        .unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 100.0   | 1970-01-01T00:00:01 |
+| a     | 2.0     | 1970-01-01T00:00:02 |
+| b     | 10.0    | 1970-01-01T00:00:00 |
+| b     | 11.0    | 1970-01-01T00:00:01 |
+| b     | 12.0    | 1970-01-01T00:00:02 |
+| c     | 20.0    | 1970-01-01T00:00:10 |
++-------+---------+---------------------+";
+    assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
+
+    // Per-series scans still group the files by time only.
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let Scanner::Series(scanner) = scanner else {
+        panic!("Scanner should be series scan");
+    };
+    let ranges: Vec<_> = scanner.properties().partitions.iter().flatten().collect();
+    assert_eq!(2, ranges.len(), "unexpected ranges: {ranges:?}");
+}
+
+#[tokio::test]
+async fn test_time_windowed_seq_scan_keeps_files_with_disjoint_keys_together() {
+    let mut env = TestEnv::with_prefix("test_time_windowed_disjoint_keys").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // All rows share one timestamp. The second file holds more rows than the first.
+    for keys in [&["a"][..], &["b", "c"][..]] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: keys
+                .iter()
+                .flat_map(|key| test_util::build_rows_for_key(key, 0, 1, 0))
+                .collect(),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::TimeWindowed),
+        ..Default::default()
+    };
+    let Scanner::Seq(mut scanner) = engine.scanner(region_id, request).await.unwrap() else {
+        panic!("Scanner should be seq scan");
+    };
+    // Assign the ranges to one partition with the largest first, as partition assignment
+    // orders them by rows.
+    let mut ranges: Vec<_> = scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.num_rows));
+    scanner
+        .prepare(
+            PrepareRequest::default()
+                .with_ranges(vec![ranges])
+                .with_target_partitions(1),
+        )
+        .unwrap();
+    let batches = scanner
+        .scan_partition(
+            &store_api::region_engine::QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::default(),
+            0,
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut keys = Vec::new();
+    for batch in batches {
+        let tags = batch.column_by_name("tag_0").unwrap();
+        for row in 0..batch.num_rows() {
+            keys.push(
+                datatypes::arrow_array::string_array_value_at_index(tags, row)
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+    }
+    // Rows come out in `(ts, primary key)` order without sorting them.
+    assert_eq!(vec!["a", "b", "c"], keys);
 }

@@ -36,6 +36,9 @@ mod handle_tail_replay;
 mod handle_truncate;
 mod handle_write;
 
+#[cfg(test)]
+pub(crate) use handle_catchup::persist_backfilled_metadata_and_notify_if_fenced;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -81,8 +84,8 @@ use crate::region::{
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
-    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, BulkInsertRequest, DdlRequest, OptionOutputTx,
+    SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
@@ -438,6 +441,15 @@ impl WorkerGroup {
     /// Returns the latest lease each region of this group received.
     pub(crate) fn granted_leases(&self) -> &GrantedLeases {
         &self.granted_leases
+    }
+
+    /// Tells the worker of `region` that a lease ended its wait for its Leader lease, without
+    /// waiting.
+    pub(crate) fn notify_leader_lease_wait_ended(&self, region: &MitoRegionRef) {
+        handle_catchup::notify_leader_lease_wait_ended(
+            &self.worker(region.region_id).sender,
+            region,
+        );
     }
 
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
@@ -798,8 +810,9 @@ impl<S: LogStore> WorkerStarter<S> {
         let running = Arc::new(AtomicBool::new(true));
         let (series_index_task_state, series_index_receiver) = if self.series_index_store.is_some()
         {
-            let (state, receiver) =
+            let (mut state, receiver) =
                 SeriesIndexTaskState::new(self.id, self.config.worker_channel_size);
+            state.worker = Some(sender.clone());
             (Some(Arc::new(state)), Some(receiver))
         } else {
             (None, None)
@@ -815,11 +828,13 @@ impl<S: LogStore> WorkerStarter<S> {
                 series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
                     self.id,
+                    self.schema_metadata_manager.clone(),
                     store,
                     regions.clone(),
                     state,
                     receiver,
                     self.config.experimental_series_index_bucket_width,
+                    self.config.experimental_series_index_min_files,
                     purger,
                     purge_receiver,
                     self.series_index_disk_usage.clone(),
@@ -835,6 +850,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config.clone(),
             regions: regions.clone(),
+            copy_region_locks: handle_copy_region::CopyRegionLocks::default(),
             catchup_regions: catchup_regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             opening_regions: opening_regions.clone(),
@@ -895,6 +911,7 @@ impl<S: LogStore> WorkerStarter<S> {
             granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
+            deferred_lease_work: HashMap::new(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1054,6 +1071,11 @@ impl RegionWorker {
     /// Returns the [CatchupRegionsRef].
     pub(crate) fn catchup_regions(&self) -> &CatchupRegionsRef {
         &self.catchup_regions
+    }
+
+    #[cfg(test)]
+    pub(crate) fn regions(&self) -> &RegionMapRef {
+        &self.regions
     }
 }
 
@@ -1276,6 +1298,9 @@ struct RegionWorkerLoop<S> {
     config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// Serializes COPY through publication and installation, including across region reopen.
+    /// Task guards remove entries when the last active or queued COPY finishes.
+    copy_region_locks: handle_copy_region::CopyRegionLocks,
     /// Regions that are not yet fully dropped.
     dropping_regions: RegionMapRef,
     /// Regions that are opening.
@@ -1361,6 +1386,22 @@ struct RegionWorkerLoop<S> {
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
     tail_replays: HashMap<RegionId, CancellableTaskState>,
+    /// Work due once a region is a writable leader with its Leader lease, which
+    /// `sweep_deferred_lease_work` runs then. Close and drop remove it; a catchup that reopens or
+    /// replaces the region keeps it.
+    deferred_lease_work: HashMap<RegionId, DeferredLeaseWork>,
+}
+
+/// Work a region runs once it is a writable leader with its Leader lease.
+#[derive(Default)]
+pub(crate) struct DeferredLeaseWork {
+    /// Whether to build the indexes of the region's files that lack them, as the wait for the
+    /// Leader lease refused them.
+    pub(crate) missing_index_pass: bool,
+    /// Whether to save the metadata the opener backfilled.
+    pub(crate) backfill: bool,
+    /// Index build retries the region's state refused, without their result senders.
+    pub(crate) retries: Vec<BuildIndexRequest>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1531,6 +1572,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &mut bulk_req_buffer,
             )
             .await;
+            self.sweep_deferred_lease_work().await;
 
             self.handle_periodical_tasks();
         }
@@ -1617,6 +1659,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_incoming_region_edit(request);
                 }
+                WorkerRequest::PauseCompaction { region_id, sender } => {
+                    self.compaction_scheduler
+                        .pause_compaction(region_id, sender);
+                }
                 WorkerRequest::CancelCompaction {
                     region_id,
                     task_id,
@@ -1641,6 +1687,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .fail(),
                     };
                     sender.send(result);
+                }
+                WorkerRequest::DiscardPendingTails {
+                    region_id,
+                    node_id,
+                    sender,
+                } => {
+                    self.handle_discard_pending_tails(region_id, node_id, sender);
                 }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
@@ -1821,7 +1874,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::IndexBuildRetry(req) => {
                 self.handle_rebuild_index_inner(req, OptionOutputTx::new(None), true)
-                    .await
+                    .await;
             }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
@@ -1848,7 +1901,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionReloaded { old, result } => {
                 self.handle_region_reloaded(region_id, old, result).await
             }
-            BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::CaughtUpAgain(caught_up) => {
+                self.handle_caught_up_again(region_id, caught_up).await
+            }
+            BackgroundNotify::HandedOver(handed_over) => {
+                self.handle_handed_over(region_id, handed_over)
+            }
+            // The sweep after the batch runs the region's deferred work.
+            BackgroundNotify::RegionBecameWritable => {
+                self.maybe_replay_tails(region_id);
+                self.listener.on_region_became_writable(region_id);
+            }
+            BackgroundNotify::LeaderLeaseWaitEnded => {
+                self.handle_leader_lease_wait_ended(region_id).await
+            }
+            BackgroundNotify::BackfillDeferred { region } => self.handle_backfill_deferred(region),
             BackgroundNotify::RegionCannotReplay { region } => {
                 self.handle_region_cannot_replay(region_id, region)
             }
@@ -1857,10 +1924,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 edit,
                 tails,
             } => {
-                self.handle_tail_replay_committed(region_id, region, edit, tails)
+                self.apply_tails_edit(region_id, &region, edit, &tails)
                     .await
             }
             BackgroundNotify::TailReplayEnded => self.handle_tail_replay_ended(region_id),
+            BackgroundNotify::PendingTailsDiscarded {
+                region,
+                edit,
+                tails,
+                discarded,
+                sender,
+            } => {
+                self.handle_pending_tails_discarded(
+                    region_id, region, edit, tails, discarded, sender,
+                )
+                .await
+            }
         }
         // Completion handlers may return early after releasing their scheduler. Dispatch
         // here covers those paths as well as their normal completion.
@@ -1940,7 +2019,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
-    async fn clean(&self) {
+    async fn clean(&mut self) {
         for state in self.tail_replays.values() {
             let _ = state.request_cancel();
         }
@@ -1963,6 +2042,7 @@ impl<S> RegionWorkerLoop<S> {
         self.regions.clear();
         for region in regions {
             self.granted_leases.remove(region.region_id);
+            self.deferred_lease_work.remove(&region.region_id);
         }
     }
 
@@ -2020,6 +2100,81 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_tail_commit_begin(_region_id).await;
+        }
+    }
+
+    /// A tail replay committed its result and has not told the worker yet.
+    pub(crate) async fn on_tail_commit_end(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_tail_commit_end(_region_id).await;
+        }
+    }
+
+    /// A discard of pending tails released the region's WAL.
+    pub(crate) fn on_discarded_tails_wal_released(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_discarded_tails_wal_released(_region_id);
+        }
+    }
+
+    /// The worker handled the end of the region's wait for its Leader lease.
+    pub(crate) fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_leader_lease_wait_ended(_region_id);
+        }
+    }
+
+    /// The worker spawns the persisting of the region's backfilled metadata.
+    pub(crate) fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_persist_backfilled_metadata_begin(_region_id);
+        }
+    }
+
+    /// The spawned save of the region's backfilled metadata is about to take the manifest lock.
+    pub(crate) async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_persist_backfilled_metadata_lock_begin(_region_id)
+                .await;
+        }
+    }
+
+    /// The worker starts the work due once the region is a writable leader with its Leader lease.
+    pub(crate) async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_deferred_lease_work_begin(_region_id).await;
+        }
+    }
+
+    /// An index build request passed the worker's checks of the region's state.
+    pub(crate) async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_rebuild_index_admitted(_region_id).await;
+        }
+    }
+
+    /// The worker received a notification that a save of the region's backfilled metadata was
+    /// deferred.
+    pub(crate) fn on_backfill_deferred(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_backfill_deferred(_region_id);
+        }
+    }
+
+    /// The worker handled a notification that the region became writable.
+    pub(crate) fn on_region_became_writable(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_became_writable(_region_id);
         }
     }
 

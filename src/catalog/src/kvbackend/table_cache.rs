@@ -14,12 +14,9 @@
 
 use std::sync::Arc;
 
-use common_meta::cache::{
-    CacheContainer, InitStrategy, Initializer, TableInfoCacheRef, TableNameCacheRef,
-};
-use common_meta::error::{Result as MetaResult, ValueNotExistSnafu};
+use common_meta::cache::{CacheContainer, Initializer, TableInfoCacheRef, TableNameCacheRef};
+use common_meta::error::ValueNotExistSnafu;
 use common_meta::instruction::CacheIdent;
-use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
 use table::TableRef;
@@ -34,20 +31,13 @@ pub type TableCache = CacheContainer<TableName, TableRef, CacheIdent>;
 /// Constructs a [TableCache].
 pub fn new_table_cache(
     name: String,
-    cache: Cache<TableName, TableRef>,
+    cache: Cache<(usize, TableName), TableRef>,
     table_info_cache: TableInfoCacheRef,
     table_name_cache: TableNameCacheRef,
 ) -> TableCache {
     let init = init_factory(table_info_cache, table_name_cache);
 
-    CacheContainer::with_strategy(
-        name,
-        cache,
-        Box::new(invalidator),
-        init,
-        filter,
-        InitStrategy::VersionChecked,
-    )
+    CacheContainer::new(name, cache, init, CacheIdent::table_name_key)
 }
 
 fn init_factory(
@@ -70,22 +60,4 @@ fn init_factory(
             Ok(Some(DistTable::table(table_info)))
         })
     })
-}
-
-fn invalidator<'a>(
-    cache: &'a Cache<TableName, TableRef>,
-    idents: &'a [&CacheIdent],
-) -> BoxFuture<'a, MetaResult<()>> {
-    Box::pin(async move {
-        for ident in idents {
-            if let CacheIdent::TableName(table_name) = ident {
-                cache.invalidate(table_name).await
-            }
-        }
-        Ok(())
-    })
-}
-
-fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::TableName(_))
 }

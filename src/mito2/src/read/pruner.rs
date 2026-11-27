@@ -58,6 +58,11 @@ impl PartitionPruner {
         let mut dedup_set = HashSet::with_capacity(pruner.inner.stream_ctx.input.num_files());
 
         let num_memtables = pruner.inner.stream_ctx.input.num_memtables();
+        let partition_ranges = if pruner.inner.stream_ctx.input.requires_narthex_preparation() {
+            &[][..]
+        } else {
+            partition_ranges
+        };
         for part_range in partition_ranges {
             let range_meta = &pruner.inner.stream_ctx.ranges[part_range.identifier];
             let pre_filter_mode = pruner.inner.stream_ctx.range_pre_filter_mode(part_range);
@@ -257,7 +262,7 @@ impl Drop for PrunerInner {
 impl PrunerInner {
     /// Checks whether manifest-level pruning proves this file is empty given the
     /// current predicate. If true, CAS the shared cache from false→true and
-    /// record `files_time_range_pruned` in `reader_metrics`.
+    /// record `files_manifest_pruned` in `reader_metrics`.
     ///
     /// Returns `true` if already cached or newly proven pruned.
     fn try_mark_manifest_pruned(
@@ -292,7 +297,7 @@ impl PrunerInner {
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+            reader_metrics.filter_metrics.files_manifest_pruned += 1;
         }
         true
     }
@@ -1251,7 +1256,7 @@ mod tests {
             .try_mark_manifest_pruned(0, &mut reader_metrics);
         assert!(marked);
         assert!(pruner.test_is_manifest_pruned(0));
-        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+        assert_eq!(reader_metrics.filter_metrics.files_manifest_pruned, 1);
 
         // Calling add_partition_ranges must reset the flag.
         let ranges = vec![file_partition_range(0)];
@@ -1285,8 +1290,8 @@ mod tests {
         );
         // builder must NOT be cached — the manifest-pruned flag is enough.
         assert!(!pruner.test_has_builder(0));
-        // files_time_range_pruned was recorded.
-        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+        // files_manifest_pruned was recorded.
+        assert_eq!(reader_metrics.filter_metrics.files_manifest_pruned, 1);
     }
 
     // ── Corner case: try_mark_manifest_pruned does not double-count ───
@@ -1303,7 +1308,7 @@ mod tests {
             .inner
             .try_mark_manifest_pruned(0, &mut reader_metrics);
         assert!(marked);
-        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+        assert_eq!(reader_metrics.filter_metrics.files_manifest_pruned, 1);
         assert!(pruner.test_is_manifest_pruned(0));
 
         // Second call: already true, no metric delta.
@@ -1312,7 +1317,7 @@ mod tests {
             .inner
             .try_mark_manifest_pruned(0, &mut reader_metrics2);
         assert!(marked2);
-        assert_eq!(reader_metrics2.filter_metrics.files_time_range_pruned, 0);
+        assert_eq!(reader_metrics2.filter_metrics.files_manifest_pruned, 0);
     }
 
     #[tokio::test]
@@ -1345,7 +1350,7 @@ mod tests {
         dynamic.update(physical_lit(false)).unwrap();
         assert!(pruner.inner.try_mark_manifest_pruned(0, &mut metrics));
         assert_eq!(pruner.inner.manifest_check_count.load(Ordering::Relaxed), 3);
-        assert_eq!(metrics.filter_metrics.files_time_range_pruned, 1);
+        assert_eq!(metrics.filter_metrics.files_manifest_pruned, 1);
     }
 
     #[tokio::test]

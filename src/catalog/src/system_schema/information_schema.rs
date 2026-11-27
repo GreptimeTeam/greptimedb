@@ -19,6 +19,7 @@ pub mod flow_statistics;
 pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
+mod loaders;
 mod partitions;
 mod procedure_info;
 pub mod process_list;

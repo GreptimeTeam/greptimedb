@@ -14,12 +14,10 @@
 
 //! The aggregate-state chunk a native `Partial`/`Final` aggregate passes between executions.
 //!
-//! A state chunk is not a query value. It names the group a partition folded and the grid
-//! positions that group has contributions at, and it carries the accumulator components its
-//! aggregate declared -- nothing else. The conversions here are the only place kernel state
-//! ([`PartialAggregate`]) and frame state ([`StateSeries`]) meet, so a hole in one is a hole in the
-//! other: a field with no contribution at a carried position stays absent through both directions
-//! rather than being filled in with a zero that a later merge would count.
+//! A state chunk carries a group's labels, the grid positions it has contributions at, and the
+//! accumulator components its aggregate declares. Converting between kernel state
+//! ([`PartialAggregate`]) and frame state ([`StateSeries`]) keeps a field with no contribution
+//! absent rather than zero, so a later merge does not count it.
 
 use std::mem::{size_of, size_of_val};
 use std::sync::Arc;
@@ -38,27 +36,19 @@ use crate::native::plan::{AggregateStateSchema, BoundAggregate, aggregate_state_
 
 /// One partition's aggregate state, either in producer series form or as a decoded consumer row.
 #[derive(Debug)]
-pub(crate) enum StateChunk {
+pub enum StateChunk {
     Series {
         series: Vec<StateSeries>,
         state_schema: Arc<AggregateStateSchema>,
-        /// The producer charge this chunk carries once it has left its node's queue.
-        ///
-        /// A state chunk is charged to the node that folded it until the chunk is handed over. The
-        /// consumer keeps the batch across polls while it packs rows from it, so the charge travels
-        /// with those series rather than being returned the moment the producer lets go.
+        /// The producer's charge, moved here when the chunk leaves its node's queue: the consumer
+        /// keeps the series across polls, so the charge travels with them.
         reservation: Option<MemoryReservation>,
     },
     Row(crate::aggregate::state::StateRow),
 }
 
-/// Rejects a bound state whose kind or component layout is not what this node binds.
-///
-/// Both halves matter. A frame carries its kind so a `sum` state is never merged as an `avg` one, and
-/// it carries the component list so a merge reads exactly the columns the producer wrote. The
-/// expected pair comes from the same binding the node was built from, so a histogram aggregate
-/// exports and accepts histogram state and a numeric one numeric state, with no second table to
-/// drift from the first.
+/// Rejects a state whose kind or component list differs from what `op`'s binding produces, so a
+/// `sum` state is never merged as `avg` and a merge reads exactly the columns the producer wrote.
 fn ensure_bound_state(op: &BoundAggregate, state_schema: &AggregateStateSchema) -> Result<()> {
     let Some((expected_kind, expected_components)) =
         aggregate_state_binding(op.kind, op.field_kind)
@@ -83,11 +73,8 @@ fn ensure_bound_state(op: &BoundAggregate, state_schema: &AggregateStateSchema) 
     Ok(())
 }
 
-/// Hands one partition's kernel state over as the frame state a consumer reads.
-///
-/// The fold already builds the frame's own representation - field-major states on sparse absolute
-/// grid positions - so this moves the groups. It copies nothing: the charge the fold reported for
-/// those groups is the charge the chunk keeps.
+/// Hands one partition's kernel state over as frame state. The fold already builds the frame
+/// representation, so this moves the groups without copying.
 pub(crate) fn state_chunk_from_partial(
     partial: PartialAggregate,
     state_schema: Arc<AggregateStateSchema>,
@@ -98,6 +85,21 @@ pub(crate) fn state_chunk_from_partial(
         series: partial.groups,
         state_schema,
         reservation: None,
+    })
+}
+
+/// Builds a state row keeping the kind and components its producer declared; the consumer checks
+/// them against its own binding.
+pub(crate) fn state_row_of(row: StateFrameRow) -> Result<crate::aggregate::state::StateRow> {
+    let fields = row
+        .fields()
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let kind = fields.kind();
+    Ok(crate::aggregate::state::StateRow {
+        metric: row.metric().clone(),
+        time: row.time().clone(),
+        fields,
+        kind,
     })
 }
 
@@ -131,10 +133,8 @@ pub(crate) fn state_row_from_frame_row(
     })
 }
 
-/// The aggregate a state kind is the state of.
-///
-/// A histogram kind is the state of the same aggregate over a histogram input, so it merges with the
-/// same rules; what differs is the payload, which the merge reads from the kind itself.
+/// The aggregate a state kind is the state of. A histogram kind maps to the same aggregate; the
+/// merge reads the payload type from the kind.
 pub(crate) fn op_of_state(kind: AggregateStateKind) -> AggregateOp {
     match kind {
         AggregateStateKind::Sum | AggregateStateKind::HistogramSum => AggregateOp::Sum,
@@ -199,9 +199,8 @@ pub(crate) fn state_row_bytes(row: &crate::aggregate::state::StateRow) -> usize 
 
 /// Bytes a state chunk holds: labels, axis runs, and one sparse state vector per field.
 ///
-/// Like [`crate::grid_series::series_bytes`] this is a work estimate rather than a heap
-/// measurement -- it counts vector capacities, not allocator overhead -- which is what the
-/// reservation it feeds needs: a figure that never under-counts what the executor holds.
+/// Like [`crate::grid_series::series_bytes`], an estimate from vector capacities that must not
+/// under-count what the executor holds.
 pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
     let StateChunk::Series {
         series,
@@ -234,9 +233,7 @@ pub(crate) fn state_bytes(chunk: &StateChunk) -> usize {
             .capacity()
             .saturating_mul(size_of::<Vec<Option<StatePayload>>>());
         let states = series.states.iter().fold(fields, |bytes, field| {
-            // The slot is sized for the payload family it holds; a histogram payload also owns its
-            // boxed state and both histograms' Arrow buffers, so its buckets are charged by width
-            // rather than estimated at a fixed size.
+            // A histogram payload owns boxed state and Arrow buffers, charged by bucket width.
             bytes
                 .saturating_add(
                     field

@@ -14,8 +14,12 @@
 
 //! Columnar samples sidecars. Wire contract: `docs/formats/mito-samples.md`.
 
+pub(crate) mod bulk;
 mod codec;
+mod histogram;
 mod metadata;
+#[cfg(test)]
+pub(crate) use histogram::tests::{TestHistogram, histogram_array};
 pub(crate) mod reader;
 #[cfg(test)]
 mod tests;
@@ -25,7 +29,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use datatypes::data_type::DataType as _;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
@@ -37,6 +43,79 @@ use crate::series_index::columnar::{invalid, require, unsupported};
 use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
 use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
+
+/// Reject unsupported narthex schemas before accepting mutations that cannot flush.
+pub(crate) fn validate_narthex_metadata(
+    metadata: &store_api::metadata::RegionMetadata,
+) -> Result<()> {
+    crate::series_index::writer::validate_metadata(metadata)?;
+    require(
+        matches!(
+            metadata
+                .time_index_column()
+                .column_schema
+                .data_type
+                .as_arrow_type(),
+            DataType::Timestamp(_, None)
+        ),
+        "narthex samples require a timestamp time index",
+    )?;
+    for column in metadata.field_columns() {
+        require(
+            ValueColumn::new(column).is_ok() && column.column_schema.is_nullable(),
+            "Narthex samples require nullable Float64 or native histogram fields",
+        )?;
+    }
+    Ok(())
+}
+
+/// Rejects native histogram samples a Narthex region could not store, before the write is
+/// accepted: every sample must fit one samples chunk on its own.
+pub(crate) fn check_histogram_rows(
+    metadata: &store_api::metadata::RegionMetadata,
+    rows: &api::v1::Rows,
+) -> Result<()> {
+    use api::v1::value::ValueData;
+
+    for (index, column) in rows.schema.iter().enumerate() {
+        if !metadata
+            .column_by_name(&column.column_name)
+            .is_some_and(|c| is_native_histogram_value_type(&c.column_schema.data_type))
+        {
+            continue;
+        }
+        for row in &rows.rows {
+            let Some(ValueData::StructValue(value)) =
+                row.values.get(index).and_then(|v| v.value_data.as_ref())
+            else {
+                continue;
+            };
+            let list_items = value
+                .items
+                .iter()
+                .map(|item| match &item.value_data {
+                    Some(ValueData::ListValue(list)) => list.items.len(),
+                    _ => 0,
+                })
+                .sum();
+            histogram::check_sample_size(value.items.len(), list_items)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`check_histogram_rows`] for a bulk write batch.
+pub(crate) fn check_histogram_batch(
+    batch: &datatypes::arrow::record_batch::RecordBatch,
+) -> Result<()> {
+    use datatypes::arrow::array::AsArray;
+
+    batch
+        .columns()
+        .iter()
+        .filter_map(|column| column.as_struct_opt())
+        .try_for_each(histogram::check_array_sample_sizes)
+}
 
 const VERSION: u32 = 1;
 const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
@@ -139,6 +218,51 @@ struct ValueColumn {
     data_type: String,
     nullable: bool,
 }
+const FLOAT64_TYPE: &str = "float64";
+const NATIVE_HISTOGRAM_TYPE: &str = "native_histogram";
+/// Sample column encoding ID of a nullable Float64 field.
+const FLOAT64_ENCODING: u16 = 5;
+impl ValueColumn {
+    fn new(column: &store_api::metadata::ColumnMetadata) -> Result<Self> {
+        let data_type = &column.column_schema.data_type;
+        let data_type = if data_type.as_arrow_type() == DataType::Float64 {
+            FLOAT64_TYPE
+        } else if is_native_histogram_value_type(data_type) {
+            NATIVE_HISTOGRAM_TYPE
+        } else {
+            return Err(invalid(
+                "samples support only Float64 and native histogram fields",
+            ));
+        };
+        Ok(Self {
+            column_id: column.column_id,
+            name: column.column_schema.name.clone(),
+            data_type: data_type.to_string(),
+            nullable: true,
+        })
+    }
+
+    fn is_histogram(&self) -> bool {
+        self.data_type == NATIVE_HISTOGRAM_TYPE
+    }
+
+    /// The only column encoding a chunk of this field may carry.
+    fn encoding(&self) -> Result<u16> {
+        match self.data_type.as_str() {
+            FLOAT64_TYPE => Ok(FLOAT64_ENCODING),
+            NATIVE_HISTOGRAM_TYPE => Ok(histogram::ENCODING),
+            _ => Err(invalid("unsupported samples field type")),
+        }
+    }
+
+    fn arrow_type(&self) -> DataType {
+        if self.is_histogram() {
+            native_histogram_value_type().as_arrow_type()
+        } else {
+            DataType::Float64
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Part {
     part_id: u32,
@@ -152,6 +276,9 @@ struct Part {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
+    /// Resolved from the owning file, not persisted in the codec manifest.
+    #[serde(skip)]
+    prefix: Option<String>,
     format: ArtifactFormat,
     version: u32,
     /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
@@ -166,6 +293,7 @@ struct Manifest {
 impl Manifest {
     fn retained_size(&self) -> usize {
         std::mem::size_of::<Self>()
+            + self.prefix.as_ref().map_or(0, String::capacity)
             + self.timestamp.name.capacity()
             + self.files.capacity() * std::mem::size_of::<Part>()
             + self.fields.capacity() * std::mem::size_of::<ValueColumn>()
@@ -177,7 +305,9 @@ impl Manifest {
     }
 
     fn prefix(&self) -> String {
-        samples_prefix(self.region_id, self.generation)
+        self.prefix
+            .clone()
+            .unwrap_or_else(|| samples_prefix(self.region_id, self.generation))
     }
     fn path(&self) -> String {
         format!("{}manifest.json", self.prefix())
@@ -204,7 +334,7 @@ impl Manifest {
         let mut ids = HashSet::from([self.timestamp.column_id]);
         for field in &self.fields {
             require(
-                field.data_type == "float64" && field.nullable,
+                field.encoding().is_ok() && field.nullable,
                 "unsupported samples field type/nullability",
             )?;
             require(
@@ -230,7 +360,7 @@ impl Manifest {
             Field::new(OPERATION, DataType::UInt8, false),
         ];
         fields.extend(self.fields.iter().map(|f| {
-            crate::sst::with_field_id(Field::new(&f.name, DataType::Float64, true), f.column_id)
+            crate::sst::with_field_id(Field::new(&f.name, f.arrow_type(), true), f.column_id)
         }));
         // Appended after the data fields so stored row indices stay stable. The column is the
         // artifact's exact-identity marker: readers attribute every row of a batch by the key

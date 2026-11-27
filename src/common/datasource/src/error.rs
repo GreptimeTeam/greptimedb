@@ -100,6 +100,16 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "{} location has no credentials, and query.allow_server_credentials is false; provide credentials in the connection options",
+        backend
+    ))]
+    ServerCredentialsDisallowed {
+        backend: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Local filesystem path '{}' does not exist within the configured copy root",
         path
     ))]
@@ -305,6 +315,7 @@ impl ErrorExt for Error {
             | InvalidUrl { .. }
             | LocalFileAccessDisabled { .. }
             | LocalFileAccessDenied { .. }
+            | ServerCredentialsDisallowed { .. }
             | LocalFilePathNotFound { .. }
             | MissingObjectName { .. }
             | InvalidLocalFileRoot { .. }

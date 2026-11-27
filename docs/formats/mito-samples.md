@@ -1,4 +1,23 @@
-# Mito columnar samples format
+# Narthex format: samples
+
+The **Narthex format**, selected by `sst_format = 'narthex'`, is optimized
+for Prometheus-style metric data. It separates series identities and string tags
+from timestamped numeric samples.
+
+The format has two artifact roles: `NarthexSamples` owns sample data, and
+`NarthexSeriesIndex` indexes exact series identities.
+Region manifests serialize these roles as `narthex_samples` and
+`narthex_series_index`.
+
+## Region manifest
+
+With `sst_format = 'narthex'`, a samples SST owns
+`<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` objects.
+The region manifest records the manifest size and a `parts` array in part-ID
+order. Each part record contains its encoded `file_size` in bytes. The
+[series index specification](mito-series.md#region-manifest) defines coverage.
+
+## Wire specification
 
 This document specifies the version 1 on-disk layout, encodings, ordering rules,
 and validation limits for samples artifacts. The version number stays 1: the
@@ -17,10 +36,10 @@ applies to an artifact of the earlier layout of this format, whose keys sat insi
 the block descriptors: its `identity_encoding` value is the older
 `exact-sparse-key`, so it is refused when the manifest is opened rather than when a
 part is first read. It shares artifact conventions with
-[Mito columnar series format](mito-series.md).
+[Narthex series-index format](mito-series.md).
 
-Samples store nullable Float64 fields, timestamps, sequences, and operation types
-in single-series blocks bounded by rows and decoded bytes.
+Samples store nullable Float64 and native histogram fields, timestamps, sequences,
+and operation types in single-series blocks bounded by rows and decoded bytes.
 
 ## Artifact manifest
 
@@ -80,7 +99,9 @@ signed i64 counts since the Unix epoch in that unit. There is no dataset-relativ
 origin, unit conversion, or timezone in the file. The timestamp is non-null.
 
 The field list records the build-time region field schema in metadata order.
-Require 1..=1,024 fields, each with `type = "float64"` and `nullable = true`.
+Require 1..=1,024 fields, each with `type` `"float64"` or `"native_histogram"` and
+`nullable = true`. `native_histogram` is the canonical nullable
+`greptime_native_histogram` Arrow struct, the same type the Parquet path stores.
 A non-nullable source Float64 field is represented by this same nullable logical
 type with no null values. Sparse logical-table fields may be entirely null.
 Timestamp and field IDs must be distinct. All output names must be unique,
@@ -88,7 +109,7 @@ including the internal names below. Tags are not sample fields and are not store
 
 The stored logical Arrow schema is `__table_id: UInt32`, `__tsid: UInt64`, the
 timestamp column with its recorded unit, `__sequence: UInt64`, `__op_type: UInt8`,
-then nullable Float64 fields in manifest order, and finally
+then the nullable value fields in manifest order, and finally
 `__primary_key: Binary` naming the exact key of the block that produced each row.
 The five internal columns and `__primary_key` are non-null; value fields stay
 nullable, as the manifest declares them. `__table_id`/`__tsid` are the coarse,
@@ -191,9 +212,18 @@ N * (8 timestamp + 8 sequence + 1 operation + 8 * F values)
     + F * ceil(N / 8) validity bytes
 ```
 
-Require this to be at most 262,144 bytes. Count all manifest fields, including
-omitted/all-null fields, and reserve validity bytes even for all-valid fields.
-This is a bound on decoded column buffers, not total allocator usage or RSS.
+Require this to be at most 262,144 bytes. A native histogram field counts as one
+8-byte value per row here, so the formula does not bound its decoded buffers: its
+18 struct children and bucket lists are bounded only by its chunk, and the reader
+reserves memory for them from the chunk header (see encoding 8). A
+writer also ends a block before a histogram chunk's encoded size bound would exceed
+the 1 MiB chunk limit: 1 byte plus 11 bytes per struct child and per list item for
+each row, and 16 bytes plus 64 bytes per child and the validity bytes for the
+chunk. A sample that exceeds the limit on its own is rejected when it is written
+to a Narthex region. Count all manifest fields, including omitted/all-null
+fields, and reserve validity bytes even for all-valid fields.
+Without histogram fields, this is a bound on decoded column buffers, not total
+allocator usage or RSS.
 The effective row cap is the largest integer satisfying both limits: 8,192 for
 one field and 31 for 1,024 fields. Encoded buffers and metadata have separate
 bounds below. Increasing the reader maximum requires an explicit compatibility
@@ -457,6 +487,7 @@ namespaces as well. Never reuse an assigned ID with a different meaning.
 | Column encoding | 5 | Nullable Float64 XOR |
 | Column encoding | 6 | Constant operation type |
 | Column encoding | 7 | Raw operation types |
+| Column encoding | 8 | Native histogram struct, column by child |
 | Metadata encoding | 1 | Leaf/internal page layout above |
 | Compression | 0 | Raw encoded bytes |
 | Compression | 1 | Zstd frame |
@@ -520,6 +551,61 @@ scatter according to validity. Preserve all bits, including signed zero, NaN
 payloads, infinities, and subnormals. Null and NaN are distinct. The unspecified
 value-buffer bits behind nulls are not part of the logical preservation contract.
 
+### Native histogram encoding 8
+
+```text
+child_count <u8>
+child_kinds <u8 x child_count>      # 1 Float64, 2 Int32, 3 Int64, 4 Timestamp(ms);
+                                    # 0x10 | kind for a list
+list_items <uvarint>                # items of all valid lists in the chunk
+validity <ceil(row_count/8) bytes>  # only when the descriptor null count is nonzero
+per child, in struct order:
+  scalar: section(row_count values)
+  list:   section(row_count lengths, null for a null list), then
+          section(list item values) unless the child has no items
+section(n):
+  null_count <uvarint>
+  unless null_count == n:
+    byte_length <uvarint>
+    body <byte_length bytes>        # encoding 5 over the n values
+```
+
+The struct order is fixed. The header records only child kinds, so children of the
+same kind, such as `zero_threshold` and `sum`, are told apart by position alone:
+
+| # | Child | Kind |
+| --- | --- | --- |
+| 0 | `schema` | Int32 |
+| 1 | `zero_threshold` | Float64 |
+| 2 | `sum` | Float64 |
+| 3 | `reset_hint` | Int32 |
+| 4 | `start_timestamp` | Timestamp(ms) |
+| 5 | `custom_values` | List of Float64 |
+| 6 | `positive_span_offsets` | List of Int32 |
+| 7 | `positive_span_lengths` | List of Int32 |
+| 8 | `negative_span_offsets` | List of Int32 |
+| 9 | `negative_span_lengths` | List of Int32 |
+| 10 | `count_i64` | Int64 |
+| 11 | `zero_count_i64` | Int64 |
+| 12 | `positive_buckets_i64` | List of Int64 |
+| 13 | `negative_buckets_i64` | List of Int64 |
+| 14 | `count_f64` | Float64 |
+| 15 | `zero_count_f64` | Float64 |
+| 16 | `positive_buckets_f64` | List of Float64 |
+| 17 | `negative_buckets_f64` | List of Float64 |
+
+A chunk holds every row of the block, null rows included, one child after another.
+Values map to u64 before encoding 5: Float64 keeps its bit pattern; integers and
+timestamps are ZigZag-mapped. A null list has no items; the item section holds the
+items of the valid lists in row order. The descriptor's null count is the struct's
+own null count, and the validity bitmap follows the rules of encoding 5.
+
+Child count and kinds must match the manifest field's struct type exactly, so a
+chunk is never decoded as another type. `list_items` must equal the lengths read and
+must not exceed 1,048,576. The reader reserves memory from `row_count`, the child
+count and `list_items` before it decodes a chunk. All-null fields have no descriptor
+or payload, as for Float64.
+
 ### Operation encodings 6 and 7
 
 Operation values are u8: 0 delete, 1 put, matching Mito's current `OpType` values.
@@ -541,8 +627,10 @@ subject to the same block bound even when chunks are omitted.
 
 Unknown file versions, depths, reserved fields, roles, or metadata codecs fail
 open/read explicitly. Column role must agree with its encoding: time 1/2,
-sequence 3/4, Float64 5, operation 6/7. An unknown column encoding or compression
-can be skipped if its chunk is not needed, but attempting to decode it returns
+sequence 3/4, Float64 5, native histogram 8, operation 6/7. A value chunk's known
+encoding must also be the one its manifest field type is stored with. An unknown
+column encoding or compression can be skipped if its chunk is not needed, but
+attempting to decode it returns
 an unsupported-codec error. Known encodings assigned to a different role are
 invalid metadata, even for an unprojected column. Unknown fields or malformed
 references must not be interpreted as omitted all-null columns.

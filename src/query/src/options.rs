@@ -76,7 +76,40 @@ pub enum QueryMemoryPoolPolicy {
     Fair,
 }
 
-/// Query engine config
+#[derive(Debug, Clone, Default)]
+pub struct FactorizedJoinAggOptions {
+    pub enabled: bool,
+}
+
+impl ConfigExtension for FactorizedJoinAggOptions {
+    const PREFIX: &'static str = "factorized_join_agg";
+}
+
+impl ExtensionOptions for FactorizedJoinAggOptions {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion::common::DataFusionError::NotImplemented(
+            format!("FactorizedJoinAggOptions does not support set key: {key} with value: {value}"),
+        ))
+    }
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![ConfigEntry {
+            key: "enabled".to_string(),
+            value: Some(self.enabled.to_string()),
+            description: "Enable experimental factorized join aggregation",
+        }]
+    }
+}
+
+/// Query engine configuration options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct QueryOptions {
@@ -84,6 +117,8 @@ pub struct QueryOptions {
     pub parallelism: usize,
     /// Whether to allow query fallback when push down fails.
     pub allow_query_fallback: bool,
+    /// Experimental: enable shape-based factorized AVG/SUM join aggregation. Default false.
+    pub experimental_enable_factorized_join_agg: bool,
     /// Memory pool size for query execution. Setting it to 0 disables the limit (unbounded).
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     /// When this limit is reached, queries will fail with ResourceExhausted error.
@@ -118,6 +153,12 @@ pub struct QueryOptions {
     /// a `true` default routes every query natively and a `false` one still lets one query or one
     /// session ask for it. Default: `false`.
     pub experimental_native_promql: bool,
+    /// Hosts that object stores built from SQL statements (`COPY`, `COPY DATABASE`,
+    /// `EXPORT/IMPORT DATABASE` and external tables) may connect to. Empty means no restriction.
+    pub remote_allowed_hosts: Vec<String>,
+    /// Whether such an object store without credentials in its connection options may use the
+    /// server's own credentials.
+    pub allow_server_credentials: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -126,6 +167,7 @@ impl Default for QueryOptions {
         Self {
             parallelism: 0,
             allow_query_fallback: false,
+            experimental_enable_factorized_join_agg: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
             experimental_spill_mode: QuerySpillMode::Default,
@@ -134,6 +176,8 @@ impl Default for QueryOptions {
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
             experimental_native_promql: false,
+            remote_allowed_hosts: Vec::new(),
+            allow_server_credentials: true,
         }
     }
 }

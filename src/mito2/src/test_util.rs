@@ -69,8 +69,9 @@ use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    PathType, RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionPutRequest, RegionRequest,
+    AlterKind, PathType, RegionAlterRequest, RegionCloseRequest, RegionCreateRequest,
+    RegionDeleteRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+    SetRegionOption,
 };
 use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Notify;
@@ -158,8 +159,9 @@ impl CheckpointTaskBlocker {
         self.release.notify_one();
     }
 
-    pub(crate) fn arm_next_close(&self) {
-        self.armed.store(true, Ordering::Release);
+    /// Arms or disarms the blocker for the next write or cleanup it blocks.
+    pub(crate) fn set_armed(&self, armed: bool) {
+        self.armed.store(armed, Ordering::Release);
     }
 
     fn block_write(file_name: String, at_close: bool) -> (Self, MockLayer) {
@@ -253,13 +255,46 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
     }
 }
 
+/// Parks the first task that passes it once armed, until released.
+#[derive(Default)]
+pub(crate) struct Gate {
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl Gate {
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn pass(&self) {
+        if self.armed.swap(false, Ordering::Relaxed) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
 /// Injects faults into the next manifest delta write of a mock object store.
 #[derive(Clone, Default)]
-pub(crate) struct DeltaFaults {
+pub struct DeltaFaults {
     /// Whether the next delta write lands but reports an error, like a lost response.
     lose_response: Arc<AtomicBool>,
     /// Whether the next delta write fails without landing.
     fail_write: Arc<AtomicBool>,
+    /// Whether the next deletion of a staging path fails.
+    fail_staging_delete: Arc<AtomicBool>,
 }
 
 impl DeltaFaults {
@@ -267,12 +302,21 @@ impl DeltaFaults {
         self.lose_response.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn fail_next_write(&self) {
+    /// Fails the next manifest delta write before it lands.
+    pub fn fail_next_write(&self) {
         self.fail_write.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn layer(&self) -> MockLayer {
+    /// Fails the next deletion of a staging path, such as the clearing of the staging manifest
+    /// that entering staging begins with.
+    pub(crate) fn fail_next_staging_delete(&self) {
+        self.fail_staging_delete.store(true, Ordering::Relaxed);
+    }
+
+    /// Builds the object-store layer controlled by these faults.
+    pub fn layer(&self) -> MockLayer {
         let faults = self.clone();
+        let fail_staging_delete = self.fail_staging_delete.clone();
         MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _args, inner| {
                 if !is_delta_file(path.rsplit('/').next().unwrap_or_default()) {
@@ -286,8 +330,33 @@ impl DeltaFaults {
                     })
                 }
             }))
+            .deleter_factory(Arc::new(move |inner| {
+                Box::new(StagingDeleter {
+                    inner,
+                    fail: fail_staging_delete.clone(),
+                })
+            }))
             .build()
             .unwrap()
+    }
+}
+
+/// A deleter whose next deletion of a staging path fails once `fail` is set.
+struct StagingDeleter {
+    inner: Deleter,
+    fail: Arc<AtomicBool>,
+}
+
+impl object_store::layers::mock::Delete for StagingDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        if path.contains("staging") && self.fail.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock failed delete"));
+        }
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.inner.close().await
     }
 }
 
@@ -524,9 +593,20 @@ impl TestEnv {
         self
     }
 
+    pub(crate) fn with_file_ref_manager(mut self, manager: FileReferenceManagerRef) -> Self {
+        self.file_ref_manager = manager;
+        self
+    }
+
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
+        self
+    }
+
+    /// Uses `fetcher` for the partition expressions of regions whose manifest lacks one.
+    pub(crate) fn with_partition_expr_fetcher(mut self, fetcher: PartitionExprFetcherRef) -> Self {
+        self.partition_expr_fetcher = fetcher;
         self
     }
 
@@ -1513,6 +1593,83 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
         .collect::<Vec<_>>()
 }
 
+pub(crate) fn sparse_metric_create_request(format: &str) -> RegionCreateRequest {
+    let mut request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", format)
+        .build();
+    if format == "narthex" {
+        for (key, value) in [
+            ("memtable.type", "bulk"),
+            ("memtable.bulk.merge_threshold", "2"),
+            ("memtable.bulk.encode_row_threshold", "1"),
+            ("memtable.bulk.encode_bytes_threshold", "1"),
+        ] {
+            request.options.insert(key.into(), value.into());
+        }
+    }
+    let reserved =
+        sst_util::sst_region_metadata_with_encoding(store_api::codec::PrimaryKeyEncoding::Sparse);
+    request
+        .column_metadatas
+        .extend(reserved.column_metadatas.into_iter().take(2));
+    request
+        .primary_key
+        .splice(0..0, reserved.primary_key.into_iter().take(2));
+    request
+}
+
+pub(crate) fn build_series_index_request() -> RegionRequest {
+    RegionRequest::BuildIndex(store_api::region_request::RegionBuildIndexRequest {
+        options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
+            Default::default(),
+        )),
+    })
+}
+
+/// Builds an encoded sparse metric put, including an explicitly nullable field.
+pub fn sparse_metric_put(key: Vec<u8>, ts: i64, value: Option<f64>) -> RegionRequest {
+    use api::v1::ColumnDataType;
+    let schema = [
+        ("__primary_key", ColumnDataType::Binary, SemanticType::Tag),
+        (
+            "ts",
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+        ),
+        ("field_0", ColumnDataType::Float64, SemanticType::Field),
+    ]
+    .into_iter()
+    .map(|(name, datatype, semantic_type)| api::v1::ColumnSchema {
+        column_name: name.into(),
+        datatype: datatype as i32,
+        semantic_type: semantic_type as i32,
+        ..Default::default()
+    })
+    .collect();
+    let values = [
+        Some(ValueData::BinaryValue(key)),
+        Some(ValueData::TimestampMillisecondValue(ts)),
+        value.map(ValueData::F64Value),
+    ]
+    .into_iter()
+    .map(|value_data| api::v1::Value { value_data })
+    .collect();
+    RegionRequest::Put(RegionPutRequest {
+        rows: Rows {
+            schema,
+            rows: vec![Row { values }],
+        },
+        hint: Some(api::v1::WriteHint {
+            primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+        }),
+        partition_expr_version: None,
+        skip_wal: false,
+    })
+}
+
 /// Put rows into the engine.
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
@@ -1597,6 +1754,18 @@ pub async fn reopen_region(
     writable: bool,
     options: HashMap<String, String>,
 ) {
+    reopen_region_with(engine, region_id, table_dir, writable, options, false).await;
+}
+
+/// Reopens the region as [reopen_region] does, skipping the WAL replay if `skip_wal_replay`.
+pub(crate) async fn reopen_region_with(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    table_dir: String,
+    writable: bool,
+    options: HashMap<String, String>,
+    skip_wal_replay: bool,
+) {
     // Close the region.
     engine
         .handle_request(
@@ -1614,7 +1783,7 @@ pub async fn reopen_region(
                 engine: String::new(),
                 table_dir,
                 options,
-                skip_wal_replay: false,
+                skip_wal_replay,
                 path_type: PathType::Bare,
                 checkpoint: None,
                 requirements: Default::default(),
@@ -1628,6 +1797,14 @@ pub async fn reopen_region(
             .set_region_role(region_id, RegionRole::Leader)
             .unwrap();
     }
+}
+
+pub(crate) fn set_skip_wal_request(skip_wal: bool) -> RegionRequest {
+    RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(skip_wal)],
+        },
+    })
 }
 
 pub(crate) fn mock_schema_metadata_manager() -> (Arc<SchemaMetadataManager>, KvBackendRef) {

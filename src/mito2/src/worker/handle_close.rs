@@ -19,6 +19,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
+use crate::error::FlushableRegionStateSnafu;
 use crate::manifest::action::cap_wal_release;
 use crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL;
 use crate::region::MitoRegionRef;
@@ -56,10 +57,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.reject_region_edits_as_not_found(region_id);
         }
 
-        // Memtables containing skip-WAL writes must be flushed before closing.
-        // Followers cannot flush; explicit flush-on-close and region WAL options
-        // retain their existing behavior.
-        if close_needs_flush(&region, &request) && region.is_flushable() {
+        // The refusal and the flush decision use one snapshot of the state, so a concurrent role
+        // change cannot skip both.
+        let needs_flush = close_needs_flush(&region, &request);
+        let state = region.state();
+        if request.flush_on_close && needs_flush && !state.is_flushable() {
+            info!(
+                "Region {} in state {:?} cannot flush before closing, keeping it open",
+                region_id, state
+            );
+            sender.send(FlushableRegionStateSnafu { region_id, state }.fail());
+            return;
+        }
+        if needs_flush && state.is_flushable() {
+            // A region that awaits its Leader lease holds rows that exist nowhere else only if
+            // it was written to, which happens only after it was routed to; a close, such as the
+            // one of a shutdown, must not drop them. It gives up the role as a downgrade does, so
+            // its flush commits under the downgrade's checks.
+            if region.is_writable() && region.manifest_ctx.awaits_leader_lease() {
+                region.manifest_ctx.begin_downgrade(region_id);
+            }
             info!("Region {} has pending data, waiting for flush", region_id);
             if self.flush_scheduler.is_flush_requested(region_id) {
                 self.flush_scheduler
@@ -85,7 +102,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // No close-time flush is required, or the region cannot flush.
         let pending_closes = self.take_pending_closes(region_id);
         self.close_region(region_id).await;
         for ddl in pending_closes {
@@ -123,13 +139,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Remove a region and stop all related tasks.
     pub(crate) async fn remove_region(&mut self, region_id: RegionId) {
-        let Some(region) = self.regions.remove_region(region_id) else {
+        let Some(region) = self.regions.get_region(region_id) else {
             return;
         };
+        // Before the removal, so no catchup promotes an unregistered instance.
+        region.stop().await;
+        self.regions.remove_region(region_id);
         self.granted_leases.remove(region_id);
+        self.deferred_lease_work.remove(&region_id);
         region.deactivate_region_manifest_size_metric();
         self.cancel_tail_replay(region_id);
-        region.stop().await;
         self.fail_region_stalled_requests_as_not_found(&region_id);
         self.reject_region_requests_as_not_found(region_id);
         // Clean flush status.
