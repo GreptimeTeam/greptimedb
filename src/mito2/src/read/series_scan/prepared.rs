@@ -18,7 +18,7 @@ mod narthex;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
@@ -185,16 +185,9 @@ pub(super) fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool
     }
 }
 
-/// Validates the pinned assignments and coverage without opening artifacts.
-///
-/// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
-/// error: the caller scans those sources with the ordinary reader instead.
-pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
-    if context.input.requires_narthex_preparation() {
-        narthex::file_indices(context, ranges)?;
-        return Ok(true);
-    }
-    Ok(false)
+/// Checks that the selected ranges refer to authoritative Narthex files.
+pub(super) fn validate_ranges(context: &StreamContext, ranges: &[PartitionRange]) -> Result<()> {
+    narthex::file_indices(context, ranges).map(|_| ())
 }
 
 /// Pushes the supported conjuncts into the request.

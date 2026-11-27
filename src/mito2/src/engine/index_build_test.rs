@@ -2314,10 +2314,7 @@ async fn test_build_series_index_rejects_non_metric_region() {
         )
         .await
         .unwrap_err();
-    assert!(
-        error.to_string().contains("sparse metric metadata"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("Narthex"), "{error}");
     engine.stop().await.unwrap();
 }
 

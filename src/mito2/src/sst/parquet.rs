@@ -47,7 +47,6 @@ pub mod file_range;
 pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
-pub(crate) mod index_reader;
 pub(crate) mod json_align;
 pub mod metadata;
 pub mod parallel_writer;

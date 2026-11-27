@@ -37,7 +37,7 @@ use super::metadata::{
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::columnar::codec as columnar_codec;
-use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
+use crate::series_index::format::{SamplesBatch, SamplesReadRequest};
 use crate::series_index::identity::ExactSeriesKey;
 use crate::sst::file::RegionFileId;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -205,7 +205,6 @@ async fn build(
     let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
     let mut writer = format
         .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
-        .await
         .unwrap();
     for batch in batches {
         writer.write(batch).await.unwrap();
@@ -251,15 +250,11 @@ async fn root_page(
 }
 
 async fn manifest(store: &ObjectStore, handle: &SamplesFileHandle) -> Manifest {
-    let path = &handle
-        .entry()
-        .artifact
-        .objects
-        .iter()
-        .find(|o| o.path.ends_with("manifest.json"))
-        .unwrap()
-        .path;
-    serde_json::from_slice(&store.read(path).await.unwrap().to_bytes()).unwrap()
+    let path = handle.manifest_path();
+    let mut manifest: Manifest =
+        serde_json::from_slice(&store.read(&path).await.unwrap().to_bytes()).unwrap();
+    manifest.prefix = path.strip_suffix("manifest.json").unwrap().to_owned();
+    manifest
 }
 fn request(names: &[&str]) -> SamplesReadRequest {
     SamplesReadRequest {
@@ -724,7 +719,6 @@ async fn out_of_order_series_are_refused() {
     let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
     let mut writer = format
         .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
-        .await
         .unwrap();
     writer
         .write(&keyed_batch(
@@ -753,7 +747,6 @@ async fn out_of_order_series_are_refused() {
             FileId::random(),
             generation,
         )
-        .await
         .unwrap();
     writer
         .write(&keyed_batch(
@@ -824,7 +817,6 @@ async fn failed_writer_and_abort_remove_outputs() {
         let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
         let mut writer = format
             .writer(m.clone(), store.clone(), &prefix, id, generation)
-            .await
             .unwrap();
         writer
             .write(&batch(
@@ -866,7 +858,6 @@ async fn failed_writer_and_abort_remove_outputs() {
     assert!(
         format
             .writer(m, store, "wrong", FileId::random(), FileId::random())
-            .await
             .is_err()
     );
 }
@@ -1281,12 +1272,10 @@ async fn wide_schema_byte_bound_and_unsupported_input() {
     assert!(
         format
             .writer(wrong, store.clone(), &prefix, id, generation)
-            .await
             .is_err()
     );
     let mut writer = format
         .writer(m.clone(), store, &prefix, id, generation)
-        .await
         .unwrap();
     let mut bad = (*m).clone();
     bad.column_metadatas
@@ -1371,7 +1360,6 @@ async fn output_failures_and_cancelled_finish_clean_up() {
                 id,
                 generation,
             )
-            .await
             .unwrap();
         writer
             .write(&batch(&m, &[(1, 1, 0, 1, 1, Some(7))], false))
@@ -2065,7 +2053,7 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
 
 mod keys;
 
-/// Narthex readers use the SST lifetime, not the local sidecar purger.
+/// Narthex readers pin the samples SST until the stream is dropped.
 #[tokio::test]
 async fn narthex_file_reader_pins_sst_lifetime() {
     use crate::sst::file::{FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSamplesMeta};
@@ -2089,7 +2077,6 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     ];
     let mut writer = ColumnarSamplesFormat::default()
         .writer(meta.clone(), store.clone(), &prefix, id, id)
-        .await
         .unwrap();
     writer.write(&batch(&meta, &rows, false)).await.unwrap();
     let artifact = writer.finish().await.unwrap();
@@ -2162,7 +2149,6 @@ async fn narthex_write_error_cleans_completed_parts_before_returning() {
             FileId::random(),
             FileId::random(),
         )
-        .await
         .unwrap();
     writer
         .write(&batch(

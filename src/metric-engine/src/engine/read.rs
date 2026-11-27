@@ -593,9 +593,7 @@ mod test {
     async fn test_series_scan_reads_metric_region() {
         let env = TestEnv::with_mito_config(
             "test_series_scan",
-            MitoConfig {
-                ..Default::default()
-            },
+            MitoConfig::default(),
             EngineConfig::default(),
         )
         .await;
@@ -664,7 +662,7 @@ mod test {
             count_scanner_rows(&mut scanner, 2),
         )
         .await
-        .expect("two-phase series scan should not deadlock");
+        .expect("series scan should complete");
         assert_eq!(7, rows);
 
         let explain = ScannerDisplay(scanner.as_ref()).to_string();
@@ -675,9 +673,7 @@ mod test {
     async fn test_raw_series_scan_uses_logical_metric_route_and_bound_metadata() {
         let env = TestEnv::with_mito_config(
             "test_logical_raw_series_scan",
-            MitoConfig {
-                ..Default::default()
-            },
+            MitoConfig::default(),
             EngineConfig::default(),
         )
         .await;

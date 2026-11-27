@@ -308,12 +308,9 @@ pub trait WriterFactory {
     fn abort(writer: Self::Writer) -> impl Future<Output = Result<()>>;
 }
 
-/// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
-/// the number of bytes accepted for upload. Bounded uploads stage bytes in a
-/// local part buffer before submitting them to the object store.
+/// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`].
 pub struct ObjectStoreWriter {
     inner: Writer,
-    output_bytes: u64,
     write_buffer_size: usize,
     cancellation: Option<CancellationToken>,
     #[cfg(feature = "enterprise")]
@@ -328,16 +325,11 @@ impl ObjectStoreWriter {
     ) -> Self {
         Self {
             inner,
-            output_bytes: 0,
             write_buffer_size,
             cancellation,
             #[cfg(feature = "enterprise")]
             buffered_upload: None,
         }
-    }
-
-    pub(crate) fn output_bytes(&self) -> u64 {
-        self.output_bytes
     }
 
     pub(crate) fn into_inner(self) -> Writer {
@@ -366,8 +358,7 @@ impl ObjectStoreWriter {
 impl AsyncFileWriter for ObjectStoreWriter {
     fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
-            let written = self.write_bytes(bytes).await?;
-            self.output_bytes += written;
+            self.write_bytes(bytes).await?;
             Ok(())
         })
     }

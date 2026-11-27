@@ -28,7 +28,6 @@ use common_telemetry::debug;
 use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
-use datafusion_expr::Expr;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -36,7 +35,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use futures::StreamExt;
-use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter, build_primary_key_codec};
+use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
 use parquet::file::metadata::ParquetMetaData;
@@ -268,56 +267,6 @@ pub(crate) struct BulkFilterPlan {
     /// Tag predicates lowered to encoded-PK filters. `None` when the batch
     /// already exposes raw tag columns or there are no tag predicates.
     pub(crate) pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
-}
-
-/// Builds an encoded-primary-key filter from the supported tag predicates.
-///
-/// Predicates on fields, timestamps, or unsupported expression shapes are intentionally
-/// omitted. Callers use this as a pruning filter and must preserve the full predicate for
-/// authoritative filtering later in the scan.
-pub(crate) fn build_primary_key_filter(
-    sst_metadata: &RegionMetadataRef,
-    expected_metadata: Option<&RegionMetadata>,
-    predicate: Option<&Predicate>,
-) -> Option<CachedPrimaryKeyFilter> {
-    let filters = simple_tag_filters(sst_metadata, expected_metadata, predicate)
-        .into_iter()
-        .map(|(_, filter)| filter)
-        .collect::<Vec<_>>();
-    if filters.is_empty() {
-        return None;
-    }
-
-    let codec = build_primary_key_codec(sst_metadata.as_ref());
-    let filter = codec.primary_key_filter(sst_metadata, Arc::new(filters));
-    Some(CachedPrimaryKeyFilter::new(filter))
-}
-
-/// Extracts simple tag filters that can be applied to encoded primary keys or series indexes.
-pub(crate) fn simple_tag_filters(
-    sst_metadata: &RegionMetadataRef,
-    expected_metadata: Option<&RegionMetadata>,
-    predicate: Option<&Predicate>,
-) -> Vec<(Expr, SimpleFilterEvaluator)> {
-    predicate
-        .into_iter()
-        .flat_map(|predicate| predicate.exprs())
-        .filter_map(|expr| {
-            SimpleFilterContext::new_opt(sst_metadata, expected_metadata, expr)
-                .map(|filter_ctx| (expr, filter_ctx))
-        })
-        .filter_map(|(expr, filter_ctx)| {
-            (filter_ctx.semantic_type() == SemanticType::Tag)
-                .then(|| {
-                    filter_ctx
-                        .filter()
-                        .as_filter()
-                        .cloned()
-                        .map(|filter| (expr.clone(), filter))
-                })
-                .flatten()
-        })
-        .collect()
 }
 
 /// How the parquet reader should apply each predicate.
@@ -1583,7 +1532,7 @@ mod tests {
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
     use datafusion_common::ScalarValue;
-    use datafusion_expr::{col, lit};
+    use datafusion_expr::{Expr, col, lit};
     use datatypes::arrow::array::{
         ArrayRef, DictionaryArray, Float64Array, Int32Array, TimestampMillisecondArray, UInt8Array,
         UInt32Array, UInt64Array,

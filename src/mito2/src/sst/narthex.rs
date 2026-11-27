@@ -33,7 +33,7 @@ use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::reader::ColumnarReader;
 use crate::series_index::columnar::{ColumnarSeriesFormat, invalid, require};
-use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
+use crate::series_index::format::{FormatWriter, SamplesFormatReader};
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::series_index::samples::reader::SamplesReader;
@@ -60,15 +60,13 @@ pub(crate) async fn write_samples(
             .await?;
     }
     let prefix = location::narthex_file_dir(&layer.build_region_dir(region_id), id);
-    let mut writer = ColumnarSamplesFormat::default()
-        .writer(
-            request.metadata.clone(),
-            layer.object_store().clone(),
-            &prefix,
-            id,
-            id,
-        )
-        .await?;
+    let mut writer = ColumnarSamplesFormat::default().writer(
+        request.metadata.clone(),
+        layer.object_store().clone(),
+        &prefix,
+        id,
+        id,
+    )?;
     let mut rows = 0;
     let mut series = 0;
     let mut previous_key = Vec::new();

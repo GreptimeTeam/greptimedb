@@ -92,12 +92,6 @@ impl PartitionPruner {
         }
     }
 
-    /// Excludes files replaced by another candidate source from prefetching.
-    pub(crate) fn excluding_files(mut self, excluded: &HashSet<usize>) -> Self {
-        self.file_indices.retain(|index| !excluded.contains(index));
-        self
-    }
-
     /// Gets or creates the FileRangeBuilder for a file.
     ///
     /// This method also triggers pre-fetching of upcoming files in the background
@@ -191,33 +185,6 @@ impl PartitionPruner {
     }
 }
 
-/// Options to create a [`Pruner`].
-#[derive(Debug, Clone, Copy)]
-pub struct PrunerOptions {
-    /// Keeps file range builders until the query-scoped pruner is dropped.
-    pub retain_builders: bool,
-    /// Whether [`FileRange`]s execute the reduced-column predicate prefilter.
-    ///
-    /// The flag is baked into the cached [`FileRangeBuilder`], so it belongs to
-    /// the whole scan. All partitions sharing this pruner must agree on it.
-    /// Two-stage series scans disable this prefilter because candidate discovery already
-    /// narrowed the assignment by tag predicate, so running it again would only repeat
-    /// that work. This is a pruning-hint trade only: the assigned series are
-    /// `(table_id, tsid)` hashes, so a series that collides with an assigned one shares
-    /// its identifier without matching the predicate, and the data phase still applies
-    /// the tag predicates through [`FileRange::precise_filter_flat`].
-    pub enable_predicate_prefilter: bool,
-}
-
-impl Default for PrunerOptions {
-    fn default() -> Self {
-        Self {
-            retain_builders: false,
-            enable_predicate_prefilter: true,
-        }
-    }
-}
-
 /// A pruner that prunes files for all partitions of a scanner.
 pub struct Pruner {
     /// Channels to send requests to workers.
@@ -242,10 +209,6 @@ struct PrunerInner {
     static_manifest_kept_files: Vec<AtomicBool>,
     #[cfg(test)]
     manifest_check_count: AtomicUsize,
-    /// Keeps file range builders until the query-scoped pruner is dropped.
-    retain_builders: bool,
-    /// Whether FileRanges should execute the reduced-column predicate prefilter.
-    enable_predicate_prefilter: bool,
 }
 
 impl Drop for PrunerInner {
@@ -337,19 +300,6 @@ impl Pruner {
     /// Initially all file_entries have `remaining_ranges = 0`.
     /// Call `add_partition_ranges()` to initialize ref counts.
     pub fn new(stream_ctx: Arc<StreamContext>, num_workers: usize) -> Self {
-        Self::new_with_options(stream_ctx, num_workers, PrunerOptions::default())
-    }
-
-    /// Creates a new pruner with the given options.
-    pub fn new_with_options(
-        stream_ctx: Arc<StreamContext>,
-        num_workers: usize,
-        options: PrunerOptions,
-    ) -> Self {
-        let PrunerOptions {
-            retain_builders,
-            enable_predicate_prefilter,
-        } = options;
         let num_files = stream_ctx.input.num_files();
         let file_entries: Vec<_> = (0..num_files)
             .map(|_| {
@@ -379,8 +329,6 @@ impl Pruner {
             static_manifest_kept_files: (0..num_files).map(|_| AtomicBool::new(false)).collect(),
             #[cfg(test)]
             manifest_check_count: AtomicUsize::new(0),
-            retain_builders,
-            enable_predicate_prefilter,
         });
 
         // Keep pruning and prefetching on the runtime of the originating workload.
@@ -558,12 +506,6 @@ impl Pruner {
         let _ = self.worker_senders[worker_idx].try_send(request);
     }
 
-    /// Returns whether this pruner builds file ranges with the reduced-column
-    /// predicate prefilter enabled.
-    pub fn predicate_prefilter_enabled(&self) -> bool {
-        self.inner.enable_predicate_prefilter
-    }
-
     fn get_worker_idx(&self, file_id: FileId) -> usize {
         let file_id_hash = Uuid::from(file_id).as_u128() as usize;
         file_id_hash % self.inner.num_workers
@@ -594,19 +536,12 @@ impl Pruner {
             .inner
             .stream_ctx
             .input
-            .prune_file_after_manifest_check(
-                file,
-                pre_filter_mode,
-                self.inner.enable_predicate_prefilter,
-                predicate,
-                reader_metrics,
-            )
+            .prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
             .await?;
 
         let arc_builder = Arc::new(builder);
 
-        // Cache only while the file still has remaining ranges. Retaining mode
-        // affects cleanup after the builder has been cached, not cache eligibility.
+        // Cache only while the file still has remaining ranges.
         {
             let mut entry = self.inner.file_entries[file_index].lock().unwrap();
             cache_builder_if_needed(&mut entry, &arc_builder, reader_metrics);
@@ -620,8 +555,7 @@ impl Pruner {
         let mut entry = self.inner.file_entries[file_index].lock().unwrap();
         entry.remaining_ranges = entry.remaining_ranges.saturating_sub(1);
 
-        if !self.inner.retain_builders
-            && entry.remaining_ranges == 0
+        if entry.remaining_ranges == 0
             && let Some(builder) = entry.builder.take()
         {
             PRUNER_ACTIVE_BUILDERS.dec();
@@ -683,13 +617,7 @@ impl Pruner {
                 inner
                     .stream_ctx
                     .input
-                    .prune_file_after_manifest_check(
-                        file,
-                        pre_filter_mode,
-                        inner.enable_predicate_prefilter,
-                        predicate,
-                        &mut metrics,
-                    )
+                    .prune_file_after_manifest_check(file, pre_filter_mode, predicate, &mut metrics)
                     .await
             };
 
@@ -853,13 +781,6 @@ mod tests {
     use crate::test_util::scheduler_util::SchedulerEnv;
 
     async fn make_test_pruner(num_files: usize) -> (SchedulerEnv, Arc<Pruner>) {
-        make_test_pruner_with_retained_builders(num_files, false).await
-    }
-
-    async fn make_test_pruner_with_retained_builders(
-        num_files: usize,
-        retain_builders: bool,
-    ) -> (SchedulerEnv, Arc<Pruner>) {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
@@ -893,14 +814,7 @@ mod tests {
             ranges,
             query_start,
         ));
-        let pruner = Arc::new(Pruner::new_with_options(
-            stream_ctx,
-            1,
-            PrunerOptions {
-                retain_builders,
-                ..Default::default()
-            },
-        ));
+        let pruner = Arc::new(Pruner::new(stream_ctx, 1));
         (env, pruner)
     }
 
@@ -1060,100 +974,6 @@ mod tests {
 
         assert_eq!(pruner.test_remaining_ranges(0), 0);
         assert!(!pruner.test_has_builder(0));
-    }
-
-    #[tokio::test]
-    async fn retained_builder_survives_after_last_range() {
-        let (_env, pruner) = make_test_pruner_with_retained_builders(1, true).await;
-        pruner.add_partition_ranges(&[file_partition_range(0)]);
-        {
-            let mut entry = pruner.inner.file_entries[0].lock().unwrap();
-            entry.builder = Some(Arc::new(FileRangeBuilder::default()));
-            PRUNER_ACTIVE_BUILDERS.inc();
-        }
-
-        let mut reader_metrics = ReaderMetrics::default();
-        pruner.skip_file_range(
-            RowGroupIndex {
-                index: 0,
-                row_group_index: 0,
-            },
-            &mut reader_metrics,
-        );
-
-        assert_eq!(pruner.test_remaining_ranges(0), 0);
-        assert!(pruner.test_has_builder(0));
-
-        let partition_metrics = make_partition_metrics();
-        let mut reader_metrics = ReaderMetrics::default();
-        let _builder = pruner
-            .get_file_builder(
-                0,
-                PreFilterMode::SkipFields,
-                &partition_metrics,
-                &mut reader_metrics,
-            )
-            .await
-            .unwrap();
-        assert_eq!(reader_metrics.filter_metrics.pruner_cache_hit, 1);
-    }
-
-    #[tokio::test]
-    async fn add_partition_ranges_keeps_retained_builder() {
-        let (_env, pruner) = make_test_pruner_with_retained_builders(1, true).await;
-        pruner.add_partition_ranges(&[file_partition_range(0)]);
-        {
-            let mut entry = pruner.inner.file_entries[0].lock().unwrap();
-            entry.builder = Some(Arc::new(FileRangeBuilder::default()));
-            PRUNER_ACTIVE_BUILDERS.inc();
-        }
-
-        let mut reader_metrics = ReaderMetrics::default();
-        pruner.skip_file_range(
-            RowGroupIndex {
-                index: 0,
-                row_group_index: 0,
-            },
-            &mut reader_metrics,
-        );
-        assert!(pruner.test_has_builder(0));
-
-        pruner.add_partition_ranges(&[file_partition_range(0)]);
-        assert!(pruner.test_has_builder(0));
-        assert_eq!(pruner.test_remaining_ranges(0), 1);
-    }
-
-    #[tokio::test]
-    async fn retaining_mode_does_not_cache_after_skip_file_range_consumed_all() {
-        let (_env, pruner) = make_test_pruner_with_retained_builders(1, true).await;
-
-        // Simulate one range for file 0.
-        let ranges = vec![file_partition_range(0)];
-        pruner.add_partition_ranges(&ranges);
-        assert_eq!(pruner.test_remaining_ranges(0), 1);
-
-        // Simulate skip_file_range consuming the last range BEFORE the
-        // background worker finishes. This mirrors the race: a dynamic filter
-        // tightens and manifest-prune fast-skip zeros out remaining_ranges.
-        let mut reader_metrics = ReaderMetrics::default();
-        let index = RowGroupIndex {
-            index: 0,
-            row_group_index: 0,
-        };
-        pruner.skip_file_range(index, &mut reader_metrics);
-        assert_eq!(pruner.test_remaining_ranges(0), 0);
-        assert!(!pruner.test_has_builder(0));
-
-        // Now simulate the worker completing: check the caching guard.
-        let entry = pruner.inner.file_entries[0].lock().unwrap();
-        let should_cache = should_cache_builder(&entry);
-        drop(entry);
-
-        assert!(!should_cache);
-
-        // Ensure the gauge was not incremented for a stale builder.
-        // (skip_file_range already decremented it if there was one, but here
-        // there was none, so the gauge should be at baseline.)
     }
 
     #[tokio::test]

@@ -19,13 +19,13 @@ use api::v1::helper::row;
 use api::v1::region::build_index_request;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Rows};
-use common_error::ext::ErrorExt;
-use datafusion::physical_plan::{ExecutionPlan, metrics::ExecutionPlanMetricsSet};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_expr::{col, lit};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SampleRef;
+use std::collections::HashSet;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{
     BoundTag, PrepareRequest, QueryScanContext, RegionEngine, RegionScanner,
@@ -65,7 +65,11 @@ fn narthex_partition_filter_ignores_empty_and_matching_rules() {
 }
 
 async fn fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
-    let (env, engine, region) = authoritative_fixture("last_row").await;
+    indexed_fixture("last_row").await
+}
+
+async fn indexed_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRegionRef) {
+    let (env, engine, region) = authoritative_fixture(merge_mode).await;
     for ts in [1000, 1000, 2000] {
         write(&engine, &region, 0, ts, Some(1.0)).await;
         flush_region(&engine, region.region_id, None).await;
@@ -225,6 +229,7 @@ fn scan_input(region: &MitoRegionRef, use_indexes: bool, projection: Vec<usize>)
                 .cloned()
                 .collect(),
         )
+        .with_merge_mode(version.options.merge_mode())
         .with_narthex_format(version.options.sst_format == Some(crate::sst::FormatType::Narthex))
         .with_narthex_series_indexes(if use_indexes {
             version.ssts.series_indexes().values().cloned().collect()
@@ -436,10 +441,10 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     write(&engine, &region, 0, 2000, None).await;
     flush_region(&engine, region.region_id, None).await;
     build(&engine, &region).await;
-    let make_scan = |format| {
+    let make_scan = |use_indexes| {
         let mut input = scan_input(
             &region,
-            format,
+            use_indexes,
             (0..region.version().metadata.column_metadatas.len()).collect(),
         );
         // Bounds in a finer unit must round up for both inclusive start and exclusive end.
@@ -449,11 +454,11 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         );
         SeriesScan::new(input)
     };
-    let legacy = make_scan(false);
+    let samples_only = make_scan(false);
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
-    let oracle = legacy
-        .scan_series_partition(&ctx, &metrics, 0, &labels(legacy.metadata()))
+    let oracle = samples_only
+        .scan_series_partition(&ctx, &metrics, 0, &labels(samples_only.metadata()))
         .unwrap()
         .unwrap()
         .try_collect::<Vec<_>>()
@@ -806,10 +811,10 @@ async fn residual_conjuncts_still_filter_discovered_series() {
         .eq(lit("a"))
         .and(Expr::Not(Box::new(col("tag_1").eq(lit("x")))));
     let mut results = Vec::new();
-    for format in [false, true] {
+    for use_indexes in [false, true] {
         let mut input = scan_input(
             &region,
-            format,
+            use_indexes,
             (0..region.version().metadata.column_metadatas.len()).collect(),
         );
         input.predicate =
@@ -827,7 +832,7 @@ async fn residual_conjuncts_still_filter_discovered_series() {
             .unwrap()
             .unwrap();
         let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
-        if format {
+        if use_indexes {
             let prepared = scanner.prepared.source.get().unwrap().as_ref().unwrap();
             // `tag_0 = 'a'` matches both series; only the residual drops `tag_1 = 'x'`.
             assert_eq!(1, prepared.candidates.len());
@@ -845,7 +850,12 @@ async fn residual_conjuncts_still_filter_discovered_series() {
 #[case::last_non_null(true)]
 #[tokio::test]
 async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null: bool) {
-    let (_env, engine, region) = fixture().await;
+    let mode = if last_non_null {
+        "last_non_null"
+    } else {
+        "last_row"
+    };
+    let (_env, engine, region) = indexed_fixture(mode).await;
     if last_non_null {
         // A newer null in the first field must recover the older value across SSTs.
         let metadata = region.version().metadata.clone();
@@ -915,15 +925,12 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
     ];
     for (predicate, identity_only) in cases {
         let mut results = Vec::new();
-        for format in [false, true] {
+        for use_indexes in [false, true] {
             let mut input = scan_input(
                 &region,
-                format,
+                use_indexes,
                 (0..region.version().metadata.column_metadatas.len()).collect(),
             );
-            if last_non_null {
-                input.merge_mode = crate::region::options::MergeMode::LastNonNull;
-            }
             input.predicate =
                 PredicateGroup::new(&region.version().metadata, std::slice::from_ref(&predicate))
                     .unwrap();
@@ -952,7 +959,7 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
                     .iter()
                     .all(|chunk| chunk.metric.is_some() == explicit)
             );
-            if format {
+            if use_indexes {
                 let prepared = scanner
                     .prepared
                     .source
@@ -1499,11 +1506,7 @@ async fn reset_state_and_other_bindings_drop_the_preflight_cache() {
 async fn added_dynamic_filters_drop_the_preflight_cache() {
     use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
 
-    let (_env, engine, region) = fixture().await;
-    write(&engine, &region, 0, 1000, Some(1.0)).await;
-    flush_region(&engine, region.region_id, None).await;
-    build(&engine, &region).await;
-
+    let (_env, engine, region) = parquet_fixture().await;
     let mut scanner = scanner(&region);
     let binding = labels(scanner.metadata());
     // The fixture's static filters pass the preflight, and the second ask is served from the cache
@@ -1735,6 +1738,7 @@ async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRe
             schedule_compaction_after_edit: false,
             experimental_enable_series_index: true,
             experimental_series_index_bucket_width: Duration::from_secs(100),
+            experimental_series_index_min_files: 1,
             ..Default::default()
         })
         .await;

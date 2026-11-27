@@ -243,7 +243,6 @@ pub(crate) struct ScanRegion {
     /// Maximum number of SST files to scan concurrently.
     max_concurrent_scan_files: usize,
     scan_memory_tracker: Option<QueryMemoryTracker>,
-    /// Whether to enable the experimental two-phase metric series scan.
     /// Whether to ignore range indexes during scans.
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
@@ -1617,7 +1616,7 @@ impl ScanInput {
             return Ok(FileRangeBuilder::default());
         }
 
-        self.prune_file_after_manifest_check(file, pre_filter_mode, true, predicate, reader_metrics)
+        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
             .await
     }
 
@@ -1632,7 +1631,6 @@ impl ScanInput {
         &self,
         file: &FileHandle,
         pre_filter_mode: PreFilterMode,
-        enable_predicate_prefilter: bool,
         predicate: Option<Predicate>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
@@ -1669,7 +1667,6 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
-            .enable_predicate_prefilter(enable_predicate_prefilter)
             .postpone_time_index_filter(postpone_time_index_filter)
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)

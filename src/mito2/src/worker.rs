@@ -64,7 +64,6 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
-use crate::access_layer::new_fs_cache_store;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRef};
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
@@ -212,7 +211,9 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        reclaim_legacy_series_cache(data_home).await?;
+        if let Err(error) = reclaim_legacy_series_cache(data_home).await {
+            warn!(error; "Failed to remove retired series-index cache in {data_home}");
+        }
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(CompactionCoordinator::new_local(
             config.max_background_compactions,
@@ -515,7 +516,9 @@ impl WorkerGroup {
         });
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        reclaim_legacy_series_cache(data_home).await?;
+        if let Err(error) = reclaim_legacy_series_cache(data_home).await {
+            warn!(error; "Failed to remove retired series-index cache in {data_home}");
+        }
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
@@ -645,36 +648,28 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
 
 /// Reclaim the retired, versioned local sidecar cache. Only numeric region directories
 /// belong to this format. Leave unrelated directories and the cache mount itself intact.
-async fn reclaim_legacy_series_cache(data_home: &str) -> Result<()> {
+async fn reclaim_legacy_series_cache(data_home: &str) -> std::io::Result<()> {
     let root = Path::new(data_home).join("series_index");
-    if !root.join("version").is_file() {
-        return Ok(());
+    let marker = root.join("version");
+    match tokio::fs::read(&marker).await {
+        Ok(version) if version == b"1" => {}
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
     }
-    let store = new_fs_cache_store(&root.to_string_lossy()).await?;
-    if store
-        .read("version")
-        .await
-        .context(crate::error::OpenDalSnafu)?
-        .to_bytes()
-        .as_ref()
-        != b"1"
-    {
-        return Ok(());
-    }
-    for entry in store.list("/").await.context(crate::error::OpenDalSnafu)? {
-        if entry.path().trim_end_matches('/').parse::<u64>().is_ok() && entry.metadata().is_dir() {
-            store
-                .delete_with(entry.path())
-                .recursive(true)
-                .await
-                .context(crate::error::OpenDalSnafu)?;
+    let mut entries = tokio::fs::read_dir(root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|s| s.parse::<u64>().is_ok_and(|id| id.to_string() == s))
+            && entry.file_type().await?.is_dir()
+        {
+            tokio::fs::remove_dir_all(entry.path()).await?;
         }
     }
-    store
-        .delete("version")
-        .await
-        .context(crate::error::OpenDalSnafu)?;
-    Ok(())
+    // An interrupted cleanup retries the remaining region directories on the next start.
+    tokio::fs::remove_file(marker).await
 }
 
 pub async fn write_cache_from_config(
@@ -1277,7 +1272,6 @@ struct RegionWorkerLoop<S> {
     index_build_scheduler: IndexBuildScheduler,
     /// Controls the worker-owned series-index task.
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
-    /// Local store for series and range indexes managed by reconciliation.
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
     /// Scheduler for compaction tasks.
@@ -2396,6 +2390,40 @@ mod tests {
         let region_id = RegionId::new(2, 3);
         let index = region_id_to_index(region_id, num_workers);
         assert_eq!(index, 1);
+    }
+
+    #[tokio::test]
+    async fn reclaim_retired_series_cache_on_restart() {
+        let temp = common_test_util::temp_dir::create_temp_dir("retired-series-cache");
+        let home = temp.path().to_str().unwrap();
+        let root = temp.path().join("series_index");
+        reclaim_legacy_series_cache(home).await.unwrap();
+        assert!(!root.exists());
+
+        let region = root.join("42");
+        let sst = temp.path().join("authoritative");
+        tokio::fs::create_dir_all(&region).await.unwrap();
+        tokio::fs::write(region.join("series-index.json"), b"old")
+            .await
+            .unwrap();
+        tokio::fs::write(&sst, b"sample data").await.unwrap();
+        tokio::fs::write(root.join("unrelated"), b"keep")
+            .await
+            .unwrap();
+
+        tokio::fs::write(root.join("version"), b"other")
+            .await
+            .unwrap();
+        reclaim_legacy_series_cache(home).await.unwrap();
+        assert!(region.exists());
+        tokio::fs::write(root.join("version"), b"1").await.unwrap();
+        for _ in 0..2 {
+            reclaim_legacy_series_cache(home).await.unwrap();
+            assert!(!region.exists());
+            assert!(!root.join("version").exists());
+            assert!(root.join("unrelated").is_file());
+            assert_eq!(tokio::fs::read(&sst).await.unwrap(), b"sample data");
+        }
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ mod raw;
 
 use std::collections::HashSet;
 use std::fmt;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -88,9 +89,8 @@ pub(crate) struct RawScanPreparation {
 
 /// Memoized raw-scan preflight: the label binding it was computed for, and its answer.
 ///
-/// The answer carries the preparation together with whether its data comes from the columnar
-/// prepared source; `None` means the raw path is unavailable for this scan.
-type PreflightCache = Option<(RawLabelSource, Option<(RawScanPreparation, bool)>)>;
+/// A cached `None` means the scan cannot serve this label binding.
+type PreflightCache = Option<(RawLabelSource, Option<RawScanPreparation>)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeriesScanMode {
@@ -203,7 +203,7 @@ impl SeriesScan {
     fn cached_preflight(
         &self,
         label_source: &RawLabelSource,
-    ) -> Option<Option<(RawScanPreparation, bool)>> {
+    ) -> Option<Option<RawScanPreparation>> {
         let cache = self.preflight.lock().unwrap();
         let (cached_source, cached) = cache.as_ref()?;
         if !prepared::same_labels(cached_source, label_source) {
@@ -212,54 +212,7 @@ impl SeriesScan {
         Some(cached.clone())
     }
 
-    fn uses_columnar(&self) -> bool {
-        self.stream_ctx.input.requires_narthex_preparation()
-    }
-
-    /// Whether every selected *field* is a `Float64` or a native histogram struct, which is all the
-    /// columnar prepared reader serves.
-    ///
-    /// Only field columns count: the projection also carries tags and the time index, and those are
-    /// no part of the samples the prepared reader hands over. Checking them here would send an
-    /// ordinary `Float64` query down the ordinary scan just because it projects a timestamp.
-    fn columnar_fields_supported(&self) -> bool {
-        let metadata = self.stream_ctx.input.mapper.metadata();
-        let selected = self.stream_ctx.input.mapper.output_schema();
-        selected
-            .column_schemas()
-            .iter()
-            .filter(|output| {
-                metadata.column_metadatas.iter().any(|column| {
-                    column.column_schema.name == output.name
-                        && column.semantic_type == SemanticType::Field
-                })
-            })
-            .all(|output| {
-                output.data_type == ConcreteDataType::float64_datatype()
-                    || is_native_histogram_value_type(&output.data_type)
-            })
-    }
-
-    /// Returns whether raw series come from the columnar prepared source.
-    ///
-    /// Derived only from the pinned series index version and every configured partition range, so
-    /// preflight, the partition reader and scanner-wide preparation agree.
-    /// `false` means the stored sources are read by the ordinary scan.
-    fn uses_prepared_columnar(&self) -> Result<bool, BoxedError> {
-        if !self.uses_columnar() {
-            return Ok(false);
-        }
-        let ranges = self
-            .properties
-            .partitions
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)
-    }
-
-    /// Prepares the raw scan and reports whether its data comes from the columnar prepared source.
+    /// Prepares the raw scan for the supplied label binding.
     ///
     /// The answer only depends on pinned scanner state plus the label binding, and an execution
     /// asks for it once per output partition, so it is memoized per binding. Only successful
@@ -268,14 +221,12 @@ impl SeriesScan {
     fn prepare_raw_scan(
         &self,
         label_source: &RawLabelSource,
-    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+    ) -> Result<Option<RawScanPreparation>, BoxedError> {
         if let Some(cached) = self.cached_preflight(label_source) {
             return Ok(cached);
         }
         let computed = self.prepare_raw_scan_uncached(label_source)?;
-        if self.stream_ctx.input.requires_narthex_preparation()
-            && !matches!(computed, Some((_, true)))
-        {
+        if self.stream_ctx.input.requires_narthex_preparation() && computed.is_none() {
             return Err(BoxedError::new(
                 InvalidRecordBatchSnafu {
                     reason: "Narthex raw scans require prepared-series support",
@@ -294,7 +245,7 @@ impl SeriesScan {
     fn prepare_raw_scan_uncached(
         &self,
         label_source: &RawLabelSource,
-    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+    ) -> Result<Option<RawScanPreparation>, BoxedError> {
         #[cfg(test)]
         self.preflight_runs.fetch_add(1, Ordering::Relaxed);
         let input = &self.stream_ctx.input;
@@ -359,27 +310,13 @@ impl SeriesScan {
                 return Ok(None);
             }
         }
-        // The columnar prepared reader serves sparse metric regions only: another region on a store in
-        // that format has no columnar samples, and its SST rows are the sources the ordinary scan reads
-        // anyway. Missing columnar coverage is not a reason to refuse the raw path - see the
-        // `prepared_columnar` gate below - so such a scan keeps it and is served from the ordinary scan.
-        // Refusing here instead would be an error no caller can turn into a fallback: the logical plan
-        // above this leaf is already the fused node by the time the region is asked.
-        let columnar_region = self.uses_columnar() && is_sparse_metric_metadata(metadata);
-        // Narthex samples exist for sparse metric regions only, so a scan that requires them and is not
-        // one of those has nothing to read them from.
-        if !columnar_region && input.requires_narthex_preparation() {
+        let narthex = input.requires_narthex_preparation();
+        if narthex && !is_sparse_metric_metadata(metadata) {
             return Ok(None);
         }
         let selected = input.mapper.output_schema();
         let mut fields = Vec::new();
         let mut specs = Vec::new();
-        // The columnar prepared reader serves `Float64` and native histogram fields. A selection
-        // carrying another kind the raw path supports - a numeric field it casts - is read by the
-        // ordinary scan instead: the columnar samples are an artifact beside the SST rows, so the
-        // same sources are still reachable, and the frame schema and ordering follow the reader
-        // that actually answers.
-        let columnar_fields_supported = self.columnar_fields_supported();
         for output in selected.column_schemas() {
             let Some(column) = metadata.column_metadatas.iter().find(|column| {
                 column.column_schema.name == output.name
@@ -410,7 +347,12 @@ impl SeriesScan {
             };
             // The raw converter casts a numeric field to `Float64` and converts a native histogram
             // struct into histogram samples; nothing else has a raw representation.
-            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
+            let numeric = if narthex {
+                *data_type == ConcreteDataType::float64_datatype()
+            } else {
+                data_type.is_numeric()
+            };
+            if !numeric && !is_native_histogram_value_type(data_type) {
                 debug!(
                     "Raw series scan preflight rejected field type: region_id={}, column_id={}",
                     metadata.region_id, column.column_id,
@@ -424,7 +366,7 @@ impl SeriesScan {
         }
         let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
         if fields.is_empty()
-            || (input.append_mode && !input.requires_narthex_preparation())
+            || (input.append_mode && !narthex)
             || input.series_row_selector.is_some()
             || !time_is_millis
         {
@@ -438,17 +380,23 @@ impl SeriesScan {
             );
             return Ok(None);
         }
-        // Structural eligibility errors still reject the raw path; ordinary scans cover sources
-        // without columnar artifacts, so missing coverage is not an error here.
-        let prepared_columnar =
-            columnar_region && self.uses_prepared_columnar()? && columnar_fields_supported;
+        if narthex {
+            let ranges = self
+                .properties
+                .partitions
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            prepared::validate_ranges(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
+        }
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
         });
         let typed_schema = input.mapper.input_arrow_schema(false);
         let mut predicates = Vec::new();
-        let predicate = if prepared_columnar {
+        let predicate = if narthex {
             input.predicate_group().predicate()
         } else {
             // The ordinary scan applies region predicates before this residual filtering.
@@ -499,14 +447,11 @@ impl SeriesScan {
                 predicates.push(physical);
             }
         }
-        Ok(Some((
-            RawScanPreparation {
-                schema,
-                fields,
-                predicates,
-            },
-            prepared_columnar,
-        )))
+        Ok(Some(RawScanPreparation {
+            schema,
+            fields,
+            predicates,
+        }))
     }
 
     /// Starts scanner-wide preparation from the preflight already performed by the caller.
@@ -515,7 +460,7 @@ impl SeriesScan {
         ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         label_source: &RawLabelSource,
-        preparation: Result<Option<(RawScanPreparation, bool)>, BoxedError>,
+        preparation: Result<Option<RawScanPreparation>, BoxedError>,
     ) -> futures::future::BoxFuture<
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
@@ -539,13 +484,9 @@ impl SeriesScan {
             &self.metrics_list,
         );
         Box::pin(async move {
-            let Some((preparation, prepared_columnar)) = preparation? else {
+            let Some(preparation) = preparation? else {
                 return Ok(None);
             };
-            if !prepared_columnar {
-                // Known unsupported coverage: the caller keeps the ordinary scan instead.
-                return Ok(None);
-            }
             state
                 .prepare(stream_ctx, ranges, labels, preparation, metrics, scan_pool)
                 .await
@@ -825,7 +766,7 @@ impl RegionScanner for SeriesScan {
     }
 
     fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
-        // Both prepared-columnar and ordinary (legacy or two-phase) scans guarantee key/time order.
+        // Both prepared-columnar and ordinary scans guarantee key/time order.
         Ok(SeriesOrdering::KeyThenTime)
     }
 
@@ -835,14 +776,14 @@ impl RegionScanner for SeriesScan {
     ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
         Ok(self
             .prepare_raw_scan(label_source)?
-            .map(|(preparation, _)| preparation.schema))
+            .map(|preparation| preparation.schema))
     }
 
     fn raw_series_has_explicit_labels(&self, labels: &RawLabelSource) -> Result<bool, BoxedError> {
-        let Some((mut raw, columnar)) = self.prepare_raw_scan(labels)? else {
+        let Some(mut raw) = self.prepare_raw_scan(labels)? else {
             return Ok(false);
         };
-        Ok(columnar
+        Ok(self.mode == SeriesScanMode::Prepared
             && prepared::sample_merge_schema(&self.stream_ctx, &mut raw)
                 .map_err(BoxedError::new)?
                 .is_some())
@@ -855,10 +796,10 @@ impl RegionScanner for SeriesScan {
         partition: usize,
         label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
-        let Some((preparation, prepared_columnar)) = self.prepare_raw_scan(label_source)? else {
+        let Some(preparation) = self.prepare_raw_scan(label_source)? else {
             return Ok(None);
         };
-        if prepared_columnar {
+        if self.mode == SeriesScanMode::Prepared {
             let partitions = self.properties.num_partitions().max(1);
             if partition >= partitions {
                 return Err(BoxedError::new(
@@ -879,7 +820,7 @@ impl RegionScanner for SeriesScan {
             let preparation = self
                 .check_scan_limit()
                 .map_err(BoxedError::new)
-                .map(|_| Some((preparation, prepared_columnar)));
+                .map(|_| Some(preparation));
             let future = self.prepare_series_with_raw(ctx, metrics_set, label_source, preparation);
             let labels = label_source.clone();
             let stream = async_stream::try_stream! {
@@ -898,8 +839,7 @@ impl RegionScanner for SeriesScan {
                 Box::pin(stream),
             )));
         }
-        // Stored sources without columnar artifacts (memtables, unindexed SSTs) are read by the
-        // ordinary scan, so the raw path stays available.
+        // Read Parquet regions through the ordinary per-series scan.
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -930,7 +870,7 @@ impl RegionScanner for SeriesScan {
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
     > {
-        if !self.uses_columnar() {
+        if !self.stream_ctx.input.requires_narthex_preparation() {
             return Box::pin(async { Ok(None) });
         }
         let preparation = self

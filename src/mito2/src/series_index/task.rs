@@ -285,7 +285,7 @@ impl SeriesIndexTask {
             Arc::ptr_eq(&current, region),
             InvalidRequestSnafu {
                 region_id: region.region_id,
-                reason: "region was replaced during series-index reconciliation",
+                reason: "region was replaced during series-index maintenance",
             }
         );
         ensure!(
@@ -300,29 +300,17 @@ impl SeriesIndexTask {
 
     async fn reconcile_manual(&mut self, region: MitoRegionRef) -> Result<()> {
         self.validate_manual_region(&region)?;
-        let result = self.reconcile_region_with_mode(region.clone(), true).await;
+        let result = self.reconcile_region(region.clone(), true).await;
         self.validate_manual_region(&region)?;
         result
     }
 
-    async fn reconcile_region(&mut self, region: MitoRegionRef) -> Result<()> {
-        self.reconcile_region_with_mode(region, false).await
-    }
-
-    async fn reconcile_region_with_mode(
-        &mut self,
-        region: MitoRegionRef,
-        manual: bool,
-    ) -> Result<()> {
+    async fn reconcile_region(&mut self, region: MitoRegionRef, manual: bool) -> Result<()> {
         if region.version().options.sst_format != Some(crate::sst::FormatType::Narthex)
             || region.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
         {
             return Ok(());
         }
-        self.reconcile_native(region, manual).await
-    }
-
-    async fn reconcile_native(&mut self, region: MitoRegionRef, manual: bool) -> Result<()> {
         self.build_and_expire_native(&region, manual).await?;
         let version = region.version();
         if !version.pending_tails.is_empty() || !self.state.is_running() {
@@ -574,7 +562,7 @@ impl SeriesIndexTask {
             if !self.state.is_running() {
                 break;
             }
-            if let Err(error) = self.reconcile_region(region.clone()).await {
+            if let Err(error) = self.reconcile_region(region.clone(), false).await {
                 warn!(error; "Failed to reconcile series indexes, worker: {}, region: {}", self.worker_id, region.region_id);
             }
         }

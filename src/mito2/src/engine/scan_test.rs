@@ -3118,7 +3118,7 @@ async fn check_series_scan_single_source_range_batches(rows_per_series: usize) {
     }
 }
 
-/// Runs one two-phase series scan over `filters` and returns `(tag_0, field_0, ts)` per row.
+/// Runs one series scan over `filters` and returns `(tag_0, field_0, ts)` per row.
 async fn sparse_rows(
     engine: &crate::engine::MitoEngine,
     region_id: RegionId,
@@ -5551,8 +5551,7 @@ async fn scan_sparse_exact_metric(
     (schema, canonical_sparse_rows(&batches))
 }
 
-/// Exact sparse-metric reads must use two-phase scanning and preserve the same
-/// complete rows as the legacy series scanner at every sequence boundary.
+/// Exact sparse-metric reads return complete rows at each sequence boundary.
 #[tokio::test]
 async fn test_sparse_metric_exact_sequence_cases() {
     let (_legacy_env, legacy, legacy_region) = build_sparse_exact_metric_engine(
@@ -5679,11 +5678,9 @@ async fn test_sparse_metric_exact_sequence_cache_isolation() {
 
     let (cold, _) = scan(restrictive.clone()).await;
     // Cache insertion is performed by the range stream's async concat task.
-    // The data reader uses partition 0 in two-phase mode and partition 1 in legacy mode.
     let warm = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (rows, verbose) = scan(restrictive.clone()).await;
-            // Inspect the data reader rather than candidate-stage cache hits.
             let data_metrics = verbose
                 .split("\"partition\":1, \"metrics\":")
                 .nth(1)
@@ -6835,7 +6832,7 @@ async fn test_raw_partition_out_of_range_keeps_scanner_usable() {
     );
 }
 
-/// Creates the sparse-encoded flat region shared by the two-phase raw scan tests.
+/// Creates the sparse-encoded flat region shared by the raw scan tests.
 ///
 /// Returns the region metadata and the row schema accepted by the sparse write path.
 async fn create_sparse_region(
@@ -7133,7 +7130,7 @@ async fn test_mito_raw_series_stream_declares_its_label_decode_description() {
         "the filtered-out stream produced no chunk"
     );
 
-    // Sparse encoding: the two-phase producer encodes table id and TSID into the key too.
+    // Sparse encoding: the producer encodes table id and TSID into the key too.
     let mut env = TestEnv::with_prefix("test_mito_raw_series_self_describing_sparse").await;
     let engine = env
         .create_engine(MitoConfig {

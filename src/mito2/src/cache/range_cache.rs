@@ -26,7 +26,6 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 use async_stream::try_stream;
 use common_cache::SyncCache;
 use common_telemetry::warn;
-use datafusion::execution::memory_pool::MemoryPool;
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use snafu::{IntoError, ResultExt};
@@ -43,19 +42,6 @@ use crate::sst::file::FileHandle;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 pub(crate) const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
-
-/// Separates active scans with different query memory reservations.
-/// Completed results are reusable across scopes. The default scope is for
-/// sources without a query-specific memory pool.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub(crate) struct RangeCacheScope(usize);
-
-impl RangeCacheScope {
-    /// Uses the identity of the pool retained by the source scan.
-    pub(crate) fn for_memory_pool(pool: &Arc<dyn MemoryPool>) -> Self {
-        Self(Arc::as_ptr(pool) as *const () as usize)
-    }
-}
 
 /// Reports cache activity to the query that owns the reader or publication.
 pub(crate) trait RangeCacheMetricsReport: Send + Sync {
@@ -146,7 +132,6 @@ impl RangeResultCache {
         key: RangeScanCacheKey,
         part_metrics: Arc<dyn RangeCacheMetricsReport>,
         files: Vec<FileHandle>,
-        scope: RangeCacheScope,
         build: F,
     ) -> Result<(BoxedRecordBatchStream, usize)>
     where
@@ -154,7 +139,7 @@ impl RangeResultCache {
         Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
     {
         let cache = self;
-        let load = match cache.get_or_register(key, files, scope) {
+        let load = match cache.get_or_register(key, files) {
             RangeCacheLookup::Hit(value) => {
                 part_metrics.inc_range_cache_hit();
                 let batch_size = value.value().estimated_batch_size;
@@ -282,7 +267,7 @@ impl RangeResultCache {
         drop(value);
         let mut value = compacted.finish();
         value.estimated_batch_size = batch_size;
-        let bytes = load.key.0.estimated_size() + value.estimated_size();
+        let bytes = load.key.estimated_size() + value.estimated_size();
         if self.complete(&load, Arc::new(value)) {
             metrics.inc_range_cache_size(bytes);
         }
@@ -370,7 +355,7 @@ impl RangeResultCache {
                 state.forget(&key, generation);
             }
         }
-        state.flights.retain(|(key, _), flight| {
+        state.flights.retain(|key, flight| {
             let Some(flight) = flight.load.upgrade() else {
                 return false;
             };
@@ -387,7 +372,6 @@ impl RangeResultCache {
         self: &Arc<Self>,
         key: RangeScanCacheKey,
         files: Vec<FileHandle>,
-        scope: RangeCacheScope,
     ) -> RangeCacheLookup {
         let mut state = self.state.lock().unwrap();
         self.drain_cleanup(&mut state);
@@ -402,10 +386,9 @@ impl RangeResultCache {
         {
             return lookup;
         }
-        let scoped_key = (key, scope);
         if let Some(load) = state
             .flights
-            .get(&scoped_key)
+            .get(&key)
             .and_then(|entry| entry.load.upgrade())
         {
             RANGE_CACHE_WORKER_EVENTS
@@ -415,14 +398,14 @@ impl RangeResultCache {
         }
         let load = Arc::new(RangeLoad {
             shared_range: OnceCell::new(),
-            key: scoped_key.clone(),
+            key: key.clone(),
             generation: state.next_generation(),
             files,
             invalidated: AtomicBool::new(false),
             cleanup_tx: self.cleanup_tx.clone(),
         });
         state.flights.insert(
-            scoped_key,
+            key,
             RangeRegistration {
                 generation: load.generation,
                 load: Arc::downgrade(&load),
@@ -455,7 +438,7 @@ impl RangeResultCache {
                 .inc();
             return false;
         }
-        self.publish(&mut state, load.key.0.clone(), value);
+        self.publish(&mut state, load.key.clone(), value);
         RANGE_CACHE_WORKER_EVENTS
             .with_label_values(&["published"])
             .inc();
@@ -529,13 +512,10 @@ impl Entry {
     }
 }
 
-type FlightKey = (RangeScanCacheKey, RangeCacheScope);
-
 /// Readers own the scan; the coordinator only retains a weak registration.
-/// Query-pool identity isolates active reservations, not completed cache values.
 struct RangeLoad {
     shared_range: OnceCell<(Arc<SharedRange>, usize)>,
-    key: FlightKey,
+    key: RangeScanCacheKey,
     generation: u64,
     files: Vec<FileHandle>,
     invalidated: AtomicBool,
@@ -562,7 +542,7 @@ enum RangeCacheCleanup {
         generation: u64,
     },
     Released {
-        key: FlightKey,
+        key: RangeScanCacheKey,
         generation: u64,
     },
 }
@@ -570,7 +550,7 @@ enum RangeCacheCleanup {
 #[derive(Default)]
 struct State {
     generation: u64,
-    flights: HashMap<FlightKey, RangeRegistration>,
+    flights: HashMap<RangeScanCacheKey, RangeRegistration>,
     /// File IDs are globally unique. Index by physical file, not query region:
     /// a copied region can read an SST whose original region differs from its own.
     files: HashMap<FileId, HashMap<Arc<RangeScanCacheKey>, u64>>,
@@ -759,20 +739,16 @@ mod tests {
 
         let blocker = worker.retention_memory.try_acquire(1024).unwrap();
         assert!(matches!(
-            worker.get_or_register(key.clone(), vec![], RangeCacheScope(0)),
+            worker.get_or_register(key.clone(), vec![]),
             RangeCacheLookup::Bypass
         ));
         assert!(worker.get(&key).is_some());
         drop(blocker);
 
-        let RangeCacheLookup::Hit(first) =
-            worker.get_or_register(key.clone(), vec![], RangeCacheScope(0))
-        else {
+        let RangeCacheLookup::Hit(first) = worker.get_or_register(key.clone(), vec![]) else {
             panic!("expected an accounted cache hit");
         };
-        let RangeCacheLookup::Hit(second) =
-            worker.get_or_register(key.clone(), vec![], RangeCacheScope(0))
-        else {
+        let RangeCacheLookup::Hit(second) = worker.get_or_register(key.clone(), vec![]) else {
             panic!("readers of the same value must share its reservation");
         };
         assert!(Arc::ptr_eq(&first, &second));
@@ -788,31 +764,29 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_registration_is_scoped_and_reader_owned() {
+    fn test_streaming_registration_is_reader_owned() {
         let worker = RangeResultCache::new(1024 * 1024);
         let key = range_cache_key(&[FileId::random()]);
-        let first = loading(worker.get_or_register(key.clone(), vec![], RangeCacheScope(1)));
-        let second = loading(worker.get_or_register(key.clone(), vec![], RangeCacheScope(1)));
+        let first = loading(worker.get_or_register(key.clone(), vec![]));
+        let second = loading(worker.get_or_register(key.clone(), vec![]));
         assert!(Arc::ptr_eq(&first, &second));
-        let other_pool = loading(worker.get_or_register(key.clone(), vec![], RangeCacheScope(2)));
-        assert!(!Arc::ptr_eq(&first, &other_pool));
         let weak = Arc::downgrade(&first);
         drop(first);
         assert!(weak.upgrade().is_some());
         drop(second);
         assert!(weak.upgrade().is_none());
-        let retry = loading(worker.get_or_register(key.clone(), vec![], RangeCacheScope(1)));
+        let retry = loading(worker.get_or_register(key.clone(), vec![]));
         // Publication must not reserve the active source's buffer twice.
         let source_permit = worker.retention_memory.try_acquire(1024 * 1024).unwrap();
         assert!(worker.complete(&retry, empty_result()));
         assert!(worker.get(&key).is_some());
         assert!(matches!(
-            worker.get_or_register(key.clone(), vec![], RangeCacheScope(3)),
+            worker.get_or_register(key.clone(), vec![]),
             RangeCacheLookup::Bypass
         ));
         drop(source_permit);
         assert!(matches!(
-            worker.get_or_register(key, vec![], RangeCacheScope(3)),
+            worker.get_or_register(key, vec![]),
             RangeCacheLookup::Hit(_)
         ));
     }
@@ -823,11 +797,7 @@ mod tests {
             let worker = RangeResultCache::new(1024 * 1024);
             let file = FileHandle::new(FileMeta::default(), Arc::new(NoopFilePurger));
             let key = range_cache_key(&[file.file_id().file_id()]);
-            let load = loading(worker.get_or_register(
-                key.clone(),
-                vec![file.clone()],
-                RangeCacheScope(0),
-            ));
+            let load = loading(worker.get_or_register(key.clone(), vec![file.clone()]));
             if mark_handle {
                 file.mark_deleted();
             } else {
@@ -837,7 +807,7 @@ mod tests {
             assert!(worker.get(&key).is_none());
             if mark_handle {
                 assert!(matches!(
-                    worker.get_or_register(key, vec![file], RangeCacheScope(0)),
+                    worker.get_or_register(key, vec![file]),
                     RangeCacheLookup::Bypass
                 ));
             }
@@ -848,8 +818,8 @@ mod tests {
     fn test_scan_release_cleans_only_the_last_owner_under_the_state_lock() {
         let cache = RangeResultCache::new(1024 * 1024);
         let key = range_cache_key(&[FileId::random()]);
-        let first = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
-        let second = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+        let first = loading(cache.get_or_register(key.clone(), vec![]));
+        let second = loading(cache.get_or_register(key.clone(), vec![]));
         let weak = Arc::downgrade(&first);
         let mut state = cache.state.lock().unwrap();
         drop(first);
@@ -866,13 +836,13 @@ mod tests {
     fn test_delayed_scan_release_keeps_a_replacement_registration() {
         let cache = RangeResultCache::new(1024 * 1024);
         let key = range_cache_key(&[FileId::random()]);
-        let old = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+        let old = loading(cache.get_or_register(key.clone(), vec![]));
         drop(old);
         let delayed = cache.cleanup_rx.lock().unwrap().try_recv().unwrap();
         // Reproduce release arriving after another caller has replaced the dead Weak.
-        let new = loading(cache.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+        let new = loading(cache.get_or_register(key.clone(), vec![]));
         cache.cleanup_tx.send(delayed).unwrap();
-        let shared = loading(cache.get_or_register(key, vec![], RangeCacheScope(0)));
+        let shared = loading(cache.get_or_register(key, vec![]));
         assert!(Arc::ptr_eq(&new, &shared));
         drop(new);
         drop(shared);
@@ -891,18 +861,18 @@ mod tests {
             .collect();
         let loads: Vec<_> = keys
             .iter()
-            .map(|key| loading(worker.get_or_register(key.clone(), vec![], RangeCacheScope(0))))
+            .map(|key| loading(worker.get_or_register(key.clone(), vec![])))
             .collect();
         for (key, load) in keys.iter().zip(&loads) {
-            let shared = loading(worker.get_or_register(key.clone(), vec![], RangeCacheScope(0)));
+            let shared = loading(worker.get_or_register(key.clone(), vec![]));
             assert!(Arc::ptr_eq(load, &shared));
         }
         let abandoned: Vec<_> = loads.iter().map(Arc::downgrade).collect();
         drop(loads);
         assert!(abandoned.iter().all(|load| load.upgrade().is_none()));
-        let next = loading(worker.get_or_register(keys[0].clone(), vec![], RangeCacheScope(0)));
+        let next = loading(worker.get_or_register(keys[0].clone(), vec![]));
         assert_eq!(worker.state.lock().unwrap().flights.len(), 1);
-        let shared = loading(worker.get_or_register(keys[0].clone(), vec![], RangeCacheScope(0)));
+        let shared = loading(worker.get_or_register(keys[0].clone(), vec![]));
         assert!(Arc::ptr_eq(&next, &shared));
     }
 
@@ -956,11 +926,8 @@ mod tests {
         worker.insert(key.clone(), empty_result());
         assert!(worker.get(&key).is_some());
         let loading_key = key.clone().for_cross_range_merge();
-        let pending = loading(worker.get_or_register(
-            loading_key.clone(),
-            vec![old_reader.clone()],
-            RangeCacheScope(0),
-        ));
+        let pending =
+            loading(worker.get_or_register(loading_key.clone(), vec![old_reader.clone()]));
         let updated = FileMeta {
             index_version: 1,
             available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
@@ -974,7 +941,7 @@ mod tests {
         assert!(old_reader.is_deleted());
         assert!(worker.get(&key).is_none());
         assert!(matches!(
-            worker.get_or_register(key, vec![old_reader], RangeCacheScope(0)),
+            worker.get_or_register(key, vec![old_reader]),
             RangeCacheLookup::Bypass
         ));
         assert!(!worker.complete(&pending, empty_result()));

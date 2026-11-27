@@ -87,8 +87,7 @@ pub fn should_enable_gc(global_gc_enabled: bool, _object_store_scheme: &'static 
 /// the files from both the storage and the cache.
 ///
 /// If the storage is an object store, an `ObjectStoreFilePurger` is created, which
-/// only manages SST file references. Companion range indexes are deleted directly in either
-/// mode on final handle release when the SST is marked deleted and a deleter is provided.
+/// only manages SST file references.
 /// Shared SSTs and their indexes are retained for global GC.
 ///
 pub fn create_file_purger(

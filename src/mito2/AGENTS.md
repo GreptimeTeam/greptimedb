@@ -28,7 +28,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `engine/table_compaction` | `src/mito2/src/engine/table_compaction.rs` | Enterprise conditional publication of table-compaction results: shared-input snapshot, verified-output checks, and the manifest-locked swap of shared inputs for L0 outputs |
 | `access_layer` | `src/mito2/src/access_layer.rs` | SST read/write over the object store |
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
-| `series_index` | `src/mito2/src/series_index/` | Format interfaces (`format.rs`), index writer/searcher, sample artifacts and source coverage (`artifact.rs`), bucket planning, catalogs, reconciliation (`maintenance.rs`), and deferred purge |
+| `series_index` | `src/mito2/src/series_index/` | Native series and samples codecs, exact-key discovery and manifest-backed series index maintenance |
 | `read` | `src/mito2/src/read/` | `ScanRegion`, merge, dedup, projection, streaming |
 | `manifest` | `src/mito2/src/manifest/` | `RegionManifestManager`, manifest actions/edits |
 | `cache` | `src/mito2/src/cache.rs` | Write/file/page caches |

@@ -80,7 +80,7 @@ use crate::sst::parquet::file_range::{
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
 use crate::sst::parquet::json_align::{AlignMode, JsonSchemaAligner, ProjectedRecordBatchStream};
-use crate::sst::parquet::metadata::{MetadataLoader, primary_key_leaf_index};
+use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
@@ -359,6 +359,7 @@ impl ParquetReaderBuilder {
     }
 
     /// Sets whether to run the reduced-column predicate prefilter pass.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn enable_predicate_prefilter(mut self, enable: bool) -> Self {
         self.enable_predicate_prefilter = enable;
@@ -1871,50 +1872,6 @@ impl RowGroupReaderBuilder {
             )
             .await?;
         self.make_projected_stream(stream)
-    }
-
-    /// Builds the normal projection without running the generic predicate prefilter.
-    ///
-    /// The series reader uses this after computing its own primary-key-only row
-    /// selection.
-    pub(crate) async fn build_without_prefilter(
-        &self,
-        build_ctx: RowGroupBuildContext<'_>,
-    ) -> Result<ProjectedRecordBatchStream> {
-        let stream = self
-            .build_with_projection(
-                build_ctx.row_group_idx,
-                build_ctx.row_selection,
-                self.projection.mask.clone(),
-                build_ctx.fetch_metrics,
-            )
-            .await?;
-        self.make_projected_stream(stream)
-    }
-
-    /// Builds a stream that reads only the encoded primary-key column.
-    ///
-    /// It preserves the normal reader's binary-or-dictionary decision. This path deliberately
-    /// skips the normal prefilter pass: the caller reads `__primary_key` once and applies all
-    /// encoded-primary-key filters to the returned batches.
-    pub(crate) async fn build_primary_key(
-        &self,
-        build_ctx: RowGroupBuildContext<'_>,
-    ) -> Result<ProjectedRecordBatchStream> {
-        let parquet_schema = self.parquet_meta.file_metadata().schema_descr();
-        let primary_key_index =
-            primary_key_leaf_index(parquet_schema).context(UnexpectedSnafu {
-                reason: "SST does not contain __primary_key",
-            })?;
-        let projection = ProjectionMask::leaves(parquet_schema, [primary_key_index]);
-
-        self.build_with_projection(
-            build_ctx.row_group_idx,
-            build_ctx.row_selection,
-            projection,
-            build_ctx.fetch_metrics,
-        )
-        .await
     }
 
     fn make_projected_stream(

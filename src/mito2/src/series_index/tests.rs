@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Behavioral coverage for series-index reconciliation.
+//! Behavioral coverage for Narthex series-index maintenance.
 
 use api::v1::helper::row;
 use api::v1::value::ValueData;

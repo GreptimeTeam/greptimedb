@@ -32,7 +32,7 @@ use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 
 use crate::series_index::artifact::SamplesFileHandle;
-use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
+use crate::series_index::format::{SamplesBatch, SamplesReadRequest};
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{

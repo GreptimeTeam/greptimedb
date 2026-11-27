@@ -2320,12 +2320,9 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_clamp_aggregates_execute_on_native_segments() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_clamp_aggregates").with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_clamp_aggregates",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -2408,13 +2405,9 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_rows_name_each_row_after_its_metric() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_rows_name_each_row")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_rows_name_each_row",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -2554,12 +2547,9 @@ async fn native_promql_rows_name_each_row_after_its_metric() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_group_by_name_over_several_metrics() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_group_by_name").with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_group_by_name",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -2670,13 +2660,9 @@ fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, q
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_field_selector_over_no_table_answers_empty() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_field_selector_empty")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_field_selector_empty",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -2757,13 +2743,9 @@ async fn native_promql_field_selector_over_no_table_answers_empty() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_canonical_merge_over_partitioned_table() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_canonical_partitioned")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_canonical_partitioned",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -4273,13 +4255,8 @@ async fn native_promql_kind_rules_match_legacy() {
     use tower::ServiceExt;
 
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_kind_rules").with_mito_config(config),
-    )
-    .await;
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_kind_rules")).await;
     let instance = standalone.fe_instance().clone();
     let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
     let router = server.build(server.make_app()).unwrap();
@@ -6286,13 +6263,9 @@ async fn distributed_native_promql_data_free_statement_plans_natively() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus_answers() {
     common_telemetry::init_default_ut_logging();
-    let mito_config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_label_rewrite_reachable")
-            .with_mito_config(mito_config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_label_rewrite_reachable",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     // Sixteen host series spread the scan over four partitions, and `probe_time` holds the
@@ -6770,13 +6743,9 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_rewrites_the_metric_name() {
     common_telemetry::init_default_ut_logging();
-    let mito_config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_metric_name_rewrite")
-            .with_mito_config(mito_config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_metric_name_rewrite",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -7026,11 +6995,7 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     common_telemetry::init_default_ut_logging();
     // The fixture opts in so its single bulk insert is distributed across real TSID scan
     // partitions; legacy may send its one batch only to partition 0.
-    let mito_config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let builder =
-        GreptimeDbStandaloneBuilder::new("native_promql_fused_e2e").with_mito_config(mito_config);
+    let builder = GreptimeDbStandaloneBuilder::new("native_promql_fused_e2e");
     let (standalone, observer) = native_test_instance(builder).await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -8140,13 +8105,9 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     }
 
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_two_scan_binary_e2e")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_two_scan_binary_e2e",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     let table = "native_two_scan_pair";
@@ -8384,13 +8345,9 @@ async fn native_promql_set_operators_read_both_scans_whole() {
     }
 
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_set_operators_e2e")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_set_operators_e2e",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     let table = "native_set_pair";
@@ -8629,12 +8586,9 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
     const BATCH_ROWS: usize = 512;
 
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_e2e").with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_cross_table_e2e",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     let schema = vec![
@@ -10990,13 +10944,9 @@ async fn native_hybrid_binary_empty_on_grouped_matching_and_errors() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings() {
     common_telemetry::init_default_ut_logging();
-    let mito_config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_rate_storage_encodings")
-            .with_mito_config(mito_config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_rate_storage_encodings",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
 
@@ -13967,13 +13917,9 @@ fn expected_rows(rows: &[(i64, &str, f64)]) -> Vec<(i64, String, String)> {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_scalar_e2e")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_dynamic_scalar_e2e",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -14279,13 +14225,9 @@ fn eval_text_rows(output: Output, reported: ReportedName<'_>) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_sum_topk_uses_global_topk_segment() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_sum_topk_segments")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_sum_topk_segments",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -14495,11 +14437,7 @@ async fn assert_computed_matching_key_runtime_parallelism(
     query: &str,
 ) {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) =
-        native_test_instance(GreptimeDbStandaloneBuilder::new(name).with_mito_config(config)).await;
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(name)).await;
     let instance = standalone.fe_instance().clone();
     execute_all(&instance, setup_sql, QueryContext::arc()).await;
 
@@ -14614,13 +14552,9 @@ async fn native_promql_computed_matching_key_cross_table_is_parallel() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_multi_source_segments_match_legacy_values() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_multi_source_segments")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_multi_source_segments",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -14895,13 +14829,9 @@ async fn native_promql_recursive_matching_segments_match_legacy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_segment_boundaries")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_segment_boundaries",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -15071,13 +15001,9 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_whole_vector_operators_over_an_aggregate_keep_their_route() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_ranking_over_aggregate")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_ranking_over_aggregate",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -15148,13 +15074,9 @@ async fn native_promql_whole_vector_operators_over_an_aggregate_keep_their_route
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bounds() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_offsets")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_cross_table_offsets",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -15290,13 +15212,9 @@ async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bound
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_cross_table_range_aggregate_segments_keep_windows() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_range_segments")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_cross_table_range_segments",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -15706,13 +15624,9 @@ async fn native_promql_scalar_multi_field_falls_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_dynamic_histogram_quantile() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_dynamic_histogram_quantile")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_dynamic_histogram_quantile",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(&instance, "CREATE TABLE native_dyn_hist (ts TIMESTAMP TIME INDEX, le STRING, v DOUBLE, PRIMARY KEY(le)); INSERT INTO native_dyn_hist (ts, le, v) VALUES (-60000, '1', 0), (0, '1', 5), (60000, '1', 10), (-60000, '2', 0), (0, '2', 9), (60000, '2', 18), (-60000, '+Inf', 0), (0, '+Inf', 10), (60000, '+Inf', 20)", QueryContext::arc()).await;
@@ -15793,12 +15707,9 @@ async fn native_promql_dynamic_histogram_quantile() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_dynamic_quantile() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_quantile").with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_dynamic_quantile",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -15977,12 +15888,9 @@ async fn native_promql_dynamic_quantile() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_dynamic_topk_matches_legacy() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_topk_e2e").with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_dynamic_topk_e2e",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -16332,13 +16240,9 @@ async fn native_promql_scalar_parameter_reads_its_own_selector() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_map_with_varying_parameters_matches_prometheus() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_varying_parameter_e2e")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_varying_parameter_e2e",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -16978,13 +16882,9 @@ fn find_plan_node_over(
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     common_telemetry::init_default_ut_logging();
-    let mito_config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_root_canonical_merge")
-            .with_mito_config(mito_config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_root_canonical_merge",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     // Sixteen series over one timestamp: each partition holds four of them, and every one of them
@@ -17571,13 +17471,9 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_fold_over_cross_partition_collision_reports_the_collision() {
     common_telemetry::init_default_ut_logging();
-    let mito_config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_fold_collision")
-            .with_mito_config(mito_config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_fold_collision",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     // Sixteen series over one timestamp, one value each: the scan hands them out over the session's
@@ -17760,13 +17656,8 @@ async fn native_promql_fold_over_cross_partition_collision_reports_the_collision
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_subqueries_match_legacy() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_subqueries").with_mito_config(config),
-    )
-    .await;
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_subqueries")).await;
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
@@ -17971,13 +17862,9 @@ async fn native_promql_subqueries_match_legacy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_aggregate_subquery_operands_run_natively() {
     common_telemetry::init_default_ut_logging();
-    let config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_aggregate_subquery")
-            .with_mito_config(config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_aggregate_subquery",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -18025,12 +17912,9 @@ async fn native_promql_aggregate_subquery_operands_run_natively() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_matrix_root_matches_legacy() {
     common_telemetry::init_default_ut_logging();
-    let mito_config = mito2::config::MitoConfig {
-        ..Default::default()
-    };
-    let (standalone, observer) = native_test_instance(
-        GreptimeDbStandaloneBuilder::new("native_promql_matrix_root").with_mito_config(mito_config),
-    )
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_matrix_root",
+    ))
     .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
@@ -18311,10 +18195,8 @@ async fn native_promql_matrix_root_matches_legacy() {
     assert_eq!(native, legacy);
 }
 
-/// Native histograms in a Narthex physical table, and in a Parquet one served by a columnar
-/// series-index sidecar, answer what the same samples answer in a plain Parquet table: PromQL on
-/// both routes and remote read, from the memtable, after flushes, after a compaction and after a
-/// reopen.
+/// Checks native histograms against ordinary Parquet through PromQL and remote read,
+/// across flush, compaction, and reopen.
 #[tokio::test(flavor = "multi_thread")]
 async fn narthex_native_histograms_match_parquet() {
     use api::helper::ColumnDataTypeWrapper;
@@ -18331,6 +18213,7 @@ async fn narthex_native_histograms_match_parquet() {
     let builder = GreptimeDbStandaloneBuilder::new("narthex_native_histograms")
         .with_mito_config(mito2::config::MitoConfig {
             experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
             ..Default::default()
         })
@@ -18347,7 +18230,7 @@ async fn narthex_native_histograms_match_parquet() {
         ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
             .unwrap()
             .into_parts();
-    // The plain Parquet table at index 1 is the baseline the others are compared against.
+    // The plain Parquet table supplies the expected results.
     let tables = [
         ("narthex_hist", "narthex_phy"),
         ("parquet_hist", "parquet_phy"),

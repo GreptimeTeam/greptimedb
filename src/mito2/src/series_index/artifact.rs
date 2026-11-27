@@ -24,18 +24,10 @@ use crate::sst::file::RegionFileId;
 /// Persisted artifact identifiers. Concrete codecs are added with their implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ArtifactFormat {
-    #[serde(rename = "parquet")]
-    Parquet,
     #[serde(rename = "columnar-series")]
     ColumnarSeries,
     #[serde(rename = "columnar-samples")]
     ColumnarSamples,
-    #[cfg(test)]
-    #[serde(rename = "fake-samples")]
-    FakeSamples,
-    #[cfg(test)]
-    #[serde(rename = "fake-index")]
-    FakeIndex,
 }
 
 /// One immutable object produced by a backend build.
@@ -55,7 +47,7 @@ pub(crate) struct ArtifactMetadata {
     pub(crate) file_size: u64,
 }
 
-/// One samples artifact derived from immutable Parquet SSTs.
+/// The object inventory for an immutable Narthex samples file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SamplesEntry {
     pub(crate) file_id: FileId,

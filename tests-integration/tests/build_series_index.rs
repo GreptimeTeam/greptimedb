@@ -55,7 +55,7 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
     "#,
     )
     .await;
-    // Reconciliation requires at least four SSTs in each bucket.
+    // The default build threshold is four SSTs per window.
     for timestamp in [1000, 2000, 3000, 4000] {
         execute_sql(
             frontend,
@@ -82,6 +82,11 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
     ] {
         assert!(try_execute_sql(frontend, sql).await.is_err(), "{sql}");
     }
+    execute_sql(frontend, "CREATE TABLE parquet_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE = metric WITH (physical_metric_table = 'true', sst_format = 'flat')").await;
+    let error = try_execute_sql(frontend, "ADMIN BUILD_SERIES_INDEX('parquet_physical')")
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("Narthex"), "{error:?}");
     execute_sql(frontend, "CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX)").await;
     assert!(
         try_execute_sql(frontend, "ADMIN BUILD_SERIES_INDEX('ordinary')")

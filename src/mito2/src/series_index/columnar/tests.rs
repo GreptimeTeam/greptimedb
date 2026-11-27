@@ -438,7 +438,6 @@ async fn read_rows(
 
 /// Publishes a writer that was created from the returned `entry`.
 async fn handle_of(
-    _store: &ObjectStore,
     entry: FileMeta,
     writer: Box<dyn crate::series_index::format::FormatWriter>,
 ) -> FileHandle {

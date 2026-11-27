@@ -23,7 +23,6 @@ use async_stream::try_stream;
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use datafusion::execution::memory_pool::MemoryPool;
 use datafusion_expr::expr::Expr;
 use datafusion_expr::{Between, BinaryExpr, Operator};
 #[cfg(test)]
@@ -37,7 +36,6 @@ use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector}
 use table::predicate::is_string_timestamp_literal;
 
 use crate::cache::CacheStrategy;
-use crate::cache::range_cache::RangeCacheScope;
 #[cfg(test)]
 use crate::cache::range_cache::{RANGE_CACHE_COMPACT_THRESHOLD_BYTES, RangeScanCacheValue};
 use crate::error::Result;
@@ -525,32 +523,6 @@ impl CachedRangeReader<'_> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
     {
-        self.build_in_scope(RangeCacheScope::default(), build).await
-    }
-
-    /// Shares active scans only with readers using the same query memory pool.
-    pub(crate) async fn build_with_memory_pool<F, Fut>(
-        self,
-        memory_pool: &Arc<dyn MemoryPool>,
-        build: F,
-    ) -> Result<(BoxedRecordBatchStream, usize)>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
-    {
-        self.build_in_scope(RangeCacheScope::for_memory_pool(memory_pool), build)
-            .await
-    }
-
-    async fn build_in_scope<F, Fut>(
-        self,
-        scope: RangeCacheScope,
-        build: F,
-    ) -> Result<(BoxedRecordBatchStream, usize)>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
-    {
         let Some(key) = self.key else {
             return build().await;
         };
@@ -564,7 +536,6 @@ impl CachedRangeReader<'_> {
             key,
             self.metrics,
             files,
-            scope,
             build,
         )
         .await
@@ -583,31 +554,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
 {
-    get_or_load_range_result_in_scope(
-        strategy,
-        key,
-        part_metrics,
-        RangeCacheScope::default(),
-        build,
-    )
-    .await
-}
-
-/// Isolates active sources that reserve memory from a query-specific pool.
-/// Pool identity affects active sharing only, never completed-result reuse.
-#[cfg(any(test, feature = "test"))]
-pub(crate) async fn get_or_load_range_result_in_scope<F, Fut>(
-    strategy: &CacheStrategy,
-    key: RangeScanCacheKey,
-    part_metrics: &PartitionMetrics,
-    scope: RangeCacheScope,
-    build: F,
-) -> Result<(BoxedRecordBatchStream, usize)>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
-{
-    load_shared_range(strategy, key, part_metrics, Vec::new(), scope, build).await
+    load_shared_range(strategy, key, part_metrics, Vec::new(), build).await
 }
 
 async fn load_shared_range<F, Fut>(
@@ -615,7 +562,6 @@ async fn load_shared_range<F, Fut>(
     key: RangeScanCacheKey,
     part_metrics: &PartitionMetrics,
     files: Vec<crate::sst::file::FileHandle>,
-    scope: RangeCacheScope,
     build: F,
 ) -> Result<(BoxedRecordBatchStream, usize)>
 where
@@ -630,7 +576,6 @@ where
             key,
             part_metrics.range_cache_metrics_reporter(),
             files,
-            scope,
             build,
         )
         .await
@@ -1834,20 +1779,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_shared_stream_does_not_poison_a_later_request() {
-        let pool_a: Arc<dyn MemoryPool> =
-            Arc::new(datafusion::execution::memory_pool::UnboundedMemoryPool::default());
-        let pool_b: Arc<dyn MemoryPool> =
-            Arc::new(datafusion::execution::memory_pool::UnboundedMemoryPool::default());
-        let scope_a = RangeCacheScope::for_memory_pool(&pool_a);
-        let scope_b = RangeCacheScope::for_memory_pool(&pool_b);
         let strategy = test_cache_strategy();
         let (key, metrics) = test_cache_context(&strategy);
-        let (mut failed, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_a,
-            || async {
+        let (mut failed, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
                 let source = futures::stream::iter(vec![
                     Ok(make_batch(&[7])),
                     Err(crate::error::UnexpectedSnafu {
@@ -1856,29 +1791,16 @@ mod tests {
                     .build()),
                 ]);
                 Ok((Box::pin(source) as BoxedRecordBatchStream, 3))
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
         // Keep a second reader alive so the failed generation remains registered.
-        let (mut existing, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_a,
-            || async { panic!("existing reader must share the source") },
-        )
-        .await
-        .unwrap();
-        let (other_pool, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_b,
-            || async { Ok((source_stream(vec![make_batch(&[8])]), 1)) },
-        )
-        .await
-        .unwrap();
+        let (mut existing, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                panic!("existing reader must share the source")
+            })
+            .await
+            .unwrap();
         assert_eq!(failed.try_next().await.unwrap().unwrap(), make_batch(&[7]));
         let error = failed.try_next().await.unwrap_err();
         let crate::error::Error::LoadRangeResult { source, .. } = error else {
@@ -1889,19 +1811,12 @@ mod tests {
             if reason == "transient source error")
         );
         let expected = make_batch(&[1, 2, 3]);
-        let (mut retry, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_a,
-            || async {
-                Ok((
-                    Box::pin(futures::stream::iter([Ok(expected.clone())]))
-                        as BoxedRecordBatchStream,
-                    3,
-                ))
-            },
-        )
+        let (mut retry, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            Ok((
+                Box::pin(futures::stream::iter([Ok(expected.clone())])) as BoxedRecordBatchStream,
+                3,
+            ))
+        })
         .await
         .unwrap();
         assert_eq!(retry.try_next().await.unwrap().unwrap(), expected);
@@ -1917,20 +1832,15 @@ mod tests {
             matches!(source.as_ref(), crate::error::Error::Unexpected { reason, .. }
             if reason == "transient source error")
         );
-        assert_eq!(
-            other_pool.try_collect::<Vec<_>>().await.unwrap(),
-            vec![make_batch(&[8])]
-        );
         wait_cached(&strategy, &key).await;
-        let (cached, _) =
-            get_or_load_range_result_in_scope(&strategy, key, &metrics, scope_a, || async {
-                panic!("completed result must be reusable across pools")
-            })
-            .await
-            .unwrap();
+        let (cached, _) = get_or_load_range_result(&strategy, key, &metrics, || async {
+            panic!("successful retry must be cached")
+        })
+        .await
+        .unwrap();
         assert_eq!(
             cached.try_collect::<Vec<_>>().await.unwrap(),
-            vec![make_batch(&[8])]
+            vec![expected]
         );
     }
 
