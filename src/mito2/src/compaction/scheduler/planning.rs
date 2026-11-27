@@ -615,7 +615,7 @@ impl CompactionScheduler {
 }
 
 /// Estimates compaction memory as the sum of all input files' maximum row-group
-/// uncompressed sizes.
+/// decoded or uncompressed sizes, whichever is larger.
 fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
     picker_output
         .outputs
@@ -624,6 +624,7 @@ fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
         .map(|file: &FileHandle| {
             let meta = file.meta_ref();
             meta.max_row_group_uncompressed_size
+                .max(meta.max_row_group_decoded_size)
         })
         .sum()
 }

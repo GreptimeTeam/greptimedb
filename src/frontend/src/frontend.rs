@@ -169,6 +169,7 @@ impl Configurable for FrontendOptions {
             "heartbeat_env_vars",
             "meta_client.metasrv_addrs",
             "event_recorder.event_types",
+            "query.remote_allowed_hosts",
             "pending_rows_batcher.protocols",
             "pending_rows_batcher.logical_table.protocols",
         ])

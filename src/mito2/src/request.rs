@@ -1010,6 +1010,7 @@ impl WorkerRequest {
             input_regions,
             region_mapping,
             new_partition_exprs,
+            validate_only,
         }: store_api::region_engine::RemapManifestsRequest,
     ) -> Result<(WorkerRequest, Receiver<Result<HashMap<RegionId, String>>>)> {
         let (sender, receiver) = oneshot::channel();
@@ -1030,6 +1031,7 @@ impl WorkerRequest {
             input_regions,
             region_mapping,
             new_partition_exprs,
+            validate_only,
             sender,
         };
 
@@ -1429,6 +1431,8 @@ pub(crate) struct RemapManifestsRequest {
     pub(crate) region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// New partition expressions for the new regions.
     pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
+    /// Only verify the ownership rule of [`Self::region_id`] instead of remapping.
+    pub(crate) validate_only: bool,
     /// Sender for the result of the remap operation.
     ///
     /// The result is a map from region IDs to their corresponding staging manifest paths.

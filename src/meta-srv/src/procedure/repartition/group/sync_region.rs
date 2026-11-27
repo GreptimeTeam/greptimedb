@@ -35,6 +35,7 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
+    validate_merge_sources,
 };
 use crate::procedure::repartition::group::{Context, State};
 use crate::procedure::utils::{ErrorStrategy, instruction_error_result};
@@ -58,6 +59,8 @@ impl State for SyncRegion {
     ) -> Result<(Box<dyn State>, Status)> {
         Self::flush_central_region(ctx).await?;
         self.sync_regions(ctx).await?;
+        // Check ownership before publishing target routes.
+        validate_merge_sources(ctx).await?;
 
         Ok((
             Box::new(UpdateMetadata::ApplyStaging),

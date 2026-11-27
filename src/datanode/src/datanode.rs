@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use common_base::Plugins;
 use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE};
-use common_datasource::object_store::LocalFileAccess;
+use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
@@ -551,6 +551,11 @@ impl DatanodeBuilder {
             file_engine_config,
             object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
             self.local_file_access.clone(),
+            RemoteStorageAccess::new(
+                &self.opts.query.remote_allowed_hosts,
+                self.opts.query.allow_server_credentials,
+            )
+            .context(error::ObjectStoreSnafu)?,
         );
 
         Ok(vec![

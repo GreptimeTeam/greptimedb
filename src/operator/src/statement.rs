@@ -42,7 +42,7 @@ use catalog::process_manager::ProcessManagerRef;
 use client::RecordBatches;
 use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
 use client::inserter::{InsertOptions, Inserter};
-use common_datasource::object_store::LocalFileAccess;
+use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
@@ -150,6 +150,7 @@ pub struct StatementExecutor {
     origin_frontend_addr: String,
     admin_function_service: AdminFunctionServiceRef,
     pub(crate) local_file_access: LocalFileAccess,
+    pub(crate) remote_storage_access: RemoteStorageAccess,
     #[cfg(feature = "enterprise")]
     create_database_handler: Option<CreateDatabaseHandlerRef>,
     #[cfg(feature = "enterprise")]
@@ -189,6 +190,7 @@ impl StatementExecutor {
         process_manager: Option<ProcessManagerRef>,
         origin_frontend_addr: String,
         local_file_access: LocalFileAccess,
+        remote_storage_access: RemoteStorageAccess,
     ) -> Self {
         let admin_function_service = admin::new_admin_function_service(query_engine.clone());
         Self {
@@ -205,6 +207,7 @@ impl StatementExecutor {
             origin_frontend_addr,
             admin_function_service,
             local_file_access,
+            remote_storage_access,
             #[cfg(feature = "enterprise")]
             create_database_handler: None,
             #[cfg(feature = "enterprise")]

@@ -43,6 +43,11 @@ remote datanodes via `operator`/`client`.
   MySQL sessions without a selected database validate explicit scopes before
   planning or executing SQL, including prepared statements; unqualified targets
   fail without falling back to `public`.
+- **COPY DATABASE** (`instance.rs`, `instance/export_database.rs`): capture export
+  tables or prepare import requests, authorize the complete resolved target set,
+  then execute that same set. Export checks both SQL write permission and
+  `COPY_TO` read permission; import permission failures must not be swallowed by
+  `continue_on_error`.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
   auto-create, partition routing, meter admission) → local `RegionServer`

@@ -134,6 +134,7 @@ async fn test_apply_staging_manifest_sequence_domain_with_format(
         .unwrap();
     let result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id: source,
             input_regions: vec![source],
             region_mapping: [(source, vec![target])].into_iter().collect(),
@@ -472,6 +473,7 @@ async fn test_apply_staging_manifest_mismatched_partition_expr_with_format(flat_
     // If staging manifest's partition expr is different from the request.
     let result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id,
             input_regions: vec![region_id],
             region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
@@ -546,6 +548,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
         .unwrap();
     let result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id,
             input_regions: vec![region_id],
             region_mapping: [(region_id, vec![new_region_id_1, new_region_id_2])]
@@ -826,6 +829,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
 
     let remap_result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id,
             input_regions: vec![region_id],
             region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
@@ -963,6 +967,7 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
 
     let remap_result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id,
             input_regions: vec![region_id],
             region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
@@ -1057,6 +1062,7 @@ async fn test_split_repartition_causes_duplicate_data() {
 
     let remap_result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id: source_region_id,
             input_regions: vec![source_region_id],
             region_mapping: [(
@@ -1270,6 +1276,7 @@ async fn test_merge_repartition_data_integrity() {
     // Remap: R1 -> R1, R2 -> R1
     let remap_result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id: target_region_id,
             input_regions: vec![source_region_id_1, source_region_id_2],
             region_mapping: [

@@ -19,7 +19,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_datasource::object_store::{LocalFileAccess, build_backend};
+use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess, build_backend};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::{self as recordbatch_error, Result as RecordBatchResult};
 use common_recordbatch::{
@@ -45,10 +45,16 @@ impl FileRegion {
         &self,
         request: ScanRequest,
         local_file_access: &LocalFileAccess,
+        remote_storage_access: &RemoteStorageAccess,
     ) -> Result<SendableRecordBatchStream> {
-        let store = build_backend(&self.url, &self.options, local_file_access)
-            .await
-            .context(BuildBackendSnafu)?;
+        let store = build_backend(
+            &self.url,
+            &self.options,
+            local_file_access,
+            remote_storage_access,
+        )
+        .await
+        .context(BuildBackendSnafu)?;
 
         let projection = request.projection.as_deref();
         let file_projection = self.projection_pushdown_to_file(projection)?;

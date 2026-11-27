@@ -20,7 +20,7 @@ use std::time::Instant;
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
-use common_datasource::object_store::LocalFileAccess;
+use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
@@ -54,9 +54,14 @@ impl FileRegionEngine {
         _config: EngineConfig,
         object_store: ObjectStore,
         local_file_access: LocalFileAccess,
+        remote_storage_access: RemoteStorageAccess,
     ) -> Self {
         Self {
-            inner: Arc::new(EngineInner::new(object_store, local_file_access)),
+            inner: Arc::new(EngineInner::new(
+                object_store,
+                local_file_access,
+                remote_storage_access,
+            )),
         }
     }
 
@@ -70,7 +75,11 @@ impl FileRegionEngine {
             .await
             .context(RegionNotFoundSnafu { region_id })
             .map_err(BoxedError::new)?
-            .query(request, &self.inner.local_file_access)
+            .query(
+                request,
+                &self.inner.local_file_access,
+                &self.inner.remote_storage_access,
+            )
             .await
             .map_err(BoxedError::new)
     }
@@ -202,6 +211,8 @@ struct EngineInner {
     object_store: ObjectStore,
 
     local_file_access: LocalFileAccess,
+
+    remote_storage_access: RemoteStorageAccess,
 }
 
 type EngineInnerRef = Arc<EngineInner>;
@@ -225,12 +236,17 @@ fn ensure_region_requirements(
 }
 
 impl EngineInner {
-    fn new(object_store: ObjectStore, local_file_access: LocalFileAccess) -> Self {
+    fn new(
+        object_store: ObjectStore,
+        local_file_access: LocalFileAccess,
+        remote_storage_access: RemoteStorageAccess,
+    ) -> Self {
         Self {
             regions: RwLock::new(HashMap::new()),
             region_mutex: Mutex::new(()),
             object_store,
             local_file_access,
+            remote_storage_access,
         }
     }
 

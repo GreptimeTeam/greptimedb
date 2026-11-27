@@ -46,8 +46,8 @@ use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index}
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, PrimaryKeyArray};
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
 
-/// Returns true if the columns in the `projection_mapper` and `read_format` have same data types
-/// and primary key encodings.
+/// Returns true if the columns in the `projection_mapper` and `read_format` have the same data
+/// types, primary key order, and primary key encoding.
 pub(crate) fn has_same_columns_and_pk_encoding(
     projection_mapper: &FlatProjectionMapper,
     read_format: &FlatReadFormat,
@@ -56,6 +56,18 @@ pub(crate) fn has_same_columns_and_pk_encoding(
     let left = projection_mapper.metadata();
     let right = read_format.metadata();
     if left.primary_key_encoding != right.primary_key_encoding {
+        return false;
+    }
+
+    // The compat reader cannot reorder a key: it can only append missing tags or
+    // rewrite the encoding. A reordered dense key is therefore rejected instead of
+    // being re-encoded, and readers must not merge keys encoded in another order, even
+    // if the projected schema hides the difference. Only `Dense` encodes key columns
+    // positionally; sparse keys are canonicalized (labels are encoded in label-name
+    // order), so their declared order carries no encoded meaning.
+    if left.primary_key_encoding == PrimaryKeyEncoding::Dense
+        && left.primary_key != right.primary_key
+    {
         return false;
     }
 
@@ -746,6 +758,64 @@ mod tests {
             builder.append(pk).unwrap();
         }
         Arc::new(builder.finish())
+    }
+
+    #[test]
+    fn test_has_same_columns_and_pk_encoding_compares_pk_order() {
+        let semantic_types = [
+            (
+                0,
+                SemanticType::Timestamp,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ),
+            (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+            (2, SemanticType::Tag, ConcreteDataType::string_datatype()),
+            (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+        ];
+        // Same columns, column ids and encoding. Only the primary key order differs:
+        // the SST encodes `(tag_1, tag_2)` while the region expects `(tag_2, tag_1)`.
+        let actual_metadata = Arc::new(new_metadata(&semantic_types, &[1, 2]));
+        let expected_metadata = Arc::new(new_metadata(&semantic_types, &[2, 1]));
+        assert_ne!(
+            actual_metadata.primary_key, expected_metadata.primary_key,
+            "the two metadata must differ in primary key order"
+        );
+
+        // The projection reads only the ordinary field, so neither Arrow schema contains
+        // an individual tag column whose position could reveal the order. This is the
+        // case the primary key comparison has to cover: without it the schemas match and
+        // the reader merges keys encoded in another order.
+        let read_columns = ReadColumns::new([3]);
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &expected_metadata,
+            vec![3],
+            read_columns.clone(),
+        )
+        .unwrap();
+        let legacy_schema = crate::sst::to_sst_arrow_schema(&actual_metadata);
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            read_columns,
+            Some(legacy_schema),
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            &mapper.input_arrow_schema(false),
+            read_format.arrow_schema(),
+            "the schemas must match so only the primary key order differs"
+        );
+
+        // Any order mismatch must take the compat path instead of merging the batch.
+        assert!(!has_same_columns_and_pk_encoding(
+            &mapper,
+            &read_format,
+            false
+        ));
+        // The compat path cannot reorder the key, so it rejects the pair loudly instead of
+        // merging keys encoded in another order.
+        assert!(FlatCompatBatch::try_new(&mapper, &read_format, false).is_err());
     }
 
     #[test]

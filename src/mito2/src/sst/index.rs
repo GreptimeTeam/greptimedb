@@ -51,7 +51,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
-use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
+use crate::batch_size::{estimate_batch_size, widest_row_group_statistic};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
@@ -472,7 +472,7 @@ pub(crate) async fn build_index_from_parquet_bytes(
         return IndexOutput::default();
     }
     // Follow the batch size the flush reads use, so wide rows are not decoded 8192 at a time.
-    let batch_size = estimate_batch_size(largest_row_group_statistic(reader_builder.metadata()));
+    let batch_size = estimate_batch_size(widest_row_group_statistic(reader_builder.metadata()));
 
     // TODO(dennis): decode only the columns the enabled indexers need, including the encoded
     // primary key for tag indexes. This needs the indexer to stop locating columns by position.
@@ -520,7 +520,7 @@ impl IndexerBuilderImpl {
     fn build_inverted_indexer(
         &self,
         file_id: FileId,
-        row_group_size: Option<usize>,
+        _row_group_size: Option<usize>,
     ) -> Option<InvertedIndexer> {
         let create = match self.build_type {
             IndexBuildType::Flush => self.inverted_index_config.create_on_flush.auto(),
@@ -547,7 +547,7 @@ impl IndexerBuilderImpl {
             return None;
         }
 
-        let Some(mut segment_row_count) =
+        let Some(segment_row_count) =
             NonZeroUsize::new(self.index_options.inverted_index.segment_row_count)
         else {
             warn!(
@@ -557,12 +557,7 @@ impl IndexerBuilderImpl {
             return None;
         };
 
-        // if segment row count not aligned with row group size, adjust it to be aligned.
-        if let Some(row_group_size) = row_group_size.and_then(NonZeroUsize::new)
-            && row_group_size.get() % segment_row_count.get() != 0
-        {
-            segment_row_count = row_group_size;
-        }
+        // Segments may span row groups; readers split them at row group boundaries.
 
         let indexer = InvertedIndexer::new(
             file_id,
@@ -1017,18 +1012,9 @@ impl IndexBuildTask {
             .build()
             .await?;
 
-        let row_group_size = parquet_reader.as_ref().and_then(|reader| {
-            reader
-                .parquet_metadata()
-                .row_groups()
-                .first()
-                .map(|row_group| row_group.num_rows() as usize)
-                .filter(|size| *size > 0)
-        });
-
         let mut indexer = self
             .indexer_builder
-            .build(region_file_id, new_index_version, row_group_size)
+            .build(region_file_id, new_index_version, None)
             .await;
         // The build type or index options may leave nothing to build. Return before reading
         // any row; an empty indexer finishes with no output, which publishes nothing.

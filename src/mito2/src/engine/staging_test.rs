@@ -451,6 +451,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
 
     let result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id,
             input_regions: vec![region_id],
             region_mapping: [(region_id, vec![region_id])].into_iter().collect(),

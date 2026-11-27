@@ -224,10 +224,14 @@ impl StatementExecutor {
             _ => unreachable!(),
         };
 
-        let backend =
-            build_backend_for_write_with_path(location, connection, &self.local_file_access)
-                .await
-                .context(error::BuildBackendSnafu)?;
+        let backend = build_backend_for_write_with_path(
+            location,
+            connection,
+            &self.local_file_access,
+            &self.remote_storage_access,
+        )
+        .await
+        .context(error::BuildBackendSnafu)?;
         let filename = backend.object_path.context(error::UnexpectedSnafu {
             violated: format!("Expected filename, path: {location}"),
         })?;

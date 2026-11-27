@@ -17,7 +17,7 @@ cargo run -p sqlness-runner -- compat --from-version v0.9.5
 cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/old --to-bins-dir ./bins/new
 
 # Test a downgrade from the current build to a released binary:
-cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/current --to-version v1.1.4
+cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/current --to-version v1.2.1
 
 # Run a compatibility case in standalone mode:
 cargo run -p sqlness-runner -- compat --topology standalone --test-filter "downgrade_compatibility"
@@ -146,7 +146,10 @@ wrapper around artifact download/extraction and this script.
 
 `downgrade_to_versions` optionally lists releases that CI restarts after the
 PR-built cluster. Those runs select only the `downgrade_compatibility` case in
-both distributed and standalone topologies.
+both distributed and standalone topologies. The oldest supported target is
+v1.2.0: SSTs written since #10528 can have inverted index segments that cross
+row group boundaries, and older readers return fewer rows for indexed queries
+on them without an error.
 
 ### `setup.sql` — Setup Phase (From Version)
 

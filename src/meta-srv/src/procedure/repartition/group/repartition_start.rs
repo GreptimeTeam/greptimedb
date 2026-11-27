@@ -24,6 +24,7 @@ use snafu::{OptionExt, ensure};
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::sync_region::SyncRegion;
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
+use crate::procedure::repartition::group::utils::validate_merge_sources;
 use crate::procedure::repartition::group::{
     Context, GroupId, GroupPrepareResult, State, region_routes,
 };
@@ -146,6 +147,9 @@ impl State for RepartitionStart {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         if ctx.persistent_ctx.group_prepare_result.is_some() {
+            // Refuse a merge whose sources still hold another region's files while the old
+            // routes are still the published ones.
+            validate_merge_sources(ctx).await?;
             return Ok((
                 Box::new(UpdateMetadata::ApplyStaging),
                 Status::executing(true),
@@ -191,6 +195,9 @@ impl State for RepartitionStart {
             }
         }
 
+        // The last edge into `UpdateMetadata::ApplyStaging`: the routes are still the old ones
+        // here, so a refusal cannot strand an acknowledged write on an unpublished route.
+        validate_merge_sources(ctx).await?;
         Ok((
             Box::new(UpdateMetadata::ApplyStaging),
             Status::executing(true),

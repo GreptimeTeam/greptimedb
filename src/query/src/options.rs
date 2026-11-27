@@ -110,6 +110,12 @@ pub struct QueryOptions {
     /// - `fair`: Fair divides memory available after unspillable reservations
     ///   evenly among spillable reservations and may trigger earlier spills.
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
+    /// Hosts that object stores built from SQL statements (`COPY`, `COPY DATABASE`,
+    /// `EXPORT/IMPORT DATABASE` and external tables) may connect to. Empty means no restriction.
+    pub remote_allowed_hosts: Vec<String>,
+    /// Whether such an object store without credentials in its connection options may use the
+    /// server's own credentials.
+    pub allow_server_credentials: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -125,6 +131,8 @@ impl Default for QueryOptions {
             experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
+            remote_allowed_hosts: Vec::new(),
+            allow_server_credentials: true,
         }
     }
 }
