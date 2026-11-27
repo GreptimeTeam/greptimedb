@@ -13576,6 +13576,9 @@ async fn native_run_ignoring_the_answer(instance: &Arc<Instance>, sql: &str, ena
 /// integers above `2^53` that cancel answer `1` before the cast and `0` after it. The shape therefore
 /// keeps the existing plan, while a fold that is a float fold - `sum` over a range function's window -
 /// is admitted as before.
+///
+/// A wrapper is not a way past that bound: `abs` keeps the type it is given and `ceil` casts the
+/// answer of the fold, so the question is what the wrapped expression folds, one call deep included.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_declines_a_cast_over_an_integer_fold() {
     common_telemetry::init_default_ut_logging();
@@ -13605,9 +13608,21 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
 
     // The integer sum is 1, and the cast is 1.0 whichever side of it the answer is read from: the
     // existing plan sums the two `BIGINT`s exactly, so that is the answer these shapes keep.
+    //
+    // A wrapper does not make the fold go away: `abs` keeps the type it is given, so `abs` of the
+    // integer sum is that integer, and `ceil` casts the answer of the aggregate rather than the
+    // samples it folded. The walk that decides this therefore descends into a call's arguments; a
+    // shape it stopped at would be admitted and the raw scan would answer the rounded sum.
     for (query, expected) in [
         (format!("sum({TABLE}) * 1"), 1.0),
         (format!("sum({TABLE}) + 1"), 2.0),
+        // A math function over the fold, one call deep and two.
+        (format!("abs(sum({TABLE})) * 1"), 1.0),
+        (format!("abs(sum({TABLE})) + 1"), 2.0),
+        (format!("abs(abs(sum({TABLE}))) * 1"), 1.0),
+        // A division over a call: `ceil` rounds the answer of the aggregate rather than the samples it
+        // folded, and the division above it casts that rounded sum.
+        (format!("ceil(sum({TABLE})) / 2"), 0.5),
     ] {
         let sql = format!("TQL EVAL (0, 0, '1m') {query}");
         let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
@@ -13629,20 +13644,39 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
         );
     }
 
-    // The inner fold is a float fold here, so the outer cast reaches values that were floats already:
-    // the route takes the statement and answers the existing plan's rows.
-    let sql = format!("TQL EVAL (60000, 60000, '1m') sum(rate({TABLE}[5m]))");
-    let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+    // `clamp_max` is a wrapper as well, and the existing plan has no kernel for it: the statement is
+    // the existing plan's, whatever that plan answers, so the route must not replace it with one of
+    // its own. The fold is the first argument, which the walk has to reach.
+    let sql = format!("TQL EVAL (0, 0, '1m') clamp_max(sum({TABLE}), 10) * 1");
     observer.clear();
-    let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
+    native_run_ignoring_the_answer(&instance, &sql, true).await;
     assert!(
-        observer.fused().is_some(),
-        "`sum(rate(...))` folds a float window and must stay admitted"
+        observer.fused().is_none(),
+        "`clamp_max(sum(...), 10) * 1` must keep the existing plan: its first argument is the \
+         integer fold"
     );
-    assert_eq!(
-        native, legacy,
-        "`sum(rate(...))`: the fused route reports the existing plan's rows"
-    );
+
+    // The inner fold is a float fold here, so the outer cast reaches values that were floats already:
+    // the route takes the statement and answers the existing plan's rows. A wrapper around such a
+    // fold is admitted for the same reason, which is what separates it from the wrapped integer fold
+    // above.
+    for query in [
+        format!("sum(rate({TABLE}[5m]))"),
+        format!("abs(sum(rate({TABLE}[5m]))) * 1"),
+    ] {
+        let sql = format!("TQL EVAL (60000, 60000, '1m') {query}");
+        let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+        observer.clear();
+        let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
+        assert!(
+            observer.fused().is_some(),
+            "`{query}` folds a float window and must stay admitted"
+        );
+        assert_eq!(
+            native, legacy,
+            "`{query}`: the fused route reports the existing plan's rows"
+        );
+    }
 }
 
 /// A store configured for the columnar series format publishes samples for sparse metric regions

@@ -3001,8 +3001,14 @@ fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> Publish
 /// what that bound admits: the fold it applies is already a float fold, which is
 /// [`publishes_float_values`] of the aggregate itself.
 ///
-/// A bare selector, a literal and a call hand over one sample at a time, so the cast reaches the same
-/// sample the scan casts and no fold happens in between.
+/// The walk descends through every node that hands its child's answer on unchanged, because a fold one
+/// wrapper down is the same fold to the cast above it: `abs` keeps the type it is given, so
+/// `abs(sum(integer_field)) * 1` casts the integer sum the existing plan computed, exactly as
+/// `sum(integer_field) * 1` does. A node this walk does not know is a decline, not an admit, which is
+/// why the arms are written out rather than reached through a catch-all.
+///
+/// A bare selector and a literal are the samples themselves, so the cast reaches the same sample the
+/// scan casts and no fold happens in between.
 fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
     match statement {
         PromExpr::Paren(ParenExpr { expr }) => folds_before_cast(expr, field_type),
@@ -3011,12 +3017,32 @@ fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
             folds_before_cast(&binary.lhs, field_type) || folds_before_cast(&binary.rhs, field_type)
         }
         PromExpr::Unary(unary) => folds_before_cast(&unary.expr, field_type),
+        // A call hands on what its arguments answer: the math functions keep the type they are given, so
+        // the answer of `abs` over an integer fold is that integer, and a range function casts the
+        // window's values itself rather than a fold under it. So the arguments decide - `rate(m[5m])`
+        // reads a selector and folds nothing, while `abs(sum(integer_field))` folds one call deep, and
+        // `clamp_max(sum(integer_field), 10)` folds in its first argument.
+        PromExpr::Call(call) => call
+            .args
+            .args
+            .iter()
+            .any(|arg| folds_before_cast(arg, field_type)),
+        // An extension node is how this crate wraps a statement for `EXPLAIN`/`ANALYZE`, and it hands
+        // on the answer of the expression it wraps: its children decide, exactly as a call's do.
+        PromExpr::Extension(extension) => extension
+            .expr
+            .children()
+            .iter()
+            .any(|child| folds_before_cast(child, field_type)),
         // A fold answers what it folds: an integer `sum` keeps the integer it added, `count` builds an
         // `Int64`, and the ranking aggregates report the samples they were given. None of them is a
         // `Float64`, so the cast above one of them is the late cast this refuses.
         PromExpr::Aggregate(_) => !publishes_float_values(statement, field_type),
-        // A selector, a literal and a call reach one sample at a time; the cast reaches that same sample.
-        _ => false,
+        // A selector is the samples themselves, and a matrix selector wraps a vector selector rather
+        // than an expression, so neither folds anything.
+        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => false,
+        // A literal is one value the cast can reach.
+        PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => false,
     }
 }
 
