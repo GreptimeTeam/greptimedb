@@ -965,13 +965,7 @@ async fn read_block(
     if let Some(reservation) = &reservation {
         let mut result = reservation.try_grow(bytes);
         if result.is_err() && !prefetched.buffers.is_empty() {
-            // Read-ahead must not prevent a block that fits on its own from being read.
-            // Drop every shared slice and its reservation before retrying, and avoid
-            // attempting the same window again on the next block.
-            *prefetched = PrefetchedBlocks {
-                end: prefetched.end,
-                ..Default::default()
-            };
+            release_read_ahead(prefetched, &mut scratch.buffers);
             result = reservation.try_grow(bytes);
         }
         result.context(crate::error::ScanMemoryExhaustedSnafu)?;
@@ -1100,17 +1094,23 @@ async fn read_block(
                             .data_type();
                         match column {
                             Some(column) => {
-                                let bytes = load_column_chunk(&scratch.buffers, column, decoder)?;
+                                let mut bytes =
+                                    load_column_chunk(&scratch.buffers, column, decoder)?;
                                 // Decoded histograms outgrow their chunk by far more than the
                                 // per-row terms reserved above, so their values are charged
                                 // from the chunk's own counts before they are built.
                                 if let Some(reservation) = &reservation {
-                                    reservation
-                                        .try_grow(histogram::decoded_bytes(
-                                            bytes,
-                                            block.rows as usize,
-                                        )?)
-                                        .context(crate::error::ScanMemoryExhaustedSnafu)?;
+                                    let decoded =
+                                        histogram::decoded_bytes(bytes, block.rows as usize)?;
+                                    if reservation.try_grow(decoded).is_err() {
+                                        release_read_ahead(prefetched, &mut scratch.buffers);
+                                        reservation
+                                            .try_grow(decoded)
+                                            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+                                        // The release replaced the slices `bytes` borrowed.
+                                        bytes =
+                                            load_column_chunk(&scratch.buffers, column, decoder)?;
+                                    }
                                 }
                                 let array: ArrayRef = Arc::new(histogram::decode(
                                     bytes,
@@ -1296,6 +1296,23 @@ fn merge_read_ranges_into(ranges: &[std::ops::Range<u64>], merged: &mut Vec<std:
             merged.push(range.clone());
         }
     }
+}
+
+/// Drops the read-ahead window so a block that fits on its own can retry its reservation, and
+/// keeps the next blocks from attempting the same window again.
+///
+/// A slice retains its whole shared fetch, whose charge leaves with the window, so the current
+/// block's slices are copied out first. The block's own reservation already covers them.
+fn release_read_ahead(prefetched: &mut PrefetchedBlocks, buffers: &mut HashMap<u64, bytes::Bytes>) {
+    for (offset, bytes) in buffers.iter_mut() {
+        if prefetched.buffers.contains_key(offset) {
+            *bytes = bytes::Bytes::copy_from_slice(bytes);
+        }
+    }
+    *prefetched = PrefetchedBlocks {
+        end: prefetched.end,
+        ..Default::default()
+    };
 }
 
 /// A bounded read-ahead window. Byte slices retain the shared fetched allocation;

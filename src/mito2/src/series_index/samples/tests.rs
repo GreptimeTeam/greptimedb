@@ -2779,3 +2779,125 @@ async fn native_histogram_fields_round_trip_and_split_by_chunk_limit() {
         "{error}"
     );
 }
+
+/// Read-ahead must not fail a histogram block that fits the pool on its own. The histogram
+/// reservation is only known once the chunk header is read, after the block's first reservation.
+#[tokio::test]
+async fn histogram_reservation_releases_read_ahead() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, MemoryReservation};
+
+    #[derive(Debug)]
+    struct PeakPool {
+        inner: GreedyMemoryPool,
+        peak: AtomicUsize,
+    }
+    impl std::fmt::Display for PeakPool {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "peak")
+        }
+    }
+    impl MemoryPool for PeakPool {
+        fn name(&self) -> &str {
+            "peak"
+        }
+        fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+            self.inner.grow(reservation, additional);
+            self.peak
+                .fetch_max(self.inner.reserved(), Ordering::Relaxed);
+        }
+        fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+            self.inner.shrink(reservation, shrink);
+        }
+        fn try_grow(
+            &self,
+            reservation: &MemoryReservation,
+            additional: usize,
+        ) -> datafusion::common::Result<()> {
+            self.inner.try_grow(reservation, additional)?;
+            self.peak
+                .fetch_max(self.inner.reserved(), Ordering::Relaxed);
+            Ok(())
+        }
+        fn reserved(&self) -> usize {
+            self.inner.reserved()
+        }
+    }
+
+    let mut m = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    m.column_metadatas
+        .iter_mut()
+        .find(|c| c.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = native_histogram_value_type().clone();
+    let m = Arc::new(m);
+    // Equal, compressible rows: several equal blocks whose chunks all fit one read-ahead window.
+    let values = histogram_array(
+        &(0..300)
+            .map(|_| {
+                Some(TestHistogram {
+                    positive_spans: vec![(0, 1000)],
+                    floats: Some((1000.0, 0.0, vec![1.0; 1000], vec![])),
+                    ..Default::default()
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+    let store = store();
+    let format = ColumnarSamplesFormat::default();
+    let rows = values.len();
+    let key = new_sparse_primary_key(&["a", "b"], &m, 1, 1);
+    let input = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("field_0", values.data_type().clone(), true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("__primary_key", DataType::Binary, false),
+            Field::new(SEQUENCE, DataType::UInt64, false),
+            Field::new(OPERATION, DataType::UInt8, false),
+        ])),
+        vec![
+            Arc::new(values.clone()),
+            Arc::new(
+                datatypes::arrow::array::TimestampMillisecondArray::from_iter_values(
+                    0..rows as i64,
+                ),
+            ),
+            Arc::new(BinaryArray::from_iter_values(vec![key.as_slice(); rows])),
+            Arc::new(UInt64Array::from(vec![1; rows])),
+            Arc::new(UInt8Array::from(vec![1; rows])),
+        ],
+    )
+    .unwrap();
+    let handle = build(&format, &store, m.clone(), &[input]).await;
+    let reader = format.reader(store, handle).await.unwrap();
+    let read = |pool: Arc<dyn MemoryPool>| {
+        let mut request = request(&["field_0"]);
+        request.memory_pool = Some(pool);
+        reader.read(request).unwrap().try_collect::<Vec<_>>()
+    };
+    let peak = Arc::new(PeakPool {
+        inner: GreedyMemoryPool::new(usize::MAX),
+        peak: AtomicUsize::new(0),
+    });
+    assert!(read(peak.clone()).await.unwrap().len() > 2);
+    // The peak decodes a block while the window is held. The same block needs less without the
+    // window, so a pool one byte smaller must still read everything.
+    let pool = Arc::new(GreedyMemoryPool::new(peak.peak.load(Ordering::Relaxed) - 1));
+    let batches = read(pool.clone()).await.unwrap();
+    let decoded = datatypes::arrow::compute::concat(
+        &batches
+            .iter()
+            .map(|b| b.column(0).as_ref())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(&values as &dyn Array, decoded.as_ref());
+    drop(batches);
+    assert_eq!(0, pool.reserved());
+}
