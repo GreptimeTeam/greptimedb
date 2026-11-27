@@ -1811,16 +1811,14 @@ mod tests {
             if reason == "transient source error")
         );
         let expected = make_batch(&[1, 2, 3]);
-        let (mut retry, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
-            Ok((
-                Box::pin(futures::stream::iter([Ok(expected.clone())])) as BoxedRecordBatchStream,
-                3,
-            ))
+        // The failed source is still pinned by the existing reader. The retry opens its
+        // own ordinary stream when the failed source refuses new subscribers.
+        let (retry, _) = get_or_load_range_result(&strategy, key, &metrics, || async {
+            Ok((source_stream(vec![expected.clone()]), 3))
         })
         .await
         .unwrap();
-        assert_eq!(retry.try_next().await.unwrap().unwrap(), expected);
-        assert!(retry.try_next().await.unwrap().is_none());
+        assert_eq!(retry.try_collect::<Vec<_>>().await.unwrap(), vec![expected]);
         assert_eq!(
             existing.try_next().await.unwrap().unwrap(),
             make_batch(&[7])
@@ -1832,16 +1830,6 @@ mod tests {
         assert!(
             matches!(source.as_ref(), crate::error::Error::Unexpected { reason, .. }
             if reason == "transient source error")
-        );
-        wait_cached(&strategy, &key).await;
-        let (cached, _) = get_or_load_range_result(&strategy, key, &metrics, || async {
-            panic!("successful retry must be cached")
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            cached.try_collect::<Vec<_>>().await.unwrap(),
-            vec![expected]
         );
     }
 
