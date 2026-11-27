@@ -556,7 +556,7 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
 #[case::non_append_key_filter(false, false, "b", 1)]
 #[case::append_time_filter(true, false, "a", 2)]
 #[case::key_overlap(false, true, "b", 1)]
-#[case::time_overlap(false, true, "a", 2)]
+#[case::time_overlap(false, true, "a", 3)]
 #[tokio::test]
 async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
     #[case] append: bool,
@@ -603,9 +603,16 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
     let store = region.access_layer.object_store().clone();
 
     let changed_time = replacement_second != 1;
+    // In the time-overlap case the old file straddles the lower query bound,
+    // so the ordinary scan cannot prune it using its manifest.
+    let rows_per_file = if keep_second_file && changed_time {
+        2
+    } else {
+        1
+    };
     let put = |key, second| api::v1::Rows {
         schema: schema.clone(),
-        rows: test_util::build_rows_for_key(key, second, second + 1, 0),
+        rows: test_util::build_rows_for_key(key, second, second + rows_per_file, 0),
     };
     test_util::put_rows(&engine, region_id, put("a", 1)).await;
     test_util::flush_region(&engine, region_id, None).await;
@@ -655,12 +662,23 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
         .find(|file| file.file_id() != old_file.file_id())
         .unwrap()
         .clone();
+    let residual_request = (keep_second_file && changed_time).then(|| lower_bound_request.clone());
     if keep_second_file {
         let scan = engine
             .handle_query(region_id, request.clone())
             .await
             .unwrap();
-        assert_eq!(scan.properties().exact_num_rows(), Some(2));
+        assert_eq!(scan.properties().exact_num_rows(), Some(2 * rows_per_file));
+        if let Some(residual_request) = &residual_request {
+            let mut scanner = engine
+                .handle_query(region_id, residual_request.clone())
+                .await
+                .unwrap();
+            let split = scanner
+                .take_statistics_split()
+                .expect("disjoint SST bounds");
+            assert_eq!(split.exact_rows, rows_per_file);
+        }
     }
 
     let bytes = store
@@ -719,12 +737,39 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
         assert_eq!(scan.properties().exact_num_rows(), Some(0));
         assert_eq!(reads.load(Ordering::Relaxed), 0);
     }
+    if let Some(residual_request) = &residual_request {
+        // A cold residual footer leaves the ordinary scan in place. Even the
+        // other file's footer is unnecessary once the proof cannot succeed.
+        reads.store(0, Ordering::Relaxed);
+        let mut scanner = engine
+            .handle_query(region_id, residual_request.clone())
+            .await
+            .unwrap();
+        assert!(scanner.take_statistics_split().is_none());
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+    }
     let mut scan = engine
         .handle_query(region_id, request.clone())
         .await
         .unwrap();
     assert_eq!(scan.properties().exact_num_rows(), None);
     assert!(scan.take_statistics_split().is_none());
+    if let Some(residual_request) = residual_request {
+        // The whole-range proof just loaded the replacement footer. A warm
+        // but inconsistent residual bound must also invalidate the split.
+        assert!(
+            engine
+                .cache_manager()
+                .get_parquet_meta_data_from_mem_cache(old_file.file_id())
+                .await
+                .is_some()
+        );
+        let mut scanner = engine
+            .handle_query(region_id, residual_request)
+            .await
+            .unwrap();
+        assert!(scanner.take_statistics_split().is_none());
+    }
     if !keep_second_file {
         // Execute the same scanner whose statistics were inspected above.
         let plan = Arc::new(RegionScanExec::new(scan, request, None).unwrap());
@@ -1113,12 +1158,15 @@ async fn test_metadata_aggr_fourteen_day_workload(
         }
     }
 
-    // Ordinary scans are never split, even with the option enabled.
+    // Ordinary scans are never split, even with the option enabled. Execute
+    // the scan once to warm the footers before checking the split's I/O.
+    let ordinary = ScanRequest::default();
     let mut scanner = engine
-        .handle_query(region_id, ScanRequest::default())
+        .handle_query(region_id, ordinary.clone())
         .await
         .unwrap();
     assert!(scanner.take_statistics_split().is_none());
+    assert_eq!(scanned_rows(scanner, ordinary).await, 14_000);
 
     // The residual scanner keeps the properties the metric engine sets after
     // Mito returns the scanner. This hinted scan also loads the files' metadata.
