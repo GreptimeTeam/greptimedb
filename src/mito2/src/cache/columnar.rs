@@ -156,39 +156,6 @@ impl ObjectReader {
         })
     }
 
-    /// Decode metadata before trusting a local copy. A failed validation gets
-    /// one read from the authoritative object without touching the disk cache.
-    pub(crate) async fn validated<T>(
-        &self,
-        ranges: Vec<std::ops::Range<u64>>,
-        decode: impl Fn(Vec<bytes::Bytes>) -> Result<T>,
-    ) -> Result<T> {
-        use snafu::ResultExt;
-        if let Some((cache, key)) = &self.local
-            && let Some(bytes) = cache.read_ranges(*key, &ranges).await
-        {
-            match decode(bytes) {
-                Ok(value) => return Ok(value),
-                Err(_) => cache.remove(*key).await,
-            }
-        }
-        let buffers = self
-            .remote
-            .fetch(ranges)
-            .await
-            .context(crate::error::OpenDalSnafu)?;
-        let value = decode(buffers.into_iter().map(|b| b.to_bytes()).collect())?;
-        if self.local.as_ref().is_some_and(|(_, key)| {
-            matches!(
-                key.file_type,
-                FileType::Samples(None) | FileType::Series(None)
-            )
-        }) {
-            self.queue_refill();
-        }
-        Ok(value)
-    }
-
     fn queue_refill(&self) {
         if let (Some(refill), Some((disk, key))) = (&self.refill, &self.local)
             && !refill
@@ -243,7 +210,6 @@ pub(crate) struct PartArea {
     generation: FileId,
     part_id: u32,
     bounds: std::ops::Range<u64>,
-    pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
 }
 
 impl PartArea {
@@ -253,7 +219,6 @@ impl PartArea {
         generation: FileId,
         part_id: u32,
         bounds: std::ops::Range<u64>,
-        pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
     ) -> Self {
         Self {
             reader,
@@ -261,7 +226,6 @@ impl PartArea {
             generation,
             part_id,
             bounds,
-            pool,
         }
     }
 
@@ -281,9 +245,30 @@ impl PartArea {
         Some((manager, key))
     }
 
+    /// Peak temporary bytes for aligned pages and the requested slices.
+    pub(crate) fn page_fetch_bytes(&self, ranges: &[std::ops::Range<u64>]) -> Option<usize> {
+        let pages = self.cache.as_ref()?.memory.as_ref()?.page_cache.as_ref()?;
+        let size = pages.page_size();
+        let area_size = self.bounds.end - self.bounds.start;
+        let aligned = ranges
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                let start = r.start - self.bounds.start;
+                let end = r.end - self.bounds.start;
+                start / size * size..(end.div_ceil(size) * size).min(area_size)
+            })
+            .collect::<Vec<_>>();
+        let bytes = 2 * common_cache::paged::unique_requested_bytes(&aligned)
+            + ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+        usize::try_from(bytes).ok()
+    }
+
+    /// A worker can outlive the requesting stream. Keep its read guard until I/O finishes.
     pub(crate) async fn cached_ranges(
         &self,
         ranges: &[std::ops::Range<u64>],
+        guard: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Option<(Vec<bytes::Bytes>, common_cache::paged::PageFetchStats)>> {
         let Some((manager, pages)) = self.cache.as_ref().and_then(|c| {
             let manager = c.memory.as_ref()?;
@@ -295,28 +280,10 @@ impl PartArea {
             .iter()
             .map(|r| r.start - self.bounds.start..r.end - self.bounds.start)
             .collect::<Vec<_>>();
-        let mut reservation = self.pool.as_ref().map(|pool| {
-            datafusion::execution::memory_pool::MemoryConsumer::new("NarthexPages").register(pool)
-        });
-        if let Some(memory) = &mut reservation {
-            let size = pages.page_size();
-            let area_size = self.bounds.end - self.bounds.start;
-            let aligned = relative
-                .iter()
-                .filter(|r| !r.is_empty())
-                .map(|r| r.start / size * size..(r.end.div_ceil(size) * size).min(area_size))
-                .collect::<Vec<_>>();
-            let bytes = 2 * common_cache::paged::unique_requested_bytes(&aligned)
-                + relative.iter().map(|r| r.end - r.start).sum::<u64>();
-            if memory.try_grow(bytes as usize).is_err() {
-                return Ok(None);
-            }
-        }
-        let pooled = reservation.is_some();
         let reader = Arc::new(NarthexPageReader {
             reader: self.reader.clone(),
             bounds: self.bounds.clone(),
-            _reservation: reservation,
+            _guard: guard,
         });
         pages
             .fetch_narthex(
@@ -325,21 +292,10 @@ impl PartArea {
                 self.part_id,
                 self.bounds.clone(),
                 &relative,
-                reader.clone(),
+                reader,
             )
             .await
-            .map(|(bytes, stats)| {
-                // Pooled readers retain only the bytes charged to their block after this reservation drops.
-                let bytes = if pooled {
-                    bytes
-                        .iter()
-                        .map(|slice| bytes::Bytes::copy_from_slice(slice))
-                        .collect()
-                } else {
-                    bytes
-                };
-                Some((bytes, stats))
-            })
+            .map(Some)
             .map_err(|error| {
                 if let Some(source) = super::find_shared_page_source::<crate::error::Error>(&error)
                 {
@@ -355,7 +311,7 @@ impl PartArea {
 struct NarthexPageReader {
     reader: ObjectReader,
     bounds: std::ops::Range<u64>,
-    _reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
+    _guard: Option<Arc<dyn Send + Sync>>,
 }
 
 #[async_trait::async_trait]

@@ -767,6 +767,35 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
         "{error}"
     );
     assert!(disk.contains_key(&part));
+    // A cold descriptor read must also surface invalid local metadata while the remote is healthy.
+    let manifest_key = crate::cache::file_cache::IndexKey::new(
+        id,
+        file.meta_ref().file_id,
+        crate::cache::file_cache::FileType::Series(None),
+    );
+    let manifest_path = disk.cache_file_path(manifest_key);
+    let mut manifest = local.read(&manifest_path).await.unwrap().to_vec();
+    manifest[0] = 0;
+    local.write(&manifest_path, manifest).await.unwrap();
+    let result = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+        region.access_layer.object_store().clone(),
+        handle.clone(),
+        crate::cache::columnar::MetadataCache::maintenance(
+            engine.cache_manager().write_cache(),
+            file.meta_ref().file_id,
+        ),
+    )
+    .await;
+    let error = result
+        .err()
+        .expect("invalid cached manifest must fail decoding");
+    assert!(
+        error
+            .to_string()
+            .contains("series manifest is not readable"),
+        "{error}"
+    );
+    assert!(disk.contains_key(&manifest_key));
     // Read the authoritative series index to verify its stored row counts.
     let reader = crate::series_index::columnar::reader::ColumnarReader::open(
         region.access_layer.object_store().clone(),

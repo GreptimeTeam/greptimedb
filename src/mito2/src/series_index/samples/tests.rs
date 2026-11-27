@@ -2403,6 +2403,7 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
 #[case(64 * 1024)]
 #[tokio::test]
 async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
+    use crate::cache::{CacheManager, CacheStrategy};
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     let store = store();
     let m = metadata();
@@ -2428,7 +2429,16 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
         &[batch(&m, &input, false)],
     )
     .await;
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let strategy = CacheStrategy::EnableAll(Arc::new(
+        CacheManager::builder().page_cache_size(1024 * 1024).build(),
+    ));
+    let reader = reader::SamplesReader::open_cached(
+        store,
+        handle,
+        strategy.columnar_metadata(FileId::random()),
+    )
+    .await
+    .unwrap();
     let pool = Arc::new(GreedyMemoryPool::new(capacity));
     let mut request = full_request();
     request.memory_pool = Some(pool.clone());
