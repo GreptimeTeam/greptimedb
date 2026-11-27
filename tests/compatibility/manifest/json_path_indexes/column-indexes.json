@@ -1,0 +1,5 @@
+[
+  {"column_id": 7, "json_path": ["a", "b"], "created_indexes": ["InvertedIndex", "BloomFilterIndex"]},
+  {"column_id": 7, "json_path": ["a.b"], "created_indexes": ["FulltextIndex"], "fulltext_bloom_version": 2},
+  {"column_id": 7, "created_indexes": ["BloomFilterIndex"]}
+]

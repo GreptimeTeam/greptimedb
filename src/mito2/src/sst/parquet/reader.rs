@@ -2562,6 +2562,10 @@ impl ParquetReader {
         self.context.read_format().metadata()
     }
 
+    pub(crate) fn output_schema(&self) -> &SchemaRef {
+        &self.context.reader_builder().output_schema
+    }
+
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.context.reader_builder().parquet_meta.clone()
     }

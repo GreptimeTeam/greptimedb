@@ -27,7 +27,7 @@ use crate::read::Batch;
 use crate::sst::file::FileMeta;
 use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
 use crate::sst::index::handler::builtin::{
-    builtin_is_current, column_target_id, normalize_entries, target_column_id,
+    builtin_is_current, normalize_entries, target_column_id,
 };
 use crate::sst::index::handler::{
     BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
@@ -62,7 +62,8 @@ impl BloomPlan {
         let mut entries = Vec::new();
         for column in &context.metadata.column_metadatas {
             for (target, options) in
-                BloomFilterIndexer::targets(column, &context.build_type).map_err(BoxedError::new)?
+                BloomFilterIndexer::targets(column, &context.build_type, context.rebuild_source)
+                    .map_err(BoxedError::new)?
             {
                 entries.push(PlanEntry {
                     column_id: target_column_id(&target),
@@ -110,7 +111,12 @@ impl PlannedIndex for BloomPlan {
     }
 
     fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
-        builtin_is_current(file, context)
+        builtin_is_current(
+            file,
+            context,
+            IndexKind::Bloom,
+            self.targets.iter().map(|(target, _)| (target, 0)),
+        )
     }
 }
 
@@ -130,27 +136,18 @@ impl IndexCreator for BloomFilterIndexer {
         &mut self,
         writer: &mut SstPuffinWriter,
     ) -> Result<Vec<CompletedEntry>, BoxedError> {
-        let mut columns: Vec<_> = Self::indexed_targets(self)
-            .filter_map(column_target_id)
-            .map(Some)
+        let entries = Self::indexed_targets(self)
+            .map(|target| CompletedEntry {
+                target: target.clone(),
+                kind: IndexKind::Bloom,
+                format_version: 0,
+            })
             .collect();
         let (_, bytes) = Self::finish(self, writer).await.map_err(BoxedError::new)?;
         if bytes == 0 {
             return Ok(Vec::new());
         }
-        if columns.is_empty() {
-            columns.push(None);
-        }
-        columns.sort_unstable();
-        columns.dedup();
-        Ok(columns
-            .into_iter()
-            .map(|column_id| CompletedEntry {
-                column_id,
-                kind: IndexKind::Bloom,
-                format_version: 0,
-            })
-            .collect())
+        Ok(entries)
     }
 
     async fn abort(&mut self) -> Result<(), BoxedError> {

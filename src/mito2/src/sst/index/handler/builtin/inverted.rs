@@ -17,19 +17,18 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use arrow_schema::extension::ExtensionType;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_telemetry::warn;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::Json2ExtensionType;
 use index::target::IndexTarget;
 
 use crate::config::InvertedIndexConfig;
 use crate::read::Batch;
 use crate::sst::file::FileMeta;
+use crate::sst::index::column::json_index_hints;
 use crate::sst::index::handler::builtin::{
-    builtin_is_current, column_target_id, normalize_entries, target_column_id,
+    builtin_is_current, normalize_entries, target_column_id,
 };
 use crate::sst::index::handler::{
     BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
@@ -74,7 +73,7 @@ impl InvertedPlan {
             .into_iter()
             .map(IndexTarget::ColumnId)
             .collect();
-        targets.extend(json_inverted_targets(context));
+        targets.extend(json_inverted_targets(context)?);
         let Some(segment_row_count) =
             NonZeroUsize::new(context.index_options.inverted_index.segment_row_count)
         else {
@@ -131,29 +130,26 @@ impl PlannedIndex for InvertedPlan {
     }
 
     fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
-        builtin_is_current(file, context)
+        builtin_is_current(
+            file,
+            context,
+            IndexKind::Inverted,
+            self.targets.iter().map(|target| (target, 0)),
+        )
     }
 }
 
-fn json_inverted_targets(context: &PlanContext<'_>) -> Vec<IndexTarget> {
-    // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
-    if !matches!(
-        context.build_type,
-        IndexBuildType::Flush | IndexBuildType::Compact
-    ) {
-        return Vec::new();
-    }
-
+fn json_inverted_targets(context: &PlanContext<'_>) -> Result<Vec<IndexTarget>, BoxedError> {
     let mut targets = Vec::new();
     for column in &context.metadata.column_metadatas {
-        if !column.column_schema.data_type.is_json2() {
-            continue;
-        }
-        let Ok(Some(extension)) = column.column_schema.extension_type::<Json2ExtensionType>()
-        else {
-            continue;
-        };
-        for hint in extension.metadata().json_settings().type_hints() {
+        for hint in json_index_hints(
+            column,
+            &context.build_type,
+            context.rebuild_source,
+            IndexKind::Inverted,
+        )
+        .map_err(BoxedError::new)?
+        {
             if !hint.inverted_index
                 || !(hint.data_type.is_numeric()
                     || hint.data_type.is_boolean()
@@ -161,13 +157,13 @@ fn json_inverted_targets(context: &PlanContext<'_>) -> Vec<IndexTarget> {
             {
                 continue;
             }
-            match IndexTarget::new_json_path(column.column_id, hint.path.clone()) {
+            match IndexTarget::new_json_path(column.column_id, hint.path) {
                 Ok(target) => targets.push(target),
                 Err(err) => warn!(err; "Skipping invalid JSON inverted index target"),
             }
         }
     }
-    targets
+    Ok(targets)
 }
 
 #[async_trait]
@@ -186,27 +182,18 @@ impl IndexCreator for InvertedIndexer {
         &mut self,
         writer: &mut SstPuffinWriter,
     ) -> Result<Vec<CompletedEntry>, BoxedError> {
-        let mut columns: Vec<_> = Self::indexed_targets(self)
-            .filter_map(column_target_id)
-            .map(Some)
+        let entries = Self::indexed_targets(self)
+            .map(|target| CompletedEntry {
+                target: target.clone(),
+                kind: IndexKind::Inverted,
+                format_version: 0,
+            })
             .collect();
         let (_, bytes) = Self::finish(self, writer).await.map_err(BoxedError::new)?;
         if bytes == 0 {
             return Ok(Vec::new());
         }
-        if columns.is_empty() {
-            columns.push(None);
-        }
-        columns.sort_unstable();
-        columns.dedup();
-        Ok(columns
-            .into_iter()
-            .map(|column_id| CompletedEntry {
-                column_id,
-                kind: IndexKind::Inverted,
-                format_version: 0,
-            })
-            .collect())
+        Ok(entries)
     }
 
     async fn abort(&mut self) -> Result<(), BoxedError> {
@@ -229,7 +216,7 @@ impl IndexCreator for InvertedIndexer {
 #[cfg(test)]
 mod tests {
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::extension::json::JsonMetadata;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
     use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 
@@ -269,6 +256,7 @@ mod tests {
                 metadata: &metadata,
                 index_options: &options,
                 build_type: build_type.clone(),
+                rebuild_source: None,
                 existing_indexes: &[],
             };
             let plan = InvertedPlan::plan(&config, &context).unwrap().unwrap();

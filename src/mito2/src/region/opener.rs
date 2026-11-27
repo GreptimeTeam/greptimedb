@@ -404,6 +404,7 @@ impl RegionOpener {
                     index_options: &options.index_options,
                     // Validate initial options without building indexes; extensions skip flush work.
                     build_type: IndexBuildType::Flush,
+                    rebuild_source: None,
                     existing_indexes: &[],
                 })
                 .map_err(|err| {

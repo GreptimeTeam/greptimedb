@@ -28,7 +28,7 @@ use crate::sst::file::FileMeta;
 use crate::sst::index::fulltext_index;
 use crate::sst::index::fulltext_index::creator::{FulltextIndexer, FulltextTarget};
 use crate::sst::index::handler::builtin::{
-    builtin_is_current, column_target_id, normalize_entries, target_column_id,
+    builtin_is_current, normalize_entries, target_column_id,
 };
 use crate::sst::index::handler::{
     BuildContext, IndexCreator, PlanContext, PlanEntry, PlannedIndex,
@@ -63,16 +63,13 @@ impl FulltextPlan {
         let mut entries = Vec::new();
         for column in &context.metadata.column_metadatas {
             for (target, options) in
-                FulltextIndexer::targets(column, &context.build_type).map_err(BoxedError::new)?
+                FulltextIndexer::targets(column, &context.build_type, context.rebuild_source)
+                    .map_err(BoxedError::new)?
             {
                 entries.push(PlanEntry {
                     column_id: target_column_id(&target),
                     kind: IndexKind::Fulltext,
-                    format_version: if options.backend == FulltextBackend::Bloom {
-                        u32::from(fulltext_index::FULLTEXT_BLOOM_VERSION)
-                    } else {
-                        0
-                    },
+                    format_version: u32::from(fulltext_format_version(&options.backend)),
                 });
                 targets.push((
                     column.column_id,
@@ -123,7 +120,21 @@ impl PlannedIndex for FulltextPlan {
     }
 
     fn is_current(&self, file: &FileMeta, context: &PlanContext<'_>) -> bool {
-        builtin_is_current(file, context)
+        builtin_is_current(
+            file,
+            context,
+            IndexKind::Fulltext,
+            self.targets
+                .iter()
+                .map(|(_, _, target, options)| (target, fulltext_format_version(&options.backend))),
+        )
+    }
+}
+
+fn fulltext_format_version(backend: &FulltextBackend) -> u8 {
+    match backend {
+        FulltextBackend::Bloom => fulltext_index::FULLTEXT_BLOOM_VERSION,
+        FulltextBackend::Tantivy => 0,
     }
 }
 
@@ -143,35 +154,23 @@ impl IndexCreator for FulltextIndexer {
         &mut self,
         writer: &mut SstPuffinWriter,
     ) -> Result<Vec<CompletedEntry>, BoxedError> {
-        let mut columns: Vec<_> = Self::indexed_targets(self)
-            .filter_map(column_target_id)
-            .map(Some)
-            .collect();
-        let bloom_columns: Vec<_> = self
-            .bloom_indexed_targets()
-            .filter_map(column_target_id)
-            .collect();
-        let (_, bytes) = Self::finish(self, writer).await.map_err(BoxedError::new)?;
-        if bytes == 0 {
-            return Ok(Vec::new());
-        }
-        if columns.is_empty() {
-            columns.push(None);
-        }
-        columns.sort_unstable();
-        columns.dedup();
-        Ok(columns
-            .into_iter()
-            .map(|column_id| CompletedEntry {
-                column_id,
+        let bloom_targets: std::collections::HashSet<_> = self.bloom_indexed_targets().collect();
+        let entries = Self::indexed_targets(self)
+            .map(|target| CompletedEntry {
+                target: target.clone(),
                 kind: IndexKind::Fulltext,
-                format_version: if column_id.is_some_and(|id| bloom_columns.contains(&id)) {
+                format_version: if bloom_targets.contains(target) {
                     u32::from(fulltext_index::FULLTEXT_BLOOM_VERSION)
                 } else {
                     0
                 },
             })
-            .collect())
+            .collect();
+        let (_, bytes) = Self::finish(self, writer).await.map_err(BoxedError::new)?;
+        if bytes == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(entries)
     }
 
     async fn abort(&mut self) -> Result<(), BoxedError> {

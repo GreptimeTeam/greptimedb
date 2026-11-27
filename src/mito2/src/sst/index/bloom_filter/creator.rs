@@ -17,10 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use api::v1::SemanticType;
-use arrow_schema::extension::ExtensionType;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::extension::json::Json2ExtensionType;
 use datatypes::vectors::Helper;
 use index::bloom_filter::creator::BloomFilterCreator;
 use index::target::IndexTarget;
@@ -41,10 +39,14 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
-use crate::sst::index::column::{column_index_rows, extract_json_type_hint_values};
+use crate::sst::index::column::{
+    column_index_rows, extract_json_type_hint_values, json_index_hints,
+};
+use crate::sst::index::handler::JsonIndexRebuildSource;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
+use crate::sst::index::kind::IndexKind;
 use crate::sst::index::primary_key::PrimaryKeyRuns;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
@@ -94,7 +96,7 @@ impl BloomFilterIndexer {
     ) -> Result<Option<Self>> {
         let mut targets = Vec::new();
         for column in &metadata.column_metadatas {
-            targets.extend(Self::targets(column, &build_type)?);
+            targets.extend(Self::targets(column, &build_type, None)?);
         }
         Self::new_with_targets(
             sst_file_id,
@@ -158,6 +160,7 @@ impl BloomFilterIndexer {
     pub(crate) fn targets(
         column: &store_api::metadata::ColumnMetadata,
         build_type: &IndexBuildType,
+        source: Option<JsonIndexRebuildSource<'_>>,
     ) -> Result<Vec<(IndexTarget, datatypes::schema::SkippingIndexOptions)>> {
         let options = column
             .column_schema
@@ -170,21 +173,12 @@ impl BloomFilterIndexer {
         if let Some(options) = options {
             targets.push((IndexTarget::ColumnId(column.column_id), options));
         }
-        // Only flush and compaction builds collect JSON targets; manual and schema-change
-        // rebuilds skip them because existing SSTs may not materialize the current hints.
-        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
-        if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
-            && column.column_schema.data_type.is_json2()
-            && let Ok(Some(extension)) = column.column_schema.extension_type::<Json2ExtensionType>()
-        {
-            for hint in extension.metadata().json_settings().type_hints() {
-                let Some(options) = &hint.skipping_index else {
-                    continue;
-                };
-                if let Ok(target) = IndexTarget::new_json_path(column.column_id, hint.path.clone())
-                {
-                    targets.push((target, options.clone()));
-                }
+        for hint in json_index_hints(column, build_type, source, IndexKind::Bloom)? {
+            let Some(options) = hint.skipping_index else {
+                continue;
+            };
+            if let Ok(target) = IndexTarget::new_json_path(column.column_id, hint.path) {
+                targets.push((target, options));
             }
         }
         Ok(targets)

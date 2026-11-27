@@ -905,6 +905,443 @@ async fn test_index_build_type_compact() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 }
 
+#[rstest::rstest]
+#[case::manual(true, false)]
+#[case::schema_change(false, false)]
+#[case::manual_missing_path_index(true, true)]
+#[tokio::test]
+async fn test_rebuild_preserves_materialized_json_indexes(
+    #[case] manual: bool,
+    #[case] missing_path_index: bool,
+) {
+    use crate::sst::index::{bloom_filter, fulltext_index, inverted_index};
+    use api::helper::encode_json_value;
+    use api::v1::{helper::row, value::ValueData};
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint, value::JsonValue};
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+    use index::target::IndexTarget;
+
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(IndexBuildListener::default());
+    let mut config = async_build_mode_config(true);
+    if missing_path_index {
+        config.inverted_index.create_on_flush = Mode::Disable;
+    }
+    let engine = env
+        .create_engine_with(config, None, Some(listener.clone()), None)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let mut request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "bulk")
+        .build();
+    let hint = |name: &str| JsonTypeHint {
+        path: vec![name.into()],
+        data_type: ConcreteDataType::string_datatype(),
+        inverted_index: true,
+        skipping_index: Some(SkippingIndexOptions::default()),
+        fulltext_index: Some(FulltextOptions {
+            enable: true,
+            ..Default::default()
+        }),
+    };
+    let extension = |hints| {
+        Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(hints, Some(0)).unwrap(),
+        )))
+    };
+    let mut original_hints = vec![hint("message")];
+    if !missing_path_index {
+        original_hints.extend([hint("changed_type"), hint("changed_options")]);
+    }
+    request.column_metadatas[1]
+        .column_schema
+        .with_extension_type(&extension(original_hints));
+    let column_id = request.column_metadatas[1].column_id;
+    let mut columns = request.column_metadatas.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let json = serde_json::json!({"message":"hello","extra":"in remainder","changed_type":"42","changed_options":"test"});
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: vec![row(vec![
+                ValueData::StringValue("tag".into()),
+                ValueData::JsonValue(encode_json_value(JsonValue::from(json))),
+                ValueData::TimestampMillisecondValue(1),
+            ])],
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    tokio::time::timeout(Duration::from_secs(10), listener.wait_finish(1))
+        .await
+        .unwrap();
+    let before = current_file_metas(&engine, region_id).await.remove(0);
+    let path_index = before
+        .indexes
+        .iter()
+        .find(|idx| idx.json_path.as_ref() == Some(&hint("message").path))
+        .unwrap();
+    if missing_path_index {
+        assert_eq!(before.indexes.len(), 1);
+        assert_eq!(path_index.created_indexes.len(), 2);
+        assert!(
+            !path_index
+                .created_indexes
+                .contains(&IndexType::InvertedIndex)
+        );
+    } else {
+        assert_eq!(path_index.created_indexes.len(), 3);
+    }
+
+    // The new hint refers to data in the remainder of the original SST.
+    let mut changed_type = hint("changed_type");
+    changed_type.data_type = ConcreteDataType::int64_datatype();
+    changed_type.fulltext_index = None;
+    let mut changed_options = hint("changed_options");
+    changed_options
+        .fulltext_index
+        .as_mut()
+        .unwrap()
+        .case_sensitive = true;
+    columns[1]
+        .column_schema
+        .with_extension_type(&extension(vec![
+            hint("message"),
+            hint("extra"),
+            changed_type,
+            changed_options,
+        ]));
+    if manual && !missing_path_index {
+        columns[0].column_schema.set_inverted_index(true);
+    }
+    let sync_columns = RegionAlterRequest {
+        kind: AlterKind::SyncColumns {
+            column_metadatas: columns,
+        },
+    };
+    if !missing_path_index {
+        engine
+            .handle_request(region_id, RegionRequest::Alter(sync_columns.clone()))
+            .await
+            .unwrap();
+    }
+    if manual {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+            .unwrap();
+    } else {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::SetIndexes {
+                        options: vec![SetIndexOption::Inverted {
+                            column_name: "tag_0".into(),
+                        }],
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(10), listener.wait_finish(2))
+        .await
+        .unwrap();
+    let after = current_file_metas(&engine, region_id).await.remove(0);
+    assert_eq!(before.file_id, after.file_id);
+    assert!(after.index_version > before.index_version);
+    let rebuilt = after
+        .indexes
+        .iter()
+        .find(|idx| idx.json_path == path_index.json_path)
+        .unwrap();
+    assert_eq!(rebuilt.created_indexes.len(), 3);
+    assert_eq!(
+        after
+            .indexes
+            .iter()
+            .filter(|idx| idx.json_path.is_some())
+            .count(),
+        if missing_path_index { 1 } else { 2 }
+    );
+
+    let manager = engine
+        .get_region(region_id)
+        .unwrap()
+        .access_layer
+        .build_puffin_manager();
+    let reader = manager.reader(&after.index_id()).await.unwrap();
+    let inverted = reader
+        .blob(inverted_index::INDEX_BLOB_TYPE)
+        .await
+        .unwrap()
+        .reader()
+        .await
+        .unwrap();
+    let meta = InvertedIndexBlobReader::new(inverted)
+        .metadata(None)
+        .await
+        .unwrap();
+    for (name, indexed, fulltext) in [
+        ("message", true, true),
+        ("extra", false, false),
+        ("changed_type", false, false),
+        ("changed_options", !missing_path_index, false),
+    ] {
+        let key = IndexTarget::new_json_path(column_id, vec![name.into()])
+            .unwrap()
+            .encode();
+        assert_eq!(meta.metas.contains_key(&key), indexed, "{name}");
+        for (prefix, present) in [
+            (bloom_filter::INDEX_BLOB_TYPE, indexed),
+            (fulltext_index::INDEX_BLOB_TYPE_BLOOM, fulltext),
+        ] {
+            assert_eq!(
+                reader.blob(&format!("{prefix}-{key}")).await.is_ok(),
+                present,
+                "{prefix}-{key}"
+            );
+        }
+    }
+
+    if missing_path_index {
+        // All configured targets are now covered. The manifest alone suffices.
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+            .unwrap();
+        assert_listener_counts(&listener, 2, 2);
+        engine
+            .handle_request(region_id, RegionRequest::Alter(sync_columns))
+            .await
+            .unwrap();
+        // The remaining hints cannot be built from this SST. Repeating the
+        // request must succeed without publishing another Puffin generation.
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+            .unwrap();
+        let repeated = current_file_metas(&engine, region_id).await.remove(0);
+        assert_eq!(repeated.index_version, after.index_version);
+    }
+}
+
+#[tokio::test]
+async fn test_rebuilt_indexes_distinguish_nested_and_dotted_json_keys() {
+    use api::helper::encode_json_value;
+    use api::v1::{helper::row, value::ValueData};
+    use common_function::scalars::json::json_get::JsonGetWithType;
+    use common_function::scalars::udf::create_udf;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint, value::JsonValue};
+    use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
+    use datatypes::types::json_type::JsonNativeType;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::object()))
+        .insert_option("append_mode", "true")
+        .insert_option("memtable.type", "bulk")
+        .insert_option("index.inverted_index.segment_row_count", "1")
+        .build();
+    let paths = [vec!["a".into(), "b".into()], vec!["a.b".into()]];
+    let extension = |nested_analyzer: FulltextAnalyzer| {
+        let hints = paths
+            .iter()
+            .zip([nested_analyzer, FulltextAnalyzer::English])
+            .map(|(path, analyzer)| JsonTypeHint {
+                path: path.clone(),
+                data_type: ConcreteDataType::string_datatype(),
+                inverted_index: true,
+                skipping_index: None,
+                fulltext_index: Some(FulltextOptions {
+                    enable: true,
+                    backend: FulltextBackend::Tantivy,
+                    analyzer,
+                    ..Default::default()
+                }),
+            })
+            .collect();
+        Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(hints, Some(0)).unwrap(),
+        )))
+    };
+    request.column_metadatas[1]
+        .column_schema
+        .with_extension_type(&extension(FulltextAnalyzer::English));
+    let schema = rows_schema(&request);
+    let mut columns = request.column_metadatas.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let rows = [
+        (1, serde_json::json!({"a": {"b": "hit"}, "a.b": "miss"})),
+        (2, serde_json::json!({"a": {"b": "miss"}, "a.b": "hit"})),
+    ]
+    .into_iter()
+    .map(|(ts, json)| {
+        row(vec![
+            ValueData::StringValue("tag".into()),
+            ValueData::JsonValue(encode_json_value(JsonValue::from(json))),
+            ValueData::TimestampMillisecondValue(ts),
+        ])
+    })
+    .collect();
+    put_rows(&engine, region_id, Rows { schema, rows }).await;
+    flush_region(&engine, region_id, None).await;
+    let region = engine.get_region(region_id).unwrap();
+    let source_metadata = region.version().metadata.clone();
+    let before = current_file_metas(&engine, region_id).await.remove(0);
+    for path in &paths {
+        assert!(
+            before
+                .indexes
+                .iter()
+                .any(|idx| idx.json_path.as_ref() == Some(path)
+                    && idx.created_indexes.contains(&IndexType::FulltextIndex))
+        );
+    }
+
+    columns[0].column_schema.set_inverted_index(true);
+    columns[1]
+        .column_schema
+        .with_extension_type(&extension(FulltextAnalyzer::Chinese));
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SyncColumns {
+                    column_metadatas: columns,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap();
+    let after = current_file_metas(&engine, region_id).await.remove(0);
+    assert_eq!(after.file_id, before.file_id);
+    assert!(after.index_version > before.index_version);
+    let full_scan = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let full_scan = datafusion::prelude::SessionContext::new()
+        .read_batches(
+            full_scan
+                .into_iter()
+                .map(|batch| batch.into_df_record_batch()),
+        )
+        .unwrap();
+    let json_get = create_udf(Arc::new(JsonGetWithType::default()));
+    for (path, expression, expected_ts, has_fulltext) in [
+        (&paths[0], "$.a.b", 1, false),
+        (&paths[1], r#"$."a.b""#, 2, true),
+    ] {
+        let entry = after
+            .indexes
+            .iter()
+            .find(|idx| idx.json_path.as_ref() == Some(path))
+            .unwrap();
+        assert!(entry.created_indexes.contains(&IndexType::InvertedIndex));
+        assert_eq!(
+            entry.created_indexes.contains(&IndexType::FulltextIndex),
+            has_fulltext
+        );
+        let filter = json_get
+            .call(vec![col("field_0"), lit(expression)])
+            .eq(lit("hit"));
+        let applier =
+            crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder::new(
+                region.access_layer.table_dir().to_string(),
+                region.access_layer.path_type(),
+                region.access_layer.object_store().clone(),
+                &region.version().metadata,
+                Default::default(),
+                region.access_layer.puffin_manager_factory().clone(),
+            )
+            .build(std::slice::from_ref(&filter))
+            .unwrap()
+            .unwrap();
+        let plan = applier.plan_for_sst(&source_metadata).unwrap().unwrap();
+        let hits = applier
+            .apply(
+                after.index_id(),
+                Some(after.index_file_size),
+                &plan.index_applier,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.segment_row_count, 1);
+        assert_eq!(
+            hits.matched_segment_ids.iter_ones().collect::<Vec<_>>(),
+            [(expected_ts - 1) as usize]
+        );
+        let filtered = full_scan
+            .clone()
+            .filter(filter)
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut timestamps = Vec::new();
+        for batch in filtered {
+            let ts = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_primitive::<TimestampMillisecondType>();
+            timestamps.extend(ts.values().iter().copied());
+        }
+        assert_eq!(timestamps, [expected_ts], "{expression}");
+    }
+}
+
 #[tokio::test]
 async fn test_index_build_type_schema_change() {
     let mut env = TestEnv::with_prefix("test_index_build_type_schema_change_").await;
@@ -2811,7 +3248,7 @@ impl IndexCreator for RebuildSketchCreator {
             finished.store(true, Ordering::Relaxed);
         }
         Ok(vec![CompletedEntry {
-            column_id: Some(0),
+            target: index::target::IndexTarget::ColumnId(0),
             kind: IndexKind::Extension(ExtensionIndexKind::Hll),
             format_version: 1,
         }])

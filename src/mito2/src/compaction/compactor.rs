@@ -168,6 +168,7 @@ impl TryFrom<&CompactionRegion> for CompactionContext {
             metadata: &region.region_metadata,
             index_options: &region.current_version.options.index_options,
             build_type: IndexBuildType::Compact,
+            rebuild_source: None,
             existing_indexes: &[],
         }));
         Ok(Self {
@@ -1609,6 +1610,7 @@ mod tests {
             metadata: &context.region_metadata,
             index_options: &context.version_options.index_options,
             build_type: IndexBuildType::Compact,
+            rebuild_source: None,
             existing_indexes: &[],
         }));
         let present = new_file_handle(dummy_file_meta());

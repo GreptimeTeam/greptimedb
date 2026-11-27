@@ -36,12 +36,12 @@ use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
 use crate::sst::file::{self, FileHandle, FileMeta, FileMetaRef, RegionFileId, RegionIndexId};
-use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
+use crate::sst::index::handler::{IndexKindProviderRef, JsonIndexRebuildSource, PlanContext};
 use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::sst::index::registry::{IndexRegistry, IndexRegistryRef};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
-    cleanup_stale_index_caches,
+    cleanup_stale_index_caches, has_json_path_indexes,
 };
 use crate::worker::{RegionWorkerLoop, index_registry};
 
@@ -375,9 +375,9 @@ impl<S> RegionWorkerLoop<S> {
             return false;
         }
 
-        let file_ids = build_tasks
+        let files = build_tasks
             .iter()
-            .map(|(file, _)| file.meta_ref().file_id)
+            .map(|(file, _)| file.clone())
             .collect::<Vec<_>>();
         let build_type = request.build_type.clone();
         // Each task holds a sender and reports at most once, so sends never block.
@@ -450,25 +450,40 @@ impl<S> RegionWorkerLoop<S> {
             // replacement is indexed according to the compaction index options,
             // as any later compaction would be.
             let manifest = region.manifest_ctx.manifest().await;
-            let (present, removed): (Vec<_>, Vec<_>) = file_ids
+            let (present, removed): (Vec<_>, Vec<_>) = files
                 .into_iter()
-                .partition(|file_id| manifest.files.contains_key(file_id));
+                .partition(|file| manifest.files.contains_key(&file.meta_ref().file_id));
             if !removed.is_empty() && build_type == IndexBuildType::Manual {
                 warn!(
                     "Files were removed during the manual index build, their replacements follow the compaction index options, region: {}, files: {:?}",
-                    region_id, removed
+                    region_id,
+                    removed
+                        .iter()
+                        .map(|file| file.meta_ref().file_id)
+                        .collect::<Vec<_>>()
                 );
             }
-            let incomplete = present
-                .into_iter()
-                .filter(|file_id| {
-                    let file = &manifest.files[file_id];
-                    !file.is_index_consistent_with_region(
-                        &snapshot.metadata.column_metadatas,
-                        &snapshot.index_options,
-                    ) || index_needs_rebuild(&registry, &snapshot, file, build_type.clone())
-                })
-                .collect::<Vec<_>>();
+            let mut incomplete = Vec::new();
+            for handle in present {
+                let file = &manifest.files[&handle.meta_ref().file_id];
+                match published_indexes_are_current(
+                    &registry,
+                    &snapshot,
+                    &region,
+                    &handle,
+                    file,
+                    &build_type,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => incomplete.push(file.file_id),
+                    Err(err) => {
+                        sender.send(Err(err));
+                        return;
+                    }
+                }
+            }
             let result = if incomplete.is_empty() {
                 Ok(0)
             } else {
@@ -624,6 +639,8 @@ fn validate_rebuild_plan(
     let plan = registry.plan(&PlanContext {
         metadata: &snapshot.metadata,
         index_options: &snapshot.index_options,
+        rebuild_source: (build_type == IndexBuildType::Manual)
+            .then_some(JsonIndexRebuildSource::RegionHints),
         build_type,
         existing_indexes: &[],
     });
@@ -638,10 +655,66 @@ fn index_needs_rebuild(
     file: &FileMeta,
     build_type: IndexBuildType,
 ) -> bool {
+    let source =
+        (build_type == IndexBuildType::Manual).then_some(JsonIndexRebuildSource::RegionHints);
+    index_needs_rebuild_with_source(registry, snapshot, file, build_type, source)
+}
+
+// A missing configured path can be valid for an older SST. Only read its schema
+// when the manifest alone cannot confirm that a manual build completed.
+async fn published_indexes_are_current(
+    registry: &IndexRegistry,
+    snapshot: &IndexBuildSnapshot,
+    region: &MitoRegionRef,
+    handle: &FileHandle,
+    file: &FileMeta,
+    build_type: &IndexBuildType,
+) -> Result<bool> {
+    if !file.is_index_consistent_with_region(
+        &snapshot.metadata.column_metadatas,
+        &snapshot.index_options,
+    ) {
+        return Ok(false);
+    }
+    if !index_needs_rebuild(registry, snapshot, file, build_type.clone()) {
+        return Ok(true);
+    }
+    if *build_type != IndexBuildType::Manual || !has_json_path_indexes(&snapshot.metadata)? {
+        return Ok(false);
+    }
+    let reader = region
+        .access_layer
+        .read_sst(handle.clone())
+        .expected_metadata(Some(snapshot.metadata.clone()))
+        .build()
+        .await?;
+    let Some(reader) = reader else {
+        return Ok(false);
+    };
+    Ok(!index_needs_rebuild_with_source(
+        registry,
+        snapshot,
+        file,
+        build_type.clone(),
+        Some(JsonIndexRebuildSource::Sst(
+            reader.metadata(),
+            reader.output_schema(),
+        )),
+    ))
+}
+
+fn index_needs_rebuild_with_source(
+    registry: &IndexRegistry,
+    snapshot: &IndexBuildSnapshot,
+    file: &FileMeta,
+    build_type: IndexBuildType,
+    rebuild_source: Option<JsonIndexRebuildSource<'_>>,
+) -> bool {
     let context = PlanContext {
         metadata: &snapshot.metadata,
         index_options: &snapshot.index_options,
         build_type,
+        rebuild_source,
         existing_indexes: &file.indexes,
     };
     let plan = registry.plan(&context);
@@ -708,6 +781,106 @@ mod tests {
             vec![sketched.file_id, plain.file_id],
             select(IndexBuildType::Manual)
         );
+    }
+
+    #[tokio::test]
+    async fn test_completion_check_preserves_latest_purge_version() {
+        use api::v1::SemanticType;
+        use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+        use datatypes::json::{JsonSettings, JsonTypeHint};
+        use datatypes::prelude::ConcreteDataType;
+        use datatypes::schema::ColumnSchema;
+        use datatypes::types::json_type::JsonNativeType;
+        use store_api::metadata::ColumnMetadata;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::engine::compaction_test::put_and_flush;
+        use crate::sst::file_purger::FilePurger;
+        use crate::test_util::{TestEnv, rows_schema};
+
+        #[derive(Debug)]
+        struct Purger(std::sync::mpsc::Sender<u64>);
+
+        impl FilePurger for Purger {
+            fn purge_file(&self, file: FileMeta) {
+                self.0.send(file.index_version).unwrap();
+            }
+        }
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let create = CreateRequestBuilder::new().build_with_index();
+        let schema = rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        put_and_flush(&engine, region_id, &schema, 0..2).await;
+        let region = engine.get_region(region_id).unwrap();
+        let mut file = region.all_manifest_files().await.0.pop().unwrap();
+        assert!(file.exists_index());
+
+        // A path added after flush forces completion to check the physical SST schema.
+        let mut target = RegionMetadataBuilder::from_existing((*region.version().metadata).clone());
+        let mut json = ColumnSchema::new(
+            "payload",
+            ConcreteDataType::json2(JsonNativeType::object()),
+            true,
+        );
+        let hint = JsonTypeHint {
+            path: vec!["message".into()],
+            data_type: ConcreteDataType::string_datatype(),
+            inverted_index: true,
+            skipping_index: None,
+            fulltext_index: None,
+        };
+        json.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(vec![hint], Some(0)).unwrap(),
+        ))));
+        target.push_column_metadata(ColumnMetadata {
+            column_schema: json,
+            semantic_type: SemanticType::Field,
+            column_id: 10,
+        });
+        let snapshot = IndexBuildSnapshot {
+            metadata: Arc::new(target.build().unwrap()),
+            index_options: IndexOptions::default(),
+        };
+        let registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+
+        // The check captured v1 before a concurrent publication installed v2.
+        file.index_version = 1;
+        let stale = FileMetaRef::from(file.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = FileHandle::new(stale.clone(), Arc::new(Purger(tx)));
+        file.index_version = 2;
+        let current = handle.with_updated_index(file);
+        assert!(index_needs_rebuild(
+            &registry,
+            &snapshot,
+            &stale,
+            IndexBuildType::Manual
+        ));
+        assert!(
+            published_indexes_are_current(
+                &registry,
+                &snapshot,
+                &region,
+                &handle,
+                &stale,
+                &IndexBuildType::Manual
+            )
+            .await
+            .unwrap()
+        );
+
+        current.mark_deleted();
+        drop(current);
+        drop(handle);
+        assert_eq!(rx.try_recv().unwrap(), 2);
     }
 
     #[derive(Debug)]
@@ -878,6 +1051,7 @@ mod tests {
                 metadata: &snapshot.metadata,
                 index_options: &snapshot.index_options,
                 build_type: reason.clone(),
+                rebuild_source: None,
                 existing_indexes: &file.indexes,
             });
             assert!(plan.entries().next().is_none());
@@ -942,6 +1116,7 @@ mod tests {
                         metadata: &snapshot.metadata,
                         index_options: &snapshot.index_options,
                         build_type: IndexBuildType::Flush,
+                        rebuild_source: None,
                         existing_indexes: &[],
                     })
                     .check_success()
