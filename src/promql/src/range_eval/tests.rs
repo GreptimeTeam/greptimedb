@@ -1400,32 +1400,38 @@ fn single_histogram_start_timestamp_is_compared_on_shifted_axis() {
 /// Two samples sharing a start timestamp never restarted between them, even when that start is
 /// later than the earlier sample: Prometheus `isStartTimestampReset` answers false on
 /// `prevStartTimestamp == currStartTimestamp` before any other check (promql/functions.go:761).
+/// That only removes the start-timestamp evidence: a bucket drop under the same start is still a
+/// reset, because `resets()` ORs in `DetectReset`.
 #[test]
 fn equal_histogram_start_timestamps_are_not_a_reset() {
     let schema = raw_schema(1);
-    let mut evaluator = RangeEvaluator::try_new(
-        &schema,
-        grid(2_000, 2_000, 1),
-        RangeWindow {
-            range_ms: 3_000,
-            offset_ms: 0,
-            anchor_ms: None,
-            modifier: None,
-        },
-        RangeFunction::Resets,
-    )
-    .unwrap();
-    let chunks = collect_chunks(
-        &mut evaluator,
-        &[
-            histogram_chunk_from(&schema, 2, 1_000, Some(1_500), false),
-            histogram_chunk_from(&schema, 2, 2_000, Some(1_500), true),
-        ],
-    );
-    let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
-    match series.fields.as_slice()[0].cursor().at(0).unwrap() {
-        SampleRef::Float(resets) => assert_eq!(resets, 0.0),
-        other => panic!("expected resets, got {}", describe_sample(Some(other))),
+    for (later_buckets, expected) in [(2, 0.0), (1, 1.0)] {
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(2_000, 2_000, 1),
+            RangeWindow {
+                range_ms: 3_000,
+                offset_ms: 0,
+                anchor_ms: None,
+                modifier: None,
+            },
+            RangeFunction::Resets,
+        )
+        .unwrap();
+        let chunks = collect_chunks(
+            &mut evaluator,
+            &[
+                histogram_chunk_from(&schema, 2, 1_000, Some(1_500), false),
+                histogram_chunk_from(&schema, later_buckets, 2_000, Some(1_500), true),
+            ],
+        );
+        let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
+        match series.fields.as_slice()[0].cursor().at(0).unwrap() {
+            SampleRef::Float(resets) => {
+                assert_eq!(resets, expected, "later sample has {later_buckets} buckets")
+            }
+            other => panic!("expected resets, got {}", describe_sample(Some(other))),
+        }
     }
 }
 
