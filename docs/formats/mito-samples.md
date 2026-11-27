@@ -570,6 +570,30 @@ section(n):
     body <byte_length bytes>        # encoding 5 over the n values
 ```
 
+The struct order is fixed. The header records only child kinds, so children of the
+same kind, such as `zero_threshold` and `sum`, are told apart by position alone:
+
+| # | Child | Kind |
+| --- | --- | --- |
+| 0 | `schema` | Int32 |
+| 1 | `zero_threshold` | Float64 |
+| 2 | `sum` | Float64 |
+| 3 | `reset_hint` | Int32 |
+| 4 | `start_timestamp` | Timestamp(ms) |
+| 5 | `custom_values` | List of Float64 |
+| 6 | `positive_span_offsets` | List of Int32 |
+| 7 | `positive_span_lengths` | List of Int32 |
+| 8 | `negative_span_offsets` | List of Int32 |
+| 9 | `negative_span_lengths` | List of Int32 |
+| 10 | `count_i64` | Int64 |
+| 11 | `zero_count_i64` | Int64 |
+| 12 | `positive_buckets_i64` | List of Int64 |
+| 13 | `negative_buckets_i64` | List of Int64 |
+| 14 | `count_f64` | Float64 |
+| 15 | `zero_count_f64` | Float64 |
+| 16 | `positive_buckets_f64` | List of Float64 |
+| 17 | `negative_buckets_f64` | List of Float64 |
+
 A chunk holds every row of the block, null rows included, one child after another.
 Values map to u64 before encoding 5: Float64 keeps its bit pattern; integers and
 timestamps are ZigZag-mapped. A null list has no items; the item section holds the

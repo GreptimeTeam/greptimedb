@@ -19,6 +19,37 @@
 //! are ZigZag-mapped first, and a list is its nullable lengths followed by its flattened items.
 //! The chunk header names the child count and each child's kind, so a reader decodes the chunk
 //! only against the exact struct type it was written for.
+//!
+//! ```text
+//! child_count   u8
+//! child_kinds   u8 x child_count       1 Float64, 2 Int32, 3 Int64, 4 Timestamp(ms),
+//!                                      0x10 | kind for a list
+//! list_items    uvarint                items of all valid lists in the chunk
+//! validity      ceil(rows / 8) bytes   only when the struct has null rows
+//! child 0 .. child 17, in struct order:
+//!   scalar      section(rows values)
+//!   list        section(rows lengths), then section(items), omitted if it has no items
+//! section(n)    null_count uvarint; unless all n are null: byte_length uvarint and an
+//!               encoding 5 body
+//! ```
+//!
+//! The header records kinds, not names, so children of one kind are told apart by position
+//! alone. The struct order, from `NATIVE_HISTOGRAM_FIELD_NAMES`:
+//!
+//! ```text
+//!  0 schema                  Int32           9 negative_span_lengths   List<Int32>
+//!  1 zero_threshold          Float64        10 count_i64               Int64
+//!  2 sum                     Float64        11 zero_count_i64          Int64
+//!  3 reset_hint              Int32          12 positive_buckets_i64    List<Int64>
+//!  4 start_timestamp         Timestamp(ms)  13 negative_buckets_i64    List<Int64>
+//!  5 custom_values           List<Float64>  14 count_f64               Float64
+//!  6 positive_span_offsets   List<Int32>    15 zero_count_f64          Float64
+//!  7 positive_span_lengths   List<Int32>    16 positive_buckets_f64    List<Float64>
+//!  8 negative_span_offsets   List<Int32>    17 negative_buckets_f64    List<Float64>
+//! ```
+//!
+//! The part-file layout around the chunk is in `docs/formats/mito-samples.md`, "Native
+//! histogram encoding 8".
 
 use std::sync::Arc;
 
