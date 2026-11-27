@@ -1,0 +1,14 @@
+src/table/src/predicate.rs
+  h_623774b620da8e 31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "91b7c176783c43841a03a2928496269c16039064",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+src/mito2/src/sst/parquet.rs
+  s_b42cba56c4911e::t_88696a80a59042 26,28-32,287-288,292-293,295-301,304-305,307-314,317-318,321-383,533-535,545,1539-1668
+tests/compatibility/cases/downgrade_compatibility/verify.sql
+  s_b42cba56c4911e::t_88696a80a59042 14-20
+tests/compatibility/README.md
+  s_b42cba56c4911e::t_88696a80a59042 20,149-152
+src/cmd/src/datanode/sst_replace.rs
+  s_b42cba56c4911e::t_88696a80a59042 24,170
+src/mito2/src/batch_size.rs
+  s_b42cba56c4911e::t_88696a80a59042 26-27
+tests/compatibility/cases/downgrade_compatibility/case.toml
+  s_b42cba56c4911e::t_88696a80a59042 2,9-16
+tests/compatibility/cases/downgrade_compatibility/setup.sql
+  s_b42cba56c4911e::t_88696a80a59042 61-92
+tests/compatibility/cases/downgrade_compatibility/verify.result
+  s_b42cba56c4911e::t_88696a80a59042 50-73
+tests/compatibility/ci.toml
+  s_b42cba56c4911e::t_88696a80a59042 12-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "00b0f11af8a243ced860ce8dc13107a4648a202f",
+  "prompts": {},
+  "sessions": {
+    "s_b42cba56c4911e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a207af-50d0-7c80-bdbc-8fe4eee39295",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

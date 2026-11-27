@@ -1,0 +1,23 @@
+src/mito2/src/sst/parquet.rs
+  s_b42cba56c4911e::t_92c262fbc3c81e 27
+src/meta-srv/src/procedure/repartition/group/sync_region.rs
+  s_b42cba56c4911e::t_92c262fbc3c81e 62
+tests/compatibility/cases/downgrade_compatibility/case.toml
+  s_b42cba56c4911e::t_92c262fbc3c81e 2,7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bb6ceb2c8a3b1de81e4270a8ddbccd3d7d1ddf14",
+  "prompts": {},
+  "sessions": {
+    "s_b42cba56c4911e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a207af-50d0-7c80-bdbc-8fe4eee39295",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
