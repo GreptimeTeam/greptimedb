@@ -1,0 +1,57 @@
+src/datanode/src/heartbeat/handler/apply_staging_manifest.rs
+  s_b42cba56c4911e::t_2897d98d893d87 249
+src/mito2/src/remap_manifest.rs
+  s_b42cba56c4911e::t_2897d98d893d87 20,57-59,81-140,405-478,595-603,605,671-1081
+src/mito2/src/engine/apply_staging_manifest_test.rs
+  s_b42cba56c4911e::t_2897d98d893d87 137,476,551,832,970,1065,1279,1368-1521
+src/mito2/src/engine/remap_manifests_test.rs
+  s_b42cba56c4911e::t_2897d98d893d87 54,101,145,161-239,292
+src/mito2/src/request.rs
+  s_b42cba56c4911e::t_2897d98d893d87 1013,1034,1434-1435
+src/mito2/src/error.rs
+  s_b42cba56c4911e::t_2897d98d893d87 348-358,1579
+src/common/meta/src/instruction.rs
+  s_b42cba56c4911e::t_2897d98d893d87 958,967-981,988-993,1444,1504-1553
+src/meta-srv/src/procedure/repartition/group/sync_region.rs
+  s_b42cba56c4911e::t_2897d98d893d87 38,61,63-67
+src/meta-srv/src/procedure/repartition/collect.rs
+  s_b42cba56c4911e::t_2897d98d893d87 47-50,61,98-99,121-125,143-180,187,190,253,284-295,298-299,316,325-341
+src/store-api/src/region_engine.rs
+  s_b42cba56c4911e::t_2897d98d893d87 18,896-940,942,945-947,955-961
+src/mito2/src/engine/copy_region_from_test.rs
+  s_b42cba56c4911e::t_2897d98d893d87 500-1112
+src/mito2/src/worker/handle_remap.rs
+  s_b42cba56c4911e::t_2897d98d893d87 36-53
+tests-integration/tests/repartition.rs
+  s_b42cba56c4911e::t_2897d98d893d87 589-599
+src/datanode/src/heartbeat/handler/remap_manifest.rs
+  s_b42cba56c4911e::t_2897d98d893d87 38,41,44-45,70,137,168,233,258
+src/meta-srv/src/procedure/repartition/group/remap_manifest.rs
+  s_b42cba56c4911e::t_2897d98d893d87 124
+tests-integration/tests/repartition_event.rs
+  s_b42cba56c4911e::t_2897d98d893d87 76-84
+src/mito2/src/engine/staging_test.rs
+  s_b42cba56c4911e::t_2897d98d893d87 454,2438-2767
+src/mito2/src/engine/partition_filter_test.rs
+  s_b42cba56c4911e::t_2897d98d893d87 46
+src/meta-srv/src/procedure/repartition/group/repartition_start.rs
+  s_b42cba56c4911e::t_2897d98d893d87 27,150-152,198-200
+src/meta-srv/src/procedure/repartition/group/utils.rs
+  s_b42cba56c4911e::t_2897d98d893d87 16,18-20,23-26,29-32,100-677
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3266820f0d3b3fcd676c64c0c34c774c96d8a608",
+  "prompts": {},
+  "sessions": {
+    "s_b42cba56c4911e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a207af-50d0-7c80-bdbc-8fe4eee39295",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
