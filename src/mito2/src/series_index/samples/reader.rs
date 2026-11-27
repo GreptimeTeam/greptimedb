@@ -629,8 +629,13 @@ impl Directory<'_> {
             async {
                 let bytes =
                     read_part_range(self.reader, start, start + count * index::ENTRY_SIZE).await?;
-                bytes
-                    .chunks_exact(index::ENTRY_SIZE as usize)
+                let (entries, remainder) = bytes.as_chunks::<{ index::ENTRY_SIZE as usize }>();
+                require(
+                    remainder.is_empty() && entries.len() as u64 == count,
+                    "truncated samples directory page",
+                )?;
+                entries
+                    .iter()
                     .map(|bytes| LeafEntry::decode(bytes, self.footer.directory))
                     .collect()
             },
