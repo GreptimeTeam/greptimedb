@@ -590,16 +590,18 @@ impl WriteCache {
 pub(crate) struct NarthexUpload {
     cache: WriteCacheRef,
     remote: ObjectStore,
+    artifact_dir: String,
     manifest_key: IndexKey,
     op_type: OperationType,
     cancellation: Option<CancellationToken>,
-    uploaded: Vec<(IndexKey, String)>,
+    uploaded: Vec<IndexKey>,
 }
 
 impl NarthexUpload {
     pub(crate) fn new(
         cache: &WriteCacheRef,
         remote: &ObjectStore,
+        artifact_dir: String,
         manifest_key: IndexKey,
         op_type: OperationType,
         cancellation: Option<CancellationToken>,
@@ -607,6 +609,7 @@ impl NarthexUpload {
         Self {
             cache: cache.clone(),
             remote: remote.clone(),
+            artifact_dir,
             manifest_key,
             op_type,
             cancellation,
@@ -625,7 +628,7 @@ impl NarthexUpload {
                 _ => unreachable!(),
             };
         }
-        self.uploaded.push((key, path.to_owned()));
+        self.uploaded.push(key);
         let disk = self.cache.file_cache();
         disk.local_store()
             .rename(&WriteCache::narthex_stage(path), &disk.cache_file_path(key))
@@ -646,13 +649,18 @@ impl NarthexUpload {
     }
 
     pub(crate) async fn clean(&mut self) {
-        for (key, path) in &self.uploaded {
-            self.cache.remove(*key).await;
-            if let Err(error) = self.remote.delete(path).await {
-                common_telemetry::warn!(error; "Failed to remove unpublished Narthex object {}", path);
-            }
+        for &key in &self.uploaded {
+            self.cache.remove(key).await;
         }
         self.uploaded.clear();
+        if let Err(error) = self
+            .remote
+            .delete_with(&self.artifact_dir)
+            .recursive(true)
+            .await
+        {
+            common_telemetry::warn!(error; "Failed to remove unpublished Narthex artifact {}", self.artifact_dir);
+        }
     }
 }
 
@@ -1001,16 +1009,18 @@ mod tests {
             }))
             .build()
             .unwrap();
-        let remote = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let remote_root = create_temp_dir("narthex-remote");
+        let remote = new_fs_store(remote_root.path().to_str().unwrap()).layer(layer);
         let owner = RegionId::new(1, 1);
         let id = FileId::random();
+        let artifact_dir = crate::sst::location::narthex_file_dir("region", id);
         let mut inventory = Vec::new();
         for (part, name) in [
             (Some(0), "part-0.series"),
             (Some(1), "part-1.series"),
             (None, "manifest.json"),
         ] {
-            let path = format!("artifact/{name}");
+            let path = format!("{artifact_dir}{name}");
             local
                 .write(&WriteCache::narthex_stage(&path), vec![42; 16])
                 .await
@@ -1026,6 +1036,7 @@ mod tests {
         let mut upload = NarthexUpload::new(
             &cache,
             &remote,
+            artifact_dir.clone(),
             IndexKey::new(owner, id, FileType::Series(None)),
             OperationType::Compact,
             Some(signal),
@@ -1044,7 +1055,10 @@ mod tests {
             .upload_closed(&inventory[2].1.path)
             .await
             .unwrap_err();
+        let directory = remote_root.path().join(&artifact_dir);
+        assert!(directory.is_dir());
         upload.clean().await;
+        assert!(!directory.try_exists().unwrap());
         assert_eq!(
             matches!(error, error::Error::SstWriteCancelled { .. }),
             cancel

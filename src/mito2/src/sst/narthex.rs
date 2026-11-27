@@ -79,6 +79,7 @@ pub(crate) async fn write_samples(
         writer.set_upload(NarthexUpload::new(
             cache,
             layer.object_store(),
+            prefix,
             IndexKey::new(region_id, id, FileType::Samples(None)),
             request.op_type,
             cancellation.clone(),
@@ -252,12 +253,13 @@ pub(crate) async fn write_series(
             |cache| cache.file_cache().local_store(),
         ),
         &entry,
-        prefix,
+        prefix.clone(),
     )?;
     if let Some(cache) = cache {
         writer.set_upload(NarthexUpload::new(
             cache,
             layer.object_store(),
+            prefix,
             IndexKey::new(metadata.region_id, id, FileType::Series(None)),
             OperationType::Compact,
             None,
