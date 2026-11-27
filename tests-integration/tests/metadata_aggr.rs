@@ -125,7 +125,11 @@ async fn test_metadata_count_distributed_with_filter_and_memtables(#[case] enabl
         ENGINE=mito WITH (append_mode = 'false', 'memtable.type' = 'bulk')",
     )
     .await;
-    execute_sql(frontend, "INSERT INTO split_count VALUES ('a', 500, 0), ('z', 500, 0)").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO split_count VALUES ('a', 500, 0), ('z', 500, 0)",
+    )
+    .await;
     execute_sql(frontend, "ADMIN FLUSH_TABLE('split_count')").await;
     execute_sql(
         frontend,
@@ -134,7 +138,11 @@ async fn test_metadata_count_distributed_with_filter_and_memtables(#[case] enabl
     )
     .await;
     execute_sql(frontend, "ADMIN FLUSH_TABLE('split_count')").await;
-    execute_sql(frontend, "INSERT INTO split_count VALUES ('a', 3000, 5), ('z', 3000, 6)").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO split_count VALUES ('a', 3000, 5), ('z', 3000, 6)",
+    )
+    .await;
 
     let sql = "SELECT count(*) FROM split_count WHERE ts >= TIMESTAMP '1970-01-01 00:00:01'";
     assert_count(frontend, sql, 6).await;

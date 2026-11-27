@@ -1074,7 +1074,9 @@ mod tests {
     #[tokio::test]
     async fn test_metadata_aggr_optimizer_preserves_exact_and_residual_counts() {
         use datafusion::functions_aggregate::count::count_udaf;
-        use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+        use datafusion::physical_plan::aggregates::{
+            AggregateExec, AggregateMode, PhysicalGroupBy,
+        };
         use datafusion::physical_plan::expressions::{BinaryExpr, lit};
         use datafusion::physical_plan::projection::ProjectionExec;
         use datafusion::physical_plan::{PhysicalExpr, collect, displayable};
@@ -1086,20 +1088,34 @@ mod tests {
         let rules: Vec<_> = session
             .physical_optimizers()
             .iter()
-            .filter(|rule| matches!(rule.name(), "aggregate_statistics" | "partial_metadata_aggr"))
+            .filter(|rule| {
+                matches!(
+                    rule.name(),
+                    "aggregate_statistics" | "partial_metadata_aggr"
+                )
+            })
             .collect();
         assert_eq!(rules.len(), 2);
 
         let projections: [(Option<Arc<dyn PhysicalExpr>>, bool); 4] = [
             (None, true),
             (Some(lit(1_i64)), true),
-            (Some(Arc::new(BinaryExpr::new(lit(1_i64), Operator::Plus, lit(1_i64)))), false),
+            (
+                Some(Arc::new(BinaryExpr::new(
+                    lit(1_i64),
+                    Operator::Plus,
+                    lit(1_i64),
+                ))),
+                false,
+            ),
             (Some(lit(ScalarValue::Int64(None))), false),
         ];
         for (projection, expect_split) in projections {
             let scan = crate::optimizer::test_util::metadata_aggr_region_scan(10, 7);
             let input: Arc<dyn ExecutionPlan> = match projection {
-                Some(expr) => Arc::new(ProjectionExec::try_new(vec![(expr, "value".to_owned())], scan).unwrap()),
+                Some(expr) => Arc::new(
+                    ProjectionExec::try_new(vec![(expr, "value".to_owned())], scan).unwrap(),
+                ),
                 None => scan,
             };
             let schema = input.schema();
@@ -1129,7 +1145,11 @@ mod tests {
                 ScalarValue::Int64(Some(17)),
                 "{text}"
             );
-            assert_eq!(text.contains("MetadataAggrExec: exact_rows=10"), expect_split, "{text}");
+            assert_eq!(
+                text.contains("MetadataAggrExec: exact_rows=10"),
+                expect_split,
+                "{text}"
+            );
         }
     }
 
