@@ -691,6 +691,75 @@ fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
     assert_eq!(names, ["__other__", "host"]);
 }
 
+#[test]
+fn drop_empty_labels_reuses_clean_labels() {
+    type Tags<'a> = &'a [(&'a str, &'a str)];
+    // metric name, input labels, expected name, expected labels
+    let cases: &[(Option<&str>, Tags<'_>, Option<&str>, Tags<'_>)] = &[
+        // No empty value: nothing to drop.
+        (Some("cpu"), &[("host", "a")], Some("cpu"), &[("host", "a")]),
+        (None, &[("host", "a")], None, &[("host", "a")]),
+        // Only the empty metric name goes; the labels are still reused.
+        (Some(""), &[("host", "a")], None, &[("host", "a")]),
+        (Some("cpu"), &[], Some("cpu"), &[]),
+        // One empty value, several, and all of them.
+        (
+            Some("cpu"),
+            &[("empty", ""), ("host", "a")],
+            Some("cpu"),
+            &[("host", "a")],
+        ),
+        (
+            Some("cpu"),
+            &[("a", ""), ("b", ""), ("c", "3")],
+            Some("cpu"),
+            &[("c", "3")],
+        ),
+        (Some("cpu"), &[("a", "")], Some("cpu"), &[]),
+        (Some(""), &[("a", "")], None, &[]),
+    ];
+    for &(name, tags, expected_name, expected_tags) in cases {
+        let input = labels(name, tags);
+        let before = input.clone();
+        let output = drop_empty_labels(&input).unwrap();
+        // The pre-early-return rebuild, as the reference for both branches.
+        let reference = SeriesLabels::try_new(
+            input.name().filter(|name| !name.is_empty()).map(Arc::from),
+            input
+                .tags()
+                .iter()
+                .filter(|label| !label.value.is_empty())
+                .cloned()
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(output, reference, "{tags:?}");
+        assert_eq!(output.name(), expected_name, "{tags:?}");
+        assert_eq!(output.tags().len(), expected_tags.len(), "{tags:?}");
+        for (got, want) in output.tags().iter().zip(expected_tags) {
+            assert_eq!(
+                (got.name.as_ref(), got.value.as_ref()),
+                *want,
+                "{name:?} {tags:?}"
+            );
+        }
+        assert_eq!(input, before, "{tags:?}");
+
+        let drops_tag = tags.iter().any(|(_, value)| value.is_empty());
+        if !drops_tag {
+            assert_eq!(output.tags(), input.tags(), "{tags:?}");
+            assert!(
+                std::ptr::eq(input.tags().as_ptr(), output.tags().as_ptr()),
+                "clean labels must stay shared instead of being rebuilt: {tags:?}"
+            );
+        }
+        if !drops_tag && output.name() == input.name() {
+            assert_eq!(output, input, "{tags:?}");
+        }
+    }
+}
+
 /// Time-varying scalars pair by absolute position; a point either one lacks has no result.
 ///
 /// `max_of(a, b)` and `min_of(a, b)` are functions of two scalars, so the compiler binds the call's

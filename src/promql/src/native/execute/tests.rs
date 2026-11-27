@@ -44,9 +44,9 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 
 use super::{
     BinaryRuntime, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
-    NativeExecutor, NodeState, PairKernel, Reader, RetainedInput, RuntimeNode, RuntimeOp,
-    SourceFacts, buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes, grid_end_ms,
-    grid_position, map_chunk, map_workspace_bytes, raw_bytes, vector_series_with_k,
+    NativeExecutor, NodeBuffer, NodeState, PairKernel, Reader, RetainedInput, RuntimeNode,
+    RuntimeOp, SourceFacts, buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes,
+    grid_end_ms, grid_position, map_chunk, map_workspace_bytes, raw_bytes, vector_series_with_k,
     vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
@@ -59,7 +59,7 @@ use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::map_time::DateFunction;
 use crate::native::canonicalize::merge_label_rewrites;
-use crate::native::metrics::{NodeMetric, NodeMetrics};
+use crate::native::metrics::{NodeMetric, NodeMetrics, NodeMetricsSnapshot};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
@@ -3117,6 +3117,78 @@ fn a_fanout_enqueue_failure_releases_every_recipient() {
             .is_err(),
         "a failed fanout execution accepted another input"
     );
+}
+
+/// A node is charged for what it holds, so a call that does not move that figure is no request.
+///
+/// Growing by nothing, giving nothing back and restoring the figure the node already holds all skip
+/// the pool; what would not fit is still refused, and the figures ANALYZE reads stay the node's.
+#[test]
+fn node_buffer_skips_requests_that_do_not_move_its_figure() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(100));
+    let set = ExecutionPlanMetricsSet::new();
+    let metrics = Arc::new(NodeMetrics::default());
+    metrics.register("probe", &set, 0);
+    let mut buffer = NodeBuffer::new("native.probe", Arc::clone(&metrics), &pool);
+
+    buffer.grow(0).unwrap();
+    buffer.shrink(0).unwrap();
+    buffer.resize(0).unwrap();
+    assert_eq!(pool.reserved(), 0);
+
+    buffer.grow(60).unwrap();
+    assert_eq!(pool.reserved(), 60);
+    // The node already holds this figure.
+    buffer.resize(60).unwrap();
+    assert_eq!(pool.reserved(), 60);
+    // A chunk and its workspace are held at once, so they are one request.
+    buffer.grow_held(20, 20).unwrap();
+    assert_eq!(pool.reserved(), 100);
+    assert_eq!(buffer.reservation.size(), 100);
+
+    // The pool still refuses what does not fit, and the node keeps what it holds.
+    let error = buffer
+        .grow(1)
+        .expect_err("a request past the limit is refused");
+    assert!(is_resources_exhausted(&error), "{error}");
+    let error = buffer
+        .grow_held(60, 41)
+        .expect_err("a held pair past the limit is refused");
+    assert!(is_resources_exhausted(&error), "{error}");
+    assert_eq!(pool.reserved(), 100);
+
+    let snapshot = NodeMetricsSnapshot::read(&set);
+    let figure = |name: &str| {
+        snapshot
+            .of("probe")
+            .iter()
+            .find(|(figure, _)| figure == name)
+            .map(|(_, value)| *value)
+    };
+    assert_eq!(figure(NodeMetric::CURRENT_RESERVED_BYTES), Some(100));
+    assert_eq!(figure(NodeMetric::PEAK_RESERVED_BYTES), Some(100));
+}
+
+/// A figure that is already past the limit must not make a request for nothing fail.
+///
+/// `MemoryReservation::grow` is the infallible path and always grants, so a pool can hold more than
+/// its limit. Asking it to admit zero more bytes is not a request, and it is not a refusal either.
+#[test]
+fn node_buffer_does_not_ask_a_full_pool_for_nothing() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(50));
+    let mut buffer = NodeBuffer::new("native.full", Arc::new(NodeMetrics::default()), &pool);
+    buffer.reservation.grow(80);
+    assert_eq!(pool.reserved(), 80);
+
+    buffer.grow(0).expect("a no-op reserves nothing");
+    buffer.resize(80).expect("the figure does not move");
+    buffer.shrink(0).expect("a no-op gives back nothing");
+    assert_eq!(pool.reserved(), 80);
+
+    // A real request still has to fit, and it does not.
+    let error = buffer.grow(1).expect_err("a real request is refused");
+    assert!(is_resources_exhausted(&error), "{error}");
+    assert_eq!(pool.reserved(), 80);
 }
 
 /// A chunk the pool cannot admit fails the execution and gives back everything it already held.

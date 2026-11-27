@@ -374,23 +374,44 @@ pub(crate) fn drop_metric_name(metric: &SeriesLabels) -> Result<SeriesLabels> {
 
 /// Drops labels with empty values, which Prometheus treats as absent.
 pub(crate) fn drop_empty_labels(metric: &SeriesLabels) -> Result<SeriesLabels> {
-    let name = metric.name().filter(|name| !name.is_empty()).map(Arc::from);
+    let name = metric.name().filter(|name| !name.is_empty());
     rebuild_labels(metric, name, |_| true)
 }
 
 /// One rebuild: removing labels one by one copies the label array each time.
 fn rebuild_labels(
     metric: &SeriesLabels,
-    name: Option<Arc<str>>,
+    name: Option<&str>,
     keep: impl Fn(&str) -> bool,
 ) -> Result<SeriesLabels> {
-    let tags = metric
-        .tags()
+    let tags = metric.tags();
+    if !tags
+        .iter()
+        .any(|label| label.value.is_empty() || !keep(&label.name))
+    {
+        // Nothing to drop: the shared label array already is the result, so hand it on
+        // instead of copying it into a vector that the caller would then discard. A group key
+        // outlives the scan, so it takes the materialized array rather than the batch view that
+        // would keep the whole scan alive.
+        let mut unchanged = metric.detached();
+        match (name, metric.name()) {
+            (Some(name), current) if current != Some(name) => {
+                unchanged
+                    .set("__name__", Arc::from(name))
+                    .map_err(series_error)?;
+            }
+            (None, Some(_)) => unchanged.remove("__name__"),
+            _ => {}
+        }
+        return Ok(unchanged);
+    }
+
+    let tags = tags
         .iter()
         .filter(|label| !label.value.is_empty() && keep(&label.name))
         .cloned()
         .collect();
-    SeriesLabels::try_new(name, tags).map_err(series_error)
+    SeriesLabels::try_new(name.map(Arc::from), tags).map_err(series_error)
 }
 
 impl MathOp {
