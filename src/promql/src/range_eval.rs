@@ -1329,20 +1329,18 @@ impl RangeEvaluator {
             };
             match self.replay {
                 Replay::PerPoint => {
-                    // The batch kernel reads floats only, so a window holding a native histogram
-                    // flushes the batch and goes through the per-window path. Histograms are in
-                    // time order, so checking the first one past the head is enough.
-                    let histogram_window = !delta
+                    // A delta series reads `delta_kernel` and the batch kernel reads floats only,
+                    // so a delta series and a window holding a native histogram both flush the
+                    // batch and go through the per-window path. Histograms are in time order, so
+                    // checking the first one past the head is enough.
+                    let batched = !delta
                         && self.batch.is_some()
-                        && self.fields.iter().any(|field| {
+                        && !self.fields.iter().any(|field| {
                             field.histograms.get(field.histogram_head).is_some_and(
                                 |(timestamp, _)| i128::from(*timestamp) <= i128::from(eval_ts),
                             )
                         });
-                    if let Some(kernel) = self.batch.as_mut()
-                        && !histogram_window
-                        && !delta
-                    {
+                    if batched && let Some(kernel) = self.batch.as_mut() {
                         accumulate(&mut self.pending, state.cursor, eval_ts, &self.fields);
                         if self.pending.len() >= EVALUATION_BATCH {
                             flush_batch(
