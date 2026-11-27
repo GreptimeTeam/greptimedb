@@ -183,7 +183,6 @@ impl LocalFilePurger {
             .await
             {
                 error!(e; "Failed to delete file {:?} from storage", file_meta);
-                return;
             }
         })) {
             error!(e; "Failed to schedule the file purge request");

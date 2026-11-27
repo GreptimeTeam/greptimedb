@@ -304,8 +304,6 @@ impl MitoRegion {
         }
     }
 
-    /// Returns the current immutable series-index snapshot.
-
     fn remove_region_metrics(&self) {
         let region_id = self.region_id.as_u64().to_string();
         let labels = &[region_id.as_str()];

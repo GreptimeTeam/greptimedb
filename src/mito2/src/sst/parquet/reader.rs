@@ -267,11 +267,8 @@ impl ParquetReaderBuilder {
         }
     }
 
-    /// Sets the captured series-index context for range-index reads.
-    #[must_use]
-
     /// Sets the scan-wide hint for rows in a decoded batch.
-
+    #[must_use]
     pub(crate) fn batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = batch_size.clamp(1, DEFAULT_READ_BATCH_SIZE);
         self
