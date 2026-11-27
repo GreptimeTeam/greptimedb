@@ -396,7 +396,7 @@ impl PromPlanner {
         // expression has already been split into the nodes those functions would have shared. A
         // shape it does not accept is planned by the existing path exactly as if it were not here.
         if let Some(plan) = planner
-            .try_plan_native_fused(&stmt.expr, query_engine_state)
+            .try_plan_native_statement(&stmt.expr, query_engine_state)
             .await?
         {
             return planner.strip_tsid_column(plan);

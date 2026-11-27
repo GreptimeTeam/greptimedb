@@ -34,10 +34,12 @@ use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::{Column, DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::UserDefinedLogicalNode;
-use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
+use datafusion::logical_expr::{
+    EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
@@ -71,11 +73,15 @@ use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, SubqueryExpr, VectorSelector,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::region_engine::RawLabelSource;
 
-use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
+use crate::parser::AliasExpr;
+use crate::promql::error::{
+    DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result, TimeIndexNotFoundSnafu,
+    UnsupportedExprSnafu,
+};
 use crate::promql::native_compile::{
     InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
     info_input, statement_grid, subquery_child_grid,
@@ -451,6 +457,80 @@ impl PromPlanner {
             split_series,
             keys_survive,
         )))
+    }
+
+    /// Offers a statement root to the native route, including a TQL `AS` alias over the expression
+    /// it names.
+    ///
+    /// An alias is not a PromQL shape: it renames the answer's one value column. So the aliased
+    /// expression is offered, and its rows are laid out the way the existing planner's
+    /// `apply_alias` publishes them - the value under the alias, then the labels, then the time
+    /// index - which a flow sinking the answer into a table relies on.
+    pub(super) async fn try_plan_native_statement(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<LogicalPlan>> {
+        let alias = match prom_expr {
+            PromExpr::Extension(extension) => extension.expr.as_any().downcast_ref::<AliasExpr>(),
+            _ => None,
+        };
+        let Some(alias) = alias else {
+            return self
+                .try_plan_native_fused(prom_expr, query_engine_state)
+                .await;
+        };
+        let statement_ctx = self.ctx.clone();
+        let Some(plan) = self
+            .try_plan_native_fused(&alias.expr, query_engine_state)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // The label order of the existing layout is a by-product of planning the whole expression
+        // (`ctx.tag_columns`), not a rule that can be read off its shape: `by(...)` keeps the order
+        // it names, `topk by(...)` keeps its input's, `count_values` appends its label, and a wrapper
+        // keeps whatever it wraps. So the existing planner is asked, with the native route off so
+        // that it does not answer itself.
+        let native_ctx = std::mem::replace(&mut self.ctx, statement_ctx.clone());
+        let native_fused = std::mem::replace(&mut self.native_fused, false);
+        let existing = self
+            .prom_expr_to_plan(&alias.expr, query_engine_state)
+            .await
+            .map(|_| {
+                (
+                    std::mem::take(&mut self.ctx.field_columns),
+                    std::mem::take(&mut self.ctx.tag_columns),
+                    self.ctx.time_index_column.take(),
+                )
+            });
+        self.native_fused = native_fused;
+        self.ctx = native_ctx;
+        let (fields, labels, time) = existing?;
+        ensure!(
+            fields.len() == 1,
+            UnsupportedExprSnafu {
+                name: "alias on multi-value result"
+            }
+        );
+        let time = time.context(TimeIndexNotFoundSnafu {
+            table: statement_ctx.table_name.clone().unwrap_or_default(),
+        })?;
+        match aliased_rows(plan, &alias.alias, &labels, &time)? {
+            Some(plan) => Ok(Some(plan)),
+            None => {
+                // The existing plan reports a different label set, so only it can answer in its own
+                // layout.
+                self.ctx = statement_ctx;
+                let reason = "alias_labels_differ_from_existing_plan";
+                crate::metrics::NATIVE_PROMQL_DECLINED_TOTAL
+                    .with_label_values(&[reason])
+                    .inc();
+                #[cfg(test)]
+                REPORTED_DECLINE.with(|reported| reported.set(Some(reason)));
+                Ok(None)
+            }
+        }
     }
 
     pub(super) async fn try_plan_native_fused(
@@ -1833,6 +1913,58 @@ fn epoch_millis(millis: i64) -> Option<SystemTime> {
     } else {
         UNIX_EPOCH.checked_add(Duration::from_millis(millis as u64))
     }
+}
+
+/// Projects a native rows answer into the layout of an aliased statement: the value column under
+/// `alias`, then `labels` in the order the existing planner reports them, then the time index under
+/// the existing planner's name `time`.
+///
+/// A rows layout is the time index, the value columns, the labels as strings and the metric name
+/// last; the existing planner publishes no metric name for an alias. `None` when the answer's labels
+/// are not exactly `labels`, as a layout with a label missing or added is not the existing one.
+fn aliased_rows(
+    plan: LogicalPlan,
+    alias: &str,
+    labels: &[String],
+    time: &str,
+) -> Result<Option<LogicalPlan>> {
+    let mut columns = plan
+        .schema()
+        .iter()
+        .filter(|(_, field)| field.name() != METRIC_NAME)
+        .map(|(qualifier, field)| Column::from((qualifier, field)));
+    let Some(native_time) = columns.next() else {
+        return Err(DataFusionError::Plan(
+            "a native rows answer has no time index".to_string(),
+        ))
+        .context(DataFusionPlanningSnafu);
+    };
+    let (label_columns, values): (Vec<_>, Vec<_>) =
+        columns.partition(|column| labels.contains(&column.name));
+    // An answer column that is not one of `labels` is a value or a label the existing plan lacks,
+    // so anything but one such column is a layout the existing plan does not report.
+    let [value] = values.as_slice() else {
+        return Ok(None);
+    };
+    let Some(label_columns) = labels
+        .iter()
+        .map(|label| label_columns.iter().find(|column| &column.name == label))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    let projection = std::iter::once(DfExpr::Column(value.clone()).alias(alias))
+        .chain(
+            label_columns
+                .into_iter()
+                .map(|column| DfExpr::Column(column.clone())),
+        )
+        .chain(std::iter::once(DfExpr::Column(native_time).alias(time)));
+    LogicalPlanBuilder::from(plan)
+        .project(projection)
+        .and_then(LogicalPlanBuilder::build)
+        .map(Some)
+        .context(DataFusionPlanningSnafu)
 }
 
 /// Finds a subquery at the statement root, treating parentheses as transparent.
