@@ -16,6 +16,7 @@ pub mod error;
 pub mod label_values;
 pub mod native_compile;
 pub mod planner;
+pub mod window;
 
 use datafusion_common::tree_node::{TreeNode as _, TreeNodeRecursion};
 use datafusion_expr::{Extension, LogicalPlan};
