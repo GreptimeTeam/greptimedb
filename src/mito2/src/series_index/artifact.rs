@@ -15,12 +15,10 @@
 //! Immutable, potentially multi-object format outputs and reader-owned lifetimes.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use store_api::storage::FileId;
 
-use crate::series_index::purger::IndexFilePurger;
 use crate::sst::file::RegionFileId;
 
 /// Persisted artifact identifiers. Concrete codecs are added with their implementations.
@@ -62,92 +60,40 @@ pub(crate) struct ArtifactMetadata {
 pub(crate) struct SamplesEntry {
     pub(crate) file_id: FileId,
     pub(crate) artifact: ArtifactMetadata,
-    /// Empty for legacy per-SST artifacts. Otherwise the complete source set for a UTC day.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) source_file_ids: Vec<FileId>,
-    /// UTC day number since the Unix epoch; absent for legacy per-SST artifacts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) window: Option<i64>,
-    /// Complete nonempty UTC-day coverage, stored on one anchor entry per source group.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub(crate) source_windows: std::collections::HashMap<FileId, Vec<i64>>,
 }
-
-impl SamplesEntry {
-    pub(crate) fn covers(&self, id: FileId) -> bool {
-        if self.window.is_some() {
-            self.source_file_ids.contains(&id)
-        } else {
-            self.file_id == id
-        }
-    }
-
-    pub(crate) fn sources_visible(&self, visible: &std::collections::HashSet<FileId>) -> bool {
-        if self.window.is_some() {
-            !self.source_file_ids.is_empty()
-                && self.source_file_ids.iter().all(|id| visible.contains(id))
-        } else {
-            visible.contains(&self.file_id)
-        }
-    }
-}
-
-/// Requires either a legacy whole-SST artifact or complete daily coverage.
-pub(crate) fn samples_cover_file(
-    samples: &std::collections::HashMap<FileId, SamplesFileHandle>,
-    file: &crate::sst::file::FileHandle,
-) -> bool {
-    let id = file.file_id().file_id();
-    if samples
-        .values()
-        .any(|h| h.entry().window.is_none() && h.entry().covers(id))
-    {
-        return true;
-    }
-    samples.values().any(|handle| {
-        let Some(days) = handle.entry().source_windows.get(&id) else {
-            // Earlier daily catalogs require rebuilding to establish actual row coverage.
-            return false;
-        };
-        !days.is_empty()
-            && days.iter().all(|day| {
-                samples.values().any(|h| {
-                    h.entry().window == Some(*day)
-                        && h.entry().covers(id)
-                        && h.entry().source_file_ids == handle.entry().source_file_ids
-                })
-            })
-    })
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct SamplesFileHandle(Arc<SamplesFileInner>);
-
 #[derive(Debug)]
 struct SamplesFileInner {
-    file_id: RegionFileId,
+    file: crate::sst::file::FileHandle,
     entry: SamplesEntry,
-    retired: AtomicBool,
-    lifetime: SamplesLifetime,
+    manifest_path: String,
 }
-
-#[derive(Debug)]
-enum SamplesLifetime {
-    Sidecar(IndexFilePurger),
-    Narthex(crate::sst::file::FileHandle),
-}
-
 impl SamplesFileHandle {
-    pub(crate) fn new(file_id: RegionFileId, entry: SamplesEntry, purger: IndexFilePurger) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(file_id: RegionFileId, entry: SamplesEntry) -> Self {
+        let manifest_path = format!(
+            "{}manifest.json",
+            crate::series_index::samples::samples_prefix(
+                file_id.region_id().as_u64(),
+                entry.artifact.generation
+            )
+        );
+        let file = crate::sst::file::FileHandle::new(
+            crate::sst::file::FileMeta {
+                region_id: file_id.region_id(),
+                file_id: file_id.file_id(),
+                ..Default::default()
+            },
+            crate::test_util::new_noop_file_purger(),
+        );
         Self(Arc::new(SamplesFileInner {
-            file_id,
+            file,
             entry,
-            retired: AtomicBool::new(false),
-            lifetime: SamplesLifetime::Sidecar(purger),
+            manifest_path,
         }))
     }
 
-    /// Pins an authoritative SST instead of giving the sidecar purger ownership.
     pub(crate) fn from_narthex(
         file: crate::sst::file::FileHandle,
         region_dir: &str,
@@ -165,7 +111,11 @@ impl SamplesFileHandle {
         let file_size = file.meta_ref().file_size;
         let file_id = file.file_id();
         Ok(Self(Arc::new(SamplesFileInner {
-            file_id,
+            manifest_path: format!(
+                "{}manifest.json",
+                crate::sst::location::narthex_file_dir(region_dir, file_id.file_id())
+            ),
+            file,
             entry: SamplesEntry {
                 file_id: file_id.file_id(),
                 artifact: ArtifactMetadata {
@@ -174,111 +124,17 @@ impl SamplesFileHandle {
                     objects,
                     file_size,
                 },
-                source_file_ids: Vec::new(),
-                window: None,
-                source_windows: Default::default(),
             },
-            retired: AtomicBool::new(false),
-            lifetime: SamplesLifetime::Narthex(file),
         })))
     }
 
     pub(crate) fn file_id(&self) -> RegionFileId {
-        match &self.0.lifetime {
-            SamplesLifetime::Sidecar(_) => self.0.file_id,
-            SamplesLifetime::Narthex(file) => file.file_id(),
-        }
+        self.0.file.file_id()
     }
-
     pub(crate) fn manifest_path(&self) -> String {
-        if matches!(self.0.lifetime, SamplesLifetime::Narthex(_)) {
-            return self
-                .0
-                .entry
-                .artifact
-                .objects
-                .last()
-                .expect("Narthex manifest")
-                .path
-                .clone();
-        }
-        format!(
-            "{}manifest.json",
-            crate::series_index::samples::samples_prefix(
-                self.file_id().region_id().as_u64(),
-                self.entry().artifact.generation
-            )
-        )
+        self.0.manifest_path.clone()
     }
-
     pub(crate) fn entry(&self) -> &SamplesEntry {
         &self.0.entry
-    }
-
-    pub(crate) fn mark_deleted(&self) {
-        self.0.retired.store(true, Ordering::Release);
-    }
-}
-
-impl Drop for SamplesFileInner {
-    fn drop(&mut self) {
-        if self.retired.load(Ordering::Acquire)
-            && let SamplesLifetime::Sidecar(purger) = &self.lifetime
-        {
-            purger.purge_objects(
-                self.file_id,
-                self.entry
-                    .artifact
-                    .objects
-                    .iter()
-                    .map(|object| object.path.clone())
-                    .collect(),
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn frozen_sample_catalog_coverage() {
-        let legacy: SamplesEntry = serde_json::from_str(include_str!(
-            "../../../../tests/compatibility/wire/mito_columnar_samples/legacy-catalog-entry.json"
-        ))
-        .unwrap();
-        assert!(legacy.window.is_none());
-        assert!(legacy.source_file_ids.is_empty());
-        assert!(legacy.covers(legacy.file_id));
-        let daily: SamplesEntry = serde_json::from_str(include_str!(
-            "../../../../tests/compatibility/wire/mito_columnar_samples/daily-catalog-entry.json"
-        ))
-        .unwrap();
-        assert!(daily.source_windows.is_empty());
-        let sparse: SamplesEntry = serde_json::from_str(include_str!(
-            "../../../../tests/compatibility/wire/mito_columnar_samples/sparse-daily-catalog-entry.json"
-        )).unwrap();
-        assert_eq!(sparse.source_windows[&legacy.file_id], vec![0, 3]);
-        assert_eq!(
-            sparse,
-            serde_json::from_str(&serde_json::to_string(&sparse).unwrap()).unwrap()
-        );
-        let mut visible: HashSet<_> = daily.source_file_ids.iter().copied().collect();
-        assert!(daily.sources_visible(&visible));
-        assert!(daily.covers(legacy.file_id));
-        assert!(!daily.covers(daily.file_id));
-        visible.remove(&legacy.file_id);
-        assert!(!daily.sources_visible(&visible));
-        assert_eq!(
-            daily,
-            serde_json::from_str(&serde_json::to_string(&daily).unwrap()).unwrap()
-        );
-        assert!(
-            !serde_json::to_string(&legacy)
-                .unwrap()
-                .contains("source_file_ids")
-        );
     }
 }

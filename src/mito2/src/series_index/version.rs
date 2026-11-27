@@ -14,18 +14,9 @@
 
 //! Immutable index snapshots and aggregate series-file handles.
 
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::{self, Debug, Formatter};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-
-use common_time::Timestamp;
-use store_api::storage::{FileId, RegionId};
-
-use crate::series_index::bucket::IndexBucket;
-use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
-use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
-use crate::sst::file::RegionFileId;
+use crate::series_index::catalog::SeriesIndexEntry;
+use crate::sst::file::{FileHandle, RegionFileId};
+use std::sync::Arc;
 
 /// Legacy codec coverage descriptor derived from immutable narthex metadata.
 /// The region manifest carries logical coverage separately from this descriptor.
@@ -60,203 +51,59 @@ pub(crate) fn narthex_series_entry(
     })
 }
 
-/// A reference-counted series-index file with deferred deletion semantics.
-#[derive(Clone)]
-pub(crate) struct SeriesIndexFileHandle {
-    inner: Arc<SeriesIndexFileHandleInner>,
-}
+/// The handle pins the immutable region artifact for the entire reader lifetime.
+#[derive(Clone, Debug)]
+pub(crate) struct SeriesIndexFileHandle(Arc<SeriesFile>);
 
-impl Debug for SeriesIndexFileHandle {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SeriesIndexFileHandle")
-            .field("file_id", &self.inner.file_id)
-            .field("deleted", &self.inner.deleted.load(Ordering::Relaxed))
-            .finish()
-    }
+#[derive(Debug)]
+struct SeriesFile {
+    file: FileHandle,
+    entry: SeriesIndexEntry,
+    manifest_path: String,
 }
 
 impl SeriesIndexFileHandle {
-    pub(crate) fn new(
-        region_id: RegionId,
-        entry: SeriesIndexEntry,
-        purger: IndexFilePurger,
-    ) -> Self {
-        Self {
-            inner: Arc::new(SeriesIndexFileHandleInner {
-                file_id: RegionFileId::new(region_id, entry.index_uuid),
-                entry,
-                deleted: AtomicBool::new(false),
-                purger: Some(purger),
-                narthex_file: None,
-            }),
-        }
-    }
-
-    pub(crate) fn from_narthex(
-        file: crate::sst::file::FileHandle,
-        region_dir: &str,
-    ) -> crate::error::Result<Self> {
-        let entry = narthex_series_entry(file.meta_ref(), region_dir)?;
-        Ok(Self {
-            inner: Arc::new(SeriesIndexFileHandleInner {
-                file_id: file.file_id(),
-                entry,
-                deleted: AtomicBool::new(false),
-                purger: None,
-                narthex_file: Some(file),
-            }),
-        })
-    }
-
-    pub(crate) fn manifest_path(&self) -> String {
-        if self.inner.narthex_file.is_some() {
-            return self
-                .inner
-                .entry
-                .artifact
-                .as_ref()
-                .expect("Narthex artifact")
-                .objects
-                .last()
-                .expect("Narthex manifest")
-                .path
-                .clone();
-        }
-        format!(
-            "{}/series/{}/manifest.json",
-            self.file_id().region_id().as_u64(),
-            self.inner.entry.index_uuid
-        )
-    }
-
-    /// Returns the region and file identity used for storage and deletion.
-    pub(crate) fn file_id(&self) -> RegionFileId {
-        self.inner.file_id
-    }
-
-    pub(crate) fn entry(&self) -> &SeriesIndexEntry {
-        &self.inner.entry
-    }
-
-    pub(crate) fn mark_deleted(&self) {
-        self.inner.deleted.store(true, Ordering::Release);
-    }
-}
-
-struct SeriesIndexFileHandleInner {
-    file_id: RegionFileId,
-    entry: SeriesIndexEntry,
-    deleted: AtomicBool,
-    purger: Option<IndexFilePurger>,
-    narthex_file: Option<crate::sst::file::FileHandle>,
-}
-
-impl Drop for SeriesIndexFileHandleInner {
-    fn drop(&mut self) {
-        if let Some(purger) = &self.purger
-            && self.deleted.load(Ordering::Acquire)
-        {
-            if let Some(artifact) = &self.entry.artifact {
-                purger.purge_objects(
-                    self.file_id,
-                    artifact
-                        .objects
-                        .iter()
-                        .map(|object| object.path.clone())
-                        .collect(),
-                );
-            } else {
-                purger.purge(PurgeRequest {
-                    file_id: self.file_id,
-                    objects: None,
-                });
-            }
-        }
-    }
-}
-
-/// Immutable series-index snapshot for one region.
-#[derive(Debug, Default)]
-pub(crate) struct SeriesIndexVersion {
-    /// Range indexes for visible SSTs; reconciliation removes IDs absent from its SST snapshot.
-    /// Physical deletion is independently handled by the SST file purger.
-    pub(crate) samples: HashMap<FileId, crate::series_index::artifact::SamplesFileHandle>,
-    pub(crate) range_indexes: HashMap<FileId, RangeIndexEntry>,
-    pub(crate) series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
-    pub(crate) index_buckets: BTreeMap<Timestamp, IndexBucket>,
-}
-
-impl SeriesIndexVersion {
-    /// Restores bucket lookup from immutable index coverage stored in the catalog.
-    pub(crate) fn new(
-        range_indexes: HashMap<FileId, RangeIndexEntry>,
-        series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
-    ) -> Self {
-        let mut index_buckets = BTreeMap::new();
-        for handle in series_indexes.values() {
-            IndexBucket::from_entry(handle.entry()).insert_into(&mut index_buckets);
-        }
-        Self {
-            samples: Default::default(),
-            range_indexes,
-            series_indexes,
-            index_buckets,
-        }
-    }
-
-    /// Approximate installed usage; old snapshots and unpublished outputs are excluded.
-    pub(crate) fn disk_usage(&self) -> u64 {
-        self.samples
-            .values()
-            .map(|handle| handle.entry().artifact.file_size)
-            .sum::<u64>()
-            + self
-                .range_indexes
-                .values()
-                .map(|entry| entry.file_size)
-                .sum::<u64>()
-            + self
-                .series_indexes
-                .values()
-                .map(|handle| handle.entry().file_size)
-                .sum::<u64>()
-    }
-
-    fn mark_all_deleted(&self) {
-        self.samples
-            .values()
-            .for_each(|handle| handle.mark_deleted());
-        self.series_indexes
-            .values()
-            .for_each(SeriesIndexFileHandle::mark_deleted);
-    }
-}
-
-/// Copy-on-write series-index snapshots owned by a region.
-#[derive(Debug, Default)]
-pub(crate) struct SeriesIndexVersionControl {
-    current: RwLock<Arc<SeriesIndexVersion>>,
-    pub(crate) formats: RwLock<Arc<crate::series_index::format::SeriesFormats>>,
-}
-
-impl SeriesIndexVersionControl {
-    pub(crate) fn with_format(self, format: crate::config::SeriesIndexFormat) -> Self {
-        *self.formats.write().unwrap() = Arc::new(
-            crate::series_index::format::SeriesFormats::from_config(format),
+    #[cfg(test)]
+    pub(crate) fn new(region_id: store_api::storage::RegionId, entry: SeriesIndexEntry) -> Self {
+        let file = FileHandle::new(
+            crate::sst::file::FileMeta {
+                region_id,
+                file_id: entry.index_uuid,
+                ..Default::default()
+            },
+            crate::test_util::new_noop_file_purger(),
         );
-        self
+        let manifest_path = format!(
+            "{}/series/{}/manifest.json",
+            region_id.as_u64(),
+            entry.index_uuid
+        );
+        Self(Arc::new(SeriesFile {
+            file,
+            entry,
+            manifest_path,
+        }))
     }
 
-    pub(crate) fn current(&self) -> Arc<SeriesIndexVersion> {
-        self.current.read().unwrap().clone()
+    pub(crate) fn from_narthex(file: FileHandle, region_dir: &str) -> crate::error::Result<Self> {
+        let entry = narthex_series_entry(file.meta_ref(), region_dir)?;
+        let manifest_path = format!(
+            "{}manifest.json",
+            crate::sst::location::narthex_file_dir(region_dir, file.meta_ref().file_id)
+        );
+        Ok(Self(Arc::new(SeriesFile {
+            file,
+            entry,
+            manifest_path,
+        })))
     }
-
-    pub(crate) fn publish(&self, next: Arc<SeriesIndexVersion>) -> Arc<SeriesIndexVersion> {
-        std::mem::replace(&mut *self.current.write().unwrap(), next)
+    pub(crate) fn manifest_path(&self) -> String {
+        self.0.manifest_path.clone()
     }
-
-    pub(crate) fn mark_dropped(&self) {
-        self.publish(Arc::new(SeriesIndexVersion::default()))
-            .mark_all_deleted();
+    pub(crate) fn file_id(&self) -> RegionFileId {
+        self.0.file.file_id()
+    }
+    pub(crate) fn entry(&self) -> &SeriesIndexEntry {
+        &self.0.entry
     }
 }

@@ -63,7 +63,6 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{MemtableBuilderProvider, ensure_json2_uses_flat_format};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
-use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
 use crate::region::version::{Version, VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -73,7 +72,6 @@ use crate::region::{
 use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::series_index::{IndexFilePurger, load_version_control};
 use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
@@ -86,7 +84,6 @@ use crate::sst::index::registry::IndexRegistryRef;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
-use crate::sst::range_index::RangeIndexDeleter;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -173,8 +170,6 @@ pub(crate) struct RegionOpener {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     hook: Option<RegionHookRef>,
-    series_index_store: Option<ObjectStore>,
-    series_index_purger: Option<IndexFilePurger>,
 }
 
 impl RegionOpener {
@@ -217,26 +212,12 @@ impl RegionOpener {
             file_ref_manager,
             partition_expr_fetcher,
             hook: None,
-            series_index_store: None,
-            series_index_purger: None,
         }
     }
 
     /// Sets the registry used to validate new-region index options.
     pub(crate) fn with_index_registry(mut self, registry: IndexRegistryRef) -> Self {
         self.index_registry = Some(registry);
-        self
-    }
-
-    /// Sets the store for companion range indexes.
-    pub(crate) fn series_index_store(mut self, store: Option<ObjectStore>) -> Self {
-        self.series_index_store = store;
-        self
-    }
-
-    /// Sets the purger shared with the worker's series-index maintenance task.
-    pub(crate) fn series_index_purger(mut self, purger: Option<IndexFilePurger>) -> Self {
-        self.series_index_purger = purger;
         self
     }
 
@@ -481,9 +462,6 @@ impl RegionOpener {
             region_id,
             compaction_state: Default::default(),
             version_control,
-            series_index_version_control: crate::series_index::SeriesIndexVersionControl::default()
-                .with_format(config.experimental_series_index_format),
-            series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
@@ -499,8 +477,6 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
                 self.file_ref_manager.clone(),
-                self.series_index_store
-                    .map(|store| RangeIndexDeleter::new(store, region_id)),
             ),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -630,9 +606,6 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
-            self.series_index_store
-                .clone()
-                .map(|store| RangeIndexDeleter::new(store, region_id)),
         );
         // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
@@ -732,23 +705,10 @@ impl RegionOpener {
 
         let now = self.time_provider.current_time_millis();
 
-        let series_index_version_control =
-            match (&self.series_index_store, &self.series_index_purger) {
-                (Some(store), Some(purger))
-                    if is_sparse_metric_metadata(&version_control.current().version.metadata) =>
-                {
-                    load_version_control(store, self.region_id, purger).await
-                }
-                _ => Default::default(),
-            };
-
         let region = MitoRegion {
             region_id: self.region_id,
             compaction_state: Default::default(),
             version_control: version_control.clone(),
-            series_index_version_control: series_index_version_control
-                .with_format(config.experimental_series_index_format),
-            series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(

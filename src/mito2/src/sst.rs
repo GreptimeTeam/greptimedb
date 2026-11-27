@@ -50,7 +50,6 @@ pub mod location;
 pub(crate) mod narthex;
 pub mod parquet;
 pub(crate) mod primary_key;
-pub mod range_index;
 pub(crate) mod upload;
 pub(crate) mod version;
 

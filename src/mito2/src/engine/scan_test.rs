@@ -50,7 +50,6 @@ use datatypes::schema::ColumnSchema;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use datatypes::vectors::json::array::JsonArray;
 use futures::TryStreamExt;
-use futures::future::try_join_all;
 use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
@@ -520,45 +519,26 @@ async fn test_narthex_spanning_sample_keeps_window_width_on_reopen() -> Whatever
 }
 
 #[tokio::test]
-async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()> {
+async fn test_parquet_region_rejects_manual_series_build() -> WhateverResult<()> {
     let mut env = TestEnv::new().await;
-    let budget = ReadableSize(1024);
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
-            experimental_series_index_min_files: 1,
-            experimental_series_index_max_size: budget,
             ..Default::default()
         })
         .await;
-    let native = RegionId::new(1024, 0);
-    let local = RegionId::new(1025, 0);
-    for (id, format) in [(local, "flat"), (native, "narthex")] {
-        engine
-            .handle_request(
-                id,
-                RegionRequest::Create(sparse_metric_create_request(format)),
-            )
-            .await?;
-        let region = engine.find_region(id).unwrap();
-        let series = if id == local { 64 } else { 1 };
-        for tsid in 0..series {
-            let tag = uuid::Uuid::new_v4().to_string();
-            let key = new_sparse_primary_key(&[&tag], &region.metadata(), 42, tsid);
-            engine
-                .handle_request(id, test_util::sparse_metric_put(key, 1000, Some(1.0)))
-                .await?;
-        }
-        test_util::flush_region(&engine, id, None).await;
-        engine
-            .handle_request(id, build_series_index_request())
-            .await?;
-        if id == native {
-            assert_eq!(1, region.version().ssts.series_indexes().len());
-        } else {
-            assert!(region.series_index_version().disk_usage() >= budget.as_bytes());
-        }
-    }
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("flat")),
+        )
+        .await?;
+    let error = engine
+        .handle_request(id, build_series_index_request())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Narthex"));
     engine.stop().await?;
     Ok(())
 }
@@ -3147,563 +3127,8 @@ async fn check_series_scan_single_source_range_batches(rows_per_series: usize) {
     }
 }
 
-#[tokio::test]
-async fn test_two_phase_series_scan() {
-    for use_index in [false, true] {
-        for use_range_index in [false, true] {
-            for mode in [
-                crate::config::ScanMemoryMode::Basic,
-                crate::config::ScanMemoryMode::Extended,
-            ] {
-                check_two_phase_series_scan(use_index, use_range_index, true, mode).await;
-            }
-        }
-        check_two_phase_series_scan(use_index, true, false, crate::config::ScanMemoryMode::Basic)
-            .await;
-    }
-}
-
-async fn check_two_phase_series_scan(
-    use_index: bool,
-    use_range_index: bool,
-    enable_range_index: bool,
-    scan_memory_mode: crate::config::ScanMemoryMode,
-) {
-    let mut env = TestEnv::with_prefix("test_two_phase_series_scan").await;
-    let engine = env
-        .create_engine(MitoConfig {
-            scan_memory_mode,
-            scan_memory_on_exhausted: common_memory_manager::OnExhaustedPolicy::Wait {
-                timeout: std::time::Duration::from_secs(30),
-            },
-            experimental_series_scan_v2: true,
-            experimental_enable_series_index: true,
-            experimental_enable_range_index: enable_range_index,
-            ..Default::default()
-        })
-        .await;
-
-    let region_id = RegionId::new(1, 1);
-    let metadata = Arc::new(sst_region_metadata_with_encoding(
-        PrimaryKeyEncoding::Sparse,
-    ));
-    let mut request = CreateRequestBuilder::new().build();
-    request.column_metadatas = metadata.column_metadatas.clone();
-    request.primary_key = metadata.primary_key.clone();
-    request
-        .options
-        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
-    request
-        .options
-        .insert("memtable.type".to_string(), "bulk".to_string());
-    request
-        .options
-        .insert("sst_format".to_string(), "flat".to_string());
-    let full_row_schema = test_util::rows_schema(&request);
-    let mut encoded_primary_key_schema = full_row_schema[0].clone();
-    encoded_primary_key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
-    encoded_primary_key_schema.datatype = ColumnDataType::Binary.into();
-    encoded_primary_key_schema.semantic_type = SemanticType::Tag.into();
-    let row_schema = vec![
-        encoded_primary_key_schema,
-        full_row_schema[5].clone(),
-        full_row_schema[4].clone(),
-    ];
-
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-
-    let rows = |values: &[(u32, u64, &str, &str, u64, i64)]| Rows {
-        schema: row_schema.clone(),
-        rows: values
-            .iter()
-            .map(|(table_id, tsid, tag_0, tag_1, field, ts)| {
-                row(vec![
-                    ValueData::BinaryValue(new_sparse_primary_key(
-                        &[*tag_0, *tag_1],
-                        &metadata,
-                        *table_id,
-                        *tsid,
-                    )),
-                    ValueData::TimestampMillisecondValue(*ts),
-                    ValueData::U64Value(*field),
-                ])
-            })
-            .collect(),
-    };
-    let put = |rows| {
-        RegionRequest::Put(RegionPutRequest {
-            skip_wal: false,
-            rows,
-            hint: Some(WriteHint {
-                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
-            }),
-            partition_expr_version: None,
-        })
-    };
-
-    engine
-        .handle_request(
-            region_id,
-            put(rows(&[
-                (10, 0, "a", "x", 10, 1000),
-                (10, u64::MAX, "b", "y", 20, 1000),
-                (20, 0, "c", "z", 30, 1000),
-            ])),
-        )
-        .await
-        .unwrap();
-    test_util::flush_region(&engine, region_id, None).await;
-    if use_index || use_range_index {
-        use datatypes::arrow::array::{BinaryArray, UInt8Array, UInt64Array};
-
-        use crate::series_index::{
-            SeriesIndexEntry, SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexWriter,
-            SeriesIndexWriterOptions, series_index_channel, series_index_path,
-        };
-
-        let region = engine.find_region(region_id).unwrap();
-        let store = region.series_index_store.clone().unwrap();
-        let sequence = region.flushed_sequence();
-        let entry = SeriesIndexEntry {
-            artifact: None,
-            file_size: 0,
-            index_uuid: FileId::random(),
-            bucket_start: Timestamp::new_millisecond(0),
-            bucket_end: Timestamp::new_millisecond(2001),
-            source_file_ids: Some(Vec::new()),
-            min_file_sequence: sequence,
-            max_file_sequence: sequence,
-            compaction_window_secs: 1,
-            window_sequences: Default::default(),
-        };
-        let keys = [
-            (10, 0, "a", "x"),
-            (10, u64::MAX, "b", "y"),
-            (20, 0, "c", "z"),
-        ]
-        .map(|(table, tsid, a, b)| new_sparse_primary_key(&[a, b], &metadata, table, tsid));
-        let batch = DfRecordBatch::try_from_iter(vec![
-            (
-                "ts",
-                Arc::new(TimestampMillisecondArray::from(vec![1000; 3])) as ArrayRef,
-            ),
-            (
-                "__primary_key",
-                Arc::new(BinaryArray::from_iter_values(&keys)),
-            ),
-            ("__sequence", Arc::new(UInt64Array::from_value(sequence, 3))),
-            ("__op_type", Arc::new(UInt8Array::from_value(0, 3))),
-        ])
-        .unwrap();
-        let mut index_version = SeriesIndexVersion::default();
-        if use_index {
-            let path = series_index_path(region_id, entry.index_uuid);
-            let mut writer = SeriesIndexWriter::try_new(
-                metadata.clone(),
-                store.clone(),
-                &path,
-                SeriesIndexWriterOptions::default(),
-                None,
-            )
-            .await
-            .unwrap();
-            writer.write(&batch).await.unwrap();
-            writer.finish().await.unwrap();
-            let (purger, _receiver) = series_index_channel(store.clone());
-            let handle = SeriesIndexFileHandle::new(region_id, entry.clone(), purger);
-            index_version
-                .series_indexes
-                .insert(entry.index_uuid, handle);
-        }
-        if use_range_index {
-            use crate::sst::range_index::{
-                SstRangeIndexWriter, SstRangeIndexWriterOptions, range_index_path,
-            };
-            let version = region.version();
-            let file = version
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files.values())
-                .next()
-                .unwrap();
-            assert_eq!(1, file.meta_ref().num_row_groups);
-            let file_id = file.file_id().file_id();
-            let mut writer = SstRangeIndexWriter::try_new(
-                metadata.clone(),
-                store,
-                &range_index_path(region_id, file_id),
-                SstRangeIndexWriterOptions::default(),
-            )
-            .await
-            .unwrap();
-            writer.write(0, &batch).await.unwrap();
-            writer.finish().await.unwrap();
-            index_version.range_indexes.insert(
-                file_id,
-                crate::series_index::RangeIndexEntry {
-                    file_id,
-                    file_size: 0,
-                },
-            );
-        }
-        region
-            .series_index_version_control
-            .publish(Arc::new(index_version));
-    }
-    // A newer SST remains uncovered; the remaining writes stay in memory.
-    engine
-        .handle_request(region_id, put(rows(&[(10, 0, "a", "x", 11, 1000)])))
-        .await
-        .unwrap();
-    test_util::flush_region(&engine, region_id, None).await;
-    engine
-        .handle_request(
-            region_id,
-            put(rows(&[
-                (10, 0, "a", "x", 12, 2000),
-                (10, u64::MAX, "b", "y", 21, 2000),
-                (20, u64::MAX, "d", "w", 40, 1000),
-            ])),
-        )
-        .await
-        .unwrap();
-
-    let scanner = engine
-        .scanner(
-            region_id,
-            ScanRequest {
-                // Internal metric identifiers must still be read for candidate discovery.
-                projection: Some(vec![2, 4, 5]),
-                distribution: Some(TimeSeriesDistribution::PerSeries),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let Scanner::Series(mut scanner) = scanner else {
-        panic!("Scanner should be series scan");
-    };
-    assert_eq!("two_phase", scanner.mode());
-
-    let ranges = scanner
-        .properties()
-        .partitions
-        .iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>();
-    scanner
-        .prepare(
-            PrepareRequest::default()
-                .with_ranges(vec![ranges, Vec::new(), Vec::new()])
-                .with_target_partitions(3),
-        )
-        .unwrap();
-
-    let metrics_set = ExecutionPlanMetricsSet::default();
-    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
-    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024 * 1024));
-    let context = store_api::region_engine::QueryScanContext {
-        memory_pool: pool.clone(),
-        ..Default::default()
-    };
-    let partition_batches = try_join_all((0..3).map(|partition| {
-        let stream = scanner
-            .scan_partition(&context, &metrics_set, partition)
-            .unwrap();
-        async move { stream.try_collect::<Vec<_>>().await }
-    }))
-    .await
-    .unwrap();
-
-    let index_files = metrics_set
-        .clone_inner()
-        .sum_by_name("candidate_index_files")
-        .map_or(0, |value| value.as_usize());
-    assert_eq!(usize::from(use_index), index_files);
-
-    let mut series_to_partition = BTreeMap::new();
-    let mut actual_rows = Vec::new();
-    for (partition, batches) in partition_batches.into_iter().enumerate() {
-        for batch in batches {
-            let tags = batch.column_by_name("tag_0").unwrap();
-            let fields = batch
-                .column_by_name("field_0")
-                .unwrap()
-                .as_primitive::<UInt64Type>();
-            let timestamps = batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_primitive::<TimestampMillisecondType>();
-            for row in 0..batch.num_rows() {
-                let tag = datatypes::arrow_array::string_array_value_at_index(tags, row)
-                    .unwrap()
-                    .to_string();
-                let previous = series_to_partition.insert(tag.clone(), partition);
-                if let Some(previous) = previous {
-                    assert_eq!(previous, partition, "series {tag} moved partitions");
-                }
-                actual_rows.push((tag, fields.value(row), timestamps.value(row)));
-            }
-        }
-    }
-    actual_rows.sort();
-    assert_eq!(
-        vec![
-            ("a".to_string(), 11, 1000),
-            ("a".to_string(), 12, 2000),
-            ("b".to_string(), 20, 1000),
-            ("b".to_string(), 21, 2000),
-            ("c".to_string(), 30, 1000),
-            ("d".to_string(), 40, 1000),
-        ],
-        actual_rows
-    );
-    assert_eq!(4, series_to_partition.len());
-    assert_eq!(Some(&0), series_to_partition.get("a"));
-    assert_eq!(Some(&0), series_to_partition.get("c"));
-    assert_eq!(Some(&2), series_to_partition.get("b"));
-    assert_eq!(Some(&2), series_to_partition.get("d"));
-
-    assert_eq!(0, pool.reserved());
-    // Existing query operators consume the same pool in either scan mode.
-    scanner.reset_state();
-    let other = MemoryConsumer::new("other-query-operator").register(&pool);
-    other.try_grow(1024 * 1024).unwrap();
-    let failed = try_join_all((0..3).map(|partition| {
-        let stream = scanner
-            .scan_partition(&context, &metrics_set, partition)
-            .unwrap();
-        async move { stream.try_collect::<Vec<_>>().await }
-    }))
-    .await;
-    assert!(failed.is_err());
-    other.free();
-    assert_eq!(0, pool.reserved());
-
-    // Exhausting the scan budget must fail even with an unbounded query pool.
-    scanner.reset_state();
-    let scan_tracker = &engine.inner.scan_memory_tracker;
-    // Cancelled background readers release their reservations asynchronously.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while scan_tracker.current() > 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    let scan_guard = scan_tracker.reserve(scan_tracker.limit()).unwrap();
-    let fresh_context = store_api::region_engine::QueryScanContext::default();
-    let fresh_pool = Arc::downgrade(&fresh_context.memory_pool);
-    let failed = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        try_join_all((0..3).map(|partition| {
-            let stream = scanner
-                .scan_partition(&fresh_context, &metrics_set, partition)
-                .unwrap();
-            async move { stream.try_collect::<Vec<_>>().await }
-        })),
-    )
-    .await
-    .expect("legacy wait policy must fail immediately on scan memory exhaustion");
-    assert!(failed.is_err());
-    drop(fresh_context);
-    // Keep the external quota occupied while failure tears down the distributor
-    // and readers. Cleanup must not depend on quota becoming available.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while fresh_pool.upgrade().is_some() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(scan_tracker.limit(), scan_tracker.current());
-    drop(scan_guard);
-    assert_eq!(0, scan_tracker.current());
-
-    // Keep the previous execution's pool exhausted while replay uses a fresh pool.
-    other.try_grow(1024 * 1024).unwrap();
-    let context = store_api::region_engine::QueryScanContext::default();
-    scanner.reset_state();
-    assert_eq!("two_phase", scanner.mode());
-    assert_eq!(
-        vec![1, 0, 0],
-        scanner
-            .properties()
-            .partitions
-            .iter()
-            .map(Vec::len)
-            .collect::<Vec<_>>()
-    );
-    let replay_batches = try_join_all((0..3).map(|partition| {
-        let stream = scanner
-            .scan_partition(&context, &metrics_set, partition)
-            .unwrap();
-        async move { stream.try_collect::<Vec<_>>().await }
-    }))
-    .await
-    .unwrap();
-    let mut replay_rows = Vec::new();
-    for batches in replay_batches {
-        for batch in batches {
-            let tags = batch.column_by_name("tag_0").unwrap();
-            let fields = batch
-                .column_by_name("field_0")
-                .unwrap()
-                .as_primitive::<UInt64Type>();
-            let timestamps = batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_primitive::<TimestampMillisecondType>();
-            for row in 0..batch.num_rows() {
-                replay_rows.push((
-                    datatypes::arrow_array::string_array_value_at_index(tags, row)
-                        .unwrap()
-                        .to_string(),
-                    fields.value(row),
-                    timestamps.value(row),
-                ));
-            }
-        }
-    }
-    replay_rows.sort();
-    assert_eq!(actual_rows, replay_rows);
-
-    // Dropping every partition must let the shared distributor release its pool.
-    scanner.reset_state();
-    let cancelled_context = store_api::region_engine::QueryScanContext::default();
-    let cancelled_pool = Arc::downgrade(&cancelled_context.memory_pool);
-    let streams = (0..3)
-        .map(|partition| {
-            scanner
-                .scan_partition(&cancelled_context, &metrics_set, partition)
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    drop(streams);
-    drop(cancelled_context);
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while cancelled_pool.upgrade().is_some() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    scanner.reset_state();
-    let direct_batches = scanner
-        .build_stream()
-        .await
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(
-        actual_rows.len(),
-        direct_batches
-            .iter()
-            .map(|batch| batch.num_rows())
-            .sum::<usize>()
-    );
-
-    // Exercise precise field/time filtering and candidate tag filtering on both paths.
-    let filtered = engine
-        .scanner(
-            region_id,
-            ScanRequest {
-                projection: Some(vec![2, 4, 5]),
-                filters: vec![
-                    col("tag_0").eq(lit("a")),
-                    col("field_0").eq(lit(11_u64)),
-                    col("ts").eq(lit(ScalarValue::TimestampMillisecond(Some(1000), None))),
-                ],
-                distribution: Some(TimeSeriesDistribution::PerSeries),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let batches = filtered
-        .scan()
-        .await
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(
-        1,
-        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
-    );
-
-    if use_range_index {
-        // Enabled queries must read the cataloged index; disabled queries must
-        // succeed even when that file is unavailable.
-        let region = engine.find_region(region_id).unwrap();
-        let version = region.series_index_version_control.current();
-        let file_id = *version.range_indexes.keys().next().unwrap();
-        region
-            .series_index_store
-            .as_ref()
-            .unwrap()
-            .delete(&crate::sst::range_index::range_index_path(
-                region_id, file_id,
-            ))
-            .await
-            .unwrap();
-        let scanner = engine
-            .scanner(
-                region_id,
-                ScanRequest {
-                    distribution: Some(TimeSeriesDistribution::PerSeries),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        if enable_range_index {
-            if let Ok(stream) = scanner.scan().await {
-                assert!(stream.try_collect::<Vec<_>>().await.is_err());
-            }
-        } else {
-            let batches = scanner
-                .scan()
-                .await
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap();
-            let mut rows = Vec::new();
-            for batch in batches {
-                let tags = batch.column_by_name("tag_0").unwrap();
-                let fields = batch
-                    .column_by_name("field_0")
-                    .unwrap()
-                    .as_primitive::<UInt64Type>();
-                let timestamps = batch
-                    .column_by_name("ts")
-                    .unwrap()
-                    .as_primitive::<TimestampMillisecondType>();
-                for row in 0..batch.num_rows() {
-                    rows.push((
-                        datatypes::arrow_array::string_array_value_at_index(tags, row)
-                            .unwrap()
-                            .to_string(),
-                        fields.value(row),
-                        timestamps.value(row),
-                    ));
-                }
-            }
-            rows.sort();
-            assert_eq!(actual_rows, rows);
-        }
-    }
-}
-
 /// Runs one two-phase series scan over `filters` and returns `(tag_0, field_0, ts)` per row.
-async fn two_phase_sparse_rows(
+async fn sparse_rows(
     engine: &crate::engine::MitoEngine,
     region_id: RegionId,
     filters: Vec<datafusion_expr::Expr>,
@@ -3716,7 +3141,7 @@ async fn two_phase_sparse_rows(
     let Scanner::Series(mut scanner) = engine.scanner(region_id, request).await.unwrap() else {
         panic!("sparse PerSeries request must use SeriesScan");
     };
-    assert_eq!("two_phase", scanner.mode());
+    assert_eq!("legacy", scanner.mode());
     let ranges = scanner
         .properties()
         .partitions
@@ -3768,16 +3193,15 @@ async fn two_phase_sparse_rows(
 /// collapses them into a single identifier, so the data read must apply the tag predicates
 /// instead of trusting the assignment as an exact series name.
 #[tokio::test]
-async fn test_two_phase_series_scan_never_reads_a_colliding_partner() {
-    let mut env = TestEnv::with_prefix("test_two_phase_colliding_series").await;
+async fn test_series_scan_never_reads_a_colliding_partner() {
+    let mut env = TestEnv::with_prefix("test_colliding_series").await;
     let engine = env
         .create_engine(MitoConfig {
-            experimental_series_scan_v2: true,
             ..Default::default()
         })
         .await;
     let region_id = RegionId::new(1, 1);
-    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
+    let (metadata, row_schema) = create_sparse_region(&engine, region_id).await;
     let rows = [
         // One tsid, two label sets.
         (
@@ -3803,12 +3227,12 @@ async fn test_two_phase_series_scan_never_reads_a_colliding_partner() {
     // Selecting one owner must never return the colliding partner's rows.
     assert_eq!(
         vec![("host-a".to_string(), 1, 1000)],
-        two_phase_sparse_rows(&engine, region_id, vec![col("tag_0").eq(lit("host-a"))]).await
+        sparse_rows(&engine, region_id, vec![col("tag_0").eq(lit("host-a"))]).await
     );
     // A series without a collision still answers its own selection.
     assert_eq!(
         vec![("host-c".to_string(), 3, 3000)],
-        two_phase_sparse_rows(&engine, region_id, vec![col("tag_0").eq(lit("host-c"))]).await
+        sparse_rows(&engine, region_id, vec![col("tag_0").eq(lit("host-c"))]).await
     );
     // Without a predicate the path still serves the whole assignment, colliding partner
     // included: the fix applies the predicates rather than disabling the scan.
@@ -3818,7 +3242,7 @@ async fn test_two_phase_series_scan_never_reads_a_colliding_partner() {
             ("host-b".to_string(), 2, 2000),
             ("host-c".to_string(), 3, 3000),
         ],
-        two_phase_sparse_rows(&engine, region_id, Vec::new()).await
+        sparse_rows(&engine, region_id, Vec::new()).await
     );
     engine.stop().await.unwrap();
 }
@@ -5933,13 +5357,11 @@ async fn test_exact_sequence_read_series_scan_per_series() {
 
 async fn build_sparse_exact_metric_engine(
     prefix: &str,
-    experimental_series_scan_v2: bool,
     range_result_cache_size: ReadableSize,
 ) -> (TestEnv, crate::engine::MitoEngine, RegionId) {
     let mut env = TestEnv::with_prefix(prefix).await;
     let engine = env
         .create_engine(MitoConfig {
-            experimental_series_scan_v2,
             range_result_cache_size,
             ..Default::default()
         })
@@ -6141,16 +5563,9 @@ async fn scan_sparse_exact_metric(
 /// Exact sparse-metric reads must use two-phase scanning and preserve the same
 /// complete rows as the legacy series scanner at every sequence boundary.
 #[tokio::test]
-async fn test_two_phase_sparse_metric_exact_sequence_cases() {
-    let (_two_phase_env, two_phase, two_phase_region) = build_sparse_exact_metric_engine(
-        "test_two_phase_sparse_metric_exact_sequence_cases_two_phase",
-        true,
-        ReadableSize::mb(0),
-    )
-    .await;
+async fn test_sparse_metric_exact_sequence_cases() {
     let (_legacy_env, legacy, legacy_region) = build_sparse_exact_metric_engine(
-        "test_two_phase_sparse_metric_exact_sequence_cases_legacy",
-        false,
+        "test_sparse_metric_exact_sequence_cases_legacy",
         ReadableSize::mb(0),
     )
     .await;
@@ -6228,37 +5643,19 @@ async fn test_two_phase_sparse_metric_exact_sequence_cases() {
                 )
             })
             .collect::<Vec<_>>();
-        let (two_phase_schema, two_phase_rows) = scan_sparse_exact_metric(
-            &two_phase,
-            two_phase_region,
-            min,
-            max,
-            selector,
-            "two_phase",
-        )
-        .await;
-        let (legacy_schema, legacy_rows) =
+        let (_, legacy_rows) =
             scan_sparse_exact_metric(&legacy, legacy_region, min, max, selector, "legacy").await;
-        assert_eq!(expected, two_phase_rows, "two-phase {name}");
-        assert_eq!(expected, legacy_rows, "legacy {name}");
-        assert_eq!(
-            two_phase_schema, legacy_schema,
-            "schema mismatch for {name}"
-        );
+        assert_eq!(expected, legacy_rows, "{name}");
     }
 }
 
 /// A warmed exact series scan must hit the existing range-result cache; a
 /// second upper bound over the same files and an unbounded scan must not reuse
 /// its rows.
-#[rstest::rstest]
-#[case(true)]
-#[case(false)]
 #[tokio::test]
-async fn test_sparse_metric_exact_sequence_cache_isolation(#[case] two_phase: bool) {
+async fn test_sparse_metric_exact_sequence_cache_isolation() {
     let (_env, engine, region_id) = build_sparse_exact_metric_engine(
         "test_sparse_metric_exact_sequence_cache_isolation",
-        two_phase,
         ReadableSize::mb(64),
     )
     .await;
@@ -6278,10 +5675,7 @@ async fn test_sparse_metric_exact_sequence_cache_isolation(#[case] two_phase: bo
         let Scanner::Series(scanner) = scanner else {
             panic!("sparse metric scan must use SeriesScan");
         };
-        assert_eq!(
-            if two_phase { "two_phase" } else { "legacy" },
-            scanner.mode()
-        );
+        assert_eq!("legacy", scanner.mode());
         assert_eq!(1, scanner.properties().num_partitions());
         let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
             .await
@@ -6300,11 +5694,7 @@ async fn test_sparse_metric_exact_sequence_cache_isolation(#[case] two_phase: bo
             let (rows, verbose) = scan(restrictive.clone()).await;
             // Inspect the data reader rather than candidate-stage cache hits.
             let data_metrics = verbose
-                .split(if two_phase {
-                    "\"partition\":0, \"metrics\":"
-                } else {
-                    "\"partition\":1, \"metrics\":"
-                })
+                .split("\"partition\":1, \"metrics\":")
                 .nth(1)
                 .and_then(|metrics| metrics.split("\"partition\":").next())
                 .expect("missing output-partition metrics");
@@ -7192,17 +6582,16 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
 /// An ordering the frame cannot carry is rejected by the frame constructor before any poll; that
 /// refusal is covered by `common_query::series_frame::tests::interleaved_ordering_is_rejected_before_any_poll`.
 #[tokio::test]
-async fn test_two_phase_native_raw_stream_declares_key_then_time_frames() {
+async fn test_native_raw_stream_declares_key_then_time_frames() {
     use common_query::series_frame::{pack_raw_series, series_frame_ordering, unpack_raw_series};
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::SeriesSchema;
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
     use store_api::region_request::RegionPutRequest;
 
-    let mut env = TestEnv::with_prefix("test_two_phase_native_raw_key_then_time_frames").await;
+    let mut env = TestEnv::with_prefix("test_native_raw_key_then_time_frames").await;
     let engine = env
         .create_engine(MitoConfig {
-            experimental_series_scan_v2: true,
             ..Default::default()
         })
         .await;
@@ -7271,7 +6660,7 @@ async fn test_two_phase_native_raw_stream_declares_key_then_time_frames() {
     let Scanner::Series(series) = selected else {
         panic!("sparse PerSeries request must use SeriesScan");
     };
-    assert_eq!("two_phase", series.mode());
+    assert_eq!("legacy", series.mode());
     let mut scanner = engine.handle_query(region_id, request).await.unwrap();
     assert_eq!(
         SeriesOrdering::KeyThenTime,
@@ -7352,19 +6741,18 @@ async fn test_two_phase_native_raw_stream_declares_key_then_time_frames() {
 }
 
 #[tokio::test]
-async fn test_two_phase_raw_partition_out_of_range_keeps_scanner_usable() {
+async fn test_raw_partition_out_of_range_keeps_scanner_usable() {
     use datatypes::series::samples::SampleRef;
     use store_api::region_engine::QueryScanContext;
 
-    let mut env = TestEnv::with_prefix("test_two_phase_raw_partition_out_of_range").await;
+    let mut env = TestEnv::with_prefix("test_raw_partition_out_of_range").await;
     let engine = env
         .create_engine(MitoConfig {
-            experimental_series_scan_v2: true,
             ..Default::default()
         })
         .await;
     let region_id = RegionId::new(1, 1);
-    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
+    let (metadata, row_schema) = create_sparse_region(&engine, region_id).await;
     let expected = [
         (new_sparse_primary_key(&["a", "x"], &metadata, 10, 0), 10, 1),
         (new_sparse_primary_key(&["b", "x"], &metadata, 10, 0), 20, 2),
@@ -7390,7 +6778,7 @@ async fn test_two_phase_raw_partition_out_of_range_keeps_scanner_usable() {
     else {
         panic!("sparse PerSeries request must use SeriesScan");
     };
-    assert_eq!("two_phase", selected.mode());
+    assert_eq!("legacy", selected.mode());
     let mut scanner = engine.handle_query(region_id, request).await.unwrap();
     let source = primary_key_label_source(&scanner.metadata());
     let ranges = scanner.properties().partitions.clone();
@@ -7456,608 +6844,10 @@ async fn test_two_phase_raw_partition_out_of_range_keeps_scanner_usable() {
     );
 }
 
-/// A `TwoPhase` scan declares [`SeriesOrdering::KeyThenTime`], a stronger claim than
-/// `Contiguous` because it also guarantees increasing keys. Each disjoint partition assignment
-/// must own exactly its assigned key set, and the concatenated stream must keep each series in one
-/// run; packing and unpacking validates the codec sequence.
-#[tokio::test]
-async fn test_two_phase_raw_stream_stays_key_ordered_across_disjoint_partition_assignments() {
-    use common_query::series_frame::{pack_raw_series, unpack_raw_series};
-    use datatypes::series::SeriesOrdering;
-    use datatypes::series::raw::RawSeriesChunk;
-    use datatypes::series::samples::{SampleRef, SeriesSchema};
-    use store_api::region_engine::QueryScanContext;
-
-    let mut env = TestEnv::with_prefix("test_two_phase_raw_key_ordered_assignments").await;
-    let engine = env
-        .create_engine(MitoConfig {
-            experimental_series_scan_v2: true,
-            // Automatic compaction could merge the two flushed SSTs before the scan pins its
-            // input and make the source-composition assertions below racy.
-            schedule_compaction_after_edit: false,
-            min_compaction_interval: Duration::from_secs(60 * 60),
-            ..Default::default()
-        })
-        .await;
-    let region_id = RegionId::new(1, 1);
-    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
-
-    // A sparse primary key carries the TSID, and `SeriesRange::partition_for` splits the u64 TSID
-    // domain over the output partitions, so the fixture splits into two disjoint groups of series:
-    // tsids below 2^63 own partition 0 and tsids at or above 2^63 own partition 1.
-    let series = [
-        ("a0", 0_u64),
-        ("a1", 1),
-        ("b0", 1_u64 << 63),
-        ("b1", (1_u64 << 63) + 1),
-    ];
-    let keys = series
-        .iter()
-        .map(|(tag, tsid)| new_sparse_primary_key(&[tag, "x"], &metadata, 10, *tsid))
-        .collect::<Vec<_>>();
-
-    // Three write rounds put every series into two SST sources (the first two rounds are flushed)
-    // plus one memtable source (the last round stays in memory), and the large rounds make a
-    // series span more than one read batch, so one series is emitted as multiple chunks instead
-    // of exactly one. The scan input assertions below check that composition instead of only
-    // checking that something was read.
-    const LARGE: i64 = 20_000;
-    const SMALL: i64 = 3;
-    let rounds: [&[(usize, i64, i64)]; 3] = [
-        &[(0, 0, LARGE), (1, 0, SMALL), (2, 0, SMALL), (3, 0, LARGE)],
-        &[
-            (0, LARGE, 5),
-            (1, SMALL, SMALL),
-            (2, SMALL, SMALL),
-            (3, LARGE, 5),
-        ],
-        &[
-            (0, LARGE + 5, 2),
-            (1, 2 * SMALL, 2),
-            (2, 2 * SMALL, 2),
-            (3, LARGE + 5, 2),
-        ],
-    ];
-    let mut expected_times = HashMap::<Vec<u8>, Vec<i64>>::new();
-    for spec in rounds {
-        for &(index, first, count) in spec {
-            expected_times
-                .entry(keys[index].clone())
-                .or_default()
-                .extend(first..first + count);
-        }
-    }
-    let mut round_rows = Vec::with_capacity(rounds.len());
-    for (round, spec) in rounds.iter().enumerate() {
-        let rows = spec
-            .iter()
-            .flat_map(|&(index, first, count)| {
-                let key = keys[index].clone();
-                (0..count).map(move |offset| {
-                    let time = first + offset;
-                    (key.clone(), time, (time + 1) as u64)
-                })
-            })
-            .collect::<Vec<_>>();
-        round_rows.push(rows.len());
-        put_sparse_rows(&engine, region_id, &row_schema, rows).await;
-        if round + 1 < rounds.len() {
-            test_util::flush_region(&engine, region_id, None).await;
-        }
-    }
-
-    let request = ScanRequest {
-        distribution: Some(TimeSeriesDistribution::PerSeries),
-        preserve_pk_dictionary_encoding: true,
-        ..Default::default()
-    };
-    let selected = engine.scanner(region_id, request).await.unwrap();
-    let Scanner::Series(mut scanner) = selected else {
-        panic!("sparse PerSeries request must use SeriesScan");
-    };
-    assert_eq!("two_phase", scanner.mode());
-    assert_eq!(
-        SeriesOrdering::KeyThenTime,
-        scanner.raw_series_ordering().unwrap()
-    );
-    // Composition of the pinned scan input: the two flushes pin two SST sources and the third
-    // write round stays in one memtable source. Each source reports the rows its write round
-    // wrote, so this asserts the layout instead of only asserting that something was read.
-    {
-        let input = scanner.input();
-        let mut file_rows = input
-            .files
-            .iter()
-            .map(|file| file.num_rows())
-            .collect::<Vec<_>>();
-        file_rows.sort_unstable();
-        let mut expected_file_rows = round_rows[..2].to_vec();
-        expected_file_rows.sort_unstable();
-        assert_eq!(
-            expected_file_rows, file_rows,
-            "each flushed write round must be one SST source"
-        );
-        assert_eq!(2, input.num_files());
-        assert_eq!(
-            1,
-            input.num_memtables(),
-            "the last round is one memtable range"
-        );
-        assert_eq!(
-            round_rows[2],
-            input
-                .memtables
-                .iter()
-                .map(|memtable| memtable.stats().num_rows)
-                .sum::<usize>(),
-            "the unflushed round must be the memtable's contribution"
-        );
-        assert_eq!(
-            round_rows.iter().sum::<usize>(),
-            input.total_rows(),
-            "the sources must add up to every written row"
-        );
-    }
-    let source = primary_key_label_source(&scanner.metadata());
-    let ranges = scanner
-        .properties()
-        .partitions
-        .clone()
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    assert!(!ranges.is_empty(), "region scan needs an input range");
-    // Two output partitions make the candidate distributor create one reader assignment per
-    // partition, so the scan runs more than one assignment.
-    let partition_count = 2;
-    let mut partitions = vec![Vec::new(); partition_count];
-    for (index, range) in ranges.into_iter().enumerate() {
-        partitions[index % partition_count].push(range);
-    }
-    scanner
-        .prepare(PrepareRequest {
-            ranges: Some(partitions),
-            target_partitions: Some(partition_count),
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(partition_count, scanner.properties().num_partitions());
-
-    let metrics = ExecutionPlanMetricsSet::default();
-    let ctx = QueryScanContext::default();
-    let mut per_partition = Vec::with_capacity(partition_count);
-    let mut schema: Option<Arc<SeriesSchema>> = None;
-    for partition in 0..partition_count {
-        let stream = scanner
-            .scan_series_partition(&ctx, &metrics, partition, &source)
-            .unwrap()
-            .expect("two-phase raw scan is supported");
-        assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
-        assert_eq!(
-            vec!["field_0"],
-            stream
-                .schema()
-                .fields
-                .iter()
-                .map(|field| field.name.as_ref())
-                .collect::<Vec<_>>()
-        );
-        schema.get_or_insert_with(|| Arc::clone(stream.schema()));
-        let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
-        assert!(
-            !chunks.is_empty(),
-            "partition {partition} must own a reader assignment"
-        );
-        // Each partition owns exactly the series the TSID split assigned to it, so the two
-        // assignment streams are non-empty and disjoint.
-        let mut observed = chunks
-            .iter()
-            .map(|chunk| chunk.primary_key.to_vec())
-            .collect::<Vec<_>>();
-        observed.sort();
-        observed.dedup();
-        let mut assigned = vec![keys[2 * partition].clone(), keys[2 * partition + 1].clone()];
-        assigned.sort();
-        assert_eq!(
-            assigned, observed,
-            "partition {partition} must own exactly its assigned series"
-        );
-        per_partition.push(chunks);
-    }
-
-    // The complete raw series stream of the two-partition scan: each partition's one assignment,
-    // concatenated in partition order. `test_two_phase_raw_same_partition_multi_round_assignment_
-    // stays_key_ordered` covers two assignments handed to the same partition.
-    let complete = per_partition
-        .into_iter()
-        .flatten()
-        .collect::<Vec<RawSeriesChunk>>();
-    let schema = schema.unwrap();
-    let complete_rows = complete.iter().map(|chunk| chunk.time.len()).sum::<usize>();
-    assert_eq!(
-        expected_times.values().map(Vec::len).sum::<usize>(),
-        complete_rows,
-        "the complete stream must carry every written row"
-    );
-
-    // Reuse the frame adapter's cross-chunk validator (private to
-    // `common_query::series_frame`) by packing and unpacking the complete stream. It rejects a key
-    // change that was not preceded by that key's final chunk, a key that recurs right after its
-    // final chunk, timestamps that do not increase across chunks, and a stream whose last chunk is
-    // not final.
-    let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
-        Arc::clone(&schema),
-        source,
-        SeriesOrdering::KeyThenTime,
-        complete.clone(),
-    )))
-    .unwrap();
-    let unpacked = unpack_raw_series(packed, Some(schema)).unwrap();
-    let validated = unpacked.try_collect::<Vec<_>>().await.unwrap();
-    assert_eq!(
-        complete_rows,
-        validated
-            .iter()
-            .map(|chunk| chunk.time.len())
-            .sum::<usize>(),
-        "packing and unpacking must preserve the complete stream"
-    );
-
-    // `SequenceValidator` checks adjacent chunks only, so also reject non-adjacent recurrence: a
-    // series interrupted by another series and resumed later would violate key-then-time order.
-    let mut runs = Vec::<Vec<u8>>::new();
-    let mut chunks_per_series = HashMap::<Vec<u8>, usize>::new();
-    for chunk in &complete {
-        let key = chunk.primary_key.to_vec();
-        *chunks_per_series.entry(key.clone()).or_default() += 1;
-        if runs.last() != Some(&key) {
-            assert!(
-                !runs.contains(&key),
-                "a series' chunks must stay contiguous across the concatenated assignments"
-            );
-            runs.push(key);
-        }
-    }
-    assert_eq!(keys.len(), runs.len(), "every series appears exactly once");
-    assert!(
-        chunks_per_series.values().copied().max().unwrap() > 1,
-        "the fixture must emit multiple chunks for one series, got {chunks_per_series:?}"
-    );
-    assert_eq!(keys.len(), chunks_per_series.len());
-    for (key, times) in &expected_times {
-        let observed = complete
-            .iter()
-            .filter(|chunk| chunk.primary_key.as_slice() == key.as_slice())
-            .flat_map(|chunk| chunk.time.as_buffer().iter().copied())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            times, &observed,
-            "sample positions must increase per series"
-        );
-    }
-    for (index, chunk) in complete.iter().enumerate() {
-        let next_is_same_series = complete
-            .get(index + 1)
-            .is_some_and(|next| next.primary_key.as_slice() == chunk.primary_key.as_slice());
-        assert_eq!(
-            !next_is_same_series, chunk.is_last,
-            "is_last must mark the final chunk of a series"
-        );
-        let times = chunk.time.as_buffer();
-        for (sample, time) in times.iter().enumerate() {
-            let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(sample) else {
-                panic!("raw fields are converted to float samples");
-            };
-            assert_eq!((*time + 1) as f64, value);
-        }
-    }
-}
-
-/// Lowers the candidate-series assignment threshold and restores it when dropped.
-///
-/// The override is process-global, so it is restored from `Drop` to keep a failing assertion or a
-/// panic from leaking a weakened threshold into later tests of the same binary. `cargo nextest`
-/// (the documented runner for this crate) additionally runs every test in its own process.
-struct AssignmentThresholdScope;
-
-impl AssignmentThresholdScope {
-    fn lower_to(threshold: usize) -> Self {
-        crate::read::series_scan::set_candidate_series_assignment_threshold(threshold);
-        Self
-    }
-}
-
-impl Drop for AssignmentThresholdScope {
-    fn drop(&mut self) {
-        crate::read::series_scan::set_candidate_series_assignment_threshold(0);
-    }
-}
-
-/// One partition receiving two candidate assignments must still emit one key-then-time stream,
-/// a stronger claim than `Contiguous` because keys must also be increasing. The test checks single-run
-/// ownership for each series and round-trip validation through the frame codec.
-///
-/// Without the threshold override a second assignment reaches the same partition only when a
-/// single collection round holds `CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD` (1,000,000) candidate
-/// series, so this test lowers the threshold instead of writing a million series.
-#[tokio::test]
-async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_key_ordered() {
-    use common_query::series_frame::{pack_raw_series, unpack_raw_series};
-    use datatypes::series::SeriesOrdering;
-    use datatypes::series::samples::SampleRef;
-    use store_api::region_engine::QueryScanContext;
-
-    // The candidate distributor starts a new assignment as soon as the collected series reach the
-    // threshold, and the candidate stream hands series over in globally sorted batches of at most
-    // `METRIC_SERIES_ID_BATCH_SIZE` (500) entries, yielding a trailing batch for the remainder.
-    // With the threshold lowered to 1 every one of those batches becomes one assignment round, so
-    // 501 series produce exactly two non-empty rounds: the first 500 sorted series, then the last
-    // one. Both rounds are addressed to the single output partition, i.e. to one receiver.
-    const CANDIDATE_BATCH: usize = 500;
-    const SERIES: usize = CANDIDATE_BATCH + 1;
-    let _scope = AssignmentThresholdScope::lower_to(1);
-
-    let mut env = TestEnv::with_prefix("test_two_phase_raw_same_partition_multi_round").await;
-    let engine = env
-        .create_engine(MitoConfig {
-            experimental_series_scan_v2: true,
-            // The source-composition assertions below pin the flushed SST until the scan opens.
-            schedule_compaction_after_edit: false,
-            min_compaction_interval: Duration::from_secs(60 * 60),
-            ..Default::default()
-        })
-        .await;
-    let region_id = RegionId::new(1, 1);
-    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
-
-    let tags = (0..SERIES)
-        .map(|index| format!("s{index}"))
-        .collect::<Vec<_>>();
-    let keys = tags
-        .iter()
-        .enumerate()
-        .map(|(index, tag)| {
-            new_sparse_primary_key(&[tag.as_str(), "x"], &metadata, 10, index as u64)
-        })
-        .collect::<Vec<_>>();
-    // The round split below relies on the candidate stream ordering series by primary key, which
-    // is the ascending TSID order for this fixture.
-    let mut sorted_keys = keys.clone();
-    sorted_keys.sort();
-    assert_eq!(keys, sorted_keys, "primary keys must sort in TSID order");
-
-    // One flushed SST source plus one memtable source. The wide series spans more than one read
-    // batch, so a series is emitted as several chunks and the round boundary sits next to chunks
-    // that must stay grouped.
-    const WIDE: i64 = 20_000;
-    const SMALL: i64 = 3;
-    const SECOND_ROUND_FIRST: i64 = 100_000;
-    let mut expected_times = HashMap::<Vec<u8>, Vec<i64>>::new();
-    expected_times.insert(
-        keys[0].clone(),
-        (0..WIDE)
-            .chain(SECOND_ROUND_FIRST..SECOND_ROUND_FIRST + 3)
-            .collect(),
-    );
-    for key in &keys[1..] {
-        expected_times.insert(
-            key.clone(),
-            (0..SMALL)
-                .chain(SECOND_ROUND_FIRST..SECOND_ROUND_FIRST + 3)
-                .collect(),
-        );
-    }
-
-    let first_round = std::iter::once((keys[0].clone(), 0_i64, WIDE))
-        .chain(keys[1..].iter().map(|key| (key.clone(), 0_i64, SMALL)))
-        .flat_map(|(key, first, count)| {
-            (0..count).map(move |offset| {
-                let time = first + offset;
-                (key.clone(), time, (time + 1) as u64)
-            })
-        })
-        .collect::<Vec<_>>();
-    let second_round = keys
-        .iter()
-        .flat_map(|key| {
-            (0..SMALL).map(move |offset| {
-                let time = SECOND_ROUND_FIRST + offset;
-                (key.clone(), time, (time + 1) as u64)
-            })
-        })
-        .collect::<Vec<_>>();
-    let (sst_rows, memtable_rows) = (first_round.len(), second_round.len());
-    put_sparse_rows(&engine, region_id, &row_schema, first_round).await;
-    test_util::flush_region(&engine, region_id, None).await;
-    put_sparse_rows(&engine, region_id, &row_schema, second_round).await;
-
-    let request = ScanRequest {
-        distribution: Some(TimeSeriesDistribution::PerSeries),
-        preserve_pk_dictionary_encoding: true,
-        ..Default::default()
-    };
-    let selected = engine.scanner(region_id, request).await.unwrap();
-    let Scanner::Series(mut scanner) = selected else {
-        panic!("sparse PerSeries request must use SeriesScan");
-    };
-    assert_eq!("two_phase", scanner.mode());
-    assert_eq!(
-        SeriesOrdering::KeyThenTime,
-        scanner.raw_series_ordering().unwrap()
-    );
-    // The fixture must really be one SST source plus one memtable source, or the two rounds below
-    // would be explained by something else.
-    {
-        let input = scanner.input();
-        assert_eq!(1, input.num_files());
-        assert_eq!(
-            vec![sst_rows],
-            input
-                .files
-                .iter()
-                .map(|file| file.num_rows())
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(1, input.num_memtables());
-        assert_eq!(
-            memtable_rows,
-            input
-                .memtables
-                .iter()
-                .map(|memtable| memtable.stats().num_rows)
-                .sum::<usize>()
-        );
-    }
-
-    let source = primary_key_label_source(&scanner.metadata());
-    let ranges = scanner
-        .properties()
-        .partitions
-        .clone()
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    assert!(!ranges.is_empty(), "region scan needs an input range");
-    // One output partition means every series the distributor assigns belongs to this receiver,
-    // so both rounds are delivered to partition 0.
-    scanner
-        .prepare(PrepareRequest {
-            ranges: Some(vec![ranges]),
-            target_partitions: Some(1),
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(1, scanner.properties().num_partitions());
-
-    let metrics = ExecutionPlanMetricsSet::default();
-    let ctx = QueryScanContext::default();
-    let stream = scanner
-        .scan_series_partition(&ctx, &metrics, 0, &source)
-        .unwrap()
-        .expect("two-phase raw scan is supported");
-    assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
-    let schema = Arc::clone(stream.schema());
-    let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
-    // Two collection rounds really happened; the fixture never reaches the production threshold.
-    let rounds = crate::read::series_scan::candidate_assignment_rounds();
-    assert!(
-        rounds >= 2,
-        "the partition must consume more than one assignment round, got {rounds}"
-    );
-    assert!(
-        !chunks.is_empty(),
-        "partition 0 must own reader assignments"
-    );
-
-    // Partition 0's single stream carries every series in one run each, with keys in increasing
-    // order as declared by `KeyThenTime`; the assignment
-    // composition is: the first assignment holds the first 500 candidate series (which includes
-    // `keys[0]`) and the trailing assignment holds the last candidate series.
-    let mut runs = Vec::<Vec<u8>>::new();
-    let mut chunks_per_series = HashMap::<Vec<u8>, usize>::new();
-    for chunk in &chunks {
-        let key = chunk.primary_key.to_vec();
-        *chunks_per_series.entry(key.clone()).or_default() += 1;
-        if runs.last() != Some(&key) {
-            assert!(
-                !runs.contains(&key),
-                "a series must not resume after another series across a round boundary"
-            );
-            runs.push(key);
-        }
-    }
-    assert_eq!(keys.len(), runs.len(), "every series appears in one run");
-    assert!(
-        chunks_per_series.values().copied().max().unwrap() > 1,
-        "the fixture must emit multiple chunks for one series, got {chunks_per_series:?}"
-    );
-    // The round boundary: the first run belongs to the first assignment, the last run to the
-    // second assignment, and both are chunks of the same partition stream.
-    let (first_assignment, second_assignment) = runs.split_at(SERIES - 1);
-    assert!(
-        first_assignment.contains(&keys[0]),
-        "the first assignment must stream the first key"
-    );
-    assert!(
-        second_assignment.contains(&keys[SERIES - 1]),
-        "the second assignment must stream the last key"
-    );
-    let last_round_chunks = chunks
-        .iter()
-        .filter(|chunk| chunk.primary_key.as_slice() == keys[SERIES - 1].as_slice())
-        .count();
-    assert!(
-        last_round_chunks > 0,
-        "the series of the second assignment must be streamed"
-    );
-
-    let stream_rows = chunks.iter().map(|chunk| chunk.time.len()).sum::<usize>();
-    assert_eq!(
-        expected_times.values().map(Vec::len).sum::<usize>(),
-        stream_rows,
-        "the stream must carry every written row of both rounds"
-    );
-    for (key, times) in &expected_times {
-        let observed = chunks
-            .iter()
-            .filter(|chunk| chunk.primary_key.as_slice() == key.as_slice())
-            .flat_map(|chunk| chunk.time.as_buffer().iter().copied())
-            .collect::<Vec<_>>();
-        assert_eq!(times, &observed, "timestamps must increase per series");
-        assert!(
-            observed.windows(2).all(|window| window[0] < window[1]),
-            "timestamps must strictly increase within a key"
-        );
-    }
-    for (index, chunk) in chunks.iter().enumerate() {
-        let next_is_same_series = chunks
-            .get(index + 1)
-            .is_some_and(|next| next.primary_key.as_slice() == chunk.primary_key.as_slice());
-        assert_eq!(
-            !next_is_same_series, chunk.is_last,
-            "is_last must mark the final chunk of a series, including at the round boundary"
-        );
-        let times = chunk.time.as_buffer();
-        for (sample, time) in times.iter().enumerate() {
-            let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(sample) else {
-                panic!("raw fields are converted to float samples");
-            };
-            assert_eq!((*time + 1) as f64, value);
-        }
-    }
-
-    // Route the same partition stream through the frame codec so its `SequenceValidator` checks
-    // the chunks this reader produced, including the chunks the second assignment added.
-    let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
-        Arc::clone(&schema),
-        source,
-        SeriesOrdering::KeyThenTime,
-        chunks.clone(),
-    )))
-    .unwrap();
-    let unpacked = unpack_raw_series(packed, Some(Arc::clone(&schema))).unwrap();
-    let validated = unpacked.try_collect::<Vec<_>>().await.unwrap();
-    assert_eq!(
-        stream_rows,
-        validated
-            .iter()
-            .map(|chunk| chunk.time.len())
-            .sum::<usize>(),
-        "packing and unpacking must preserve the multi-round stream"
-    );
-    let mut schema_fields = schema
-        .fields
-        .iter()
-        .map(|field| field.name.as_ref())
-        .collect::<Vec<_>>();
-    schema_fields.dedup();
-    assert_eq!(vec!["field_0"], schema_fields);
-}
-
 /// Creates the sparse-encoded flat region shared by the two-phase raw scan tests.
 ///
 /// Returns the region metadata and the row schema accepted by the sparse write path.
-async fn create_two_phase_sparse_region(
+async fn create_sparse_region(
     engine: &crate::engine::MitoEngine,
     region_id: RegionId,
 ) -> (
@@ -8356,12 +7146,11 @@ async fn test_mito_raw_series_stream_declares_its_label_decode_description() {
     let mut env = TestEnv::with_prefix("test_mito_raw_series_self_describing_sparse").await;
     let engine = env
         .create_engine(MitoConfig {
-            experimental_series_scan_v2: true,
             ..Default::default()
         })
         .await;
     let region_id = RegionId::new(1, 1);
-    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
+    let (metadata, row_schema) = create_sparse_region(&engine, region_id).await;
     let key = new_sparse_primary_key(&["host-a", "zone-1"], &metadata, 10, 0);
     put_sparse_rows(
         &engine,

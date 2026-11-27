@@ -196,6 +196,16 @@ impl<S> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
+        if region.version().options.sst_format != Some(crate::sst::FormatType::Narthex) {
+            sender.send(
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: "series indexes require Narthex storage",
+                }
+                .fail(),
+            );
+            return;
+        }
         let Some(state) = &self.series_index_task_state else {
             sender.send(
                 InvalidRequestSnafu {

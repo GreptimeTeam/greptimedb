@@ -38,8 +38,7 @@ use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::columnar::codec as columnar_codec;
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
-use crate::series_index::purger::series_index_channel;
+use crate::series_index::identity::ExactSeriesKey;
 use crate::sst::file::RegionFileId;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
@@ -212,17 +211,9 @@ async fn build(
         writer.write(batch).await.unwrap();
     }
     let artifact = writer.finish().await.unwrap();
-    let (purger, _) = series_index_channel(store.clone());
     SamplesFileHandle::new(
         RegionFileId::new(meta.region_id, file_id),
-        SamplesEntry {
-            file_id,
-            artifact,
-            source_file_ids: Vec::new(),
-            window: None,
-            source_windows: Default::default(),
-        },
-        purger,
+        SamplesEntry { file_id, artifact },
     )
 }
 /// Reads the descriptor and root page of a one-part artifact, plus the part's bytes. Tests
@@ -914,8 +905,7 @@ async fn selective_reads_pin_the_artifact() {
         )],
     )
     .await;
-    let (purger, mut purges) = series_index_channel(store.clone());
-    let handle = SamplesFileHandle::new(built.file_id(), built.entry().clone(), purger);
+    let handle = SamplesFileHandle::new(built.file_id(), built.entry().clone());
     drop(built);
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
@@ -937,14 +927,14 @@ async fn selective_reads_pin_the_artifact() {
     let mut req = request(&["field_0"]);
     req.table_id = Some(2);
     let stream = reader.read(req).unwrap();
-    handle.mark_deleted();
+
     drop(handle);
     drop(reader);
-    assert!(purges.try_recv().is_err());
+
     let result = stream.try_collect::<Vec<_>>().await.unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].column(0).null_count(), 1);
-    assert!(purges.try_recv().is_ok());
+
     // Header, trailer, one leaf/root, and the selected block's key from the key area. The
     // all-null projected field has no payload.
     assert_eq!(reads.lock().unwrap().len(), 4);
@@ -1074,386 +1064,10 @@ async fn malformed_framing_and_payload_corruption() {
         .artifact
         .objects
         .push(entry.artifact.objects[0].clone());
-    let (purger, _) = series_index_channel(store.clone());
-    let bad = SamplesFileHandle::new(handle.file_id(), entry, purger);
+    let bad = SamplesFileHandle::new(handle.file_id(), entry);
     assert!(format.reader(store, bad).await.is_err());
 }
 
-#[rstest::rstest]
-#[case(vec![1000, 2000], 1, true)]
-#[case(vec![-1, 0, 86_399_999, 86_400_000], 3, true)]
-#[case(vec![86_399_999, 86_400_000], 2, false)]
-#[case((1000..1065).collect(), 2, true)]
-#[tokio::test]
-async fn real_samples_reconcile_reopen_and_retire(
-    #[case] expected_times: Vec<i64>,
-    #[case] windows: usize,
-    #[case] flush_each: bool,
-) {
-    use crate::config::MitoConfig;
-    use crate::series_index::format::SeriesFormats;
-    use crate::series_index::maintenance::reconcile_series_indexes;
-    use crate::test_util::TestEnv;
-    let mut env = TestEnv::with_prefix("columnar-samples-reconcile").await;
-    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
-        &mut env,
-        &expected_times,
-        MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-            min_compaction_interval: Duration::from_secs(3600),
-            ..Default::default()
-        },
-        metadata(),
-        flush_each,
-    )
-    .await;
-    if !flush_each {
-        assert!(
-            region
-                .version()
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|l| l.files())
-                .any(|f| {
-                    let (a, b) = f.time_range();
-                    crate::series_index::builder::sample_day(a)
-                        != crate::series_index::builder::sample_day(b)
-                })
-        );
-    }
-    let format = Arc::new(ColumnarSamplesFormat::default());
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        samples: Some(format.clone()),
-        ..Default::default()
-    });
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, mut purges) = series_index_channel(store.clone());
-    let reconcile = || {
-        reconcile_series_indexes(
-            0,
-            store.clone(),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true,
-        )
-    };
-    assert_eq!(reconcile().await.unwrap().built_samples, windows);
-    assert_eq!(reconcile().await.unwrap().built_samples, 0);
-    let reopened =
-        crate::series_index::catalog::load_version_control(&store, region.region_id, &purger).await;
-    assert_eq!(reopened.current().samples.len(), windows);
-    let mut timestamps = Vec::new();
-    for handle in reopened.current().samples.values() {
-        let day = handle.entry().window.unwrap();
-        let manifest_path = format!(
-            "{}manifest.json",
-            samples_prefix(
-                region.region_id.as_u64(),
-                handle.entry().artifact.generation
-            )
-        );
-        let manifest: Manifest =
-            serde_json::from_slice(&store.read(&manifest_path).await.unwrap().to_bytes()).unwrap();
-        // All source chunks for this series/day are repacked into one block.
-        assert_eq!(manifest.files.iter().map(|p| p.num_blocks).sum::<u64>(), 1);
-        assert!(
-            manifest
-                .files
-                .iter()
-                .all(|p| p.min_timestamp.div_euclid(86_400_000) == day
-                    && p.max_timestamp.div_euclid(86_400_000) == day)
-        );
-        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
-        let batches = reader
-            .read(full_request())
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        timestamps.extend(collect_rows(&batches).into_iter().map(|row| row.2));
-    }
-    timestamps.sort_unstable();
-    assert_eq!(timestamps, expected_times);
-    // A missing artifact triggers rebuilding; failure to publish its replacement
-    // must retain the prior snapshot/catalog and retire only the new generation.
-    let before = region.series_index_version();
-    let catalog_path = crate::series_index::catalog::samples_catalog_path(region.region_id);
-    let catalog = store.read(&catalog_path).await.unwrap().to_bytes();
-    let old = before.samples.values().next().unwrap();
-    store
-        .delete(&old.entry().artifact.objects[0].path)
-        .await
-        .unwrap();
-    let layer = MockLayerBuilder::default()
-        .writer_factory(Arc::new(|path, _, inner| {
-            if path.ends_with("samples.json") {
-                Box::new(FaultyWriter {
-                    inner,
-                    fail_write: true,
-                    closing: None,
-                })
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap();
-    assert!(
-        reconcile_series_indexes(
-            0,
-            store.clone().layer(layer),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true
-        )
-        .await
-        .is_err()
-    );
-    assert!(Arc::ptr_eq(&before, &region.series_index_version()));
-    assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
-    let rebuilt_days = before
-        .samples
-        .values()
-        .filter(|h| h.entry().source_file_ids == old.entry().source_file_ids)
-        .count();
-    for _ in 0..rebuilt_days {
-        let cleanup = purges.try_recv().unwrap().objects.unwrap();
-        assert_eq!(cleanup.len(), 2);
-        assert!(cleanup.iter().all(|path| before.samples.values().all(|h| {
-            h.entry()
-                .artifact
-                .objects
-                .iter()
-                .all(|object| object.path != *path)
-        })));
-    }
-    assert!(purges.try_recv().is_err());
-
-    // A successful rebuild replaces the generation it supersedes, and that generation is retired:
-    // the published snapshot keeps its objects alive, so it is purged only once the last reader of
-    // the superseded generation is dropped. This pass also rebuilds the day whose generation the
-    // failed publish above left behind.
-    drop(before);
-    let current = region.series_index_version();
-    let retired = current.samples.values().next().unwrap().clone();
-    let retired_paths: BTreeSet<String> = retired
-        .entry()
-        .artifact
-        .objects
-        .iter()
-        .map(|object| object.path.clone())
-        .collect();
-    store
-        .delete(&retired.entry().artifact.objects[0].path)
-        .await
-        .unwrap();
-    let rebuilt = reconcile().await.unwrap();
-    assert!(rebuilt.built_samples > 0);
-    let next = region.series_index_version();
-    assert!(!Arc::ptr_eq(&current, &next));
-    assert!(
-        next.samples
-            .values()
-            .all(|handle| handle.entry().file_id != retired.entry().file_id)
-    );
-    assert!(next.samples.values().all(|handle| {
-        handle
-            .entry()
-            .artifact
-            .objects
-            .iter()
-            .all(|object| !retired_paths.contains(&object.path))
-    }));
-    // Nothing is released while the superseded snapshot and its handle are still alive.
-    assert!(purges.try_recv().is_err());
-    // A reader outlives the snapshot it was taken from, so hold a handle on every generation the
-    // superseded snapshot published: a rebuild can replace several of them at once, and releasing
-    // the snapshot must release none while those handles are alive.
-    let readers: Vec<_> = current
-        .samples
-        .values()
-        .filter(|handle| handle.entry().file_id != retired.entry().file_id)
-        .cloned()
-        .collect();
-    drop(current);
-    // The purge follows the last reader handle, not the snapshot: `retired` and `readers` still
-    // hold the superseded generations, so dropping the published snapshot that owned one of their
-    // handles each must not release them.
-    assert!(purges.try_recv().is_err());
-    drop(retired);
-    let mut purged = BTreeSet::new();
-    while let Ok(request) = purges.try_recv() {
-        purged.extend(request.objects.unwrap());
-    }
-    assert!(retired_paths.is_subset(&purged));
-    // The generations kept alive above are superseded as well, so they are released with their
-    // last reader handle, not with the snapshot.
-    drop(readers);
-    while let Ok(request) = purges.try_recv() {
-        purged.extend(request.objects.unwrap());
-    }
-    // Only superseded generations are released; nothing the snapshot still points at is purged.
-    assert!(
-        region
-            .series_index_version()
-            .samples
-            .values()
-            .all(|handle| handle
-                .entry()
-                .artifact
-                .objects
-                .iter()
-                .all(|object| !purged.contains(&object.path)))
-    );
-    use store_api::region_engine::RegionEngine;
-    engine.stop().await.unwrap();
-}
-
-/// An artifact written by the previous layout keeps its key in every block descriptor and names
-/// that older encoding in its manifest.
-///
-/// Nothing else separates it from a current artifact: it is structurally valid, ordered, and has
-/// the same version. Without the layout in `identity_encoding`, maintenance opens it, finds it
-/// sound, and keeps it - and only the first part read fails. The manifest must be refused instead,
-/// so an unreadable artifact is rebuilt before it is ever marked reusable.
-#[tokio::test]
-async fn inline_key_artifact_is_rebuilt_not_reused() {
-    use std::collections::HashMap;
-
-    use crate::config::MitoConfig;
-    use crate::series_index::format::SeriesFormats;
-    use crate::series_index::maintenance::reconcile_series_indexes;
-    use crate::series_index::version::SeriesIndexVersion;
-    use crate::test_util::TestEnv;
-
-    let mut env = TestEnv::with_prefix("columnar-samples-inline-keys").await;
-    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
-        &mut env,
-        &[1000, 2000],
-        MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-            min_compaction_interval: Duration::from_secs(3600),
-            ..Default::default()
-        },
-        metadata(),
-        true,
-    )
-    .await;
-    let format = Arc::new(ColumnarSamplesFormat::default());
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        samples: Some(format.clone()),
-        ..Default::default()
-    });
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, _purges) = series_index_channel(store.clone());
-    let reconcile = || {
-        reconcile_series_indexes(
-            0,
-            store.clone(),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true,
-        )
-    };
-    assert_eq!(1, reconcile().await.unwrap().built_samples);
-
-    // Rewrite every samples manifest to the value an artifact written before the key area carries.
-    let current = region.series_index_version();
-    let mut samples = HashMap::new();
-    for (id, handle) in &current.samples {
-        let mut entry = handle.entry().clone();
-        for object in &mut entry.artifact.objects {
-            if !object.path.ends_with("manifest.json") {
-                continue;
-            }
-            let bytes = store.read(&object.path).await.unwrap().to_bytes();
-            let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            manifest["identity_encoding"] = serde_json::json!("exact-sparse-key");
-            let rewritten = serde_json::to_vec(&manifest).unwrap();
-            object.file_size = rewritten.len() as u64;
-            store.write(&object.path, rewritten).await.unwrap();
-        }
-        entry.artifact.file_size = entry
-            .artifact
-            .objects
-            .iter()
-            .map(|object| object.file_size)
-            .sum();
-        samples.insert(
-            *id,
-            SamplesFileHandle::new(handle.file_id(), entry, purger.clone()),
-        );
-    }
-    region
-        .series_index_version_control
-        .publish(Arc::new(SeriesIndexVersion {
-            samples: samples.clone(),
-            range_indexes: current.range_indexes.clone(),
-            series_indexes: current.series_indexes.clone(),
-            index_buckets: current.index_buckets.clone(),
-        }));
-
-    // The manifest alone refuses it: no part has to be read to see the old layout.
-    let legacy = samples.values().next().unwrap().clone();
-    let error = format
-        .reader(store.clone(), legacy.clone())
-        .await
-        .err()
-        .expect("an inline-key artifact must be refused at open");
-    let message = error.to_string();
-    assert!(message.contains("rebuild"), "{message}");
-
-    // Maintenance must rebuild it, not mark it reusable and fail on the first read.
-    let stats = reconcile().await.unwrap();
-    assert_eq!(
-        1, stats.built_samples,
-        "an artifact the format refuses must be rebuilt"
-    );
-    let rebuilt = region.series_index_version();
-    assert_eq!(1, rebuilt.samples.len());
-    for handle in rebuilt.samples.values() {
-        assert_ne!(
-            handle.entry().artifact.generation,
-            legacy.entry().artifact.generation,
-            "the refused artifact must be replaced"
-        );
-        let manifest = manifest(&store, handle).await;
-        assert_eq!(
-            IdentityEncoding::CURRENT_SAMPLES,
-            manifest.identity_encoding
-        );
-        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
-        let batches = reader
-            .read(full_request())
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        let mut times = collect_rows(&batches)
-            .into_iter()
-            .map(|row| row.2)
-            .collect::<Vec<_>>();
-        times.sort_unstable();
-        assert_eq!(vec![1000, 2000], times);
-    }
-    use store_api::region_engine::RegionEngine;
-    engine.stop().await.unwrap();
-}
-
-/// Fields the frozen v1 manifest still has; unknown-to-the-current-format ones are
-/// deliberately not parsed, so the artifact reaches the reader's rejection path.
 #[derive(serde::Deserialize)]
 struct FrozenV1Manifest {
     region_id: u64,
@@ -1495,20 +1109,15 @@ async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
         file_size: (json.len() + bytes.len()) as u64,
         objects,
     };
-    let (purger, _) = series_index_channel(store.clone());
     SamplesFileHandle::new(
         RegionFileId::new(
             store_api::storage::RegionId::from_u64(frozen.region_id),
             frozen.source_file_id,
         ),
         SamplesEntry {
-            source_file_ids: Vec::new(),
-            window: None,
-            source_windows: Default::default(),
             file_id: frozen.source_file_id,
             artifact,
         },
-        purger,
     )
 }
 
@@ -1579,8 +1188,7 @@ async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> 
         }
     }
     entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    SamplesFileHandle::new(handle.file_id(), entry, purger)
+    SamplesFileHandle::new(handle.file_id(), entry)
 }
 
 /// A column whose codec the format does not know can only be skipped: a query that does not
@@ -2770,8 +2378,7 @@ async fn native_histogram_fields_round_trip_and_split_by_chunk_limit() {
         }
     }
     entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    let error = read(SamplesFileHandle::new(handle.file_id(), entry, purger))
+    let error = read(SamplesFileHandle::new(handle.file_id(), entry))
         .await
         .unwrap_err();
     assert!(

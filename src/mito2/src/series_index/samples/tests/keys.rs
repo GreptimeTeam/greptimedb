@@ -34,7 +34,6 @@ use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataR
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
 use crate::series_index::identity::ExactSeriesKey;
-use crate::series_index::purger::series_index_channel;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, KeyRef, MAGIC, Page, PayloadReference, TRAILER_SIZE, Trailer,
@@ -137,8 +136,7 @@ async fn rewrite_part(
         }
     }
     entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    SamplesFileHandle::new(handle.file_id(), entry, purger)
+    SamplesFileHandle::new(handle.file_id(), entry)
 }
 
 /// A single label this long encodes to a key well past the 65,536-byte page limit. The old

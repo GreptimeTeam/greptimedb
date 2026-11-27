@@ -2321,7 +2321,6 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
 async fn native_promql_clamp_aggregates_execute_on_native_segments() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -2410,7 +2409,6 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
 async fn native_promql_rows_name_each_row_after_its_metric() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -2557,7 +2555,6 @@ async fn native_promql_rows_name_each_row_after_its_metric() {
 async fn native_promql_group_by_name_over_several_metrics() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -2674,7 +2671,6 @@ fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, q
 async fn native_promql_field_selector_over_no_table_answers_empty() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -2762,7 +2758,6 @@ async fn native_promql_field_selector_over_no_table_answers_empty() {
 async fn native_promql_canonical_merge_over_partitioned_table() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -4279,7 +4274,6 @@ async fn native_promql_kind_rules_match_legacy() {
 
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -6293,7 +6287,6 @@ async fn distributed_native_promql_data_free_statement_plans_natively() {
 async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus_answers() {
     common_telemetry::init_default_ut_logging();
     let mito_config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -6778,7 +6771,6 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
 async fn native_promql_rewrites_the_metric_name() {
     common_telemetry::init_default_ut_logging();
     let mito_config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -7035,7 +7027,6 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     // The fixture opts in so its single bulk insert is distributed across real TSID scan
     // partitions; legacy may send its one batch only to partition 0.
     let mito_config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let builder =
@@ -8150,7 +8141,6 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
 
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -8395,7 +8385,6 @@ async fn native_promql_set_operators_read_both_scans_whole() {
 
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -8641,7 +8630,6 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
 
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -9546,182 +9534,173 @@ async fn native_promql_discovery_over_two_metrics_under_an_aggregate_sums_both()
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_cross_table_pairs_over_different_schemas() {
     common_telemetry::init_default_ut_logging();
-    for series_scan_v2 in [true, false] {
-        let config = mito2::config::MitoConfig {
-            experimental_series_scan_v2: series_scan_v2,
-            ..Default::default()
-        };
-        let (standalone, observer) = native_test_instance(
-            GreptimeDbStandaloneBuilder::new(&format!(
-                "native_promql_cross_table_schemas_{series_scan_v2}"
-            ))
-            .with_mito_config(config),
-        )
-        .await;
-        let instance = standalone.fe_instance().clone();
-        execute_all(
-            &instance,
-            "CREATE TABLE native_xs_a (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_cross_table_schemas",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_xs_a (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
              val DOUBLE, PRIMARY KEY(host, kind))",
-            QueryContext::arc(),
-        )
-        .await;
-        execute_all(
-            &instance,
-            "CREATE TABLE native_xs_b (host STRING, az STRING, \
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE native_xs_b (host STRING, az STRING, \
              greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE, \
              PRIMARY KEY(host, az))",
-            QueryContext::arc(),
-        )
-        .await;
-        // `a` is `10 * host + second`, `b` is `100 + second`. Seconds 0..5 are flushed, the rest
-        // stays in the memtable.
-        for (seconds, flush) in [(0..5, true), (5..10, false)] {
-            let mut a = Vec::new();
-            let mut b = Vec::new();
-            for second in seconds {
-                for host in 0..2 {
-                    a.push(format!(
-                        "('h{host}', 'x', {}, {})",
-                        second * 1_000,
-                        10 * host + second
-                    ));
-                    b.push(format!(
-                        "('h{host}', 'z', {}, {})",
-                        second * 1_000,
-                        100 + second
-                    ));
-                }
+        QueryContext::arc(),
+    )
+    .await;
+    // `a` is `10 * host + second`, `b` is `100 + second`. Seconds 0..5 are flushed, the rest
+    // stays in the memtable.
+    for (seconds, flush) in [(0..5, true), (5..10, false)] {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for second in seconds {
+            for host in 0..2 {
+                a.push(format!(
+                    "('h{host}', 'x', {}, {})",
+                    second * 1_000,
+                    10 * host + second
+                ));
+                b.push(format!(
+                    "('h{host}', 'z', {}, {})",
+                    second * 1_000,
+                    100 + second
+                ));
             }
-            for (table, values) in [("native_xs_a", a), ("native_xs_b", b)] {
+        }
+        for (table, values) in [("native_xs_a", a), ("native_xs_b", b)] {
+            execute_all(
+                &instance,
+                &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+                QueryContext::arc(),
+            )
+            .await;
+            if flush {
                 execute_all(
                     &instance,
-                    &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+                    &format!("ADMIN FLUSH_TABLE('{table}')"),
                     QueryContext::arc(),
                 )
                 .await;
-                if flush {
-                    execute_all(
-                        &instance,
-                        &format!("ADMIN FLUSH_TABLE('{table}')"),
-                        QueryContext::arc(),
-                    )
-                    .await;
+            }
+        }
+    }
+
+    let labels = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let mut union = Vec::new();
+    let mut union_legacy = Vec::new();
+    let mut ratio = Vec::new();
+    let mut filled = Vec::new();
+    for host in 0..2_i64 {
+        let name = format!("h{host}");
+        for second in 3..10_i64 {
+            let a = (10 * host + second) as f64;
+            let b = (100 + second) as f64;
+            union.push((
+                second * 1_000,
+                labels(&[("host", &name), ("kind", "x"), ("__name__", "native_xs_a")]),
+                a,
+            ));
+            union.push((
+                second * 1_000,
+                labels(&[("host", &name), ("az", "z"), ("__name__", "native_xs_b")]),
+                b,
+            ));
+            // `or` reports both operands with the label set each of them read, the metric name
+            // among them. The existing route declares no name column, so its rows answer the
+            // same set without that label; that is a difference of the column, not of the
+            // answer, so the two are compared as the rows each route can report.
+            union_legacy.push((second * 1_000, labels(&[("host", &name), ("kind", "x")]), a));
+            union_legacy.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
+
+            ratio.push((second * 1_000, labels(&[("host", &name)]), a / b));
+            filled.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
+        }
+    }
+    union.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+    union_legacy.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+    ratio.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+    filled.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+    // The existing plan fails to execute the match over two differently named time indexes
+    // (it reads a tag column as the time index), so only the native answer is checked there.
+    for (query, columns, expected, legacy_expected) in [
+        (
+            "native_xs_a or native_xs_b",
+            vec!["__name__", "az", "host", "kind", "ts", "val"],
+            union,
+            Some(union_legacy),
+        ),
+        (
+            "native_xs_a / on(host) native_xs_b",
+            vec!["__name__", "host", "ts", "val"],
+            ratio,
+            None,
+        ),
+        // `kind` and `az` keep every pair apart, so each result is a filled right series and
+        // carries `az`.
+        (
+            "native_xs_a + fill_left(0) native_xs_b",
+            vec!["__name__", "az", "host", "kind", "ts", "val"],
+            filled,
+            None,
+        ),
+    ] {
+        let context = query.to_string();
+        let sql = format!("TQL EVAL (3, 9, '1s', '1s') {query}");
+        observer.clear();
+        let (native_columns, native) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.two_input_fused();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{context}");
+        assert_eq!(plan.children().len(), 2, "{context}: fused inputs");
+        assert!(
+            !Arc::ptr_eq(plan.children()[0], plan.children()[1]),
+            "{context}: each table has an independent frontend input"
+        );
+        let scans = observed_series_scans(&observer);
+        assert_eq!(
+            scans.len(),
+            2,
+            "{context}: expected one distinct SeriesScanExec per selector occurrence"
+        );
+        let mut expected_columns = columns
+            .into_iter()
+            .map(|column| {
+                if column == "val" {
+                    expression_name(query)
+                } else {
+                    column.to_string()
                 }
-            }
-        }
-
-        let labels = |pairs: &[(&str, &str)]| {
-            pairs
-                .iter()
-                .map(|(name, value)| (name.to_string(), value.to_string()))
-                .collect::<std::collections::BTreeMap<_, _>>()
-        };
-        let mut union = Vec::new();
-        let mut union_legacy = Vec::new();
-        let mut ratio = Vec::new();
-        let mut filled = Vec::new();
-        for host in 0..2_i64 {
-            let name = format!("h{host}");
-            for second in 3..10_i64 {
-                let a = (10 * host + second) as f64;
-                let b = (100 + second) as f64;
-                union.push((
-                    second * 1_000,
-                    labels(&[("host", &name), ("kind", "x"), ("__name__", "native_xs_a")]),
-                    a,
-                ));
-                union.push((
-                    second * 1_000,
-                    labels(&[("host", &name), ("az", "z"), ("__name__", "native_xs_b")]),
-                    b,
-                ));
-                // `or` reports both operands with the label set each of them read, the metric name
-                // among them. The existing route declares no name column, so its rows answer the
-                // same set without that label; that is a difference of the column, not of the
-                // answer, so the two are compared as the rows each route can report.
-                union_legacy.push((second * 1_000, labels(&[("host", &name), ("kind", "x")]), a));
-                union_legacy.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
-
-                ratio.push((second * 1_000, labels(&[("host", &name)]), a / b));
-                filled.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
-            }
-        }
-        union.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
-        union_legacy.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
-        ratio.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
-        filled.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
-        // The existing plan fails to execute the match over two differently named time indexes
-        // (it reads a tag column as the time index), so only the native answer is checked there.
-        for (query, columns, expected, legacy_expected) in [
-            (
-                "native_xs_a or native_xs_b",
-                vec!["__name__", "az", "host", "kind", "ts", "val"],
-                union,
-                Some(union_legacy),
-            ),
-            (
-                "native_xs_a / on(host) native_xs_b",
-                vec!["__name__", "host", "ts", "val"],
-                ratio,
-                None,
-            ),
-            // `kind` and `az` keep every pair apart, so each result is a filled right series and
-            // carries `az`.
-            (
-                "native_xs_a + fill_left(0) native_xs_b",
-                vec!["__name__", "az", "host", "kind", "ts", "val"],
-                filled,
-                None,
-            ),
-        ] {
-            let context = format!("{query} (series_scan_v2={series_scan_v2})");
-            let sql = format!("TQL EVAL (3, 9, '1s', '1s') {query}");
-            observer.clear();
-            let (native_columns, native) =
-                native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-            let plan = observer.two_input_fused();
-            assert_eq!(plan.name(), "FusedSeriesExec", "{context}");
-            assert_eq!(plan.children().len(), 2, "{context}: fused inputs");
-            assert!(
-                !Arc::ptr_eq(plan.children()[0], plan.children()[1]),
-                "{context}: each table has an independent frontend input"
-            );
-            let scans = observed_series_scans(&observer);
+            })
+            .collect::<Vec<_>>();
+        expected_columns.sort();
+        assert_eq!(native_columns, expected_columns, "{context}");
+        assert_eq!(native.len(), expected.len(), "{context}: {native:?}");
+        for (actual, expected) in native.iter().zip(&expected) {
             assert_eq!(
-                scans.len(),
-                2,
-                "{context}: expected one distinct SeriesScanExec per selector occurrence"
+                (actual.0, &actual.1),
+                (expected.0, &expected.1),
+                "{context}"
             );
-            let mut expected_columns = columns
-                .into_iter()
-                .map(|column| {
-                    if column == "val" {
-                        expression_name(query)
-                    } else {
-                        column.to_string()
-                    }
-                })
-                .collect::<Vec<_>>();
-            expected_columns.sort();
-            assert_eq!(native_columns, expected_columns, "{context}");
-            assert_eq!(native.len(), expected.len(), "{context}: {native:?}");
-            for (actual, expected) in native.iter().zip(&expected) {
-                assert_eq!(
-                    (actual.0, &actual.1),
-                    (expected.0, &expected.1),
-                    "{context}"
-                );
-                assert!(
-                    (actual.2 - expected.2).abs() <= 1e-12 * expected.2.abs().max(1.0),
-                    "{context}: {actual:?} != {expected:?}"
-                );
-            }
-            if let Some(legacy_expected) = legacy_expected {
-                let (_, legacy) =
-                    native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
-                assert_eq!(legacy_expected, legacy, "legacy: {context}");
-            }
+            assert!(
+                (actual.2 - expected.2).abs() <= 1e-12 * expected.2.abs().max(1.0),
+                "{context}: {actual:?} != {expected:?}"
+            );
+        }
+        if let Some(legacy_expected) = legacy_expected {
+            let (_, legacy) =
+                native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+            assert_eq!(legacy_expected, legacy, "legacy: {context}");
         }
     }
 }
@@ -11012,7 +10991,6 @@ async fn native_hybrid_binary_empty_on_grouped_matching_and_errors() {
 async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings() {
     common_telemetry::init_default_ut_logging();
     let mito_config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -13564,7 +13542,6 @@ async fn native_promql_columnar_config_answers_from_the_ordinary_scan() {
     const FLOAT: &str = "native_columnar_float";
     let mito_config = mito2::config::MitoConfig {
         experimental_enable_series_index: true,
-        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -13635,8 +13612,8 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     const TABLE: &str = "native_columnar_fused";
     let mito_config = mito2::config::MitoConfig {
         experimental_enable_series_index: true,
-        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
-        // Slow the periodic pass, so the manual build below is what publishes the catalog.
+        experimental_series_index_min_files: 1,
+        // Slow the periodic pass, so the manual build below is what publishes the index.
         experimental_series_index_maintenance_interval: Duration::from_secs(3600),
         ..Default::default()
     };
@@ -13649,7 +13626,7 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
         &instance,
         &format!(
             "CREATE TABLE {PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric \
-             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); \
+             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse', 'sst_format' = 'narthex'); \
              CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) \
              ENGINE=metric WITH ('on_physical_table' = '{PHYSICAL}'); \
              INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30), \
@@ -13715,27 +13692,11 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     let series_schema = series_scan.series_schema();
     assert_eq!(series_schema.fields.len(), 1);
     assert_eq!(series_schema.fields[0].name.as_ref(), "val");
-    // Only the columnar writer publishes these formats, so the scanned region's catalog rules out
-    // a configuration-only run.
-    let samples = std::path::Path::new(&standalone.opts.storage.data_home)
-        .join("series_index")
-        .join(physical_metadata.region_id.as_u64().to_string())
-        .join("samples.json");
-    let catalog: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(samples).unwrap()).unwrap();
-    let entries = catalog["entries"].as_array().unwrap();
-    let series = catalog["series"].as_array().unwrap();
-    assert!(!entries.is_empty() && !series.is_empty(), "published");
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry["artifact"]["format"] == "columnar-samples")
-    );
-    assert!(
-        series
-            .iter()
-            .all(|entry| entry["artifact"]["format"] == "columnar-series")
-    );
+    let stats = standalone
+        .mito_engine
+        .get_region_statistic(physical_metadata.region_id)
+        .unwrap();
+    assert!(stats.sst_num > 0 && stats.index_size > 0);
     // One value per series: the node ran, rather than being merely planned.
     let output_values = fused_metric_set(&plan)
         .iter()
@@ -13789,7 +13750,7 @@ async fn native_promql_columnar_unindexed_float64_matches_legacy(
     const TABLE: &str = "native_columnar_unindexed";
     let mito_config = mito2::config::MitoConfig {
         experimental_enable_series_index: true,
-        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+        experimental_series_index_min_files: 1,
         // No periodic build, so neither case ever gets an index.
         experimental_series_index_maintenance_interval: Duration::from_secs(3600),
         ..Default::default()
@@ -13804,7 +13765,7 @@ async fn native_promql_columnar_unindexed_float64_matches_legacy(
         &instance,
         &format!(
             "CREATE TABLE {PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric \
-             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); \
+             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse', 'sst_format' = 'narthex'); \
              CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) \
              ENGINE=metric WITH ('on_physical_table' = '{PHYSICAL}'); \
              INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30), \
@@ -13871,7 +13832,7 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
     const TABLE: &str = "native_columnar_partial";
     let mito_config = mito2::config::MitoConfig {
         experimental_enable_series_index: true,
-        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+        experimental_series_index_min_files: 1,
         // Slow the periodic pass, so only the manual build below publishes an index.
         experimental_series_index_maintenance_interval: Duration::from_secs(3600),
         ..Default::default()
@@ -13888,7 +13849,7 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
         &instance,
         &format!(
             "CREATE TABLE {PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric \
-             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); \
+             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse', 'sst_format' = 'narthex'); \
              CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) \
              ENGINE=metric WITH ('on_physical_table' = '{PHYSICAL}'); \
              INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('b', 60000, 20); \
@@ -14007,7 +13968,6 @@ fn expected_rows(rows: &[(i64, &str, f64)]) -> Vec<(i64, String, String)> {
 async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -14320,7 +14280,6 @@ fn eval_text_rows(output: Output, reported: ReportedName<'_>) -> String {
 async fn native_promql_sum_topk_uses_global_topk_segment() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -14537,7 +14496,6 @@ async fn assert_computed_matching_key_runtime_parallelism(
 ) {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) =
@@ -14657,7 +14615,6 @@ async fn native_promql_computed_matching_key_cross_table_is_parallel() {
 async fn native_promql_multi_source_segments_match_legacy_values() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -14939,7 +14896,6 @@ async fn native_promql_recursive_matching_segments_match_legacy() {
 async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -15116,7 +15072,6 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
 async fn native_promql_whole_vector_operators_over_an_aggregate_keep_their_route() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -15194,7 +15149,6 @@ async fn native_promql_whole_vector_operators_over_an_aggregate_keep_their_route
 async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bounds() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -15337,7 +15291,6 @@ async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bound
 async fn native_promql_cross_table_range_aggregate_segments_keep_windows() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -15754,7 +15707,6 @@ async fn native_promql_scalar_multi_field_falls_back() {
 async fn native_promql_dynamic_histogram_quantile() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -15842,7 +15794,6 @@ async fn native_promql_dynamic_histogram_quantile() {
 async fn native_promql_dynamic_quantile() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -16027,7 +15978,6 @@ async fn native_promql_dynamic_quantile() {
 async fn native_promql_dynamic_topk_matches_legacy() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -16383,7 +16333,6 @@ async fn native_promql_scalar_parameter_reads_its_own_selector() {
 async fn native_promql_map_with_varying_parameters_matches_prometheus() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -17030,7 +16979,6 @@ fn find_plan_node_over(
 async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     common_telemetry::init_default_ut_logging();
     let mito_config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -17624,7 +17572,6 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
 async fn native_promql_fold_over_cross_partition_collision_reports_the_collision() {
     common_telemetry::init_default_ut_logging();
     let mito_config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -17814,7 +17761,6 @@ async fn native_promql_fold_over_cross_partition_collision_reports_the_collision
 async fn native_promql_subqueries_match_legacy() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -18026,7 +17972,6 @@ async fn native_promql_subqueries_match_legacy() {
 async fn native_promql_aggregate_subquery_operands_run_natively() {
     common_telemetry::init_default_ut_logging();
     let config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -18081,7 +18026,6 @@ async fn native_promql_aggregate_subquery_operands_run_natively() {
 async fn native_promql_matrix_root_matches_legacy() {
     common_telemetry::init_default_ut_logging();
     let mito_config = mito2::config::MitoConfig {
-        experimental_series_scan_v2: true,
         ..Default::default()
     };
     let (standalone, observer) = native_test_instance(
@@ -18386,11 +18330,7 @@ async fn narthex_native_histograms_match_parquet() {
     // A plan observer plugin cannot survive the rebuild below, so `TQL ANALYZE` shows the route.
     let builder = GreptimeDbStandaloneBuilder::new("narthex_native_histograms")
         .with_mito_config(mito2::config::MitoConfig {
-            experimental_series_scan_v2: true,
             experimental_enable_series_index: true,
-            experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
-            // Only the manual build below publishes a sidecar, so the plain Parquet table never
-            // gets one.
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
             ..Default::default()
         })
@@ -18411,9 +18351,8 @@ async fn narthex_native_histograms_match_parquet() {
     let tables = [
         ("narthex_hist", "narthex_phy"),
         ("parquet_hist", "parquet_phy"),
-        ("sidecar_hist", "sidecar_phy"),
     ];
-    for (format, (_, physical)) in ["narthex", "flat", "flat"].into_iter().zip(tables) {
+    for (format, (_, physical)) in ["narthex", "flat"].into_iter().zip(tables) {
         let expr = CreateTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
@@ -18467,22 +18406,19 @@ async fn narthex_native_histograms_match_parquet() {
         run_sql(&instance, &format!("ADMIN FLUSH_TABLE('{physical}')")).await;
         run_sql(&instance, &format!("ADMIN COMPACT_TABLE('{physical}')")).await;
     }
-    run_sql(&instance, "ADMIN BUILD_SERIES_INDEX('sidecar_phy')").await;
+    run_sql(&instance, "ADMIN BUILD_SERIES_INDEX('narthex_phy')").await;
     assert_histograms_match(&instance, &tables, "compacted").await;
-    // The sidecar's histogram samples answer a native read: the columnar reader decodes rows.
-    // Reopening rebuilds every region's sidecar, the plain table's included, so only this stage
-    // compares the sidecar against plain Parquet reads.
     let decoded = columnar_decoded_rows();
     let output = native_tql_output(
         &instance,
-        "TQL EVAL (0, 600, '60s') histogram_count(rate(sidecar_hist[5m]))",
+        "TQL EVAL (0, 600, '60s') histogram_count(rate(narthex_hist[5m]))",
         true,
     )
     .await;
     assert!(!float_answer_rows(output).await.is_empty());
     assert!(
         columnar_decoded_rows() > decoded,
-        "the columnar sidecar did not serve the histogram read"
+        "Narthex samples were not decoded"
     );
     context.rebuild().await;
     let instance = context.frontend();

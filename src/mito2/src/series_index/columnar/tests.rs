@@ -39,7 +39,6 @@ use crate::series_index::catalog::SeriesIndexEntry;
 use crate::series_index::format::{SeriesIndexFormat, SeriesReadRequest};
 use crate::series_index::{
     MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
-    series_index_channel,
 };
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
@@ -114,8 +113,7 @@ async fn build(
     let artifact = writer.finish().await.unwrap();
     entry.file_size = artifact.file_size;
     entry.artifact = Some(artifact);
-    let (purger, _) = series_index_channel(store.clone());
-    SeriesIndexFileHandle::new(meta.region_id, entry, purger)
+    SeriesIndexFileHandle::new(meta.region_id, entry)
 }
 async fn manifest(store: &ObjectStore, handle: &SeriesIndexFileHandle) -> Manifest {
     let path = handle
@@ -385,15 +383,14 @@ async fn read_rows(
 
 /// Publishes a writer that was created from the returned `entry`.
 async fn handle_of(
-    store: &ObjectStore,
+    _store: &ObjectStore,
     mut entry: SeriesIndexEntry,
     writer: Box<dyn crate::series_index::format::FormatWriter>,
 ) -> SeriesIndexFileHandle {
     let artifact = writer.finish().await.unwrap();
     entry.file_size = artifact.file_size;
     entry.artifact = Some(artifact);
-    let (purger, _) = series_index_channel(store.clone());
-    SeriesIndexFileHandle::new(metadata().region_id, entry, purger)
+    SeriesIndexFileHandle::new(metadata().region_id, entry)
 }
 
 /// The captured failure pair: two distinct series with one `table_id`/`tsid` whose
@@ -531,8 +528,7 @@ async fn same_exact_series_continues_across_batches_leaves_and_parts() {
     let artifact = writer.finish().await.unwrap();
     entry.file_size = artifact.file_size;
     entry.artifact = Some(artifact);
-    let (purger, _) = series_index_channel(store.clone());
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
     assert!(manifest(&store, &handle).await.files.len() > 1);
     let batches = format
         .reader(store.clone(), handle)
@@ -650,8 +646,7 @@ async fn inconsistent_object_sizes_are_rejected() {
             }
             _ => unreachable!(),
         };
-        let (purger, _) = series_index_channel(store.clone());
-        let invalid = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+        let invalid = SeriesIndexFileHandle::new(meta.region_id, entry);
         let error = format.reader(store.clone(), invalid).await.err().unwrap();
         assert!(error.to_string().contains(reason), "case {case}: {error}");
     }
@@ -940,8 +935,7 @@ async fn selective_io_and_pinned_stream_retirement() {
         &[batch(&[a.clone(), a, b.clone(), b.clone(), b, c], false, 0)],
     )
     .await;
-    let (purger, mut purges) = series_index_channel(store.clone());
-    let handle = SeriesIndexFileHandle::new(meta.region_id, built.entry().clone(), purger);
+    let handle = SeriesIndexFileHandle::new(meta.region_id, built.entry().clone());
     drop(built);
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
@@ -1012,149 +1006,19 @@ async fn selective_io_and_pinned_stream_retirement() {
     let mut req = request(&["tag_0"]);
     req.table_id = Some(9);
     let stream = reader.read(req).unwrap();
-    handle.mark_deleted();
+
     drop(handle);
     drop(reader);
-    assert!(purges.try_recv().is_err());
+
     let result = stream.try_collect::<Vec<_>>().await.unwrap();
     assert_eq!(result.len(), 1);
-    assert!(purges.try_recv().is_ok());
+
     // Framing, root, one leaf, and one tag payload. No TSID/count chunks or other leaf.
     let reads = reads.lock().unwrap();
     assert_eq!(
         reads.iter().filter(|(p, _)| p.ends_with(".series")).count(),
         4
     );
-}
-
-#[tokio::test]
-async fn real_format_reconciliation_and_fallback() {
-    use crate::config::MitoConfig;
-    use crate::series_index::format::SeriesFormats;
-    use crate::series_index::maintenance::reconcile_series_indexes;
-    use crate::test_util::TestEnv;
-    use store_api::region_engine::RegionEngine;
-    let mut env = TestEnv::with_prefix("columnar-reconcile").await;
-    let timestamps = [1000, 2000, 3000, 4000, 101000, 102000, 103000, 104000];
-    let (engine, region) = crate::series_index::tests::prepare_region_with_config(
-        &mut env,
-        &timestamps,
-        MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_scan_v2: true,
-            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-            min_compaction_interval: Duration::from_secs(3600),
-            ..Default::default()
-        },
-    )
-    .await;
-    let format = Arc::new(ColumnarSeriesFormat::default());
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        index: Some(format.clone()),
-        ..Default::default()
-    });
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, mut purges) = series_index_channel(store.clone());
-    let reconcile = || {
-        reconcile_series_indexes(
-            0,
-            store.clone(),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true,
-        )
-    };
-    assert_eq!(reconcile().await.unwrap().built_series, 2);
-    let snapshot = region.series_index_version();
-    for handle in snapshot.series_indexes.values() {
-        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
-        let batches = reader
-            .read(request(&[ROW_COUNT_COLUMN]))
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
-    }
-    assert_eq!(reconcile().await.unwrap().built_series, 0);
-    let reopened =
-        crate::series_index::catalog::load_version_control(&store, region.region_id, &purger).await;
-    assert_eq!(reopened.current().series_indexes.len(), 2);
-    let scanner = engine
-        .scanner(
-            region.region_id,
-            store_api::storage::ScanRequest {
-                distribution: Some(store_api::storage::TimeSeriesDistribution::PerSeries),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let batches = scanner
-        .scan()
-        .await
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(
-        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
-        timestamps.len()
-    );
-    let catalog_path = crate::series_index::catalog::series_catalog_path(region.region_id);
-    let old_catalog = store.read(&catalog_path).await.unwrap().to_bytes();
-    let old = snapshot.series_indexes.values().next().unwrap();
-    store
-        .delete(&old.entry().artifact.as_ref().unwrap().objects[0].path)
-        .await
-        .unwrap();
-    let layer = object_store::layers::mock::MockLayerBuilder::default()
-        .writer_factory(Arc::new(|path, _, inner| {
-            if path.ends_with("series-index.json") {
-                Box::new(FailedOutput {
-                    inner,
-                    fail_write: false,
-                })
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap();
-    assert!(
-        reconcile_series_indexes(
-            0,
-            store.clone().layer(layer),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true
-        )
-        .await
-        .is_err()
-    );
-    assert!(Arc::ptr_eq(&snapshot, &region.series_index_version()));
-    assert_eq!(
-        old_catalog,
-        store.read(&catalog_path).await.unwrap().to_bytes()
-    );
-    let cleanup = purges.try_recv().unwrap().objects.unwrap();
-    assert_eq!(cleanup.len(), 2);
-    assert!(cleanup.iter().all(|path| {
-        !old.entry()
-            .artifact
-            .as_ref()
-            .unwrap()
-            .objects
-            .iter()
-            .any(|object| &object.path == path)
-    }));
-    engine.stop().await.unwrap();
 }
 
 struct FailedOutput {
@@ -1361,8 +1225,7 @@ async fn malformed_manifest_and_timestamp_independence() {
             path: "unowned".into(),
             file_size: 0,
         });
-    let (purger, _) = series_index_channel(store.clone());
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
     assert!(format.reader(store, handle).await.is_err());
 }
 
@@ -1517,8 +1380,7 @@ async fn opendal_reads_sparse_part_beyond_four_gib() {
         };
     }
     store.write(&manifest.path(), manifest_bytes).await.unwrap();
-    let (purger, _) = series_index_channel(store.clone());
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
     let batches = format
         .reader(store, handle)
         .await
@@ -1642,8 +1504,7 @@ async fn large_repeated_tags_across_small_batches() {
     let artifact = writer.finish().await.unwrap();
     entry.file_size = artifact.file_size;
     entry.artifact = Some(artifact);
-    let (purger, _) = series_index_channel(store.clone());
-    let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+    let handle = SeriesIndexFileHandle::new(meta.region_id, entry);
     let batches = format
         .reader(store.clone(), handle)
         .await

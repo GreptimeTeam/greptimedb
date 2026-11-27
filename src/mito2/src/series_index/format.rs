@@ -148,30 +148,6 @@ pub(crate) trait SamplesFormat: Debug + Send + Sync {
     ) -> Result<Box<dyn FormatWriter>>;
 }
 
-/// Optional writers, captured once per reconciliation pass.
-/// Without an index backend, builds use the existing Parquet writer.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SeriesFormats {
-    pub(crate) index: Option<Arc<dyn SeriesIndexFormat>>,
-    pub(crate) samples: Option<Arc<dyn SamplesFormat>>,
-}
-
-impl SeriesFormats {
-    pub(crate) fn from_config(format: crate::config::SeriesIndexFormat) -> Self {
-        match format {
-            crate::config::SeriesIndexFormat::Legacy => Self::default(),
-            crate::config::SeriesIndexFormat::Columnar => Self {
-                index: Some(Arc::new(
-                    crate::series_index::columnar::ColumnarSeriesFormat::default(),
-                )),
-                samples: Some(Arc::new(
-                    crate::series_index::samples::ColumnarSamplesFormat::default(),
-                )),
-            },
-        }
-    }
-}
-
 /// Reads a column ID from an artifact schema field.
 pub(crate) fn field_id(field: &Field) -> Result<u32> {
     field

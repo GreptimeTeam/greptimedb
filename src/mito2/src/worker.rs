@@ -42,7 +42,7 @@ pub(crate) use handle_catchup::persist_backfilled_metadata_and_notify_if_fenced;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
@@ -52,7 +52,6 @@ use common_runtime::JoinHandle;
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, error, info, warn};
 use futures::future::{join_all, try_join_all};
-use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::{Histogram, IntGauge};
 use rand::{Rng, rng};
@@ -89,9 +88,7 @@ use crate::request::{
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
-use crate::series_index::{
-    IndexFilePurger, SeriesIndexTaskState, series_index_channel, spawn_series_index_tasks,
-};
+use crate::series_index::{SeriesIndexTaskState, spawn_series_index_tasks};
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
@@ -215,8 +212,7 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        let series_index_store = series_index_store_from_config(&config, data_home).await?;
-        let series_index_disk_usage = Arc::new(AtomicU64::new(0));
+        reclaim_legacy_series_cache(data_home).await?;
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(CompactionCoordinator::new_local(
             config.max_background_compactions,
@@ -238,10 +234,7 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
-                .enable_columnar_meta_cache(
-                    config.experimental_series_index_format
-                        == crate::config::SeriesIndexFormat::Columnar,
-                )
+                .enable_columnar_meta_cache(config.experimental_enable_series_index)
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -289,8 +282,6 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
-                    series_index_store: series_index_store.clone(),
-                    series_index_disk_usage: series_index_disk_usage.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -524,8 +515,7 @@ impl WorkerGroup {
         });
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
-        let series_index_store = series_index_store_from_config(&config, data_home).await?;
-        let series_index_disk_usage = Arc::new(AtomicU64::new(0));
+        reclaim_legacy_series_cache(data_home).await?;
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
@@ -555,10 +545,7 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
-                .enable_columnar_meta_cache(
-                    config.experimental_series_index_format
-                        == crate::config::SeriesIndexFormat::Columnar,
-                )
+                .enable_columnar_meta_cache(config.experimental_enable_series_index)
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -599,8 +586,6 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
-                    series_index_store: series_index_store.clone(),
-                    series_index_disk_usage: series_index_disk_usage.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -658,59 +643,37 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
         % num_workers
 }
 
-/// Opens the fixed local series-index store only when the feature is enabled.
-async fn series_index_store_from_config(
-    config: &MitoConfig,
-    data_home: &str,
-) -> Result<Option<ObjectStore>> {
-    if !config.experimental_enable_series_index {
-        return Ok(None);
-    }
-
+/// Reclaim the retired, versioned local sidecar cache. Only numeric region directories
+/// belong to this format. Leave unrelated directories and the cache mount itself intact.
+async fn reclaim_legacy_series_cache(data_home: &str) -> Result<()> {
     let root = Path::new(data_home).join("series_index");
-    let store = new_fs_cache_store(&root.to_string_lossy()).await?;
-    initialize_series_index_cache(&store).await?;
-    Ok(Some(store))
-}
-
-/// Marks the rebuildable local index layout, and resets the store when it changes.
-///
-/// This branch is experimental and has no deployments, so it pins the token at `1`: a
-/// cache written by any other build is discarded on startup and rebuilt from the SSTs.
-/// Artifacts are additionally rejected on open when they lack the mandatory
-/// `identity_encoding` discriminator, so a stale artifact is never served even if the
-/// reset did not happen (a read that precedes it, or an artifact outside this cache).
-const SERIES_INDEX_CACHE_VERSION: &str = "1";
-
-/// Resets incompatible caches before any worker or reader can use their catalogs.
-async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {
-    let version = match store.read("version").await {
-        Ok(bytes) => Some(bytes.to_bytes()),
-        Err(error) if error.kind() == object_store::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context(crate::error::OpenDalSnafu),
-    };
-    if version.as_deref() == Some(SERIES_INDEX_CACHE_VERSION.as_bytes()) {
+    if !root.join("version").is_file() {
         return Ok(());
     }
-    common_telemetry::info!("Resetting series-index cache: missing or incompatible layout version");
-    // Preserve the cache root, which may be a mount point.
-    let entries = store.list("/").await.context(crate::error::OpenDalSnafu)?;
-    for entry in entries {
-        // Listings can include the directory itself.
-        if entry.path() == "/" {
-            continue;
+    let store = new_fs_cache_store(&root.to_string_lossy()).await?;
+    if store
+        .read("version")
+        .await
+        .context(crate::error::OpenDalSnafu)?
+        .to_bytes()
+        .as_ref()
+        != b"1"
+    {
+        return Ok(());
+    }
+    for entry in store.list("/").await.context(crate::error::OpenDalSnafu)? {
+        if entry.path().trim_end_matches('/').parse::<u64>().is_ok() && entry.metadata().is_dir() {
+            store
+                .delete_with(entry.path())
+                .recursive(true)
+                .await
+                .context(crate::error::OpenDalSnafu)?;
         }
-        store
-            .delete_with(entry.path())
-            .recursive(true)
-            .await
-            .context(crate::error::OpenDalSnafu)?;
     }
     store
-        .write("version", SERIES_INDEX_CACHE_VERSION)
+        .delete("version")
         .await
         .context(crate::error::OpenDalSnafu)?;
-    common_telemetry::info!("Series-index cache reset complete");
     Ok(())
 }
 
@@ -768,8 +731,6 @@ struct WorkerStarter<S> {
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: Arc<CompactionCoordinator>,
     index_build_job_pool: SchedulerRef,
-    series_index_store: Option<ObjectStore>,
-    series_index_disk_usage: Arc<AtomicU64>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     memtable_compact_dispatcher: Arc<CompactDispatcher>,
@@ -808,40 +769,29 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-        let (series_index_task_state, series_index_receiver) = if self.series_index_store.is_some()
-        {
-            let (mut state, receiver) =
-                SeriesIndexTaskState::new(self.id, self.config.worker_channel_size);
-            state.worker = Some(sender.clone());
-            (Some(Arc::new(state)), Some(receiver))
-        } else {
-            (None, None)
-        };
-        let mut series_index_purger = None;
-        let series_index_handle = self
-            .series_index_store
+        let (series_index_task_state, series_index_receiver) =
+            if self.config.experimental_enable_series_index {
+                let (mut state, receiver) =
+                    SeriesIndexTaskState::new(self.id, self.config.worker_channel_size);
+                state.worker = Some(sender.clone());
+                (Some(Arc::new(state)), Some(receiver))
+            } else {
+                (None, None)
+            };
+        let series_index_handle = series_index_task_state
             .clone()
-            .zip(series_index_task_state.clone())
             .zip(series_index_receiver)
-            .map(|((store, state), receiver)| {
-                let (purger, purge_receiver) = series_index_channel(store.clone());
-                series_index_purger = Some(purger.clone());
+            .map(|(state, receiver)| {
                 spawn_series_index_tasks(
                     self.id,
                     self.schema_metadata_manager.clone(),
-                    store,
                     regions.clone(),
                     state,
                     receiver,
                     self.config.experimental_series_index_bucket_width,
                     self.config.experimental_series_index_min_files,
-                    purger,
-                    purge_receiver,
-                    self.series_index_disk_usage.clone(),
-                    self.config.experimental_series_index_max_size.as_bytes(),
                     self.config.experimental_series_index_maintenance_interval,
                     self.time_provider.clone(),
-                    self.config.experimental_enable_range_index,
                 )
             });
         let now = self.time_provider.current_time_millis();
@@ -872,8 +822,6 @@ impl<S: LogStore> WorkerStarter<S> {
                 self.config.max_background_index_builds,
             ),
             series_index_task_state: series_index_task_state.clone(),
-            series_index_store: self.series_index_store,
-            series_index_purger,
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,
@@ -1330,8 +1278,6 @@ struct RegionWorkerLoop<S> {
     /// Controls the worker-owned series-index task.
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Local store for series and range indexes managed by reconciliation.
-    series_index_store: Option<ObjectStore>,
-    series_index_purger: Option<IndexFilePurger>,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
     /// Scheduler for compaction tasks.
@@ -2439,70 +2385,6 @@ mod tests {
     use super::*;
     use crate::test_util::TestEnv;
 
-    #[tokio::test]
-    async fn test_series_index_cache_layout_reset() {
-        let parent = common_test_util::temp_dir::create_temp_dir("series-cache-version");
-        let root = parent.path().join("series_index");
-        let sentinel = parent.path().join("sst");
-        tokio::fs::write(&sentinel, b"source data").await.unwrap();
-        let store = crate::access_layer::new_fs_cache_store(&root.to_string_lossy())
-            .await
-            .unwrap();
-        // Keep the original directory alive so its inode cannot be reused after deletion.
-        #[cfg(unix)]
-        let root_handle = tokio::fs::File::open(&root).await.unwrap();
-        for version in [None, Some("0"), Some("invalid")] {
-            if let Some(version) = version {
-                store.write("version", version).await.unwrap();
-            }
-            store.write("stale", "old").await.unwrap();
-            store
-                .write("42/samples/old/source/part-0.samples", "old")
-                .await
-                .unwrap();
-            store
-                .write("42/samples.json", "stale references")
-                .await
-                .unwrap();
-            super::initialize_series_index_cache(&store).await.unwrap();
-            assert!(!store.exists("stale").await.unwrap());
-            assert_eq!(
-                store.read("version").await.unwrap().to_bytes().as_ref(),
-                SERIES_INDEX_CACHE_VERSION.as_bytes()
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-
-                let original = root_handle.metadata().await.unwrap();
-                let current = tokio::fs::metadata(&root).await.unwrap();
-                assert_eq!(
-                    (original.dev(), original.ino()),
-                    (current.dev(), current.ino())
-                );
-            }
-            assert!(!store.exists("42/samples.json").await.unwrap());
-            assert!(
-                !store
-                    .exists("42/samples/old/source/part-0.samples")
-                    .await
-                    .unwrap()
-            );
-            store
-                .write("42/series/current/manifest.json", "current")
-                .await
-                .unwrap();
-            super::initialize_series_index_cache(&store).await.unwrap();
-            assert!(
-                store
-                    .exists("42/series/current/manifest.json")
-                    .await
-                    .unwrap()
-            );
-            assert_eq!(tokio::fs::read(&sentinel).await.unwrap(), b"source data");
-        }
-    }
-
     #[test]
     fn test_region_id_to_index() {
         let num_workers = 4;
@@ -2541,7 +2423,7 @@ mod tests {
                 assert_eq!(worker.series_index_task_state.is_some(), enabled);
                 assert_eq!(worker.series_index_handle.lock().await.is_some(), enabled);
             }
-            assert_eq!(root.is_dir(), enabled || existing_index);
+            assert_eq!(root.is_dir(), existing_index);
             if existing_index {
                 assert_eq!(
                     tokio::fs::read(root.join("retained")).await.unwrap(),

@@ -35,8 +35,9 @@ use crate::series_index::columnar::{
     ColumnarSeriesFormat, MANIFEST_LIMIT, Manifest, Part, Tag, VERSION, invalid, require,
 };
 use crate::series_index::format::FormatWriter;
+use crate::series_index::identity::decode_series_identity;
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
-use crate::series_index::writer::{decode_series_identity, tag_columns, validate_metadata};
+use crate::series_index::writer::{tag_columns, validate_metadata};
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TSID_COLUMN};
 
 /// Maximum owned row bytes per block; a single larger row is flushed on its own.

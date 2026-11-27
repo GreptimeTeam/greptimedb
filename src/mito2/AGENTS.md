@@ -99,19 +99,12 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
   `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file
   that carries extension indexes (`worker/handle_rebuild_index.rs::needs_background_indexes`).
-- **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
-  and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
-  range entries and expires series indexes to reclaim published usage. Concurrent builds may
-  overshoot; closed-region files are not counted. Series handles and the SST purger own file deletion.
-- **Series format PoC**: samples are rebuildable local SST sidecars. Optional writer interfaces (`format.rs`) integrate with reconciliation, catalog publication, and deferred purge. Defaults retain the original Parquet writer and disable samples. The opt-in columnar backend (`series_index/columnar.rs`) implements streaming OpenDAL writes and pinned format reads; its wire contract is in `docs/formats/mito-series.md`. Artifact objects record paths and sizes, including the manifest, so reads need no stat. Codecs currently run inline pending scheduling benchmarks. Sample payload reads coalesce nearby selected ranges in bounded, memory-accounted windows; boundary blocks keep timestamp-first pruning. Aligned native payload blocks share the page-cache budget with Parquet, with generation/namespace isolation and no shared lock held across I/O. Columnar stage timings and read counters are exported through Mito metrics. Columnar `SeriesScan` raw reads use scanner-wide preparation in `read/series_scan/prepared.rs`; ordinary record-batch scans retain their SST path. Native reader metadata shares the decoded SST cache reservation; maintenance readers bypass this cache. The paired `experimental_series_index_format` setting selects legacy or columnar artifacts.
-- **Series-index coverage** (`series_index/catalog.rs`): `SeriesIndexEntry` stores
-  compaction-window width and SST summaries keyed by aligned start in both catalogs and Parquet footers.
-- **Local index cache**: startup checks a root layout version before workers start; missing or incompatible versions reset the whole rebuildable cache, including catalogs and range indexes. Samples use one generation directory; source SST identity stays in metadata.
-- **Columnar samples**: `series_index/samples.rs` implements opt-in sample artifacts,
-  including nullable Float64 and native histogram fields and preserved sequence/delete rows. Its wire
-  contract is `docs/formats/mito-samples.md`; time/ID bounds may overlap across
-  leaves and parts. Both columnar backends share cancellation-safe output ownership
-  in `series_index/artifact_writer.rs`. Format readers do not apply query visibility; the prepared-source adapter applies visibility and the existing merge/dedup pipeline. Eligible sample merges use identity-only keys and omit tag columns; candidates retain memory-accounted series batch/row labels, and the raw adapter attaches explicit labels with region-qualified identities. Scanner preflight declares that representation so lazy streams and planned frames agree. Non-separable tag/sample residuals retain the full flat schema. Manual reconciliation covers all snapshot SSTs regardless of maintenance eligibility, but retains the soft disk limit. Manual builds validate columnar sample and tag schemas before reuse. Columnar reconciliation consolidates snapshot SSTs into UTC-day sample generations; catalogs record all source IDs. Grouped reads require complete daily coverage and all sources still visible, open each artifact once, and fall back for source-sequence-pruned scans. SST replacement invalidates a whole affected generation; catalog publication and reader handles govern retirement.
+- **Native series maintenance** (`series_index/task.rs`) streams exact keys from pinned
+  Narthex files and publishes index replacements through a region manifest edit. Expiry respects the certified window. Reader handles pin retired files until the last reader releases them.
+- **Series discovery** (`read/series_scan/prepared/narthex.rs`) checks the sequence domain,
+  schema and required artifacts before skipping sample keys. Samples and live memtables
+  determine visibility. The series and sample wire formats are documented in
+  `docs/formats/mito-series.md` and `docs/formats/mito-samples.md`.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
 - **WAL/memtable encoding** (`wal/`, `memtable/`): breaks replay if changed incompatibly.
 

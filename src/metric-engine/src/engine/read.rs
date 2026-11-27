@@ -590,11 +590,10 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_two_phase_series_scan_reads_metric_region() {
+    async fn test_series_scan_reads_metric_region() {
         let env = TestEnv::with_mito_config(
-            "test_two_phase_series_scan",
+            "test_series_scan",
             MitoConfig {
-                experimental_series_scan_v2: true,
                 ..Default::default()
             },
             EngineConfig::default(),
@@ -669,7 +668,7 @@ mod test {
         assert_eq!(7, rows);
 
         let explain = ScannerDisplay(scanner.as_ref()).to_string();
-        assert!(explain.contains("\"mode\":\"two_phase\""), "{explain}");
+        assert!(explain.contains("\"mode\":\"legacy\""), "{explain}");
     }
 
     #[tokio::test]
@@ -677,7 +676,6 @@ mod test {
         let env = TestEnv::with_mito_config(
             "test_logical_raw_series_scan",
             MitoConfig {
-                experimental_series_scan_v2: true,
                 ..Default::default()
             },
             EngineConfig::default(),
@@ -967,35 +965,5 @@ mod test {
             ["a-one".to_string(), "a-two".to_string()].into()
         );
         assert_eq!(last_markers, 2);
-    }
-
-    #[tokio::test]
-    async fn test_series_scan_v2_flag_disables_two_phase_mode() {
-        let env = TestEnv::with_mito_config(
-            "test_disable_two_phase_series_scan",
-            MitoConfig {
-                experimental_series_scan_v2: false,
-                ..Default::default()
-            },
-            EngineConfig::default(),
-        )
-        .await;
-        env.init_metric_region().await;
-
-        let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
-        let scanner = env
-            .mito()
-            .handle_query(
-                data_region_id,
-                ScanRequest {
-                    distribution: Some(TimeSeriesDistribution::PerSeries),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        let explain = ScannerDisplay(scanner.as_ref()).to_string();
-        assert!(explain.contains("\"mode\":\"legacy\""), "{explain}");
     }
 }

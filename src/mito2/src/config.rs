@@ -66,17 +66,6 @@ pub enum ScanMemoryMode {
 /// Fetch option timeout
 pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Paired series-index and sample storage selection for the experimental reader.
-#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum SeriesIndexFormat {
-    /// Parquet series indexes and authoritative SST reads.
-    #[default]
-    Legacy,
-    /// Columnar series indexes and daily columnar samples.
-    Columnar,
-}
-
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 /// Before using the config, call [`MitoConfig::sanitize()`] to validate and normalize it.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -112,23 +101,12 @@ pub struct MitoConfig {
     // Background job configs:
     /// Max number of running background index build jobs (default: 1/8 of cpu cores).
     pub max_background_index_builds: usize,
-    /// Under development; do not enable. Whether to enable series indexes (default false).
-    /// Indexes are stored on the local filesystem under `{data_home}/series_index`.
+    /// Build certified series indexes for authoritative Narthex regions.
     pub experimental_enable_series_index: bool,
-    /// Paired artifact format (default legacy).
-    pub experimental_series_index_format: SeriesIndexFormat,
-    /// Approximate size limit for local series and range index sidecars in open regions (default: 5 GiB).
-    /// Workers share a periodically refreshed estimate and defer sidecar builds when full.
-    /// In-flight reconciliation can exceed the limit; closed-region files are not counted.
-    pub experimental_series_index_max_size: ReadableSize,
-    /// Whether to build and query range indexes when series indexes are enabled (default false).
-    /// Obsolete range-index metadata and files are still cleaned up when disabled.
-    pub experimental_enable_range_index: bool,
     /// Interval between series-index maintenance runs (default 5 min). Zero uses the default.
     #[serde(with = "humantime_serde")]
     pub experimental_series_index_maintenance_interval: Duration,
     /// Under development. Native series indexes persist this window width on first build.
-    /// Local series indexes round up to a multiple of the compaction time window.
     #[serde(with = "humantime_serde")]
     pub experimental_series_index_bucket_width: Duration,
     /// Minimum uncovered live sample SSTs per native series index window.
@@ -248,9 +226,6 @@ pub struct MitoConfig {
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
     pub default_flat_format: bool,
 
-    /// Whether to enable the experimental two-phase mode for eligible metric series scans.
-    pub experimental_series_scan_v2: bool,
-
     pub gc: GcConfig,
 }
 
@@ -267,9 +242,6 @@ impl Default for MitoConfig {
             max_background_index_builds: divide_num_cpus(8),
             experimental_enable_series_index: false,
             experimental_series_index_min_files: DEFAULT_SERIES_INDEX_MIN_FILES,
-            experimental_series_index_format: SeriesIndexFormat::Legacy,
-            experimental_series_index_max_size: ReadableSize::gb(5),
-            experimental_enable_range_index: false,
             experimental_series_index_maintenance_interval:
                 DEFAULT_SERIES_INDEX_MAINTENANCE_INTERVAL,
             experimental_series_index_bucket_width: Duration::from_secs(5 * 24 * 60 * 60),
@@ -311,7 +283,6 @@ impl Default for MitoConfig {
             schedule_compaction_after_edit: true,
             default_flat_format: true,
             // FIXME(#9435): Keep v2 opt-in while long-range scan memory usage is investigated.
-            experimental_series_scan_v2: false,
             gc: GcConfig::default(),
         };
 
@@ -341,14 +312,6 @@ impl MitoConfig {
             self.scan_memory_on_exhausted = OnExhaustedPolicy::Fail;
         }
 
-        if self.experimental_enable_series_index {
-            snafu::ensure!(
-                self.experimental_series_index_max_size.as_bytes() >= 1024,
-                crate::error::InvalidConfigSnafu {
-                    reason: "experimental_series_index_max_size must be at least 1KiB"
-                }
-            );
-        }
         // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
             self.num_workers = divide_num_cpus(2);
@@ -542,16 +505,12 @@ mod tests {
         let defaults: MitoConfig = toml::from_str("").unwrap();
         assert_eq!(4, defaults.experimental_series_index_min_files);
         assert!(!MitoConfig::default().experimental_enable_series_index);
-        assert!(!MitoConfig::default().experimental_enable_range_index);
         assert_eq!(
             MitoConfig::default().experimental_series_index_bucket_width,
             Duration::from_secs(5 * 24 * 60 * 60)
         );
         let mut config: MitoConfig = toml::from_str(
             "experimental_enable_series_index = true
-             experimental_series_index_format = 'columnar'
-             experimental_enable_range_index = false
-             experimental_series_index_max_size = '64MiB'
              experimental_series_index_maintenance_interval = '30s'
              experimental_series_index_min_files = 2
              experimental_series_index_bucket_width = '2days'",
@@ -560,15 +519,6 @@ mod tests {
         config.sanitize("/data").unwrap();
         assert_eq!(2, config.experimental_series_index_min_files);
         assert!(config.experimental_enable_series_index);
-        assert_eq!(
-            config.experimental_series_index_format,
-            SeriesIndexFormat::Columnar
-        );
-        assert_eq!(
-            ReadableSize::mb(64),
-            config.experimental_series_index_max_size
-        );
-        assert!(!config.experimental_enable_range_index);
         assert_eq!(
             config.experimental_series_index_maintenance_interval,
             Duration::from_secs(30)
@@ -582,10 +532,6 @@ mod tests {
         config.experimental_series_index_min_files = 0;
         config.sanitize("/data").unwrap();
         assert_eq!(4, config.experimental_series_index_min_files);
-        config.experimental_series_index_max_size = ReadableSize(1023);
-        assert!(config.sanitize("/data").is_err());
-        config.experimental_series_index_max_size = ReadableSize(1024);
-        config.sanitize("/data").unwrap();
 
         let mut config: MitoConfig =
             toml::from_str("experimental_series_index_maintenance_interval = '0s'").unwrap();
@@ -594,19 +540,6 @@ mod tests {
             config.experimental_series_index_maintenance_interval,
             MitoConfig::default().experimental_series_index_maintenance_interval
         );
-    }
-
-    #[test]
-    fn test_range_index_config() {
-        let config: MitoConfig = toml::from_str("experimental_enable_series_index = true").unwrap();
-        assert!(!config.experimental_enable_range_index);
-        for enabled in [false, true] {
-            let config: MitoConfig =
-                toml::from_str(&format!("experimental_enable_range_index = {enabled}")).unwrap();
-            assert_eq!(enabled, config.experimental_enable_range_index);
-            let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-            assert_eq!(config, restored);
-        }
     }
 }
 
