@@ -120,7 +120,6 @@ const UNIX_TO_ABSOLUTE: i64 = (1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400) 
     + (ABSOLUTE_YEARS as i64 / 400 * 146_097 + MARCH_THRU_DECEMBER as i64) * 86_400;
 
 impl DateFunction {
-    /// The PromQL name of the function.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::DayOfMonth => "day_of_month",

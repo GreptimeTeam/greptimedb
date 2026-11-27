@@ -3017,3 +3017,109 @@ async fn test_postgres_copy_in_with_batching() {
         instance.guard.remove_all().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_partitioned_on_value_column() {
+    use common_telemetry::init_default_ut_logging;
+    use frontend::server::Services;
+    use tests_integration::standalone::GreptimeDbStandaloneBuilder;
+
+    init_default_ut_logging();
+    let mut instance = GreptimeDbStandaloneBuilder::new("delete_value_partition_10705")
+        .build()
+        .await;
+    let mut opts = instance.opts.clone();
+    opts.http.addr = "127.0.0.1:0".into();
+    opts.grpc.bind_addr = "127.0.0.1:0".into();
+    opts.postgres.addr = "127.0.0.1:0".into();
+    let mut servers = Services::new(opts, instance.fe_instance().clone(), Default::default())
+        .build()
+        .unwrap();
+    servers.start_all().await.unwrap();
+    let (pg, connection) = tokio_postgres::connect(
+        &format!(
+            "postgres://{}/public",
+            servers.addr("POSTGRES_SERVER").unwrap()
+        ),
+        NoTls,
+    )
+    .await
+    .unwrap();
+    let pg_task = tokio::spawn(async move { connection.await.unwrap() });
+
+    // 1) Metric engine: physical table partitioned on non-key value column `val`
+    pg.batch_execute(
+        "CREATE TABLE phy (
+            job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job)
+        ) PARTITION ON COLUMNS (val) (val < 0, val >= 0)
+        ENGINE=metric WITH ('physical_metric_table'='true');
+
+        CREATE TABLE m (
+            job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job)
+        ) ENGINE=metric WITH ('on_physical_table'='phy');
+
+        INSERT INTO m VALUES ('neg', 60000, -1), ('pos', 60000, 1);",
+    )
+    .await
+    .unwrap();
+
+    let deleted = pg
+        .execute("DELETE FROM m WHERE job = 'pos' AND ts = 60000", &[])
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+
+    let rows: Vec<(String, f64)> = pg
+        .query("SELECT job, val FROM m ORDER BY job", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(rows, vec![("neg".to_string(), -1.0)]);
+
+    // Verify deleted row stays deleted after flushing the physical table
+    pg.batch_execute("ADMIN flush_table('phy');").await.unwrap();
+    let rows_after_flush: Vec<(String, f64)> = pg
+        .query("SELECT job, val FROM m ORDER BY job", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(rows_after_flush, vec![("neg".to_string(), -1.0)]);
+
+    // 2) Mito engine: base table partitioned on non-key value column `val`
+    pg.batch_execute(
+        "CREATE TABLE mito_val_part (
+            job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (job)
+        ) PARTITION ON COLUMNS (val) (val < 0, val >= 0);
+
+        INSERT INTO mito_val_part VALUES ('neg', 60000, -1), ('pos', 60000, 1);",
+    )
+    .await
+    .unwrap();
+
+    let deleted_mito = pg
+        .execute(
+            "DELETE FROM mito_val_part WHERE job = 'pos' AND ts = 60000",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted_mito, 1);
+
+    let mito_rows: Vec<(String, f64)> = pg
+        .query("SELECT job, val FROM mito_val_part ORDER BY job", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(mito_rows, vec![("neg".to_string(), -1.0)]);
+
+    drop(pg);
+    pg_task.await.unwrap();
+    servers.shutdown_all().await.unwrap();
+    instance.guard.remove_all().await;
+}

@@ -8432,7 +8432,7 @@ async fn a_raw_merge_conflict_fails_the_execution() {
     assert!(
         error
             .to_string()
-            .contains("duplicate raw timestamp has conflicting samples")
+            .contains("has two different samples at timestamp 1 ms")
     );
 }
 

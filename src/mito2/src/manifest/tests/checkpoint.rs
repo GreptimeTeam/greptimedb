@@ -819,7 +819,7 @@ async fn completed_checkpoint_is_reaped_before_scheduling_the_next_one() {
 
     // Do not explicitly wait/reap the completed handle. The next eligible
     // update must reap it before scheduling another checkpoint.
-    blocker.arm_next_close();
+    blocker.set_armed(true);
     manager.update(nop_action(), false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_blocked())
         .await

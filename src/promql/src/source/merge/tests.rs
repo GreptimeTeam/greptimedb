@@ -43,34 +43,6 @@ fn schema(count: usize) -> SeriesSchema {
     }
 }
 
-fn histogram(sum: f64, threshold: f64) -> Samples {
-    let mut builder = HistogramBatchBuilder::new();
-    let side = BucketSideView {
-        span_offsets: &[],
-        span_lengths: &[],
-        buckets: &[],
-    };
-    let index = builder
-        .push(datatypes::series::histogram::HistogramView {
-            schema: 1,
-            zero_threshold: threshold,
-            sum,
-            count: 1.0,
-            zero_count: 0.0,
-            reset_hint: CounterResetHint::Unknown,
-            start_timestamp: None,
-            custom_values: &[],
-            positive: side,
-            negative: side,
-        })
-        .unwrap();
-    Samples::try_from_histogram(
-        UInt32Array::from(vec![Some(index)]),
-        builder.finish().unwrap(),
-    )
-    .unwrap()
-}
-
 fn labels(value: &str) -> SeriesLabels {
     SeriesLabels::try_new(
         Some(Arc::from("metric")),
@@ -281,40 +253,6 @@ fn rejects_different_keys_labels_and_internal_duplicates() {
     assert!(merge_raw_identity(&schema(1), &[no_labels]).is_err());
 }
 
-#[test]
-fn histogram_duplicates_compare_every_float_property() {
-    let schema = schema(1);
-    let make = |sample| RawSeriesChunk {
-        primary_key: Buffer::from(b"k".to_vec()),
-        metric: Some(labels("v")),
-        time: RawTimestamps::try_new(vec![1].into()).unwrap(),
-        fields: SeriesFields::one(sample),
-        is_last: false,
-    };
-    assert!(
-        merge_raw_identity(
-            &schema,
-            &[make(histogram(2.0, 0.5)), make(histogram(2.0, 0.5))]
-        )
-        .is_ok()
-    );
-    assert!(
-        merge_raw_identity(
-            &schema,
-            &[make(histogram(2.0, 0.5)), make(histogram(3.0, 0.5))]
-        )
-        .is_err()
-    );
-    assert!(
-        merge_raw_identity(
-            &schema,
-            &[make(histogram(2.0, 0.5)), make(histogram(2.0, -0.0))]
-        )
-        .is_err()
-    );
-}
-
-/// Builds a histogram with configurable comparison properties for duplicate-conflict tests.
 fn histogram_with(view: datatypes::series::histogram::HistogramView<'_>) -> Samples {
     let mut builder = HistogramBatchBuilder::new();
     let index = builder.push(view).unwrap();
@@ -325,12 +263,8 @@ fn histogram_with(view: datatypes::series::histogram::HistogramView<'_>) -> Samp
     .unwrap()
 }
 
-/// Two histograms are duplicates only when every property matches.
-///
-/// Bucket values are independently free within a valid layout and are compared directly. The
-/// span/cursor layout cannot be varied independently of bucket count: each layout must have
-/// nonnegative lengths summing to the bucket count and a valid cursor. The cases below vary each
-/// offset and length while preserving valid layouts and equal bucket counts.
+/// Two histograms are duplicates only when every property matches. Span offsets and lengths are
+/// varied while keeping the layout valid and the bucket count equal.
 #[test]
 fn histogram_duplicates_compare_every_property() {
     let schema = schema(1);
@@ -401,7 +335,6 @@ fn histogram_duplicates_compare_every_property() {
         buckets: &[3.0, 4.5],
         ..negative
     };
-    // Same span count and lengths as the baseline, different cursors: only the offsets differ.
     let positive_offsets_changed = BucketSideView {
         span_offsets: &[1, 0],
         ..positive
@@ -410,8 +343,6 @@ fn histogram_duplicates_compare_every_property() {
         span_offsets: &[1, 0],
         ..negative
     };
-    // Same cursors and same total bucket count (2), different split into spans. A zero-length
-    // span is a valid layout, so only the lengths differ here.
     let positive_lengths_changed = BucketSideView {
         span_lengths: &[2, 0],
         ..positive

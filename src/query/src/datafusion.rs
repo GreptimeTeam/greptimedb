@@ -295,6 +295,10 @@ impl DatafusionQueryEngine {
                                 .meta
                                 .row_key_column_names()
                                 .any(|name| name == &column.name)
+                            || table_info
+                                .meta
+                                .partition_column_names()
+                                .any(|name| name == &column.name)
                     })
                     .map(|(index, _)| index)
                     .collect::<Vec<_>>();

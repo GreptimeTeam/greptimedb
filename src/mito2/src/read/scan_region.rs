@@ -1955,11 +1955,9 @@ impl ScanInput {
     }
 
     fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
-        if source_count <= 1 {
-            // Duplicated rows in the same source is not a normal case and we don't provide
-            // strict dedup semantic (last_row/last_non_null) for it. We expect the duplicated rows
-            // are exactly identical in the same source so we use PreFilterMode::All for
-            // performance reason.
+        // A single LastNonNull source can retain delete markers and multiple versions
+        // of a row. Field filters must leave all of them available for deduplication.
+        if source_count <= 1 && self.merge_mode == MergeMode::LastRow {
             return PreFilterMode::All;
         }
 
@@ -3733,7 +3731,9 @@ mod tests {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let cases = [
             (true, MergeMode::LastRow, 1, PreFilterMode::All),
-            (false, MergeMode::LastNonNull, 1, PreFilterMode::All),
+            (false, MergeMode::LastNonNull, 1, PreFilterMode::SkipFields),
+            (false, MergeMode::LastNonNull, 2, PreFilterMode::SkipFields),
+            (false, MergeMode::LastRow, 1, PreFilterMode::All),
             (false, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
             (true, MergeMode::LastRow, 2, PreFilterMode::All),
         ];

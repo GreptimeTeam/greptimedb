@@ -23,14 +23,11 @@ use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema};
 
-use crate::grid_series::label_set;
+use crate::grid_series::{label_set, render_label_set};
 
-/// Rebuilds one raw series from every piece of one complete physical identity, reporting each
-/// allocation before it happens.
-///
-/// Reconstruction holds three intermediate vectors whose sizes depend on how the pieces interleave,
-/// so what it needs cannot be known up front. The caller charges `reserve` as the work grows
-/// instead of reserving a worst case it may never reach.
+/// Rebuilds one raw series from every piece of one complete physical identity. Calls `reserve`
+/// before each allocation, since the sizes depend on how the pieces interleave, and `shrink` once
+/// the transient workspaces are freed.
 pub(crate) fn merge_raw_identity_charging(
     schema: &SeriesSchema,
     chunks: &[RawSeriesChunk],
@@ -218,7 +215,7 @@ fn merge_raw_chunks(
                             .ok_or_else(|| invalid("field index out of bounds"))?
                             .sample(duplicate.2),
                     ) {
-                        return Err(invalid("duplicate raw timestamp has conflicting samples"));
+                        return Err(invalid(&conflicting_samples(&labels, rows[index].0)));
                     }
                 }
             }
@@ -273,9 +270,22 @@ fn merge_raw_chunks(
         true,
     )
     .map_err(|error| DataFusionError::External(Box::new(error)))?;
-    // Only the general merge path allocates transient row-index workspaces.
     shrink(transient_workspace_bytes);
     Ok(result)
+}
+
+/// Raw timestamps strictly increase within a chunk, so the two samples come from two chunks of
+/// one identity: normally two regions of a table partitioned on a non-tag column, each holding
+/// one side of an overwrite. Two chunks of one region should never disagree, so the cause is
+/// stated as likely.
+fn conflicting_samples(labels: &SeriesLabels, timestamp: i64) -> String {
+    format!(
+        "series {} has two different samples at timestamp {timestamp} ms, read from different \
+         regions or scan partitions. Likely cause: the table is partitioned on a non-tag column \
+         and this sample was written with values on both sides of a partition bound, so each \
+         region kept one version",
+        render_label_set(&label_set(labels))
+    )
 }
 
 fn samples_equal(left: SampleRef<'_>, right: SampleRef<'_>) -> bool {
