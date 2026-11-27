@@ -305,8 +305,9 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .push(Arc::new(GlobalTopKOverFilteredScan));
-        // Split scalar COUNT states over a Mito statistics split before the
-        // aggregate-statistics rule folds the exact branch into a literal.
+        // Fold complete statistics first. AggregateStatistics traverses unary
+        // nodes looking for a partial aggregate and could otherwise replace
+        // the wrapped COUNT using only the residual scan's statistics.
         let aggregate_statistics_index = physical_optimizer
             .rules
             .iter()
@@ -315,7 +316,7 @@ impl QueryEngineState {
                 datafusion_common::internal_datafusion_err!("Missing AggregateStatistics rule")
             })?;
         physical_optimizer.rules.insert(
-            aggregate_statistics_index,
+            aggregate_statistics_index + 1,
             Arc::new(table::table::scan::PartialAggrRule::with_count_state(
                 common_function::aggrs::aggr_wrapper::is_builtin_count_or_state,
             )),
@@ -1068,6 +1069,68 @@ mod tests {
             plugins,
             options,
         )
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_optimizer_preserves_exact_and_residual_counts() {
+        use datafusion::functions_aggregate::count::count_udaf;
+        use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+        use datafusion::physical_plan::expressions::{BinaryExpr, lit};
+        use datafusion::physical_plan::projection::ProjectionExec;
+        use datafusion::physical_plan::{PhysicalExpr, collect, displayable};
+        use datafusion_common::ScalarValue;
+        use datafusion_expr::Operator;
+        use datafusion_physical_expr::aggregate::AggregateExprBuilder;
+
+        let session = new_query_engine_state().session_state();
+        let rules: Vec<_> = session
+            .physical_optimizers()
+            .iter()
+            .filter(|rule| matches!(rule.name(), "aggregate_statistics" | "partial_metadata_aggr"))
+            .collect();
+        assert_eq!(rules.len(), 2);
+
+        let projections: [(Option<Arc<dyn PhysicalExpr>>, bool); 4] = [
+            (None, true),
+            (Some(lit(1_i64)), true),
+            (Some(Arc::new(BinaryExpr::new(lit(1_i64), Operator::Plus, lit(1_i64)))), false),
+            (Some(lit(ScalarValue::Int64(None))), false),
+        ];
+        for (projection, expect_split) in projections {
+            let scan = crate::optimizer::test_util::metadata_aggr_region_scan(10, 7);
+            let input: Arc<dyn ExecutionPlan> = match projection {
+                Some(expr) => Arc::new(ProjectionExec::try_new(vec![(expr, "value".to_owned())], scan).unwrap()),
+                None => scan,
+            };
+            let schema = input.schema();
+            let count = AggregateExprBuilder::new(count_udaf(), vec![lit(1_i64)])
+                .schema(schema.clone())
+                .alias("count")
+                .build()
+                .unwrap();
+            let mut plan: Arc<dyn ExecutionPlan> = Arc::new(
+                AggregateExec::try_new(
+                    AggregateMode::Single,
+                    PhysicalGroupBy::new_single(vec![]),
+                    vec![Arc::new(count)],
+                    vec![None],
+                    input,
+                    schema,
+                )
+                .unwrap(),
+            );
+            for rule in &rules {
+                plan = rule.optimize(plan, session.config().options()).unwrap();
+            }
+            let text = displayable(plan.as_ref()).indent(true).to_string();
+            let result = collect(plan, session.task_ctx()).await.unwrap();
+            assert_eq!(
+                ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                ScalarValue::Int64(Some(17)),
+                "{text}"
+            );
+            assert_eq!(text.contains("MetadataAggrExec: exact_rows=10"), expect_split, "{text}");
+        }
     }
 
     struct TestRuntimeProvider {

@@ -204,10 +204,17 @@ impl PartialAggrRule {
         if let Some(scan) = input.downcast_ref::<RegionScanExec>() {
             return Some(scan);
         }
-        input
-            .downcast_ref::<ProjectionExec>()?
-            .input()
-            .downcast_ref::<RegionScanExec>()
+        let projection = input.downcast_ref::<ProjectionExec>()?;
+        if !projection.expr().iter().all(|expr| {
+            expr.expr.is::<Column>()
+                || expr
+                    .expr
+                    .downcast_ref::<Literal>()
+                    .is_some_and(|literal| !literal.value().is_null())
+        }) {
+            return None;
+        }
+        projection.input().downcast_ref::<RegionScanExec>()
     }
 
     fn partial(

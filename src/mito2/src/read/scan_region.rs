@@ -735,7 +735,9 @@ impl ScanRegion {
                 && input.predicate_group().predicate_without_region().is_none()
                 && input.source_row_counts_are_exact())
         {
-            match aggr::prepare(&input, &self.request, &self.version.ssts, allow_partial)
+            // Reuse the scan's manifest time pruning. Footer checks apply only to
+            // exact candidates, even for manifests from older offline tools.
+            match aggr::prepare(&input, &self.request, allow_partial)
                 .boxed()
                 .await
             {

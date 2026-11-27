@@ -556,7 +556,7 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
 #[case::non_append_key_filter(false, false, "b", 1)]
 #[case::append_time_filter(true, false, "a", 2)]
 #[case::key_overlap(false, true, "b", 1)]
-#[case::time_overlap(false, true, "a", 3)]
+#[case::time_overlap(false, true, "a", 2)]
 #[tokio::test]
 async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
     #[case] append: bool,
@@ -603,16 +603,9 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
     let store = region.access_layer.object_store().clone();
 
     let changed_time = replacement_second != 1;
-    // Two timestamps let the residual file straddle the lower query bound
-    // while its manifest time range remains disjoint from the exact file.
-    let rows_per_file = if keep_second_file && changed_time {
-        2
-    } else {
-        1
-    };
     let put = |key, second| api::v1::Rows {
         schema: schema.clone(),
-        rows: test_util::build_rows_for_key(key, second, second + rows_per_file, 0),
+        rows: test_util::build_rows_for_key(key, second, second + 1, 0),
     };
     test_util::put_rows(&engine, region_id, put("a", 1)).await;
     test_util::flush_region(&engine, region_id, None).await;
@@ -662,26 +655,12 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
         .find(|file| file.file_id() != old_file.file_id())
         .unwrap()
         .clone();
-    let residual_request = if changed_time {
-        lower_bound_request.clone()
-    } else {
-        ScanRequest {
-            filters: vec![col("tag_0").eq(lit("b"))],
-            ..request.clone()
-        }
-    };
     if keep_second_file {
         let scan = engine
             .handle_query(region_id, request.clone())
             .await
             .unwrap();
-        assert_eq!(scan.properties().exact_num_rows(), Some(2 * rows_per_file));
-        let mut scan = engine
-            .handle_query(region_id, residual_request.clone())
-            .await
-            .unwrap();
-        let split = scan.take_statistics_split().expect("disjoint SST bounds");
-        assert_eq!(split.exact_rows, rows_per_file);
+        assert_eq!(scan.properties().exact_num_rows(), Some(2));
     }
 
     let bytes = store
@@ -730,29 +709,23 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
         .await
         .unwrap();
     if !keep_second_file && changed_time {
-        // The file is excluded by the old manifest. A cold proof must fall back
-        // without opening it just to validate that exclusion.
+        // Time pruning uses the manifest just as the ordinary scan does, even
+        // if an older offline replacement left stale bounds there.
         reads.store(0, Ordering::Relaxed);
         let scan = engine
             .handle_query(region_id, lower_bound_request)
             .await
             .unwrap();
-        assert_eq!(scan.properties().exact_num_rows(), None);
+        assert_eq!(scan.properties().exact_num_rows(), Some(0));
         assert_eq!(reads.load(Ordering::Relaxed), 0);
     }
-    let scan = engine
+    let mut scan = engine
         .handle_query(region_id, request.clone())
         .await
         .unwrap();
     assert_eq!(scan.properties().exact_num_rows(), None);
-    if keep_second_file {
-        // Only the residual file has stale bounds.
-        let mut scan = engine
-            .handle_query(region_id, residual_request)
-            .await
-            .unwrap();
-        assert!(scan.take_statistics_split().is_none());
-    } else {
+    assert!(scan.take_statistics_split().is_none());
+    if !keep_second_file {
         // Execute the same scanner whose statistics were inspected above.
         let plan = Arc::new(RegionScanExec::new(scan, request, None).unwrap());
         let ctx = SessionContext::new();
@@ -765,6 +738,72 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
             ScalarValue::Int64(Some(0))
         );
     }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_metadata_aggr_time_pruning_skips_cold_footers() {
+    let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".parquet") {
+                observed.lock().unwrap().push(path.to_owned());
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let config = MitoConfig {
+        experimental_metadata_aggr: true,
+        enable_write_cache: false,
+        preload_index_cache: false,
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let table_dir = create.table_dir.clone();
+    let options = create.options.clone();
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &schema, 0..3).await;
+    put_and_flush(&engine, region_id, &schema, 10..13).await;
+    let inside = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files
+        .values()
+        .max_by_key(|file| file.time_range().0)
+        .unwrap()
+        .file_id();
+
+    let engine = env.reopen_engine(engine, config).await;
+    test_util::reopen_region(&engine, region_id, table_dir, false, options).await;
+    reads.lock().unwrap().clear();
+    let request = ScanRequest {
+        filters: vec![col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))],
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    let scanner = engine.handle_query(region_id, request).await.unwrap();
+    assert_eq!(scanner.properties().exact_num_rows(), Some(3));
+    let reads = reads.lock().unwrap().clone();
+    assert!(!reads.is_empty(), "the in-range footer starts cold");
+    assert!(
+        reads
+            .iter()
+            .all(|path| path.ends_with(&format!("{}.parquet", inside.file_id()))),
+        "{reads:?}"
+    );
     engine.stop().await.unwrap();
 }
 
@@ -1102,6 +1141,16 @@ async fn test_metadata_aggr_fourteen_day_workload(
     );
     assert_eq!(split.residual.properties().exact_num_rows(), None);
     drop(split);
+
+    let mut scanner = engine
+        .handle_query(region_id, hinted.clone())
+        .await
+        .unwrap();
+    scanner
+        .prepare(store_api::region_engine::PrepareRequest::default()
+            .with_distinguish_partition_range(true))
+        .unwrap();
+    assert!(scanner.take_statistics_split().is_none());
 
     // A dynamic predicate invalidates the prepared split.
     let mut scanner = engine

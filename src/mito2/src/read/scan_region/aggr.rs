@@ -30,7 +30,7 @@ use datatypes::value::Value;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
+use parquet::file::metadata::ParquetMetaData;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
@@ -41,9 +41,8 @@ use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
 use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::metadata::{
-    DEDUPED_SST_KEY, extract_primary_key_range, extract_time_range, has_only_puts,
+    extract_primary_key_range, extract_time_range, has_deduped_sst_marker, has_only_puts,
 };
-use crate::sst::version::SstVersion;
 
 /// What the manifest and SST statistics prove about the row count of a
 /// hinted scalar COUNT scan.
@@ -69,7 +68,6 @@ pub(crate) struct StatisticsSplitPlan {
 pub(crate) async fn prepare(
     input: &ScanInput,
     request: &ScanRequest,
-    ssts: &SstVersion,
     allow_partial: bool,
 ) -> Option<MetadataAggr> {
     if !allow_partial && !input.memtables.is_empty() {
@@ -87,34 +85,16 @@ pub(crate) async fn prepare(
     if input.append_mode && request.filters.is_empty() {
         return resolve(input, classification, allow_partial);
     }
-    verify_pruned_times(input, ssts).await?;
     let mut classification = classification;
-    let check_overlap = !input.append_mode
-        && !classification.exact.is_empty()
-        && classification.exact.len() + classification.remaining.len() > 1;
-    let check_keys = classification.key_filter || check_overlap;
-    let mut files: Vec<_> = classification
-        .exact
-        .iter()
-        .map(|&index| (index, check_keys, !input.append_mode))
-        .collect();
-    if check_overlap {
-        // A stale residual bound could hide an overlap with an exact file.
-        files.extend(
-            classification
-                .remaining
-                .iter()
-                .map(|&index| (index, true, false)),
-        );
-    }
-    let reads = futures::stream::iter(files)
-        .map(|(index, keys, rows)| file_evidence(input, input.files[index].clone(), keys, rows));
-    let mut proven: Vec<_> = reads
+    let check_keys = classification.key_filter
+        || (!input.append_mode && classification.exact.len() + classification.remaining.len() > 1);
+    let check_rows = !input.append_mode;
+    let proven: Vec<_> = futures::stream::iter(classification.exact.iter().copied())
+        .map(|index| file_evidence(input, input.files[index].clone(), check_keys, check_rows))
         .buffered(input.max_concurrent_scan_files.max(1))
         .try_collect()
         .await
         .ok()?;
-    proven.truncate(classification.exact.len());
     classification.retain_exact(input, &proven);
     resolve(input, classification, allow_partial)
 }
@@ -139,23 +119,6 @@ fn resolve(
             .map(|&i| input.files[i].clone())
             .collect(),
     }))
-}
-
-/// Older offline replacements could retain stale manifest bounds. Never open an
-/// excluded SST for COUNT: a cold or inconsistent footer leaves the scan in place.
-async fn verify_pruned_times(input: &ScanInput, ssts: &SstVersion) -> Option<()> {
-    let time_id = input.region_metadata().time_index_column().column_id;
-    for id in &input.time_pruned_files {
-        let file = ssts.levels().iter().find_map(|level| level.files.get(id))?;
-        let sst = input
-            .cache_strategy
-            .get_sst_meta_data_from_mem_cache(file.file_id(), PageIndexPolicy::Skip)
-            .await?;
-        if !time_bounds_match(file, &sst, time_id) {
-            return None;
-        }
-    }
-    Some(())
 }
 
 fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
@@ -207,10 +170,7 @@ fn file_evidence(
 /// only a single physical row is independently known to be unique.
 fn footer_proves_visible_rows(metadata: &ParquetMetaData, manifest_rows: usize) -> bool {
     let footer = metadata.file_metadata();
-    let unique = manifest_rows == 1
-        || footer
-            .key_value_metadata()
-            .is_some_and(|entries| entries.iter().any(|entry| entry.key == DEDUPED_SST_KEY));
+    let unique = manifest_rows == 1 || has_deduped_sst_marker(metadata);
     unique
         && usize::try_from(footer.num_rows()) == Ok(manifest_rows)
         && metadata
@@ -323,6 +283,10 @@ fn classify(
 
 /// Returns, for each file in `files`, whether another file or a memtable range
 /// may hold a row with the same primary key and timestamp.
+///
+/// Like ordinary scan pruning, this uses manifest bounds. Only exact candidates
+/// are checked against their footers; stale residual bounds from older offline
+/// tools are outside that check.
 ///
 /// A memtable range is bounded by its container, the time range of every row
 /// it can ever yield (see [`MemRangeBuilder::container_time_range`]), not by
@@ -855,6 +819,8 @@ mod tests {
         use parquet::file::metadata::KeyValue;
         use parquet::file::properties::{EnabledStatistics, WriterProperties};
         use store_api::storage::consts::OP_TYPE_COLUMN_NAME;
+
+        use crate::sst::parquet::metadata::DEDUPED_SST_KEY;
 
         let put = OpType::Put as u8;
         let del = OpType::Delete as u8;
