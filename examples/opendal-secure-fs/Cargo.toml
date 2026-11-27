@@ -1,0 +1,19 @@
+[package]
+name = "opendal-secure-fs"
+version = "0.1.0"
+edition = "2024"
+description = "A capability-rooted filesystem service for OpenDAL"
+license = "Apache-2.0"
+publish = false
+
+# Keep the example independently buildable while its permanent home is discussed.
+[workspace]
+
+[dependencies]
+cap-std = "4.0"
+opendal-core = "=0.59.4"
+tokio = { version = "1.47", features = ["fs", "io-util", "rt"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.47", features = ["macros"] }
