@@ -171,13 +171,17 @@ pub trait PromStoreProtocolHandler {
         .fail()
     }
 
-    /// Runs pre-write checks/hooks for prometheus remote write exemplars.
+    /// Runs routing hooks and authorizes the resulting exemplar destination.
+    /// Handlers that accept exemplars must override this; [`Self::pre_write`] only sees metric rows.
     async fn pre_write_exemplars(
         &self,
         _exemplars: &operator::insert::ExemplarBatch,
         _ctx: QueryContextRef,
     ) -> Result<()> {
-        Ok(())
+        crate::error::NotSupportedSnafu {
+            feat: "exemplar destination preflight",
+        }
+        .fail()
     }
 
     /// Runs pre-write checks/hooks for prometheus remote write requests.

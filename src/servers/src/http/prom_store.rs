@@ -1143,6 +1143,13 @@ mod exemplar_accounting_tests {
         async fn pre_write(&self, _: &RowInsertRequests, _: QueryContextRef) -> Result<()> {
             Ok(())
         }
+        async fn pre_write_exemplars(
+            &self,
+            _: &operator::insert::ExemplarBatch,
+            _: QueryContextRef,
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn check_exemplar_sources(
             &self,
             _: &std::collections::BTreeSet<String>,
@@ -1482,6 +1489,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mixed_write_requires_exemplar_destination_preflight() {
+        let handler = Arc::new(RecordingPromStoreHandler {
+            events: Default::default(),
+        });
+        let exemplar = crate::exemplar::Exemplar {
+            metric: "exemplar_source".into(),
+            series_labels: Default::default(),
+            labels: Default::default(),
+            timestamp: 1,
+            value: 1.0,
+        };
+        let outcome = exemplar::write(
+            handler.clone(),
+            None,
+            true,
+            vec![test_prom_write_batch("sample")],
+            vec![],
+            [(None, vec![exemplar])].into(),
+            QueryContext::arc(),
+        )
+        .await;
+
+        assert_eq!(outcome.written, [0, 0, 0]);
+        assert!(
+            matches!(outcome.error, Some(error::Error::NotSupported { feat }) if feat == "exemplar destination preflight")
+        );
+        let events = handler.events.lock().unwrap();
+        assert!(
+            events.iter().all(|event| event.starts_with("pre:")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_async_v2_counts_acceptance_without_confirming_storage() {
         let handler: PromStoreProtocolHandlerRef = Arc::new(RecordingPromStoreHandler {
             events: Default::default(),
@@ -1599,6 +1640,24 @@ mod tests {
         ) -> Result<()> {
             record_write_event(&self.events, "pre", request);
             Ok(())
+        }
+
+        // Intentionally inherit destination preflight even though source checks succeed.
+        async fn check_exemplar_sources(
+            &self,
+            _: &std::collections::BTreeSet<String>,
+            _: QueryContextRef,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write_exemplars_prepared(
+            &self,
+            exemplars: operator::insert::ExemplarBatch,
+            _: QueryContextRef,
+        ) -> Result<Output> {
+            self.events.lock().unwrap().push("exemplar".into());
+            Ok(Output::new_with_affected_rows(exemplars.len()))
         }
 
         async fn write_prepared(
