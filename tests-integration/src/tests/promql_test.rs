@@ -18448,6 +18448,71 @@ async fn distributed_native_promql_over_a_time_partitioned_narthex_table_matches
     assert_time_split_narthex_matches_reference(cluster.fe_instance()).await;
 }
 
+/// A narthex table partitioned on its sample value keeps both versions of a sample overwritten
+/// across the partition bound, one per region. Regions do not order writes against each other, so
+/// the native route refuses the series, and the error has to say which sample and why.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_reports_an_overwrite_across_a_value_partition() {
+    common_telemetry::init_default_ut_logging();
+    let standalone = GreptimeDbStandaloneBuilder::new("native_promql_value_partition_overwrite")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let ctx = QueryContext::arc();
+    for sql in [
+        "CREATE TABLE phy (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) \
+         PARTITION ON COLUMNS (val) (val < 0, val >= 0) ENGINE=metric \
+         WITH ('physical_metric_table'='true', 'sst_format'='narthex')",
+        "CREATE TABLE value_split (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='phy')",
+        "INSERT INTO value_split (job, ts, val) VALUES ('api', 0, 5), ('api', 60000, -1)",
+        "INSERT INTO value_split (job, ts, val) VALUES ('api', 60000, 1)",
+    ] {
+        execute_all(instance, sql, ctx.clone()).await;
+    }
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    let query = PromQuery {
+        query: "value_split".to_string(),
+        start: "60".to_string(),
+        end: "60".to_string(),
+        step: "1".to_string(),
+        ..PromQuery::default()
+    };
+    let output = instance
+        .do_promql_query(&query, Arc::new(ctx))
+        .await
+        .remove(0)
+        .unwrap();
+    assert!(
+        output
+            .meta
+            .plan
+            .as_ref()
+            .is_some_and(|plan| native_plan_nodes(plan)
+                .iter()
+                .any(|node| node.name() == "FusedSeriesExec")),
+        "the native route must run"
+    );
+    let OutputData::Stream(stream) = output.data else {
+        unreachable!("a native PromQL query streams its answer")
+    };
+    let error = collect_batches(stream).await.unwrap_err().to_string();
+    assert!(
+        error.contains(
+            "series {__name__=\"value_split\", job=\"api\"} has two different samples at \
+             timestamp 60000 ms, read from different regions or scan partitions. Likely cause: the \
+             table is partitioned on a non-tag column and this sample was written with values on \
+             both sides of a partition bound, so each region kept one version"
+        ),
+        "{error}"
+    );
+}
+
 /// Native histograms in a Narthex physical table, and in a Parquet one served by a columnar
 /// series-index sidecar, answer what the same samples answer in a plain Parquet table: PromQL on
 /// both routes and remote read, from the memtable, after flushes, after a compaction and after a
