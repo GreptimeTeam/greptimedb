@@ -23,7 +23,7 @@ use ahash::HashMap;
 use arrow::array::{StringBuilder, UInt32Builder};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use common_recordbatch::adapter::{
-    MetricCollector, NativeTreeMetrics, PlanMetrics, RecordBatchMetrics,
+    MetricCollector, NativeTreeMetrics, PlanMetrics, RecordBatchMetrics, region_scan_output_bytes,
 };
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::error::Result as DfResult;
@@ -116,29 +116,39 @@ pub fn analyze_plan_metrics_to_json_value(
         .map(|exec| exec.input().clone())
         .unwrap_or_else(|| plan.clone());
 
-    let mut stages = Vec::new();
     let mut collector = MetricCollector::new(verbose);
     accept(input.as_ref(), &mut collector).unwrap();
+    let stage_0_metrics = collector.record_batch_metrics;
+    // The same per-region records the stage 1 rows are built from, so the query-level
+    // `scan_bytes` below can never disagree with the scan nodes next to it.
+    let region_rows = collect_region_stage_rows(&input)
+        .map_err(|e| serde_json::Error::io(std::io::Error::other(e.to_string())))?;
+
+    let mut stages = Vec::new();
     stages.push(json!({
         "stage": 0,
         "node": 0,
-        "plan": JsonMetrics::from_record_batch_metrics(collector.record_batch_metrics),
+        "plan": query_metrics_to_json(stage_0_metrics, &region_rows),
     }));
-
-    let _ = input.apply(|plan| {
-        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
-            for (node, metric) in merge_scan.sub_stage_metrics().into_iter().enumerate() {
-                stages.push(json!({
-                    "stage": 1,
-                    "node": node,
-                    "plan": JsonMetrics::from_record_batch_metrics(metric),
-                }));
-            }
-        }
-        Ok(TreeNodeRecursion::Continue)
-    });
+    for row in region_rows {
+        stages.push(json!({
+            "stage": row.stage,
+            "node": row.node,
+            "plan": JsonMetrics::from_record_batch_metrics(row.metrics),
+        }));
+    }
 
     Ok(Value::Array(stages))
+}
+
+/// The query-level [`JsonMetrics`]: the query's own stage, carrying `scan_bytes` once.
+fn query_metrics_to_json(
+    stage_0_metrics: RecordBatchMetrics,
+    region_rows: &[StageRow],
+) -> JsonMetrics {
+    let mut metrics = JsonMetrics::from_record_batch_metrics(stage_0_metrics);
+    metrics.scan_bytes = Some(query_scan_bytes(region_rows));
+    metrics
 }
 
 impl DisplayAs for DistAnalyzeExec {
@@ -298,29 +308,84 @@ fn create_output_batch(
     format: AnalyzeFormat,
     verbose: bool,
 ) -> DfResult<DfRecordBatch> {
-    let mut builder = AnalyzeOutputBuilder::new(schema);
-
     // Treat the current stage as stage 0. Fetch its metrics
     let mut collector = MetricCollector::new(verbose);
     // Safety: metric collector won't return error
     accept(input.as_ref(), &mut collector).unwrap();
     let stage_0_metrics = collector.record_batch_metrics;
 
-    // Append the metrics of the current stage
-    builder.append_metric(0, 0, metrics_to_string(stage_0_metrics, format)?);
+    // Find the merge scans and gather their sub_stage_metrics.
+    let region_rows = collect_region_stage_rows(&input)?;
 
-    // Find merge scan and append its sub_stage_metrics
+    build_output_batch(total_rows, stage_0_metrics, &region_rows, schema, format)
+}
+
+/// One row of the output below the query's own stage: the region stage it belongs to and the
+/// metrics it reports.
+struct StageRow {
+    stage: u32,
+    node: u32,
+    metrics: RecordBatchMetrics,
+}
+
+/// The per-region rows below the query's own stage: one per region of every [`MergeScanExec`],
+/// numbered from 0 within each merge scan.
+fn collect_region_stage_rows(input: &Arc<dyn ExecutionPlan>) -> DfResult<Vec<StageRow>> {
+    let mut rows = Vec::new();
     input.apply(|plan| {
         if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
-            let sub_stage_metrics = merge_scan.sub_stage_metrics();
-            for (node, metric) in sub_stage_metrics.into_iter().enumerate() {
-                builder.append_metric(1, node as _, metrics_to_string(metric, format)?);
+            for (node, metrics) in merge_scan.sub_stage_metrics().into_iter().enumerate() {
+                rows.push(StageRow {
+                    stage: 1,
+                    node: node as _,
+                    metrics,
+                });
             }
             // might have multiple merge scans, so continue
-            return Ok(TreeNodeRecursion::Continue);
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
+    Ok(rows)
+}
+
+/// The bytes the region scan nodes of every region reported as `output_bytes`, added up: the
+/// figure a reader would otherwise get by summing the stage 1 rows by hand.
+///
+/// Only the analyze path computes this; a normal query never visits these metrics.
+fn query_scan_bytes(region_rows: &[StageRow]) -> usize {
+    region_rows
+        .iter()
+        .map(|row| region_scan_output_bytes(&row.metrics))
+        .sum()
+}
+
+/// Writes the ANALYZE rows: the query's own stage first, then one row per region of every merge
+/// scan, then the total row.
+fn build_output_batch(
+    total_rows: usize,
+    stage_0_metrics: RecordBatchMetrics,
+    region_rows: &[StageRow],
+    schema: SchemaRef,
+    format: AnalyzeFormat,
+) -> DfResult<DfRecordBatch> {
+    let mut builder = AnalyzeOutputBuilder::new(schema);
+
+    // The metrics of the current stage, carrying the query-level scan bytes
+    let scan_bytes = query_scan_bytes(region_rows);
+    builder.append_metric(
+        0,
+        0,
+        metrics_to_string(stage_0_metrics, format, Some(scan_bytes))?,
+    );
+
+    // Append the metrics of the sub stages
+    for row in region_rows {
+        builder.append_metric(
+            row.stage,
+            row.node,
+            metrics_to_string(row.metrics.clone(), format, None)?,
+        );
+    }
 
     // Write total rows
     builder.append_total_rows(total_rows);
@@ -328,9 +393,19 @@ fn create_output_batch(
     builder.finish()
 }
 
-fn metrics_to_string(metrics: RecordBatchMetrics, format: AnalyzeFormat) -> DfResult<String> {
+/// Renders the metrics of one row. `scan_bytes` is the query-level total: it is written to the
+/// JSON of the row it is passed for, and the text format ignores it.
+fn metrics_to_string(
+    metrics: RecordBatchMetrics,
+    format: AnalyzeFormat,
+    scan_bytes: Option<usize>,
+) -> DfResult<String> {
     match format {
-        AnalyzeFormat::JSON => Ok(JsonMetrics::from_record_batch_metrics(metrics).to_string()),
+        AnalyzeFormat::JSON => {
+            let mut metrics = JsonMetrics::from_record_batch_metrics(metrics);
+            metrics.scan_bytes = scan_bytes;
+            Ok(metrics.to_string())
+        }
         AnalyzeFormat::TEXT => Ok(metrics.to_string()),
         format => Err(DataFusionError::NotImplemented(format!(
             "AnalyzeFormat {format}",
@@ -353,6 +428,19 @@ struct JsonMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_usage: Option<usize>,
     children: Vec<JsonMetrics>,
+    /// Query-level total, set only on the record of the query's own stage: the sum of
+    /// `output_bytes` over the region scan node of every region, i.e. what a reader would
+    /// otherwise get by adding up the scan nodes of all the stage 1 records.
+    ///
+    /// These are the bytes of the decoded Arrow batches the region scans produced, not the bytes
+    /// read from disk or object storage; the bytes fetched from a store are reported per region as
+    /// `page_size_to_fetch_store` in the verbose output.
+    ///
+    /// Operators that sit between the scan and the query report `output_bytes` of their own - the
+    /// PromQL ones, for example - and those bytes are not the regions' scan bytes, so they are not
+    /// counted here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scan_bytes: Option<usize>,
 }
 
 impl JsonMetrics {
@@ -404,6 +492,7 @@ impl JsonMetrics {
                 .into_iter()
                 .map(Self::from_native_metrics)
                 .collect(),
+            scan_bytes: None,
         }
     }
 
@@ -449,6 +538,7 @@ impl JsonMetrics {
                 metrics: other_metrics,
                 memory_usage: None,
                 children,
+                scan_bytes: None,
             },
         )
     }
@@ -770,5 +860,261 @@ mod tests {
         assert!(value["children"][0].get("memory_usage").is_none());
         assert_eq!(value["metrics"]["mem_used"], 24);
         assert_eq!(value["children"][0]["metrics"]["mem_used"], 18);
+    }
+
+    /// One region's metrics, shaped as a region stage reports them: the region's own plan, whose
+    /// scan node is the only node that reports `output_bytes`.
+    fn region_stage_metrics(region: u32, output_bytes: usize) -> RecordBatchMetrics {
+        RecordBatchMetrics {
+            elapsed_compute: 7,
+            memory_usage: 11,
+            plan_metrics: vec![
+                PlanMetrics {
+                    plan: "CooperativeExec".to_string(),
+                    plan_name: "CooperativeExec".to_string(),
+                    level: 0,
+                    metrics: vec![
+                        ("output_rows".to_string(), 3),
+                        ("elapsed_compute".to_string(), 7),
+                    ],
+                    native: None,
+                },
+                PlanMetrics {
+                    plan: format!("SeriesScan: region={region}"),
+                    plan_name: common_recordbatch::adapter::SERIES_SCAN_EXEC_NAME.to_string(),
+                    level: 1,
+                    metrics: vec![
+                        ("output_rows".to_string(), 3),
+                        ("output_bytes".to_string(), output_bytes),
+                        ("page_size_to_fetch_store".to_string(), 4096),
+                    ],
+                    native: None,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// The query's own stage, as the frontend collects it over a merge scan.
+    fn query_stage_metrics() -> RecordBatchMetrics {
+        RecordBatchMetrics {
+            elapsed_compute: 9,
+            memory_usage: 64,
+            plan_metrics: vec![PlanMetrics {
+                plan: "MergeScanExec: peers=[...]".to_string(),
+                plan_name: "MergeScanExec".to_string(),
+                level: 0,
+                metrics: vec![
+                    ("output_rows".to_string(), 4),
+                    ("elapsed_compute".to_string(), 9),
+                    ("output_batches".to_string(), 1),
+                ],
+                native: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The `plan` column of one row: the row's JSON, as text.
+    fn plan_text(batch: &DfRecordBatch, row: usize) -> &str {
+        batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("the plan column holds each row's content as text")
+            .value(row)
+    }
+
+    /// The JSON of one row, parsed back out of the output.
+    fn row_json(batch: &DfRecordBatch, row: usize) -> Value {
+        serde_json::from_str(plan_text(batch, row)).unwrap()
+    }
+
+    /// Every node of a record, outermost first.
+    fn record_nodes<'a>(record: &'a Value, nodes: &mut Vec<&'a Value>) {
+        nodes.push(record);
+        for child in record["children"].as_array().into_iter().flatten() {
+            record_nodes(child, nodes);
+        }
+    }
+
+    /// `scan_bytes` is the figure a reader would otherwise add up by hand, so it has to equal the
+    /// sum of the `output_bytes` the region scan nodes report in the same output - and be read back
+    /// out of that output rather than compared against a number this test remembers. Two regions,
+    /// each with its own byte count, so a total that copied one of them cannot pass.
+    #[test]
+    fn qbs_analyze_json_scan_bytes_is_the_sum_of_the_region_scans() {
+        let region_rows = vec![
+            StageRow {
+                stage: 1,
+                node: 0,
+                metrics: region_stage_metrics(0, 24),
+            },
+            StageRow {
+                stage: 1,
+                node: 1,
+                metrics: region_stage_metrics(1, 18),
+            },
+        ];
+        let batch = build_output_batch(
+            4,
+            query_stage_metrics(),
+            &region_rows,
+            dist_analyze_output_schema(),
+            AnalyzeFormat::JSON,
+        )
+        .unwrap();
+        assert_eq!(
+            batch.num_rows(),
+            4,
+            "the query's stage, two regions, the total"
+        );
+
+        // The fields the output already had keep their place and their type.
+        let query = row_json(&batch, 0);
+        assert_eq!(query["name"], "MergeScanExec");
+        assert_eq!(query["param"], "peers=[...]");
+        assert_eq!(query["output_rows"], 4);
+        assert_eq!(query["elapsed_compute"], 9);
+        // A metric that is not one of the two the record lifts into fields of its own stays in
+        // `metrics`, where it was.
+        assert_eq!(query["metrics"]["output_batches"], 1);
+        assert_eq!(query["memory_usage"], 64);
+
+        let mut region_sums = Vec::new();
+        for row in 1..batch.num_rows() - 1 {
+            let region = row_json(&batch, row);
+            assert_eq!(region["name"], "CooperativeExec");
+            assert_eq!(region["output_rows"], 3);
+            assert_eq!(region["elapsed_compute"], 7);
+            assert!(
+                region.get("scan_bytes").is_none(),
+                "the total is reported once, on the query's own record: {region}"
+            );
+
+            let mut nodes = Vec::new();
+            record_nodes(&region, &mut nodes);
+            // The region scan node is the only node reporting `output_bytes`, so reading the sum
+            // back identifies it by the byte count it reports, not by a list of node names here.
+            let region_bytes: usize = nodes
+                .iter()
+                .filter_map(|node| node["metrics"]["output_bytes"].as_u64())
+                .map(|bytes| bytes as usize)
+                .sum();
+            region_sums.push(region_bytes);
+        }
+
+        assert_eq!(
+            region_sums,
+            vec![24, 18],
+            "each region contributes the bytes its own scan reported"
+        );
+        let summed: usize = region_sums.iter().sum();
+        assert_ne!(
+            summed, 0,
+            "the fixture must read data: an empty region would make the sum zero and the test pass \
+             as `0 == 0`"
+        );
+        assert_eq!(
+            query["scan_bytes"].as_u64(),
+            Some(summed as u64),
+            "scan_bytes is the sum of the region scan nodes in the same output"
+        );
+    }
+
+    /// Only the region scan nodes' bytes are the query's scan: an operator between the scan and the
+    /// query reports `output_bytes` of its own, and a total that added every `output_bytes` in sight
+    /// would count bytes the regions never decoded. The live TQL output shows exactly this -
+    /// `PromInstantManipulateExec` at 174 and `PromSeriesDivideExec` at 99 over a 74 byte scan.
+    #[test]
+    fn qbs_analyze_scan_bytes_counts_only_the_region_scans() {
+        let mut region_metrics = region_stage_metrics(0, 24);
+        region_metrics.plan_metrics.insert(
+            1,
+            PlanMetrics {
+                plan: "PromSeriesDivideExec: tags=[\"k\"]".to_string(),
+                plan_name: "PromSeriesDivideExec".to_string(),
+                level: 1,
+                metrics: vec![("output_bytes".to_string(), 99)],
+                native: None,
+            },
+        );
+        let region_rows = vec![StageRow {
+            stage: 1,
+            node: 0,
+            metrics: region_metrics,
+        }];
+        let batch = build_output_batch(
+            4,
+            query_stage_metrics(),
+            &region_rows,
+            dist_analyze_output_schema(),
+            AnalyzeFormat::JSON,
+        )
+        .unwrap();
+
+        let region = row_json(&batch, 1);
+        let mut nodes = Vec::new();
+        record_nodes(&region, &mut nodes);
+        let every_byte: usize = nodes
+            .iter()
+            .filter_map(|node| node["metrics"]["output_bytes"].as_u64())
+            .map(|bytes| bytes as usize)
+            .sum();
+        assert_eq!(every_byte, 123, "the row reports the scan and the operator");
+
+        assert_eq!(
+            row_json(&batch, 0)["scan_bytes"].as_u64(),
+            Some(24),
+            "the total counts the region scan only, not every `output_bytes` in the row"
+        );
+    }
+
+    /// The text format is untouched: the field belongs to `FORMAT JSON` only.
+    #[test]
+    fn qbs_analyze_text_output_has_no_scan_bytes() {
+        let region_rows = vec![StageRow {
+            stage: 1,
+            node: 0,
+            metrics: region_stage_metrics(0, 24),
+        }];
+        let batch = build_output_batch(
+            4,
+            query_stage_metrics(),
+            &region_rows,
+            dist_analyze_output_schema(),
+            AnalyzeFormat::TEXT,
+        )
+        .unwrap();
+
+        for row in 0..batch.num_rows() {
+            assert!(
+                !plan_text(&batch, row).contains("scan_bytes"),
+                "the text format keeps what it printed: {}",
+                plan_text(&batch, row)
+            );
+        }
+    }
+
+    /// A plan with no merge scan has no region to sum: the traversal finds no row, and the query
+    /// reports zero rather than a figure taken from somewhere else.
+    #[test]
+    fn qbs_analyze_scan_bytes_without_region_scans_is_zero() {
+        let input = empty_plan("input");
+        let region_rows = collect_region_stage_rows(&input).unwrap();
+        assert!(
+            region_rows.is_empty(),
+            "a plan without a merge scan reports no region"
+        );
+
+        let batch = build_output_batch(
+            0,
+            RecordBatchMetrics::default(),
+            &region_rows,
+            dist_analyze_output_schema(),
+            AnalyzeFormat::JSON,
+        )
+        .unwrap();
+        assert_eq!(row_json(&batch, 0)["scan_bytes"], 0);
     }
 }
