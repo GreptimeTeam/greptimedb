@@ -663,40 +663,6 @@ impl FloatHistogram {
         bound(idx, self.schema, &self.custom_values)
     }
 
-    /// The reset a pair of start timestamps witnesses, given the window timestamps they are
-    /// compared against.
-    ///
-    /// Separate from the payload so a caller whose window timestamps have been moved by an
-    /// `offset` can shift the stored timestamps onto the same axis without cloning either
-    /// histogram: `range_eval` keeps its samples at `timestamp + offset_ms` while the stored start
-    /// timestamp stays where the sender put it, and comparing across those two axes reports a
-    /// reset for a pair that never restarted.
-    pub(crate) fn start_timestamp_reset(
-        current_start: i64,
-        previous_start: i64,
-        previous_ts: i64,
-        current_ts: i64,
-    ) -> bool {
-        if current_start == 0 || current_start >= current_ts || current_start < previous_ts {
-            return false;
-        }
-        if current_start > previous_ts {
-            return true;
-        }
-
-        // The previous sample's own start timestamp witnesses a restart between it and the one
-        // before, which the current sample inherits. Requiring it to be at or before `previous_ts`
-        // keeps a start later than its own sample — which no sender can have observed — from being
-        // read as one.
-        //
-        // What this does NOT implement is the rule that two adjacent samples sharing the same
-        // non-zero start timestamp never restarted between them: here only the previous sample's
-        // start is compared with its own time, so equal starts are not excluded. The existing
-        // planner's `detect_start_timestamp_reset` has the same gap, so the two routes agree, which
-        // is what this route owes it; closing the gap is a change to both.
-        previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
-    }
-
     /// Detects a counter reset for a window whose timestamps an `offset` has already moved.
     ///
     /// `range_eval` hands its windows at `timestamp + offset_ms` while a histogram's start
@@ -717,10 +683,10 @@ impl FloatHistogram {
         current_ts: i64,
         offset_ms: i64,
     ) -> bool {
-        Self::start_timestamp_reset(
-            self.start_timestamp.unwrap_or_default(),
+        common_query::native_histogram::is_start_timestamp_reset(
             previous.start_timestamp.unwrap_or_default(),
             previous_ts.wrapping_sub(offset_ms),
+            self.start_timestamp.unwrap_or_default(),
             current_ts.wrapping_sub(offset_ms),
         ) || self.detect_reset(previous).unwrap_or(false)
     }
