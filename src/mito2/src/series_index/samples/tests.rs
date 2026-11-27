@@ -31,14 +31,12 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
-use super::metadata::{
-    Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PayloadReference, TRAILER_SIZE, Trailer,
-};
+use super::metadata::{Bounds, KEY_CHECKSUM_BYTES, Page};
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::columnar::codec as columnar_codec;
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
+use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::purger::series_index_channel;
 use crate::sst::file::RegionFileId;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -225,50 +223,104 @@ async fn build(
         purger,
     )
 }
-/// Reads the descriptor and root page of a one-part artifact, plus the part's bytes. Tests
-/// use it to inspect what the reader decodes and to rewrite a stored page.
-async fn root_page(
+async fn manifest(store: &ObjectStore, handle: &SamplesFileHandle) -> SamplesMetadata {
+    let bytes = store.read(&handle.index_path()).await.unwrap().to_bytes();
+    let footer = index_footer(&bytes);
+    let (schema, files) = index::decode_metadata(
+        &footer.metadata,
+        &bytes[footer.metadata.offset as usize..footer.metadata.end().unwrap() as usize],
+    )
+    .unwrap();
+    SamplesMetadata {
+        timestamp: schema.timestamp,
+        fields: schema.fields,
+        files,
+        generation: footer.generation,
+        source_file_id: footer.source,
+
+        prefix: handle
+            .index_path()
+            .strip_suffix("samples.idx")
+            .unwrap()
+            .into(),
+    }
+}
+
+fn index_footer(bytes: &[u8]) -> index::Footer {
+    index::Footer::decode(
+        &bytes[bytes.len() - index::FOOTER_SIZE..],
+        bytes.len() as u64,
+    )
+    .unwrap()
+}
+
+async fn read_leaf(
     store: &ObjectStore,
     handle: &SamplesFileHandle,
-) -> (Manifest, Trailer, Page, Vec<u8>) {
+    leaf: u64,
+) -> (SamplesMetadata, index::LeafEntry, Page, Vec<u8>) {
     let manifest = manifest(store, handle).await;
-    assert_eq!(
-        1,
-        manifest.files.len(),
-        "one part keeps the root page addressable"
-    );
-    let bytes = store
-        .read(&manifest.part_path(0))
-        .await
-        .unwrap()
-        .to_bytes()
-        .to_vec();
-    let trailer_start = bytes.len() - TRAILER_SIZE as usize;
-    let trailer = Trailer::decode(&bytes[trailer_start..], bytes.len() as u64).unwrap();
-    assert_eq!(1, trailer.depth, "one leaf keeps the root page addressable");
-    let start = trailer.root.payload.offset as usize;
-    let stored = &bytes[start..start + trailer.root.payload.stored as usize];
+    let bytes = store.read(&handle.index_path()).await.unwrap().to_vec();
+    let footer = index_footer(&bytes);
+    let offset = (footer.directory + leaf * index::ENTRY_SIZE) as usize;
+    let entry = index::LeafEntry::decode(
+        &bytes[offset..offset + index::ENTRY_SIZE as usize],
+        footer.directory,
+    )
+    .unwrap();
+    let r = entry.page.payload;
     let page = Page::decode(
-        &trailer.root.payload.unpack(stored).unwrap(),
-        &trailer.root,
-        trailer.depth,
-        trailer.areas(),
+        &r.unpack(&bytes[r.offset as usize..r.end().unwrap() as usize])
+            .unwrap(),
+        &entry.page,
+        entry.keys(),
         &manifest,
     )
     .unwrap();
-    (manifest, trailer, page, bytes)
+    (manifest, entry, page, bytes)
 }
 
-async fn manifest(store: &ObjectStore, handle: &SamplesFileHandle) -> Manifest {
-    let path = &handle
-        .entry()
+async fn root_page(
+    store: &ObjectStore,
+    handle: &SamplesFileHandle,
+) -> (SamplesMetadata, index::LeafEntry, Page, Vec<u8>) {
+    read_leaf(store, handle, 0).await
+}
+
+/// Repack the single leaf of a fixture after editing its block descriptors.
+async fn replace_leaf(
+    store: &ObjectStore,
+    handle: SamplesFileHandle,
+    page: Page,
+) -> SamplesFileHandle {
+    let (_, mut entry, _, mut bytes) = root_page(store, &handle).await;
+    let mut footer = index_footer(&bytes);
+    assert_eq!(footer.leaves, 1);
+    let metadata =
+        bytes[footer.metadata.offset as usize..footer.metadata.end().unwrap() as usize].to_vec();
+    bytes.truncate(entry.page.payload.offset as usize);
+    let (payload, stored) =
+        super::metadata::pack(&page.encode(), bytes.len() as u64, 1, true).unwrap();
+    entry.page.payload = payload;
+    bytes.extend(stored);
+    footer.directory = bytes.len() as u64;
+    bytes.extend(entry.encode());
+    footer.metadata.offset = bytes.len() as u64;
+    bytes.extend(metadata);
+    bytes.extend(footer.encode());
+    let mut inventory = handle.entry().clone();
+    let object = inventory
         .artifact
         .objects
-        .iter()
-        .find(|o| o.path.ends_with("manifest.json"))
-        .unwrap()
-        .path;
-    serde_json::from_slice(&store.read(path).await.unwrap().to_bytes()).unwrap()
+        .iter_mut()
+        .find(|o| o.path == handle.index_path())
+        .unwrap();
+    inventory.artifact.file_size =
+        inventory.artifact.file_size - object.file_size + bytes.len() as u64;
+    object.file_size = bytes.len() as u64;
+    store.write(&object.path, bytes).await.unwrap();
+    let (purger, _) = series_index_channel(store.clone());
+    SamplesFileHandle::new(handle.file_id(), inventory, purger)
 }
 fn request(names: &[&str]) -> SamplesReadRequest {
     SamplesReadRequest {
@@ -449,7 +501,7 @@ async fn equal_timestamps_cross_leaves_and_parts() {
         block_rows: 1,
         // One block descriptor plus header; a block now also stores its exact series key.
         page_bytes: 288,
-        root_capacity: 2,
+        part_bytes: 42,
         ..Default::default()
     };
     let rows: Vec<_> = (0..7)
@@ -458,17 +510,9 @@ async fn equal_timestamps_cross_leaves_and_parts() {
         .collect();
     let handle = build(&format, &store, m.clone(), &[batch(&m, &rows, true)]).await;
     let manifest = manifest(&store, &handle).await;
-    assert!(manifest.files.len() >= 4);
-    let first = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
-    assert_eq!(
-        Trailer::decode(
-            &first[first.len() - TRAILER_SIZE as usize..],
-            first.len() as u64
-        )
-        .unwrap()
-        .depth,
-        2
-    );
+    assert!(manifest.files.len() >= 2);
+    let index = store.read(&manifest.path()).await.unwrap().to_bytes();
+    assert_eq!(rows.len() as u64, index_footer(&index).leaves);
     let reader = format.reader(store, handle).await.unwrap();
     for (start, end) in [(99, 100), (100, 101), (101, 102), (50, 101)] {
         let mut req = full_request();
@@ -555,9 +599,7 @@ async fn long_keys_round_trip() {
     // The key area keeps the key byte for byte, so a read returns the same bytes the writer
     // received; the descriptor only references it.
     let (_, trailer, page, bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     assert_eq!(1, blocks.len());
     let reference = blocks[0].key;
     reference.validate(trailer.keys()).unwrap();
@@ -945,9 +987,13 @@ async fn selective_reads_pin_the_artifact() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].column(0).null_count(), 1);
     assert!(purges.try_recv().is_ok());
-    // Header, trailer, one leaf/root, and the selected block's key from the key area. The
-    // all-null projected field has no payload.
-    assert_eq!(reads.lock().unwrap().len(), 4);
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| path.ends_with("samples.idx"))
+    );
 }
 #[test]
 fn payload_limits_and_timestamp_envelopes() {
@@ -1006,24 +1052,9 @@ async fn malformed_framing_and_payload_corruption() {
     let manifest = manifest(&store, &handle).await;
     let path = manifest.part_path(0);
     let original = store.read(&path).await.unwrap().to_vec();
-    let end = original.len() - TRAILER_SIZE as usize;
-    let trailer = Trailer::decode(&original[end..], original.len() as u64).unwrap();
-    for (encoding, compression) in [(99, 0), (1, 99)] {
-        let mut unsupported = Trailer::decode(&original[end..], original.len() as u64).unwrap();
-        unsupported.root.payload.encoding = encoding;
-        unsupported.root.payload.compression = compression;
-        assert!(Trailer::decode(&unsupported.encode(), original.len() as u64).is_err());
-    }
-    let decoded = trailer
-        .root
-        .payload
-        .unpack(&original[trailer.root.payload.offset as usize..end])
-        .unwrap();
-    let Page::Leaf(blocks) =
-        Page::decode(&decoded, &trailer.root, 1, trailer.areas(), &manifest).unwrap()
-    else {
-        panic!()
-    };
+    let (_, entry, page, index_bytes) = root_page(&store, &handle).await;
+    let Page(blocks) = page;
+    let decoded = Page(blocks.clone()).encode();
     let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
     let mut bad = original.clone();
     bad[blocks[0].columns[3].payload.offset as usize] ^= 1;
@@ -1044,30 +1075,22 @@ async fn malformed_framing_and_payload_corruption() {
             .await
             .is_err()
     );
-    for offset in [0, end + 72, end + TRAILER_SIZE as usize - 8] {
-        let mut bad = original.clone();
+    let footer_start = index_bytes.len() - index::FOOTER_SIZE;
+    for offset in [footer_start, index_bytes.len() - 1] {
+        let mut bad = index_bytes.clone();
         bad[offset] ^= 3;
-        store.write(&path, bad).await.unwrap();
-        assert!(
-            reader
-                .read(full_request())
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .is_err()
-        );
+        store.write(&manifest.path(), bad).await.unwrap();
+        assert!(format.reader(store.clone(), handle.clone()).await.is_err());
     }
+    let mut footer = index_footer(&index_bytes);
+    footer.leaves = u64::MAX;
+    assert!(index::Footer::decode(&footer.encode(), index_bytes.len() as u64).is_err());
+    let mut footer = index_footer(&index_bytes);
+    footer.metadata.decoded = (MANIFEST_LIMIT + 1) as u32;
+    assert!(index::Footer::decode(&footer.encode(), index_bytes.len() as u64).is_err());
+    store.write(&manifest.path(), index_bytes).await.unwrap();
     for length in 0..decoded.len() {
-        assert!(
-            Page::decode(
-                &decoded[..length],
-                &trailer.root,
-                1,
-                trailer.areas(),
-                &manifest
-            )
-            .is_err()
-        );
+        assert!(Page::decode(&decoded[..length], &entry.page, entry.keys(), &manifest).is_err());
     }
     let mut entry = handle.entry().clone();
     entry
@@ -1150,15 +1173,7 @@ async fn real_samples_reconcile_reopen_and_retire(
     let mut timestamps = Vec::new();
     for handle in reopened.current().samples.values() {
         let day = handle.entry().window.unwrap();
-        let manifest_path = format!(
-            "{}manifest.json",
-            samples_prefix(
-                region.region_id.as_u64(),
-                handle.entry().artifact.generation
-            )
-        );
-        let manifest: Manifest =
-            serde_json::from_slice(&store.read(&manifest_path).await.unwrap().to_bytes()).unwrap();
+        let manifest = manifest(&store, handle).await;
         // All source chunks for this series/day are repacked into one block.
         assert_eq!(manifest.files.iter().map(|p| p.num_blocks).sum::<u64>(), 1);
         assert!(
@@ -1317,227 +1332,11 @@ async fn real_samples_reconcile_reopen_and_retire(
     engine.stop().await.unwrap();
 }
 
-/// An artifact written by the previous layout keeps its key in every block descriptor and names
-/// that older encoding in its manifest.
-///
-/// Nothing else separates it from a current artifact: it is structurally valid, ordered, and has
-/// the same version. Without the layout in `identity_encoding`, maintenance opens it, finds it
-/// sound, and keeps it - and only the first part read fails. The manifest must be refused instead,
-/// so an unreadable artifact is rebuilt before it is ever marked reusable.
-#[tokio::test]
-async fn inline_key_artifact_is_rebuilt_not_reused() {
-    use std::collections::HashMap;
-
-    use crate::config::MitoConfig;
-    use crate::series_index::format::SeriesFormats;
-    use crate::series_index::maintenance::reconcile_series_indexes;
-    use crate::series_index::version::SeriesIndexVersion;
-    use crate::test_util::TestEnv;
-
-    let mut env = TestEnv::with_prefix("columnar-samples-inline-keys").await;
-    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
-        &mut env,
-        &[1000, 2000],
-        MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-            min_compaction_interval: Duration::from_secs(3600),
-            ..Default::default()
-        },
-        metadata(),
-        true,
-    )
-    .await;
-    let format = Arc::new(ColumnarSamplesFormat::default());
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        samples: Some(format.clone()),
-        ..Default::default()
-    });
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, _purges) = series_index_channel(store.clone());
-    let reconcile = || {
-        reconcile_series_indexes(
-            0,
-            store.clone(),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true,
-        )
-    };
-    assert_eq!(1, reconcile().await.unwrap().built_samples);
-
-    // Rewrite every samples manifest to the value an artifact written before the key area carries.
-    let current = region.series_index_version();
-    let mut samples = HashMap::new();
-    for (id, handle) in &current.samples {
-        let mut entry = handle.entry().clone();
-        for object in &mut entry.artifact.objects {
-            if !object.path.ends_with("manifest.json") {
-                continue;
-            }
-            let bytes = store.read(&object.path).await.unwrap().to_bytes();
-            let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            manifest["identity_encoding"] = serde_json::json!("exact-sparse-key");
-            let rewritten = serde_json::to_vec(&manifest).unwrap();
-            object.file_size = rewritten.len() as u64;
-            store.write(&object.path, rewritten).await.unwrap();
-        }
-        entry.artifact.file_size = entry
-            .artifact
-            .objects
-            .iter()
-            .map(|object| object.file_size)
-            .sum();
-        samples.insert(
-            *id,
-            SamplesFileHandle::new(handle.file_id(), entry, purger.clone()),
-        );
-    }
-    region
-        .series_index_version_control
-        .publish(Arc::new(SeriesIndexVersion {
-            samples: samples.clone(),
-            range_indexes: current.range_indexes.clone(),
-            series_indexes: current.series_indexes.clone(),
-            index_buckets: current.index_buckets.clone(),
-        }));
-
-    // The manifest alone refuses it: no part has to be read to see the old layout.
-    let legacy = samples.values().next().unwrap().clone();
-    let error = format
-        .reader(store.clone(), legacy.clone())
-        .await
-        .err()
-        .expect("an inline-key artifact must be refused at open");
-    let message = error.to_string();
-    assert!(message.contains("rebuild"), "{message}");
-
-    // Maintenance must rebuild it, not mark it reusable and fail on the first read.
-    let stats = reconcile().await.unwrap();
-    assert_eq!(
-        1, stats.built_samples,
-        "an artifact the format refuses must be rebuilt"
-    );
-    let rebuilt = region.series_index_version();
-    assert_eq!(1, rebuilt.samples.len());
-    for handle in rebuilt.samples.values() {
-        assert_ne!(
-            handle.entry().artifact.generation,
-            legacy.entry().artifact.generation,
-            "the refused artifact must be replaced"
-        );
-        let manifest = manifest(&store, handle).await;
-        assert_eq!(
-            IdentityEncoding::CURRENT_SAMPLES,
-            manifest.identity_encoding
-        );
-        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
-        let batches = reader
-            .read(full_request())
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        let mut times = collect_rows(&batches)
-            .into_iter()
-            .map(|row| row.2)
-            .collect::<Vec<_>>();
-        times.sort_unstable();
-        assert_eq!(vec![1000, 2000], times);
-    }
-    use store_api::region_engine::RegionEngine;
-    engine.stop().await.unwrap();
-}
-
-/// Fields the frozen v1 manifest still has; unknown-to-the-current-format ones are
-/// deliberately not parsed, so the artifact reaches the reader's rejection path.
-#[derive(serde::Deserialize)]
-struct FrozenV1Manifest {
-    region_id: u64,
-    source_file_id: FileId,
-    generation: FileId,
-}
-
-async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
-    let bytes =
-        include_str!("../../../../../tests/compatibility/wire/mito_columnar_samples/v1-part.hex")
-            .split_whitespace()
-            .collect::<String>();
-    let bytes = (0..bytes.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&bytes[i..i + 2], 16).unwrap())
-        .collect::<Vec<_>>();
-    let json = include_str!(
-        "../../../../../tests/compatibility/wire/mito_columnar_samples/v1-manifest.json"
-    );
-    let frozen: FrozenV1Manifest = serde_json::from_str(json).unwrap();
-    let prefix = crate::series_index::samples::samples_prefix(frozen.region_id, frozen.generation);
-    let manifest_path = format!("{prefix}manifest.json");
-    let part_path = format!("{prefix}part-0.samples");
-    store.write(&part_path, bytes.clone()).await.unwrap();
-    store.write(&manifest_path, json).await.unwrap();
-    let objects = vec![
-        crate::series_index::artifact::ArtifactObject {
-            path: manifest_path,
-            file_size: json.len() as u64,
-        },
-        crate::series_index::artifact::ArtifactObject {
-            path: part_path,
-            file_size: bytes.len() as u64,
-        },
-    ];
-    let artifact = crate::series_index::artifact::ArtifactMetadata {
-        format: ArtifactFormat::ColumnarSamples,
-        generation: frozen.generation,
-        file_size: (json.len() + bytes.len()) as u64,
-        objects,
-    };
-    let (purger, _) = series_index_channel(store.clone());
-    SamplesFileHandle::new(
-        RegionFileId::new(
-            store_api::storage::RegionId::from_u64(frozen.region_id),
-            frozen.source_file_id,
-        ),
-        SamplesEntry {
-            source_file_ids: Vec::new(),
-            window: None,
-            source_windows: Default::default(),
-            file_id: frozen.source_file_id,
-            artifact,
-        },
-        purger,
-    )
-}
-
-/// A frozen artifact written under hash-only identity must be rejected, never read:
-/// it is structurally valid and ordered, so nothing else distinguishes it, and the
-/// labels a collapsed block lost cannot be recovered from it.
-#[tokio::test]
-async fn frozen_v1_samples_fixture_is_rejected() {
-    let store = store();
-    let handle = frozen_v1_handle(&store).await;
-    let format = ColumnarSamplesFormat::default();
-    let error = format
-        .reader(store.clone(), handle)
-        .await
-        .err()
-        .expect("a v1 samples artifact must be rejected");
-    // The compatibility property, not the wording of the discriminator: the artifact is
-    // refused, and the remedy the caller is told about is a rebuild.
-    let message = error.to_string();
-    assert!(message.contains("rebuild"), "{message}");
-}
-
 /// Rewrites the stored root page so every field column carries an unknown codec, and returns a
 /// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
 async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
-    let (mut manifest, mut trailer, page, mut bytes) = root_page(store, &handle).await;
-    let Page::Leaf(mut blocks) = page else {
-        panic!("the root page must be a leaf")
-    };
+    let (_, _, page, _) = root_page(store, &handle).await;
+    let Page(mut blocks) = page;
     let mut patched = 0;
     for column in blocks.iter_mut().flat_map(|block| block.columns.iter_mut()) {
         if column.role == 4 {
@@ -1546,41 +1345,7 @@ async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> 
         }
     }
     assert_eq!(1, patched, "the fixture must store one field column");
-    let start = trailer.root.payload.offset as usize;
-    let encoded = Page::Leaf(blocks).encode();
-    bytes.truncate(start);
-    bytes.extend_from_slice(&encoded);
-    trailer.root.payload = PayloadReference {
-        offset: start as u64,
-        stored: encoded.len() as u32,
-        decoded: encoded.len() as u32,
-        checksum: codec::checksum(&encoded),
-        encoding: 1,
-        compression: 0,
-    };
-    // The payload area ends where the pages begin, so only the page's own reference and the
-    // file length change.
-    trailer.file_length = (bytes.len() + TRAILER_SIZE as usize) as u64;
-    bytes.extend_from_slice(&trailer.encode());
-    let part_path = manifest.part_path(0);
-    store.write(&part_path, bytes.clone()).await.unwrap();
-    manifest.files[0].file_size = bytes.len() as u64;
-    let manifest_path = manifest.path();
-    let json = serde_json::to_vec(&manifest).unwrap();
-    store.write(&manifest_path, json.clone()).await.unwrap();
-    let mut entry = handle.entry().clone();
-    for object in &mut entry.artifact.objects {
-        if object.path == part_path {
-            object.file_size = bytes.len() as u64;
-        } else if object.path == manifest_path {
-            object.file_size = json.len() as u64;
-        } else {
-            panic!("unexpected samples object {}", object.path);
-        }
-    }
-    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    SamplesFileHandle::new(handle.file_id(), entry, purger)
+    replace_leaf(store, handle, Page(blocks)).await
 }
 
 /// A column whose codec the format does not know can only be skipped: a query that does not
@@ -1740,7 +1505,7 @@ async fn output_failures_and_cancelled_finish_clean_up() {
         let observed = closing.clone();
         let layer = MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _, inner| {
-                if !manifest_only || path.ends_with("manifest.json") {
+                if !manifest_only || path.ends_with("samples.idx") {
                     Box::new(FaultyWriter {
                         inner,
                         fail_write,
@@ -1860,15 +1625,14 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
     assert_eq!(1, creations.load(Ordering::Relaxed));
     {
         let reads = reads.lock().unwrap();
-        // Each stream reads framing/root, one payload read across both blocks, and the part's
-        // exact keys from the key area.
-        assert_eq!(10, reads.len());
+        let payload: Vec<_> = reads
+            .iter()
+            .filter(|(path, _)| path.ends_with(".samples"))
+            .collect();
+        assert_eq!(2, payload.len());
         assert_eq!(
             2 * part_size,
-            reads
-                .iter()
-                .map(|(_, range)| range.size().unwrap())
-                .sum::<u64>()
+            payload.iter().map(|(_, r)| r.size().unwrap()).sum::<u64>()
         );
     }
     reads.lock().unwrap().clear();
@@ -1884,6 +1648,7 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
             .lock()
             .unwrap()
             .iter()
+            .filter(|(path, _)| path.ends_with(".samples"))
             .map(|(_, range)| range.size().unwrap())
             .sum::<u64>()
             < part_size
@@ -1974,10 +1739,16 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
         let reads = reads.lock().unwrap();
         // Header, trailer, root, the selected block's key, then timestamps only. The other part
         // is pruned.
-        assert_eq!(5, reads.len());
+        assert_eq!(
+            1,
+            reads
+                .iter()
+                .filter(|(path, _)| path.ends_with(".samples"))
+                .count()
+        );
         reads
             .iter()
-            .find(|(_, range)| range.offset() == HEADER_SIZE)
+            .find(|(path, range)| path.ends_with(".samples") && range.offset() == 0)
             .cloned()
             .expect("the timestamp chunk must be read")
     };
@@ -1997,12 +1768,18 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
     let reads = reads.lock().unwrap();
     // Both boundary blocks read timestamps before fetching remaining columns, and each part
     // reads its own keys.
-    assert_eq!(12, reads.len());
+    assert_eq!(
+        4,
+        reads
+            .iter()
+            .filter(|(path, _)| path.ends_with(".samples"))
+            .count()
+    );
     assert_eq!(
         Some(&timestamp_read),
         reads
             .iter()
-            .find(|(_, range)| range.offset() == HEADER_SIZE)
+            .find(|(path, range)| path.ends_with(".samples") && range.offset() == 0)
     );
 }
 
@@ -2049,14 +1826,20 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
         // series key, so this fixture's 260 blocks fit one page where a key-carrying descriptor
         // needed two), three windows of at most 128 blocks, and one merged key read for the
         // page's selected keys.
-        assert_eq!(7, reads.len());
+        assert_eq!(
+            3,
+            reads
+                .iter()
+                .filter(|(path, _)| path.ends_with(".samples"))
+                .count()
+        );
         // The initial read-ahead window is the first read of block 0's first column: it starts
         // at the payload header, while the header, trailer, and page reads do not. Anchor on
         // that range rather than on an index so a reordered traversal cannot point the
         // assertions below at some later window.
         let (_, window) = reads
             .iter()
-            .find(|(_, range)| range.offset() == HEADER_SIZE)
+            .find(|(path, range)| path.ends_with(".samples") && range.offset() == 0)
             .expect("the initial payload window must be read");
         let window_size = window.size().unwrap() as usize;
         // One row per block and four payload columns: 8 + 8 + 1 + 8 bytes each. A read that
@@ -2112,7 +1895,15 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     assert_eq!(vec![input[0], input[2]], collect_rows(&selected));
     // The intervening series is read as a gap, but never decoded or returned: only the
     // leaf that owns both selected blocks and one payload window are fetched.
-    assert_eq!(5, reads.lock().unwrap().len());
+    assert_eq!(
+        1,
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.ends_with(".samples"))
+            .count()
+    );
 
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     // The first pool rejects read-ahead outright. The second admits the first 128-block,
@@ -2144,7 +1935,7 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
             // which is why the anchor is the range rather than an index.
             let initial = reads
                 .iter()
-                .find(|(_, range)| range.offset() == HEADER_SIZE)
+                .find(|(path, range)| path.ends_with(".samples") && range.offset() == 0)
                 .map(|(_, range)| range.size().unwrap() as usize);
             assert_eq!(
                 capacity != 64 * 1024,
@@ -2187,7 +1978,7 @@ async fn keys_are_kept_out_of_metadata_pages() {
         keys.iter()
             .map(|key| key.len() as u64 + KEY_CHECKSUM_BYTES)
             .sum::<u64>(),
-        trailer.key_end - trailer.payload_end,
+        trailer.page.payload.offset - trailer.keys_start,
         "the key area holds one copy of each key and its checksum"
     );
 }
@@ -2215,9 +2006,7 @@ async fn stream_reuses_one_decoder_and_scratch_across_compressed_blocks() {
     // Every block must decode a compressed payload, or a decoder rebuilt per block would build
     // no context and the assertion below could not fail.
     let (_, _, page, _) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds every block");
-    };
+    let Page(blocks) = page;
     assert!(blocks.iter().all(|block| {
         block
             .columns
@@ -2487,7 +2276,7 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     let artifact = writer.finish().await.unwrap();
     let (manifest, parts) = artifact.objects.split_first().unwrap();
     let narthex = NarthexSamplesMeta {
-        manifest_size: manifest.file_size,
+        index_size: manifest.file_size,
         parts: parts
             .iter()
             .map(|part| NarthexPartMeta {
@@ -2603,7 +2392,6 @@ async fn narthex_prepared_discovery_empty_projection_skips_payload() {
         &[batch(&metadata, &rows, false)],
     )
     .await;
-    let (_, framing, _, _) = root_page(&store, &handle).await;
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
     let store = store.layer(
@@ -2642,12 +2430,6 @@ async fn narthex_prepared_discovery_empty_projection_skips_payload() {
             .len()
     );
     let reads = reads.lock().unwrap();
-    assert!(reads.iter().any(|(path, _)| path.ends_with(".samples")));
-    for (path, range) in reads.iter().filter(|(path, _)| path.ends_with(".samples")) {
-        let end = range.offset() + range.size().unwrap();
-        assert!(
-            end <= HEADER_SIZE || range.offset() >= framing.payload_end,
-            "preparation read sample payload: {path} {range:?}"
-        );
-    }
+    assert!(reads.iter().any(|(path, _)| path.ends_with("samples.idx")));
+    assert!(reads.iter().all(|(path, _)| !path.ends_with(".samples")));
 }

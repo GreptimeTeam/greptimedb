@@ -190,7 +190,7 @@ impl SamplesFileHandle {
         }
     }
 
-    pub(crate) fn manifest_path(&self) -> String {
+    pub(crate) fn index_path(&self) -> String {
         if matches!(self.0.lifetime, SamplesLifetime::Narthex(_)) {
             return self
                 .0
@@ -203,7 +203,7 @@ impl SamplesFileHandle {
                 .clone();
         }
         format!(
-            "{}manifest.json",
+            "{}samples.idx",
             crate::series_index::samples::samples_prefix(
                 self.file_id().region_id().as_u64(),
                 self.entry().artifact.generation

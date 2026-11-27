@@ -241,7 +241,7 @@ impl RemapManifest {
                 // ownership and object inventory must still agree in all builds.
                 let same_inventory = match (&existing.format, &file_meta.format) {
                     (FileFormat::NarthexSamples(left), FileFormat::NarthexSamples(right)) => {
-                        left.manifest_size == right.manifest_size && left.parts == right.parts
+                        left.index_size == right.index_size && left.parts == right.parts
                     }
                     _ => false,
                 };

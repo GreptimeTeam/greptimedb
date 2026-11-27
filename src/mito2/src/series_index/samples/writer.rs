@@ -14,6 +14,7 @@
 
 //! Streaming sample writing with bounded blocks and owned outputs.
 
+use super::index::{self, Footer, LeafEntry};
 use async_trait::async_trait;
 use datatypes::arrow::array::{
     Array, BinaryArray, DictionaryArray, Float64Array, UInt8Array, UInt64Array,
@@ -27,19 +28,20 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, consts};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 
 use crate::error::{Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::artifact_writer::Outputs;
 use crate::series_index::format::FormatWriter;
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, decode_series_id};
+use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
-    self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
+    self, Block, Bounds, Column, KeyRef, Page, PageReference, pack,
 };
 use crate::series_index::samples::{
-    ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
-    TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
+    ColumnarSamplesFormat, MANIFEST_LIMIT, Part, SamplesMetadata, TimestampColumn, TimestampUnit,
+    ValueColumn, invalid, require, valid_rows,
 };
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -76,107 +78,34 @@ impl SampleBuffer {
 }
 
 struct Row {
-    id: MetricSeriesId,
     time: i64,
     sequence: u64,
     operation: u8,
     fields: Vec<Option<u64>>,
 }
-/// A block descriptor whose exact key has not been placed in the part's key area yet.
-///
-/// The key bytes are held here until the part ends, when they are written to their own area
-/// and replaced by a fixed-size [`KeyRef`]. That is why no descriptor — and therefore no
-/// metadata page — ever has to fit a key.
-struct PendingBlock {
-    key: ExactSeriesKey,
-    min: i64,
-    max: i64,
-    ordinal: u64,
-    rows: u32,
-    columns: Vec<Column>,
-}
-
-impl PendingBlock {
-    /// Descriptor bytes once the key reference replaces the key bytes.
-    fn size(&self) -> usize {
-        metadata::descriptor_bytes(self.columns.len())
-    }
-}
-
-/// Places one copy of each series key in the part's key area and turns pending blocks into
-/// descriptors that reference it.
-///
-/// Blocks are ordered by exact key, so every block of one series is adjacent and shares one
-/// copy of the key. Consecutive equal keys therefore reuse the previous reference, while every
-/// new series appends its bytes after the previous copy: references are ordered, disjoint, and
-/// unique per series, which is what lets a reader treat an equal reference as the same series
-/// without reading the bytes. Each copy is followed by its XXH64, which the reference does not
-/// count: a reader verifies the bytes before they can name a series.
-fn place_keys(leaves: Vec<Vec<PendingBlock>>, start: u64) -> Result<(Vec<Vec<Block>>, Vec<u8>)> {
-    let mut area: Vec<u8> = Vec::new();
-    let mut previous: Option<(Vec<u8>, KeyRef)> = None;
-    let mut placed = Vec::with_capacity(leaves.len());
-    for pending in leaves {
-        let mut blocks = Vec::with_capacity(pending.len());
-        for block in pending {
-            let reuse = previous
-                .as_ref()
-                .filter(|(key, _)| key.as_slice() == block.key.bytes())
-                .map(|(_, reference)| *reference);
-            let reference = match reuse {
-                Some(reference) => reference,
-                None => {
-                    let length = u32::try_from(block.key.bytes().len())
-                        .map_err(|_| invalid("sample series key exceeds 4 GiB"))?;
-                    let offset = start
-                        .checked_add(
-                            u64::try_from(area.len())
-                                .map_err(|_| invalid("sample key area overflow"))?,
-                        )
-                        .ok_or_else(|| invalid("sample key offset overflow"))?;
-                    area.extend_from_slice(block.key.bytes());
-                    area.extend_from_slice(&codec::checksum(block.key.bytes()).to_le_bytes());
-                    let reference = KeyRef { offset, length };
-                    previous = Some((block.key.bytes().to_vec(), reference));
-                    reference
-                }
-            };
-            blocks.push(Block {
-                id: block.key.id(),
-                key: reference,
-                min: block.min,
-                max: block.max,
-                ordinal: block.ordinal,
-                rows: block.rows,
-                columns: block.columns,
-            });
-        }
-        placed.push(blocks);
-    }
-    Ok((placed, area))
-}
 pub(super) struct SamplesWriter {
     options: ColumnarSamplesFormat,
-    manifest: Manifest,
+    manifest: SamplesMetadata,
     outputs: Outputs,
     output_buffer: SampleBuffer,
     offsets: SparseOffsetsCache,
     /// Canonical sparse key of the series that owns `rows` and `last`.
     series_key: Option<ExactSeriesKey>,
     rows: Vec<Row>,
-    last: Option<(MetricSeriesId, i64, u64)>,
+    last: Option<(i64, u64)>,
     ordinal: u64,
-    leaves: Vec<Vec<PendingBlock>>,
+    leaf: Vec<Block>,
+    index_outputs: Outputs,
+    index_buffer: SampleBuffer,
+    index_position: u64,
+    keys_start: u64,
+    directory: Option<BufWriter<tokio::fs::File>>,
+    leaf_count: u64,
+    part_bounds: Option<Bounds>,
     leaf_bytes: usize,
-    descriptor_bytes: usize,
     position: u64,
     part_rows: u64,
     part_blocks: u64,
-    /// Bytes this part's key area is charged, one copy per series with its checksum, counted
-    /// before they are written.
-    part_key_bytes: u64,
-    /// The last series whose key this part already counts, to charge one copy per series.
-    part_last_key: Option<ExactSeriesKey>,
     manifest_bytes: usize,
     failed: bool,
 }
@@ -192,10 +121,8 @@ impl SamplesWriter {
         super::validate_narthex_metadata(&metadata)?;
         require(
             (1..=super::MAX_ROWS).contains(&options.block_rows)
-                && (1..=metadata::ROOT_CAPACITY).contains(&options.root_capacity)
-                && (188..=metadata::PAGE_LIMIT).contains(&options.page_bytes)
-                && options.part_bytes > 0
-                && options.metadata_bytes > 0,
+                && (204..=metadata::PAGE_LIMIT).contains(&options.page_bytes)
+                && options.part_bytes > 0,
             "invalid samples packing options",
         )?;
         let timestamp = metadata.time_index_column();
@@ -218,12 +145,9 @@ impl SamplesWriter {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let manifest = Manifest {
-            prefix: Some(prefix.to_string()),
-            format: ArtifactFormat::ColumnarSamples,
-            version: VERSION,
-            identity_encoding: IdentityEncoding::CURRENT_SAMPLES,
-            region_id: metadata.region_id.as_u64(),
+        let manifest = SamplesMetadata {
+            prefix: prefix.to_string(),
+
             source_file_id,
             generation,
             timestamp: TimestampColumn {
@@ -239,7 +163,12 @@ impl SamplesWriter {
             prefix.ends_with('/') && !prefix.split('/').any(|part| part == ".."),
             "invalid samples output prefix",
         )?;
-        let manifest_bytes = serde_json::to_vec(&manifest).context(SerdeJsonSnafu)?.len();
+        let manifest_bytes = serde_json::to_vec(&manifest.fields)
+            .context(SerdeJsonSnafu)?
+            .len()
+            + serde_json::to_vec(&manifest.timestamp)
+                .context(SerdeJsonSnafu)?
+                .len();
         require(
             manifest_bytes <= MANIFEST_LIMIT,
             "samples schema exceeds manifest limit",
@@ -248,7 +177,7 @@ impl SamplesWriter {
             options,
             manifest,
             outputs: Outputs {
-                store,
+                store: store.clone(),
                 active: None,
                 paths: Vec::new(),
                 committed: false,
@@ -259,14 +188,23 @@ impl SamplesWriter {
             rows: Vec::new(),
             last: None,
             ordinal: 0,
-            leaves: Vec::new(),
+            leaf: Vec::new(),
+            index_outputs: Outputs {
+                store: store.clone(),
+                active: None,
+                paths: Vec::new(),
+                committed: false,
+            },
+            index_buffer: SampleBuffer::default(),
+            index_position: 0,
+            keys_start: 0,
+            directory: None,
+            leaf_count: 0,
+            part_bounds: None,
             leaf_bytes: 12,
-            descriptor_bytes: 0,
             position: 0,
             part_rows: 0,
             part_blocks: 0,
-            part_key_bytes: 0,
-            part_last_key: None,
             manifest_bytes,
             failed: false,
         })
@@ -345,12 +283,7 @@ impl SamplesWriter {
                 // Validate the whole key once per series: identity is the exact key, and a
                 // malformed one must not reach a block descriptor.
                 let exact = ExactSeriesKey::from_sparse_key(key, &mut self.offsets)?;
-                if self.last.is_some() {
-                    // Rows arrive in canonical sparse-key order.
-                    let previous = self
-                        .series_key
-                        .as_ref()
-                        .ok_or_else(|| invalid("missing sample series key"))?;
+                if let Some(previous) = self.series_key.as_ref() {
                     require(
                         exact > *previous,
                         "sample input is not sorted by primary key",
@@ -363,24 +296,18 @@ impl SamplesWriter {
                 }
                 self.series_key = Some(exact);
             }
-            let id = match self.last {
-                Some((id, last_time, last_seq)) if !new_series => {
-                    // The same exact series continues: the existing monotonic rules hold.
-                    require(
-                        time > last_time || (time == last_time && seq <= last_seq),
-                        "sample input is not sorted",
-                    )?;
-                    id
-                }
-                _ => decode_series_id(key, &mut self.offsets)?,
-            };
+            if !new_series && let Some((last_time, last_seq)) = self.last {
+                require(
+                    time > last_time || (time == last_time && seq <= last_seq),
+                    "sample input is not sorted",
+                )?;
+            }
             if self.rows.len() == self.options.block_rows
                 || !valid_rows(self.rows.len() + 1, fields.len())
             {
                 self.flush_block().await?;
             }
             self.rows.push(Row {
-                id,
                 time,
                 sequence: seq,
                 operation: op,
@@ -395,7 +322,7 @@ impl SamplesWriter {
                     })
                     .collect(),
             });
-            self.last = Some((id, time, seq));
+            self.last = Some((time, seq));
         }
         Ok(())
     }
@@ -404,19 +331,13 @@ impl SamplesWriter {
             return Ok(());
         }
         let rows = std::mem::take(&mut self.rows);
-        let key = self
-            .series_key
-            .as_ref()
-            .ok_or_else(|| invalid("sample block has no series key"))?;
-        let (mut block, chunks) = encode_block(&rows, key, &self.manifest, self.ordinal)?;
-        // Bytes one copy of this series' key costs in a part's key area: the key and its stored
-        // checksum.
-        let key_len = key.bytes().len() as u64 + metadata::KEY_CHECKSUM_BYTES;
+        let ordinal = self.ordinal;
+        let mut columns = encode_columns(&rows, &self.manifest)?;
         self.ordinal = self
             .ordinal
             .checked_add(1)
             .ok_or_else(|| invalid("sample ordinal overflow"))?;
-        let size = block.size();
+        let size = metadata::descriptor_bytes(columns.len());
         // The descriptor carries a fixed-size key reference, not the key, so this bound is a
         // function of the field count only: a key longer than a whole metadata page is no
         // longer a build failure, and only a narrower configured page can reject a descriptor.
@@ -424,121 +345,126 @@ impl SamplesWriter {
             size + 12 <= self.options.page_bytes,
             "sample descriptor exceeds leaf limit",
         )?;
-        if !self.leaves.is_empty()
-            && self.leaf_bytes + size > self.options.page_bytes
-            && self.leaves.len() == self.options.root_capacity
-        {
-            self.finish_part().await?;
+        if self.leaf_bytes + size > self.options.page_bytes {
+            self.finish_leaf().await?;
         }
+        let part_id = u32::try_from(self.manifest.files.len())
+            .map_err(|_| invalid("too many samples parts"))?;
         if self.outputs.active.is_none() {
-            let id = u32::try_from(self.manifest.files.len())
-                .map_err(|_| invalid("too many sample parts"))?;
-            self.outputs.open(self.manifest.part_path(id)).await?;
-            self.output_buffer
-                .write(&mut self.outputs, &metadata::header())
-                .await?;
-            self.position = metadata::HEADER_SIZE;
+            self.outputs.open(self.manifest.part_path(part_id)).await?;
         }
-        for (column, chunk) in block.columns.iter_mut().zip(chunks) {
+        for (column, chunk) in &mut columns {
             column.payload.offset = self.position;
             self.position = column.payload.end()?;
-            self.output_buffer.write(&mut self.outputs, &chunk).await?;
+            self.output_buffer.write(&mut self.outputs, chunk).await?;
         }
-        if self.leaves.is_empty() || self.leaf_bytes + size > self.options.page_bytes {
-            self.leaves.push(Vec::new());
-            self.leaf_bytes = 12;
-        }
-        self.leaf_bytes += size;
-        self.descriptor_bytes += size;
+        self.ensure_index().await?;
+        let key = self
+            .series_key
+            .as_ref()
+            .ok_or_else(|| invalid("sample block has no series key"))?;
+        // The writer resets ordinal on every exact-key change. A continuation
+        // can reuse the previous reference only while that leaf is still open.
+        let reference = match self.leaf.last() {
+            Some(previous) if ordinal != 0 => previous.key,
+            _ => {
+                let reference = KeyRef {
+                    offset: self.index_position,
+                    length: u32::try_from(key.bytes().len())
+                        .map_err(|_| invalid("samples key exceeds 4 GiB"))?,
+                };
+                self.index_buffer
+                    .write(&mut self.index_outputs, key.bytes())
+                    .await?;
+                self.index_buffer
+                    .write(
+                        &mut self.index_outputs,
+                        &codec::checksum(key.bytes()).to_le_bytes(),
+                    )
+                    .await?;
+                self.index_position = reference.checksum_end()?;
+                reference
+            }
+        };
+        let block = Block {
+            part_id,
+            id: key.id(),
+            key: reference,
+            min: rows[0].time,
+            max: rows[rows.len() - 1].time,
+            ordinal,
+            rows: rows.len() as u32,
+            columns: columns.into_iter().map(|(column, _)| column).collect(),
+        };
         self.part_rows = self
             .part_rows
             .checked_add(u64::from(block.rows))
-            .ok_or_else(|| invalid("sample row count overflow"))?;
+            .ok_or_else(|| invalid("sample part rows overflow"))?;
         self.part_blocks += 1;
-        self.leaves
-            .last_mut()
-            .ok_or_else(|| invalid("missing sample leaf"))?
-            .push(block);
-        // Keys live in their own area but are still bytes of this part: count one copy per
-        // series so the part target covers them too, and a key-heavy part still rolls over.
-        // This is decided after the rollover above, which cleared the part's accounting: a series
-        // that starts a new part still needs its copy counted in that part.
-        if self.part_last_key.as_ref() != self.series_key.as_ref() {
-            self.part_key_bytes = self
-                .part_key_bytes
-                .checked_add(key_len)
-                .ok_or_else(|| invalid("sample key area overflow"))?;
-            self.part_last_key = self.series_key.clone();
+        let bounds = block.bounds();
+        if let Some(current) = &mut self.part_bounds {
+            current.extend(bounds);
+        } else {
+            self.part_bounds = Some(bounds);
         }
-        if self.position.saturating_add(self.part_key_bytes) >= self.options.part_bytes
-            || self.descriptor_bytes >= self.options.metadata_bytes
-        {
+        self.leaf_bytes += size;
+        self.leaf.push(block);
+        if self.position >= self.options.part_bytes {
             self.finish_part().await?;
         }
         Ok(())
     }
-    async fn write_page(&mut self, page: Page) -> Result<PageReference> {
-        let bounds = page.bounds()?;
-        let (payload, bytes) = pack(&page.encode(), self.position, 1, true)?;
-        self.position = payload.end()?;
-        self.output_buffer.write(&mut self.outputs, &bytes).await?;
-        Ok(PageReference { bounds, payload })
+
+    async fn ensure_index(&mut self) -> Result<()> {
+        if self.index_outputs.active.is_none() {
+            self.index_outputs.open(self.manifest.path()).await?;
+            self.outputs.paths.append(&mut self.index_outputs.paths);
+            let file = tokio::task::spawn_blocking(tempfile::tempfile)
+                .await
+                .map_err(|e| invalid(format!("opening samples directory spool: {e}")))?
+                .map_err(spool_error)?;
+            self.directory = Some(BufWriter::new(tokio::fs::File::from_std(file)));
+        }
+        Ok(())
     }
-    async fn finish_part(&mut self) -> Result<()> {
-        if self.leaves.is_empty() {
+
+    async fn finish_leaf(&mut self) -> Result<()> {
+        if self.leaf.is_empty() {
             return Ok(());
         }
-        let payload_end = self.position;
-        // Keys go to their own area after the payload. Every block of one series shares one
-        // copy, so the area holds one key per distinct series of this part.
-        let (leaves, key_area) = place_keys(std::mem::take(&mut self.leaves), payload_end)?;
-        if !key_area.is_empty() {
-            self.position = self
-                .position
-                .checked_add(
-                    u64::try_from(key_area.len())
-                        .map_err(|_| invalid("sample key area overflow"))?,
-                )
-                .ok_or_else(|| invalid("sample file length overflow"))?;
-            self.output_buffer
-                .write(&mut self.outputs, &key_area)
-                .await?;
-        }
-        let key_end = self.position;
-        let mut children = Vec::new();
-        for leaf in leaves {
-            children.push(self.write_page(Page::Leaf(leaf)).await?);
-        }
-        let depth = if children.len() == 1 { 1 } else { 2 };
-        let root = if depth == 1 {
-            children.remove(0)
-        } else {
-            self.write_page(Page::Internal(children)).await?
-        };
-        let bounds = root.bounds;
-        let file_length = self
-            .position
-            .checked_add(metadata::TRAILER_SIZE)
-            .ok_or_else(|| invalid("sample file length overflow"))?;
-        self.output_buffer
-            .write(
-                &mut self.outputs,
-                &Trailer {
-                    root,
-                    depth,
-                    file_length,
-                    payload_end,
-                    key_end,
-                }
-                .encode(),
-            )
+        let page = Page(std::mem::take(&mut self.leaf));
+        let bounds = page.bounds()?;
+        let (payload, bytes) = pack(&page.encode(), self.index_position, 1, true)?;
+        self.index_buffer
+            .write(&mut self.index_outputs, &bytes)
             .await?;
+        let entry = LeafEntry {
+            keys_start: self.keys_start,
+            page: PageReference { bounds, payload },
+        };
+        self.directory
+            .as_mut()
+            .ok_or_else(|| invalid("missing samples directory spool"))?
+            .write_all(&entry.encode())
+            .await
+            .map_err(spool_error)?;
+        self.index_position = payload.end()?;
+        self.keys_start = self.index_position;
+        self.leaf_bytes = 12;
+        self.leaf_count += 1;
+        Ok(())
+    }
+
+    async fn finish_part(&mut self) -> Result<()> {
+        let Some(bounds) = self.part_bounds.take() else {
+            return Ok(());
+        };
         self.output_buffer.flush(&mut self.outputs).await?;
         self.outputs.close().await?;
         let part = Part {
             part_id: u32::try_from(self.manifest.files.len())
                 .map_err(|_| invalid("too many sample parts"))?,
-            file_size: file_length,
+            file_size: self.position,
             num_rows: self.part_rows,
             num_blocks: self.part_blocks,
             first: bounds.first,
@@ -546,32 +472,77 @@ impl SamplesWriter {
             min_timestamp: bounds.min,
             max_timestamp: bounds.max,
         };
-        self.manifest_bytes += serde_json::to_vec(&part).context(SerdeJsonSnafu)?.len()
-            + usize::from(!self.manifest.files.is_empty());
+        self.manifest_bytes += serde_json::to_vec(&part).context(SerdeJsonSnafu)?.len() + 1;
         require(
             self.manifest_bytes <= MANIFEST_LIMIT,
-            "samples manifest exceeds size limit",
+            "samples inventory exceeds limit",
         )?;
         self.manifest.files.push(part);
         self.position = 0;
         self.part_rows = 0;
         self.part_blocks = 0;
-        self.part_key_bytes = 0;
-        self.part_last_key = None;
-        self.descriptor_bytes = 0;
-        self.leaf_bytes = 12;
         Ok(())
     }
+    async fn cleanup(&mut self) -> Result<()> {
+        self.outputs.paths.append(&mut self.index_outputs.paths);
+        let index = self.index_outputs.cleanup().await;
+        let parts = self.outputs.cleanup().await;
+        index.and(parts)
+    }
+
     async fn complete(&mut self) -> Result<ArtifactMetadata> {
         require(!self.failed, "sample writer failed previously")?;
         self.flush_block().await?;
         self.finish_part().await?;
-        let bytes = serde_json::to_vec(&self.manifest).context(SerdeJsonSnafu)?;
-        require(
-            bytes.len() <= MANIFEST_LIMIT,
-            "samples manifest exceeds limit",
-        )?;
-        let mut file_size = bytes.len() as u64;
+        self.ensure_index().await?;
+        self.finish_leaf().await?;
+        let directory = self.index_position;
+        let mut spool = self
+            .directory
+            .take()
+            .ok_or_else(|| invalid("missing samples directory spool"))?;
+        spool.flush().await.map_err(spool_error)?;
+        let mut spool = spool.into_inner();
+        spool.rewind().await.map_err(spool_error)?;
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let n = spool.read(&mut buffer).await.map_err(spool_error)?;
+            if n == 0 {
+                break;
+            }
+            self.index_buffer
+                .write(&mut self.index_outputs, &buffer[..n])
+                .await?;
+            self.index_position = self
+                .index_position
+                .checked_add(n as u64)
+                .ok_or_else(|| invalid("samples directory size overflow"))?;
+        }
+        let schema = index::Schema {
+            timestamp: self.manifest.timestamp.clone(),
+            fields: self.manifest.fields.clone(),
+        };
+        let (metadata, bytes) =
+            index::encode_metadata(&schema, &self.manifest.files, self.index_position)?;
+        let footer = Footer {
+            source: self.manifest.source_file_id,
+            generation: self.manifest.generation,
+            directory,
+            leaves: self.leaf_count,
+            metadata,
+        };
+        self.index_buffer
+            .write(&mut self.index_outputs, &bytes)
+            .await?;
+        self.index_buffer
+            .write(&mut self.index_outputs, &footer.encode())
+            .await?;
+        self.index_buffer.flush(&mut self.index_outputs).await?;
+        self.index_outputs.close().await?;
+        let mut file_size = metadata
+            .end()?
+            .checked_add(index::FOOTER_SIZE as u64)
+            .ok_or_else(|| invalid("samples index size overflow"))?;
         let mut objects = vec![ArtifactObject {
             path: self.manifest.path(),
             file_size,
@@ -585,9 +556,7 @@ impl SamplesWriter {
                 .checked_add(part.file_size)
                 .ok_or_else(|| invalid("sample artifact size overflow"))?;
         }
-        self.outputs.open(self.manifest.path()).await?;
-        self.outputs.write(bytes).await?;
-        self.outputs.close().await?;
+        self.index_outputs.committed = true;
         self.outputs.committed = true;
         Ok(ArtifactMetadata {
             format: ArtifactFormat::ColumnarSamples,
@@ -598,22 +567,6 @@ impl SamplesWriter {
     }
 }
 
-#[cfg(test)]
-impl SamplesWriter {
-    /// The current part's accounting, for the rollover tests: `(position, counted key bytes,
-    /// blocks in the current part, finished parts)`.
-    ///
-    /// A key copy that is not counted defers the part boundary silently, and the parts it makes
-    /// are still readable, so only the accounting itself shows the difference.
-    pub(super) fn part_accounting(&self) -> (u64, u64, u64, usize) {
-        (
-            self.position,
-            self.part_key_bytes,
-            self.part_blocks,
-            self.manifest.files.len(),
-        )
-    }
-}
 #[async_trait]
 impl FormatWriter for SamplesWriter {
     async fn write(&mut self, batch: &RecordBatch) -> Result<()> {
@@ -628,46 +581,32 @@ impl FormatWriter for SamplesWriter {
     async fn finish(mut self: Box<Self>) -> Result<ArtifactMetadata> {
         let result = self.complete().await;
         if result.is_err()
-            && let Err(error) = self.outputs.cleanup().await
+            && let Err(error) = self.cleanup().await
         {
             common_telemetry::warn!(error; "Cleaning failed samples build");
         }
         result
     }
     async fn abort(mut self: Box<Self>) -> Result<()> {
-        self.outputs.cleanup().await
+        self.cleanup().await
     }
 }
-fn encode_block(
-    rows: &[Row],
-    key: &ExactSeriesKey,
-    manifest: &Manifest,
-    ordinal: u64,
-) -> Result<(PendingBlock, Vec<Vec<u8>>)> {
-    let first = rows.first().ok_or_else(|| invalid("empty sample block"))?;
-    let last = rows.last().ok_or_else(|| invalid("empty sample block"))?;
-    require(
-        rows.iter().all(|row| row.id == key.id()),
-        "sample block mixes series",
-    )?;
-    let mut block = PendingBlock {
-        key: key.clone(),
-        min: first.time,
-        max: last.time,
-        ordinal,
-        rows: rows.len() as u32,
-        columns: Vec::new(),
-    };
-    let mut chunks = Vec::new();
+fn spool_error(e: std::io::Error) -> crate::error::Error {
+    invalid(format!("samples directory spool: {e}"))
+}
+fn encode_columns(rows: &[Row], manifest: &SamplesMetadata) -> Result<Vec<(Column, Vec<u8>)>> {
+    let mut columns = Vec::with_capacity(3 + manifest.fields.len());
     let mut push = |role, id, encoding, bytes: Vec<u8>, nulls| -> Result<()> {
         let (payload, bytes) = pack(&bytes, 0, encoding, false)?;
-        block.columns.push(Column {
-            role,
-            id,
-            payload,
-            nulls,
-        });
-        chunks.push(bytes);
+        columns.push((
+            Column {
+                role,
+                id,
+                payload,
+                nulls,
+            },
+            bytes,
+        ));
         Ok(())
     };
     let (encoding, bytes) = codec::encode_time(&rows.iter().map(|r| r.time).collect::<Vec<_>>());
@@ -691,7 +630,7 @@ fn encode_block(
             )?;
         }
     }
-    Ok((block, chunks))
+    Ok(columns)
 }
 
 #[cfg(test)]

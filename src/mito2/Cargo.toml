@@ -16,6 +16,7 @@ hdfs-object-store = ["object-store/hdfs-object-store"]
 workspace = true
 
 [dependencies]
+tempfile.workspace = true
 api.workspace = true
 aquamarine.workspace = true
 arrow-schema.workspace = true

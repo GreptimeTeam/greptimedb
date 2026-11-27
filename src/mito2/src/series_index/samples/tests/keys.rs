@@ -14,7 +14,7 @@
 
 //! Exact series keys stored outside every bounded page.
 //!
-//! A block descriptor names its series with a fixed-size reference into the part's key area,
+//! A block descriptor names its series with a fixed-size reference into the leaf's key area,
 //! so the descriptor — and therefore the metadata page that holds it — never carries a key.
 //! These tests pin both directions of that choice: keys far longer than a page must round-trip
 //! (they used to exceed the leaf limit and fail the build), and a corrupt reference must be
@@ -34,16 +34,13 @@ use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataR
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
 use crate::series_index::identity::ExactSeriesKey;
-use crate::series_index::purger::series_index_channel;
+use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::series_index::samples::codec;
-use crate::series_index::samples::metadata::{
-    self, KeyRef, MAGIC, Page, PayloadReference, TRAILER_SIZE, Trailer,
-};
-use crate::series_index::samples::{ColumnarSamplesFormat, Manifest};
+use crate::series_index::samples::metadata::{self, KeyRef, Page};
 use crate::series_index::{TABLE_ID_COLUMN, TSID_COLUMN};
 use crate::test_util::sst_util::new_sparse_primary_key;
 
-use super::{RecordingRead, build, exact, keyed_batch, request, root_page, sample_batch, store};
+use super::{RecordingRead, build, exact, keyed_batch, request, root_page, store};
 
 /// `(table_id, tsid, timestamp)` of every returned row, in output order.
 fn collect_times(batches: &[SamplesBatch]) -> Vec<(u32, u64, i64)> {
@@ -111,36 +108,6 @@ fn wide_batch(meta: &RegionMetadataRef, key: &[u8], times: &[i64]) -> RecordBatc
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
 }
 
-/// Replaces the part and manifest of `handle` with `bytes` and their recorded sizes.
-///
-/// Everything else stays valid, so a test can isolate one rewritten descriptor.
-async fn rewrite_part(
-    store: &ObjectStore,
-    handle: SamplesFileHandle,
-    mut manifest: Manifest,
-    bytes: Vec<u8>,
-) -> SamplesFileHandle {
-    let part_path = manifest.part_path(0);
-    store.write(&part_path, bytes.clone()).await.unwrap();
-    manifest.files[0].file_size = bytes.len() as u64;
-    let manifest_path = manifest.path();
-    let json = serde_json::to_vec(&manifest).unwrap();
-    store.write(&manifest_path, json.clone()).await.unwrap();
-    let mut entry = handle.entry().clone();
-    for object in &mut entry.artifact.objects {
-        if object.path == part_path {
-            object.file_size = bytes.len() as u64;
-        } else if object.path == manifest_path {
-            object.file_size = json.len() as u64;
-        } else {
-            panic!("unexpected samples object {}", object.path);
-        }
-    }
-    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    SamplesFileHandle::new(handle.file_id(), entry, purger)
-}
-
 /// A single label this long encodes to a key well past the 65,536-byte page limit. The old
 /// descriptor had to fit `48 + 44 * C + key_length` bytes plus the leaf prefix in one page,
 /// so this build failed with "sample descriptor exceeds leaf limit"; the key now lives in its
@@ -181,16 +148,14 @@ async fn key_longer_than_one_page_round_trips() {
     assert_eq!(vec![selection], exact_keys(&batches));
     // The stored key is the writer's key byte for byte.
     let (manifest, trailer, page, bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     assert_eq!(1, blocks.len());
     let reference = blocks[0].key;
-    assert_eq!(reference.offset, trailer.payload_end);
+    assert_eq!(reference.offset, trailer.keys_start);
     assert_eq!(reference.length as usize, key.len());
     // One copy is the key plus its stored checksum, which the reference does not count.
     assert_eq!(
-        trailer.key_end - trailer.payload_end,
+        trailer.page.payload.offset - trailer.keys_start,
         key.len() as u64 + metadata::KEY_CHECKSUM_BYTES
     );
     assert_eq!(
@@ -207,13 +172,13 @@ async fn key_longer_than_one_page_round_trips() {
     );
     // A key longer than a page still leaves a descriptor far below the page limit.
     assert_eq!(
-        56 + 44 * 4,
+        60 + 44 * 4,
         metadata::descriptor_bytes(blocks[0].columns.len())
     );
     assert!(metadata::descriptor_bytes(blocks[0].columns.len()) + 12 < 65_536 / 2);
     // The key area is part of the part, not of any page.
-    assert!(trailer.key_end > trailer.payload_end);
-    assert!(manifest.files[0].file_size > trailer.key_end);
+    assert!(trailer.page.payload.offset > trailer.keys_start);
+    assert!(manifest.files[0].file_size < key.len() as u64);
 }
 
 /// At the 1,024-field maximum the old layout left `65,536 - (12 + 48 + 44 * 1,027) = 20,288`
@@ -248,16 +213,14 @@ async fn many_fields_round_trip_a_key_past_the_old_ceiling() {
     assert_eq!(vec![selection], exact_keys(&batches));
     // The widest descriptor stays a fixed number of bytes whatever the key's length is.
     let (_, trailer, page, _) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     assert_eq!(
-        56 + 44 * 1027,
+        60 + 44 * 1027,
         metadata::descriptor_bytes(blocks[0].columns.len())
     );
     assert_eq!(3 + 1024, blocks[0].columns.len());
     assert_eq!(
-        trailer.key_end - trailer.payload_end,
+        trailer.page.payload.offset - trailer.keys_start,
         key.len() as u64 + metadata::KEY_CHECKSUM_BYTES
     );
 }
@@ -285,9 +248,7 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
     )
     .await;
     let (manifest, trailer, page, bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     let area = trailer.keys();
     // Past the end of the area, before its start, and a zero length: each one addresses
     // descriptor bytes that cannot be a key of this part.
@@ -297,7 +258,7 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
             length: 4,
         },
         KeyRef {
-            offset: area.start - 4,
+            offset: u64::MAX - 1,
             length: 4,
         },
         KeyRef {
@@ -305,40 +266,22 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
             length: 0,
         },
     ];
-    let start = trailer.root.payload.offset as usize;
-    let mut encoded = Page::Leaf(blocks.clone()).encode();
     for bad in corrupt {
         let mut patched = blocks.clone();
         patched[0].key = bad;
-        encoded = Page::Leaf(patched).encode();
         assert!(
             Page::decode(
-                &encoded,
-                &trailer.root,
-                trailer.depth,
-                trailer.areas(),
+                &Page(patched).encode(),
+                &trailer.page,
+                trailer.keys(),
                 &manifest
             )
-            .is_err(),
-            "{bad:?} must not decode"
+            .is_err()
         );
     }
-    // Install the last patch and read it back through the reader.
-    let mut rewritten = bytes;
-    rewritten.truncate(start);
-    rewritten.extend_from_slice(&encoded);
-    let mut trailer = trailer;
-    trailer.root.payload = PayloadReference {
-        offset: start as u64,
-        stored: encoded.len() as u32,
-        decoded: encoded.len() as u32,
-        checksum: codec::checksum(&encoded),
-        encoding: 1,
-        compression: 0,
-    };
-    trailer.file_length = (rewritten.len() + TRAILER_SIZE as usize) as u64;
-    rewritten.extend_from_slice(&trailer.encode());
-    let handle = rewrite_part(&store, handle, manifest, rewritten).await;
+    let mut patched = blocks;
+    patched[0].key = corrupt[2];
+    let handle = super::replace_leaf(&store, handle, Page(patched)).await;
     let reader = format.reader(store, handle).await.unwrap();
     let mut stream = reader.read(request(&[TABLE_ID_COLUMN])).unwrap();
     let error = stream
@@ -399,18 +342,16 @@ async fn colliding_series_keep_their_own_exact_keys() {
     }
     // One copy per series: two references, in block order, and the area holds both keys.
     let (_, trailer, page, bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     assert_eq!(2, blocks.len());
     assert_eq!(first_key.id(), blocks[0].id);
     assert_eq!(partner_key.id(), blocks[0].id);
     assert_ne!(blocks[0].key, blocks[1].key);
     assert!(blocks[0].key.end().unwrap() <= blocks[1].key.offset);
-    assert_eq!(trailer.payload_end, blocks[0].key.offset);
+    assert_eq!(trailer.keys_start, blocks[0].key.offset);
     assert_eq!(
         first.len() + partner.len() + 2 * metadata::KEY_CHECKSUM_BYTES as usize,
-        (trailer.key_end - trailer.payload_end) as usize
+        (trailer.page.payload.offset - trailer.keys_start) as usize
     );
     assert_eq!(
         first.as_slice(),
@@ -422,51 +363,6 @@ async fn colliding_series_keep_their_own_exact_keys() {
     );
 }
 
-/// A part written before the key area has a 112-byte trailer and no `key_end`. The reader locates
-/// a trailer from the recorded object size, so it always reads the last 120 bytes: the shifted
-/// frame must be rejected, never decoded as if it were current. There is no version bump to tell
-/// the two shapes apart, so an artifact from an earlier build of this branch is unreadable and
-/// has to be rebuilt.
-#[tokio::test]
-async fn legacy_112_byte_trailer_is_rejected() {
-    let store = store();
-    let meta = super::metadata();
-    let format = ColumnarSamplesFormat::default();
-    let key = new_sparse_primary_key(&["a", "b"], &meta, 1, 7);
-    let handle = build(
-        &format,
-        &store,
-        meta.clone(),
-        &[keyed_batch(&meta, &[key], &[100], false)],
-    )
-    .await;
-    let (_, trailer, _, _) = root_page(&store, &handle).await;
-    assert_eq!(120, TRAILER_SIZE);
-    // The pre-key-area frame: the same fields without `key_end`, which is 112 bytes.
-    let mut legacy = trailer.encode();
-    // Drop `key_end` (96..104) and the current magic/checksum, then seal the old way: the old
-    // checksum covers its 96 body bytes plus the magic, 104 in total.
-    legacy.drain(96..104);
-    legacy.truncate(96);
-    legacy.extend_from_slice(MAGIC);
-    let sum = codec::checksum(&legacy);
-    legacy.extend_from_slice(&sum.to_le_bytes());
-    assert_eq!(112, legacy.len());
-    // A 112-byte slice is not a trailer of this format at all.
-    let error = Trailer::decode(&legacy, trailer.file_length)
-        .err()
-        .expect("a 112-byte frame is not a trailer");
-    assert!(error.to_string().contains("truncated"), "{error}");
-    // What a reader actually does with an old part: the last 120 bytes of the file, which start
-    // 8 bytes before the old trailer. The magic still lands where this format expects it, so the
-    // frame is caught by the checksum over the shifted prefix rather than by the magic.
-    let mut window: Vec<u8> = vec![0; 8];
-    window.extend_from_slice(&legacy);
-    assert_eq!(TRAILER_SIZE as usize, window.len());
-    assert!(Trailer::decode(&window, trailer.file_length).is_err());
-}
-
-/// One request's key-area traffic: `(reads, bytes)` plus the rows it returned.
 async fn key_area_traffic(
     store: &ObjectStore,
     format: &ColumnarSamplesFormat,
@@ -504,7 +400,10 @@ async fn key_area_traffic(
     let area = trailer.keys();
     let reads = reads.lock().unwrap();
     let (mut count, mut bytes) = (0usize, 0u64);
-    for (_, range) in reads.iter() {
+    for (_, range) in reads
+        .iter()
+        .filter(|(path, _)| path.ends_with("samples.idx"))
+    {
         let start = range.offset();
         let end = start + range.size().unwrap();
         if start < end && start >= area.start && end <= area.end {
@@ -586,11 +485,9 @@ async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
     )
     .await;
     let (manifest, trailer, page, mut bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     let reference = blocks[0].key;
-    assert_eq!(reference.offset, trailer.payload_end);
+    assert_eq!(reference.offset, trailer.keys_start);
     // The canonical sparse prefix is `[column id 0..4][table_id marker 4][table_id 5..9]`
     // `[tsid column id 9..13][tsid marker 13][tsid 14..22]`, then the labels. Byte 16 is in the
     // middle of the tsid value, so the framing still parses and only the identifier changes.
@@ -601,7 +498,7 @@ async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
     let checksum_start = reference.end().unwrap() as usize;
     bytes[checksum_start..reference.checksum_end().unwrap() as usize]
         .copy_from_slice(&sum.to_le_bytes());
-    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    store.write(&manifest.path(), bytes).await.unwrap();
     let reader = format.reader(store, handle).await.unwrap();
     let mut stream = reader.read(request(&[TABLE_ID_COLUMN])).unwrap();
     let error = stream
@@ -617,34 +514,6 @@ async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
 /// The trailer and root page of one part, plus its bytes.
 ///
 /// `root_page` insists on a single-part artifact; the part-boundary tests need one part at a time.
-async fn part_root(
-    store: &ObjectStore,
-    handle: &SamplesFileHandle,
-    part: u32,
-) -> (Trailer, Page, Vec<u8>) {
-    let manifest = super::manifest(store, handle).await;
-    let bytes = store
-        .read(&manifest.part_path(part))
-        .await
-        .unwrap()
-        .to_bytes()
-        .to_vec();
-    let start = bytes.len() - TRAILER_SIZE as usize;
-    let trailer = Trailer::decode(&bytes[start..], bytes.len() as u64).unwrap();
-    assert_eq!(1, trailer.depth, "one leaf keeps the root page addressable");
-    let offset = trailer.root.payload.offset as usize;
-    let stored = &bytes[offset..offset + trailer.root.payload.stored as usize];
-    let page = Page::decode(
-        &trailer.root.payload.unpack(stored).unwrap(),
-        &trailer.root,
-        trailer.depth,
-        trailer.areas(),
-        &manifest,
-    )
-    .unwrap();
-    (trailer, page, bytes)
-}
-
 /// Rewrites the two stored key entries of a two-series part in place.
 ///
 /// The descriptors stay untouched and the part keeps its length, so whatever rejects the part
@@ -655,14 +524,12 @@ async fn rewrite_entries(
     edit: impl FnOnce(&mut [u8], [std::ops::Range<usize>; 2]),
 ) {
     let (manifest, _, page, mut bytes) = root_page(store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     assert_eq!(2, blocks.len(), "the fixture holds two series");
     let entries = [&blocks[0].key, &blocks[1].key]
         .map(|reference| reference.offset as usize..reference.checksum_end().unwrap() as usize);
     edit(&mut bytes, entries);
-    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    store.write(&manifest.path(), bytes).await.unwrap();
 }
 
 /// One query's key-area reads - `(reads, bytes)` - and row count, run through a recording layer.
@@ -704,7 +571,10 @@ async fn recorded_key_area_reads(
     let area = trailer.keys();
     let reads = reads.lock().unwrap();
     let (mut count, mut bytes) = (0usize, 0u64);
-    for (_, range) in reads.iter() {
+    for (_, range) in reads
+        .iter()
+        .filter(|(path, _)| path.ends_with("samples.idx"))
+    {
         let start = range.offset();
         let end = start + range.size().unwrap();
         if start < end && start < area.end && end > area.start {
@@ -715,14 +585,9 @@ async fn recorded_key_area_reads(
     (count, bytes, result)
 }
 
-/// One exact series may span parts, and every part lays out its own key area.
-///
-/// The two copies of one series therefore live at unrelated offsets. Comparing references across
-/// the boundary reads those offsets as one area, so a legitimate artifact looks overlapping (or
-/// like a new series that skipped its ordinal). Only the exact key bytes can tell a series that
-/// continues from a series that starts.
+/// One leaf can reference several parts while retaining a single copy of the series key.
 #[tokio::test]
-async fn same_series_across_parts_with_different_key_offsets_is_readable() {
+async fn a_series_spanning_payload_parts_reuses_its_leaf_key() {
     let store = store();
     let meta = super::metadata();
     let format = ColumnarSamplesFormat {
@@ -749,12 +614,10 @@ async fn same_series_across_parts_with_different_key_offsets_is_readable() {
         super::manifest(&store, &handle).await.files.len(),
         "every block rolls its part"
     );
-    let (first, _, _) = part_root(&store, &handle, 0).await;
-    let (second, _, _) = part_root(&store, &handle, 1).await;
-    assert_ne!(
-        first.payload_end, second.payload_end,
-        "the parts must place their key areas differently"
-    );
+    let (_, _, page, _) = root_page(&store, &handle).await;
+    let Page(blocks) = page;
+    assert_eq!(blocks[0].key, blocks[2].key);
+    assert_ne!(blocks[0].part_id, blocks[2].part_id);
     let reader = format.reader(store, handle).await.unwrap();
     let batches = reader
         .read(request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]))
@@ -773,14 +636,9 @@ async fn same_series_across_parts_with_different_key_offsets_is_readable() {
     );
 }
 
-/// Two parts' key areas are unrelated, so equal references in them name different series.
-///
-/// Both series are alone in their part and encode to the same length, so both key areas start at
-/// the same offset and the two references are the same number. Treating an equal reference as one
-/// series would then demand a continuation the artifact never promised: the second series starts
-/// its own timestamps and ordinal.
+/// A hash collision may cross a payload part boundary inside one index leaf.
 #[tokio::test]
-async fn equal_key_references_across_parts_are_different_series() {
+async fn colliding_series_across_payload_parts_use_distinct_key_references() {
     let store = store();
     let meta = super::metadata();
     let format = ColumnarSamplesFormat {
@@ -799,22 +657,10 @@ async fn equal_key_references_across_parts_are_different_series() {
     )
     .await;
     assert_eq!(2, super::manifest(&store, &handle).await.files.len());
-    let (_, first_page, _) = part_root(&store, &handle, 0).await;
-    let (_, second_page, _) = part_root(&store, &handle, 1).await;
-    let Page::Leaf(first_blocks) = first_page else {
-        panic!("one leaf page holds the first part")
-    };
-    let Page::Leaf(second_blocks) = second_page else {
-        panic!("one leaf page holds the second part")
-    };
-    assert_eq!(
-        first_blocks[0].key, second_blocks[0].key,
-        "the two series' references must be the same number"
-    );
-    assert!(
-        second_blocks[0].min < first_blocks[0].max,
-        "the second series must restart its timestamps"
-    );
+    let (_, _, page, _) = root_page(&store, &handle).await;
+    let Page(blocks) = page;
+    assert_ne!(blocks[0].key, blocks[1].key);
+    assert!(blocks[1].min < blocks[0].max);
     let reader = format.reader(store, handle).await.unwrap();
     let batches = reader
         .read(request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]))
@@ -857,11 +703,9 @@ async fn corrupted_label_byte_is_rejected() {
     )
     .await;
     let (manifest, trailer, page, mut bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     let reference = blocks[0].key;
-    assert_eq!(reference.offset, trailer.payload_end);
+    assert_eq!(reference.offset, trailer.keys_start);
     // Find a label byte whose flip keeps the key well framed and under the same identifier.
     let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
     let position = (22..key.len())
@@ -874,7 +718,7 @@ async fn corrupted_label_byte_is_rejected() {
         })
         .expect("a label byte whose flip keeps the key valid");
     bytes[reference.offset as usize + position] ^= 1;
-    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    store.write(&manifest.path(), bytes).await.unwrap();
     let reader = format.reader(store, handle).await.unwrap();
     let error = reader
         .read(request(&[TABLE_ID_COLUMN]))
@@ -1024,85 +868,6 @@ async fn unpayable_key_prefetch_issues_no_key_read() {
         "{reads} key-area reads happened although the pool cannot hold one key"
     );
     assert_eq!(0, pool.reserved());
-}
-
-/// One writer over one long-keyed series, returning the accounting after the second block flushes
-/// plus the size of one key copy.
-///
-/// `root_capacity` is one and `page_bytes` admits exactly one maximal descriptor per leaf, so the
-/// second block starts a new part while the series continues into it.
-async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), u64) {
-    use crate::series_index::format::FormatWriter;
-    use crate::series_index::samples::writer::SamplesWriter;
-    use store_api::storage::FileId;
-
-    let store = store();
-    let meta = super::metadata();
-    let label = "x".repeat(512);
-    let key = new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, 7);
-    let copy_bytes = key.len() as u64 + metadata::KEY_CHECKSUM_BYTES;
-    let format = ColumnarSamplesFormat {
-        block_rows: 1,
-        part_bytes,
-        page_bytes: 244,
-        root_capacity: 1,
-        ..Default::default()
-    };
-    let generation = FileId::random();
-    let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
-    let mut writer = SamplesWriter::new(
-        format,
-        meta.clone(),
-        store,
-        &prefix,
-        FileId::random(),
-        generation,
-    )
-    .unwrap();
-    // A row is buffered before the next one flushes its block, so three single-row batches flush
-    // two blocks: the second one is the block that starts the new part.
-    for (time, value) in [(10, None), (20, Some(0.0)), (30, Some(0.0))] {
-        let batch = sample_batch(
-            &meta,
-            std::slice::from_ref(&key),
-            vec![time],
-            vec![1],
-            vec![0],
-            vec![value],
-            false,
-        );
-        writer.write(&batch).await.unwrap();
-    }
-    (writer.part_accounting(), copy_bytes)
-}
-
-/// A series that crosses a metadata rollover must have its new part's key copy counted.
-///
-/// `finish_part` clears the part's key accounting, so a "is this the first copy" decision taken
-/// before the rollover skips the copy the new part makes. The part target then never sees the key
-/// bytes and defers the part boundary by one part's worth of keys.
-#[tokio::test]
-async fn series_across_a_metadata_rollover_counts_its_key_copy() {
-    let ((position, counted, blocks, parts), copy_bytes) =
-        cross_rollover_accounting(u64::MAX).await;
-    assert_eq!(1, parts, "the metadata rule must complete one part");
-    assert_eq!(1, blocks, "the second block opens the new part");
-    assert_eq!(
-        copy_bytes, counted,
-        "the new part must count its own copy of the series key"
-    );
-    // `flush_block` compares exactly `position + part_key_bytes` with the part target, so a part
-    // target of that sum rolls the new part at once - only when the copy is counted.
-    let ((_, _, blocks_again, parts_again), _) =
-        cross_rollover_accounting(position + counted).await;
-    assert_eq!(
-        2, parts_again,
-        "the counted key copy must be what reaches the part target"
-    );
-    assert_eq!(
-        0, blocks_again,
-        "the part target rolls the new part at once"
-    );
 }
 
 /// A memory pool that remembers the highest reservation it ever held and how much each named
@@ -1329,7 +1094,7 @@ async fn per_key_fallback_reserves_fetch_and_retained_key() {
         .unwrap()
         .iter()
         .filter(|(path, start, length, _)| {
-            path.ends_with(".samples") && *start < area.end && *start + *length > area.start
+            path.ends_with("samples.idx") && *start < area.end && *start + *length > area.start
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1374,7 +1139,7 @@ async fn per_key_fallback_reserves_fetch_and_retained_key() {
         .unwrap()
         .iter()
         .filter(|(path, start, length, _)| {
-            path.ends_with(".samples") && *start < area.end && *start + *length > area.start
+            path.ends_with("samples.idx") && *start < area.end && *start + *length > area.start
         })
         .count();
     assert_eq!(
@@ -1400,6 +1165,7 @@ async fn boundary_key_is_charged_while_it_is_alive() {
     let format = ColumnarSamplesFormat {
         block_rows: 1,
         part_bytes: 1,
+        page_bytes: 248,
         ..Default::default()
     };
     let label = "x".repeat(1024);
@@ -1475,16 +1241,14 @@ async fn skipped_block_does_not_hide_reversed_keys() {
     // valid; only the order of the two keys the request loads is wrong. The middle block is
     // outside the requested time range, so its key is never read.
     let (manifest, _, page, mut bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
+    let Page(blocks) = page;
     assert_eq!(3, blocks.len());
     let entries = [&blocks[0].key, &blocks[2].key]
         .map(|reference| reference.offset as usize..reference.checksum_end().unwrap() as usize);
     let first_entry = bytes[entries[0].clone()].to_vec();
     bytes.copy_within(entries[1].clone(), entries[0].start);
     bytes[entries[1].clone()].copy_from_slice(&first_entry);
-    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    store.write(&manifest.path(), bytes).await.unwrap();
     let reader = format.reader(store, handle).await.unwrap();
     let mut query = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
     query.end = Some(1_000);
@@ -1516,8 +1280,7 @@ async fn pruned_block_does_not_hide_the_boundary_key() {
     // therefore traversed without being loaded, which is what used to lose the boundary key.
     let format = ColumnarSamplesFormat {
         block_rows: 1,
-        page_bytes: 476,
-        root_capacity: 1,
+        page_bytes: 484,
         ..Default::default()
     };
     let first = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7);
@@ -1535,23 +1298,21 @@ async fn pruned_block_does_not_hide_the_boundary_key() {
         )],
     )
     .await;
-    assert_eq!(2, super::manifest(&store, &handle).await.files.len());
+    assert_eq!(1, super::manifest(&store, &handle).await.files.len());
     // Rewrite the second part's key with a smaller key of the same length and identifier, so the
     // two loaded keys are reversed while everything else about the part stays valid.
     let smaller = new_sparse_primary_key(&["host-000000", "z"], &meta, 1, 7);
     assert_eq!(last.len(), smaller.len());
-    let (_, page, mut bytes) = part_root(&store, &handle, 1).await;
+    let (_, _, page, mut bytes) = super::read_leaf(&store, &handle, 1).await;
     let manifest = super::manifest(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the second part")
-    };
+    let Page(blocks) = page;
     let reference = blocks[0].key;
     let start = reference.offset as usize;
     bytes[start..start + smaller.len()].copy_from_slice(&smaller);
     let sum = codec::checksum(&smaller);
     bytes[start + smaller.len()..reference.checksum_end().unwrap() as usize]
         .copy_from_slice(&sum.to_le_bytes());
-    store.write(&manifest.part_path(1), bytes).await.unwrap();
+    store.write(&manifest.path(), bytes).await.unwrap();
     let reader = format.reader(store, handle).await.unwrap();
     let mut query = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
     query.end = Some(1_000);

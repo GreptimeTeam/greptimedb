@@ -23,7 +23,7 @@
             "sequence": 7,
             "format": {
               "narthex_samples": {
-                "manifest_size": 10,
+                "index_size": 10,
                 "parts": [
                   {
                     "file_size": 20
@@ -52,7 +52,7 @@
             "sequence": 7,
             "format": {
               "narthex_samples": {
-                "manifest_size": 10,
+                "index_size": 10,
                 "parts": [
                   {
                     "file_size": 20

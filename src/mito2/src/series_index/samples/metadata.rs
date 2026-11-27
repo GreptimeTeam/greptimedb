@@ -12,27 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Explicit sample framing and bounded two-level metadata pages.
+//! Bounded descriptor leaves and references into the shared index and payload parts.
 
 use crate::error::Result;
 use crate::series_index::samples::codec::{self, Cursor, put_u32, put_u64};
 use crate::series_index::samples::{
-    Manifest, MetricSeriesId, VERSION, invalid, require, unsupported, valid_rows,
+    MetricSeriesId, SamplesMetadata, invalid, require, unsupported, valid_rows,
 };
 
-pub(super) const MAGIC: &[u8; 8] = b"GTSAMPLE";
-pub(super) const HEADER_SIZE: u64 = 16;
-pub(super) const TRAILER_SIZE: u64 = 120;
 pub(super) const PAGE_LIMIT: usize = 65536;
-pub(super) const ROOT_CAPACITY: usize = (PAGE_LIMIT - 12) / 72;
 /// Largest decoded block payload, and therefore the largest frame a decoder has to decompress.
 const CHUNK_LIMIT: usize = 1024 * 1024;
 /// Fixed part of a block descriptor, before its 44-byte column descriptors.
 ///
 /// The exact series key is not part of it. A descriptor keeps a fixed-size [`KeyRef`] into
-/// the part's key area instead, so descriptor size is independent of key length and a key
+/// the leaf's key area instead, so descriptor size is independent of key length and a key
 /// longer than a metadata page is representable.
-pub(super) const BLOCK_FIXED_BYTES: usize = 56;
+pub(super) const BLOCK_FIXED_BYTES: usize = 60;
 /// Smallest possible block descriptor: the fixed part plus its three mandatory columns.
 const MIN_BLOCK_BYTES: usize = BLOCK_FIXED_BYTES + 3 * 44;
 
@@ -78,7 +74,7 @@ impl PayloadReference {
         }
         Ok(())
     }
-    fn encode(&self, out: &mut Vec<u8>) {
+    pub(super) fn encode(&self, out: &mut Vec<u8>) {
         put_u64(out, self.offset);
         put_u32(out, self.stored);
         put_u32(out, self.decoded);
@@ -87,7 +83,7 @@ impl PayloadReference {
         out.extend(self.compression.to_le_bytes());
         put_u32(out, 0);
     }
-    fn decode(c: &mut Cursor<'_>) -> Result<Self> {
+    pub(super) fn decode(c: &mut Cursor<'_>) -> Result<Self> {
         let result = Self {
             offset: c.u64()?,
             stored: c.u32()?,
@@ -197,11 +193,11 @@ pub(super) struct PageReference {
     pub payload: PayloadReference,
 }
 impl PageReference {
-    fn encode(&self, out: &mut Vec<u8>) {
+    pub(super) fn encode(&self, out: &mut Vec<u8>) {
         self.bounds.encode(out);
         self.payload.encode(out);
     }
-    fn decode(c: &mut Cursor<'_>) -> Result<Self> {
+    pub(super) fn decode(c: &mut Cursor<'_>) -> Result<Self> {
         let reference = Self {
             bounds: Bounds::decode(c)?,
             payload: PayloadReference::decode(c)?,
@@ -219,10 +215,10 @@ pub(super) struct Column {
     pub payload: PayloadReference,
     pub nulls: u32,
 }
-/// The location of one exact series key inside a part's key area.
+/// The location of one exact series key inside a leaf's key area.
 ///
 /// This reference is the descriptor's whole identity. The key bytes themselves are stored
-/// once per series in the part's key area, outside every bounded metadata page, so a key may
+/// once per series in the leaf's key area, outside every bounded metadata page, so a key may
 /// be longer than a page and the descriptor stays 12 bytes whatever its length is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct KeyRef {
@@ -281,10 +277,10 @@ impl KeyRef {
 /// could not suffer: its keys sat in a page whose stored bytes were already checksummed.
 pub(super) const KEY_CHECKSUM_BYTES: u64 = std::mem::size_of::<u64>() as u64;
 
-/// A part's key area: exact series keys stored back to back, outside every metadata page.
+/// A leaf's key area: exact series keys stored back to back, outside every metadata page.
 ///
 /// Keys are appended in block order and are never page-bounded, so their length is bounded by
-/// the part, not by `PAGE_LIMIT`. Every copy is followed by its checksum. Because blocks are
+/// the index, not by `PAGE_LIMIT`. Every copy is followed by its checksum. Because blocks are
 /// ordered by exact key, every block of one series is adjacent and shares a single copy of the
 /// key, which makes an equal [`KeyRef`] mean "the same exact series".
 #[derive(Debug, Clone, Copy)]
@@ -293,25 +289,15 @@ pub(super) struct KeyArea {
     pub end: u64,
 }
 
-/// The three regions of one part, in file order: column payloads, exact series keys, pages.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Areas {
-    /// End of the column payload area and start of the key area.
-    pub payload_end: u64,
-    /// The key area every block descriptor references.
-    pub keys: KeyArea,
-    /// Start of the metadata area, which is the end of the key area.
-    pub metadata_start: u64,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct Block {
+    pub part_id: u32,
     /// Coarse `(table_id, tsid)` prefix decoded from the block's exact key.
     ///
     /// It prunes candidates but never names the owner: `(table_id, tsid)` is a hash, so two
     /// distinct series can share it. The owner is the key [`Self::key`] references.
     pub id: MetricSeriesId,
-    /// Fixed-size reference to the block's exact key in the part's key area.
+    /// Fixed-size reference to the block's exact key in the leaf's key area.
     ///
     /// Equal references mean the same exact series; a different series that collides on the
     /// identifier always carries a different reference.
@@ -322,16 +308,16 @@ pub(super) struct Block {
     pub rows: u32,
     pub columns: Vec<Column>,
 }
-/// The ordering boundary retained between pages and parts, without column descriptors.
+/// The ordering boundary retained between pages and leaves, without column descriptors.
 ///
-/// A [`KeyRef`] is an offset inside one part's key area, so two references are comparable only
-/// when they belong to the same part; `part` carries that scope in the boundary itself so no
-/// caller can compare references across a part boundary by accident. Two parts hold unrelated
-/// key areas, which is why a series that spans parts is recognised by [`BlockOrder::continues`]
+/// A [`KeyRef`] is an offset inside one leaf's key area, so two references are comparable only
+/// when they belong to the same leaf; `leaf` carries that scope in the boundary itself so no
+/// caller can compare references across a leaf boundary by accident. Two leaves hold unrelated
+/// key areas, which is why a series that spans leaves is recognised by [`BlockOrder::continues`]
 /// on the exact key bytes instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockOrder {
-    part: u32,
+    leaf: u64,
     id: MetricSeriesId,
     key: KeyRef,
     min: i64,
@@ -340,32 +326,32 @@ pub(crate) struct BlockOrder {
 }
 
 impl BlockOrder {
-    /// The part this block belongs to.
-    pub(crate) fn part(&self) -> u32 {
-        self.part
+    /// The leaf this block belongs to.
+    pub(crate) fn leaf(&self) -> u64 {
+        self.leaf
     }
 
-    /// The coarse `(table_id, tsid)` prefix, which is ordered across parts as well.
+    /// The coarse `(table_id, tsid)` prefix, which is ordered across leaves as well.
     pub(crate) fn id(&self) -> MetricSeriesId {
         self.id
     }
 
-    /// The block's key reference, a location inside [`Self::part`]'s key area.
+    /// The block's key reference, a location inside [`Self::leaf`]'s key area.
     pub(crate) fn key(&self) -> KeyRef {
         self.key
     }
 
-    /// Checks the next block of the *same* part against this boundary.
+    /// Checks the next block of the *same* leaf against this boundary.
     ///
-    /// Ownership and ordering of a part are decided on the exact `(table_id, tsid)` and on the
-    /// key reference only: two blocks of one part that share one reference share one key copy,
+    /// Ownership and ordering of a leaf are decided on the exact `(table_id, tsid)` and on the
+    /// key reference only: two blocks of one leaf that share one reference share one key copy,
     /// so they are one exact series, while a different series always has its own copy, placed
     /// after the previous one and restarting the ordinal. Only descriptor fields are read, so a
     /// block this request prunes is never fetched and its key content is not validated.
     pub(crate) fn precedes(&self, next: &Self, adjacent: bool) -> Result<()> {
         require(
-            self.part == next.part,
-            "sample key references compared across parts",
+            self.leaf == next.leaf,
+            "sample key references compared across leaves",
         )?;
         require(self.id <= next.id, "unordered sample series keys")?;
         if next.key == self.key {
@@ -387,9 +373,9 @@ impl BlockOrder {
 
     /// Requires `next` to continue one exact series in time and ordinal.
     ///
-    /// Equal exact key bytes are what make two blocks the same series across a part boundary,
+    /// Equal exact key bytes are what make two blocks the same series across a leaf boundary,
     /// where their references belong to different key areas. A repeated key that restarts its
-    /// ordinal or goes back in time is a corrupt part, not a second series.
+    /// ordinal or goes back in time is a corrupt leaf, not a second series.
     pub(crate) fn continues(&self, next: &Self, adjacent: bool) -> Result<()> {
         require(
             self.max <= next.min && self.ordinal < next.ordinal,
@@ -406,10 +392,10 @@ impl BlockOrder {
 }
 
 impl Block {
-    /// The ordering boundary this block contributes, scoped to its part.
-    pub(crate) fn order(&self, part: u32) -> BlockOrder {
+    /// The ordering boundary this block contributes, scoped to its leaf.
+    pub(crate) fn order(&self, leaf: u64) -> BlockOrder {
         BlockOrder {
-            part,
+            leaf,
             id: self.id,
             key: self.key,
             min: self.min,
@@ -420,12 +406,12 @@ impl Block {
 
     /// Checks this block against the previous block of the same page.
     ///
-    /// A page never spans parts, so both references name one key area and are comparable; a block
-    /// in another part is compared through [`BlockOrder::continues`] and its exact key instead.
+    /// A page owns one key area, so both references name one key area and are comparable; a block
+    /// in another leaf is compared through [`BlockOrder::continues`] and its exact key instead.
     fn follows_in_page(&self, previous: &Self, adjacent: bool) -> Result<()> {
-        // One scope for both sides: a page belongs to exactly one part, and no reference built
+        // One scope for both sides: a page belongs to exactly one leaf, and no reference built
         // here outlives the page.
-        const PAGE_SCOPE: u32 = 0;
+        const PAGE_SCOPE: u64 = 0;
         previous
             .order(PAGE_SCOPE)
             .precedes(&self.order(PAGE_SCOPE), adjacent)
@@ -441,6 +427,7 @@ impl Block {
         }
     }
     pub fn encode(&self, out: &mut Vec<u8>) {
+        put_u32(out, self.part_id);
         put_u32(out, self.id.table_id);
         put_u64(out, self.id.tsid);
         self.key.encode(out);
@@ -456,12 +443,12 @@ impl Block {
             put_u32(out, column.nulls);
         }
     }
-    fn decode(
-        c: &mut Cursor<'_>,
-        manifest: &Manifest,
-        areas: Areas,
-        previous_end: &mut u64,
-    ) -> Result<Self> {
+    fn decode(c: &mut Cursor<'_>, manifest: &SamplesMetadata, keys: KeyArea) -> Result<Self> {
+        let part_id = c.u32()?;
+        let part = manifest
+            .files
+            .get(part_id as usize)
+            .ok_or_else(|| invalid("unknown samples payload part"))?;
         let id = MetricSeriesId {
             table_id: c.u32()?,
             tsid: c.u64()?,
@@ -471,7 +458,7 @@ impl Block {
         // reads it; the reader validates the reference and its `(table_id, tsid)` prefix
         // when it fetches the key for a block it actually selects.
         let key = KeyRef::decode(c)?;
-        key.validate(areas.keys)?;
+        key.validate(keys)?;
         let min = c.u64()? as i64;
         let max = c.u64()? as i64;
         let ordinal = c.u64()?;
@@ -487,6 +474,7 @@ impl Block {
         )?;
         let mut columns = Vec::with_capacity(count);
         let mut next_field = 0;
+        let mut previous_end = 0;
         for index in 0..count {
             let role = c.u32()?;
             let column_id = c.u32()?;
@@ -526,8 +514,8 @@ impl Block {
                 };
                 require(valid, "sample codec role mismatch")?;
             }
-            payload.validate(*previous_end, areas.payload_end, false)?;
-            *previous_end = payload.end()?;
+            payload.validate(previous_end, part.file_size, false)?;
+            previous_end = payload.end()?;
             columns.push(Column {
                 role,
                 id: column_id,
@@ -536,6 +524,7 @@ impl Block {
             });
         }
         Ok(Self {
+            part_id,
             id,
             key,
             min,
@@ -547,226 +536,76 @@ impl Block {
     }
 }
 #[derive(Debug)]
-pub(super) enum Page {
-    Leaf(Vec<Block>),
-    Internal(Vec<PageReference>),
-}
+pub(super) struct Page(pub Vec<Block>);
+
 impl Page {
     pub(crate) fn retained_size(&self) -> usize {
         std::mem::size_of::<Self>()
-            + match self {
-                Self::Internal(children) => {
-                    children.capacity() * std::mem::size_of::<PageReference>()
-                }
-                Self::Leaf(blocks) => {
-                    blocks.capacity() * std::mem::size_of::<Block>()
-                        // Each block owns its column descriptors on the heap. Its exact
-                        // series key is not retained: it stays in the part's key area.
-                        + blocks
-                            .iter()
-                            .map(|block| block.columns.capacity() * std::mem::size_of::<Column>())
-                            .sum::<usize>()
-                }
-            }
+            + self.0.capacity() * std::mem::size_of::<Block>()
+            + self
+                .0
+                .iter()
+                .map(|b| b.columns.capacity() * std::mem::size_of::<Column>())
+                .sum::<usize>()
     }
-
     pub fn bounds(&self) -> Result<Bounds> {
-        let bounds: Vec<_> = match self {
-            Self::Leaf(v) => v.iter().map(Block::bounds).collect(),
-            Self::Internal(v) => v.iter().map(|c| c.bounds).collect(),
-        };
-        let mut result = *bounds.first().ok_or_else(|| invalid("empty sample page"))?;
-        for bound in &bounds[1..] {
-            result.extend(*bound);
-        }
-        Ok(result)
+        self.0
+            .iter()
+            .map(Block::bounds)
+            .reduce(|mut bounds, next| {
+                bounds.extend(next);
+                bounds
+            })
+            .ok_or_else(|| invalid("empty samples leaf"))
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        match self {
-            Self::Leaf(v) => {
-                put_u32(&mut out, 0);
-                put_u64(&mut out, v.len() as u64);
-                for block in v {
-                    block.encode(&mut out);
-                }
-            }
-            Self::Internal(v) => {
-                put_u32(&mut out, 1);
-                put_u64(&mut out, v.len() as u64);
-                for child in v {
-                    child.encode(&mut out);
-                }
-            }
+        put_u32(&mut out, 0);
+        put_u64(&mut out, self.0.len() as u64);
+        for block in &self.0 {
+            block.encode(&mut out);
         }
         out
     }
-    /// Decodes one metadata page.
-    ///
-    /// `areas` bounds what the page may reference: column payloads end where the key area
-    /// starts, keys live in their own area, and the page area starts at `areas.metadata_start`
-    /// so every child page must lie after it and before its parent.
     pub fn decode(
         bytes: &[u8],
         reference: &PageReference,
-        depth: u32,
-        areas: Areas,
-        manifest: &Manifest,
+        keys: KeyArea,
+        manifest: &SamplesMetadata,
     ) -> Result<Self> {
-        require(bytes.len() <= PAGE_LIMIT, "sample page exceeds limit")?;
+        require(bytes.len() <= PAGE_LIMIT, "sample leaf exceeds limit")?;
         let mut c = Cursor::new(bytes);
-        let kind = c.u32()?;
+        require(c.u32()? == 0, "unknown samples leaf encoding")?;
         let count = c.length()?;
-        require(count > 0, "empty sample page")?;
-        let page = match (kind, depth) {
-            (0, 1) => {
+        require(
+            count > 0 && count <= c.remaining() / MIN_BLOCK_BYTES,
+            "invalid sample leaf block count",
+        )?;
+        let mut blocks: Vec<Block> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let block = Block::decode(&mut c, manifest, keys)?;
+            if let Some(previous) = blocks.last() {
+                block.follows_in_page(previous, true)?;
                 require(
-                    count <= c.remaining() / MIN_BLOCK_BYTES,
-                    "sample block count exceeds page",
+                    previous.part_id <= block.part_id,
+                    "unordered sample part references",
                 )?;
-                let mut blocks: Vec<Block> = Vec::with_capacity(count);
-                let mut end = HEADER_SIZE;
-                for _ in 0..count {
-                    let block = Block::decode(&mut c, manifest, areas, &mut end)?;
-                    if let Some(previous) = blocks.last() {
-                        block.follows_in_page(previous, true)?;
-                    }
-                    blocks.push(block);
+                if previous.part_id == block.part_id {
+                    require(
+                        previous.columns.last().unwrap().payload.end()?
+                            <= block.columns[0].payload.offset,
+                        "overlapping sample blocks",
+                    )?;
                 }
-                Self::Leaf(blocks)
             }
-            (1, 2) => {
-                require(
-                    count <= ROOT_CAPACITY && count <= c.remaining() / 72,
-                    "sample root exceeds capacity",
-                )?;
-                let mut children: Vec<PageReference> = Vec::with_capacity(count);
-                let mut end = areas.metadata_start;
-                for _ in 0..count {
-                    let child = PageReference::decode(&mut c)?;
-                    child
-                        .payload
-                        .validate(end, reference.payload.offset, true)?;
-                    end = child.payload.end()?;
-                    if let Some(previous) = children.last() {
-                        require(
-                            previous.bounds.last <= child.bounds.first,
-                            "unordered sample child ranges",
-                        )?;
-                    }
-                    children.push(child);
-                }
-                Self::Internal(children)
-            }
-            _ => return Err(unsupported("samples metadata kind/depth")),
-        };
+            blocks.push(block);
+        }
         c.end()?;
+        let page = Self(blocks);
         require(
             page.bounds()? == reference.bounds,
-            "samples page bounds disagree with parent",
+            "sample leaf bounds disagree with directory",
         )?;
         Ok(page)
-    }
-}
-pub(super) fn header() -> Vec<u8> {
-    let mut out = MAGIC.to_vec();
-    put_u32(&mut out, VERSION);
-    put_u32(&mut out, 0);
-    out
-}
-pub(super) fn validate_header(bytes: &[u8]) -> Result<()> {
-    let mut c = Cursor::new(bytes);
-    require(c.take(8)? == MAGIC, "sample header magic")?;
-    if c.u32()? != VERSION {
-        return Err(unsupported("samples file version"));
-    }
-    require(c.u32()? == 0, "nonzero sample header reserved field")?;
-    c.end()
-}
-pub(super) struct Trailer {
-    pub root: PageReference,
-    pub depth: u32,
-    pub file_length: u64,
-    /// End of the payload area, which is where the key area starts.
-    pub payload_end: u64,
-    /// End of the key area, which is where the metadata pages start.
-    pub key_end: u64,
-}
-impl Trailer {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        self.root.encode(&mut out);
-        put_u32(&mut out, self.depth);
-        put_u32(&mut out, VERSION);
-        put_u64(&mut out, self.file_length);
-        put_u64(&mut out, self.payload_end);
-        put_u64(&mut out, self.key_end);
-        out.extend(MAGIC);
-        let sum = codec::checksum(&out);
-        put_u64(&mut out, sum);
-        out
-    }
-    pub fn decode(bytes: &[u8], file_length: u64) -> Result<Self> {
-        require(
-            bytes.len() == TRAILER_SIZE as usize,
-            "truncated sample trailer",
-        )?;
-        let mut c = Cursor::new(bytes);
-        let root = PageReference::decode(&mut c)?;
-        let depth = c.u32()?;
-        let version = c.u32()?;
-        if !(1..=2).contains(&depth) || version != VERSION {
-            return Err(unsupported("sample trailer version/depth"));
-        }
-        let length = c.u64()?;
-        let payload_end = c.u64()?;
-        let key_end = c.u64()?;
-        require(
-            // The checksum covers everything before it, magic included: the trailer body plus
-            // the 8-byte magic, which is `TRAILER_SIZE - 8` and not a frozen constant.
-            c.take(8)? == MAGIC
-                && c.u64()?
-                    == codec::checksum(
-                        &bytes[..TRAILER_SIZE as usize - std::mem::size_of::<u64>()],
-                    ),
-            "sample trailer checksum/magic",
-        )?;
-        require(
-            length == file_length
-                && payload_end >= HEADER_SIZE
-                && key_end >= payload_end
-                && file_length >= HEADER_SIZE + TRAILER_SIZE,
-            "invalid sample framing",
-        )?;
-        root.payload
-            .validate(key_end, file_length - TRAILER_SIZE, true)?;
-        require(
-            root.payload.end()? == file_length - TRAILER_SIZE,
-            "sample root must end at trailer",
-        )?;
-        Ok(Self {
-            root,
-            depth,
-            file_length,
-            payload_end,
-            key_end,
-        })
-    }
-
-    /// The key area every block descriptor in this part references.
-    pub fn keys(&self) -> KeyArea {
-        KeyArea {
-            start: self.payload_end,
-            end: self.key_end,
-        }
-    }
-
-    /// The part's three regions, as page decoding needs them.
-    pub fn areas(&self) -> Areas {
-        Areas {
-            payload_end: self.payload_end,
-            keys: self.keys(),
-            metadata_start: self.key_end,
-        }
     }
 }

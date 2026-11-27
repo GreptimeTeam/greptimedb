@@ -908,6 +908,17 @@ async fn test_narthex_copy_and_remap(
                 .await
                 .unwrap();
             assert_eq!(actual.content_length(), object.file_size);
+            if !remap && object.path.ends_with("/samples.idx") {
+                let store = destination.access_layer.object_store();
+                let source_path = format!(
+                    "{}samples.idx",
+                    crate::sst::location::narthex_file_dir(&source_dir, meta.file_id)
+                );
+                assert_eq!(
+                    store.read(&source_path).await.unwrap().to_bytes(),
+                    store.read(&object.path).await.unwrap().to_bytes()
+                );
+            }
         }
     }
     // Physical copies survive complete deletion of their source. Remaps retain
@@ -1219,7 +1230,7 @@ async fn test_region_storage_format_admission(
 
     let foreign_format = if source_format == "narthex" {
         FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
-            manifest_size: 1,
+            index_size: 1,
             parts: Default::default(),
         }))
     } else {

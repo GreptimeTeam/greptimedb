@@ -416,6 +416,23 @@ async fn prepare_narthex_copy(
     let source_objects = source
         .narthex_objects(&layer.build_region_dir(source.region_id))
         .ok_or_else(|| invalid("expected Narthex copy source"))?;
+    if matches!(&source.format, FileFormat::NarthexSamples(_)) {
+        let copied = remap_copied_file_meta(source, region.region_id);
+        let targets = copied
+            .narthex_objects(&layer.build_region_dir(region.region_id))
+            .ok_or_else(|| invalid("missing Narthex samples inventory"))?;
+        let descriptors = source_objects
+            .into_iter()
+            .zip(targets)
+            .map(|(source, target)| FileDescriptor::NarthexObject {
+                source: source.path,
+                target: target.path,
+                size: source.file_size,
+                manifest: None,
+            })
+            .collect();
+        return Ok((copied, descriptors));
+    }
     let (source_manifest, parts) = source_objects
         .split_last()
         .expect("Narthex inventory includes manifest");
@@ -440,9 +457,10 @@ async fn prepare_narthex_copy(
     let mut copied = remap_copied_file_meta(source, region.region_id);
     let manifest_size = bytes.len() as u64;
     match &mut copied.format {
-        FileFormat::NarthexSamples(meta) => meta.manifest_size = manifest_size,
+        FileFormat::NarthexSamples(_) | FileFormat::Parquet => {
+            return Err(invalid("expected Narthex series copy source"));
+        }
         FileFormat::NarthexSeriesIndex(meta) => meta.manifest_size = manifest_size,
-        FileFormat::Parquet => return Err(invalid("expected Narthex copy source")),
     }
     let targets = copied
         .narthex_objects(&target_region_dir)

@@ -99,6 +99,7 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
   `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file
   that carries extension indexes (`worker/handle_rebuild_index.rs::needs_background_indexes`).
+- **Narthex samples**: the shared `samples.idx` owns exact keys, descriptors and the part inventory. Payload parts roll independently. Keep both catalog and authoritative SST paths aligned with [the wire format](../../docs/formats/mito-samples.md).
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may

@@ -16,6 +16,7 @@
 
 pub(crate) mod bulk;
 mod codec;
+mod index;
 mod metadata;
 pub(crate) mod reader;
 #[cfg(test)]
@@ -37,7 +38,6 @@ use crate::error::Result;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::columnar::{invalid, require, unsupported};
 use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
-use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
 
 /// Reject unsupported narthex schemas before accepting mutations that cannot flush.
@@ -66,7 +66,6 @@ pub(crate) fn validate_narthex_metadata(
     Ok(())
 }
 
-const VERSION: u32 = 1;
 const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 8192;
 const MAX_FIELDS: usize = 1024;
@@ -81,18 +80,14 @@ const PRIMARY_KEY: &str = store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 pub(crate) struct ColumnarSamplesFormat {
     pub(crate) block_rows: usize,
     pub(crate) part_bytes: u64,
-    pub(crate) metadata_bytes: usize,
     pub(crate) page_bytes: usize,
-    pub(crate) root_capacity: usize,
 }
 impl Default for ColumnarSamplesFormat {
     fn default() -> Self {
         Self {
             block_rows: MAX_ROWS,
             part_bytes: 512 * 1024 * 1024,
-            metadata_bytes: 8 * 1024 * 1024,
             page_bytes: metadata::PAGE_LIMIT,
-            root_capacity: metadata::ROOT_CAPACITY,
         }
     }
 }
@@ -178,26 +173,20 @@ struct Part {
     min_timestamp: i64,
     max_timestamp: i64,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Manifest {
-    /// Resolved from the owning file, not persisted in the codec manifest.
-    #[serde(skip)]
-    prefix: Option<String>,
-    format: ArtifactFormat,
-    version: u32,
-    /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
-    identity_encoding: IdentityEncoding,
-    region_id: u64,
+/// Validated in-memory description of a samples index and its payloads.
+#[derive(Debug, Clone)]
+struct SamplesMetadata {
+    prefix: String,
     source_file_id: FileId,
     generation: FileId,
     timestamp: TimestampColumn,
     fields: Vec<ValueColumn>,
     files: Vec<Part>,
 }
-impl Manifest {
+impl SamplesMetadata {
     fn retained_size(&self) -> usize {
         std::mem::size_of::<Self>()
-            + self.prefix.as_ref().map_or(0, String::capacity)
+            + self.prefix.capacity()
             + self.timestamp.name.capacity()
             + self.files.capacity() * std::mem::size_of::<Part>()
             + self.fields.capacity() * std::mem::size_of::<ValueColumn>()
@@ -208,16 +197,11 @@ impl Manifest {
                 .sum::<usize>()
     }
 
-    fn prefix(&self) -> String {
-        self.prefix
-            .clone()
-            .unwrap_or_else(|| samples_prefix(self.region_id, self.generation))
-    }
     fn path(&self) -> String {
-        format!("{}manifest.json", self.prefix())
+        format!("{}samples.idx", self.prefix)
     }
     fn part_path(&self, id: u32) -> String {
-        format!("{}part-{id}.samples", self.prefix())
+        format!("{}part-{id}.samples", self.prefix)
     }
     fn validate_schema(&self) -> Result<()> {
         require(

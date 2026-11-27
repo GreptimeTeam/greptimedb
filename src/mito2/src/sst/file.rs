@@ -269,8 +269,8 @@ pub struct NarthexPartMeta {
 /// Common bounds, statistics and sequence semantics remain in [`FileMeta`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarthexSamplesMeta {
-    /// Encoded size of manifest.json.
-    pub manifest_size: u64,
+    /// Encoded size of the shared samples.idx.
+    pub index_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
 }
@@ -593,8 +593,12 @@ impl FileMeta {
             _ => {
                 let region_dir =
                     location::region_dir_from_table_dir(table_dir, self.region_id, path_type);
+                let descriptor = match self.format {
+                    FileFormat::NarthexSamples(_) => "samples.idx",
+                    _ => "manifest.json",
+                };
                 format!(
-                    "{}manifest.json",
+                    "{}{descriptor}",
                     location::narthex_file_dir(&region_dir, self.file_id)
                 )
             }
@@ -607,10 +611,14 @@ impl FileMeta {
         region_dir: &str,
     ) -> Option<Vec<crate::series_index::artifact::ArtifactObject>> {
         use crate::series_index::artifact::ArtifactObject;
-        let (manifest, parts, extension) = match &self.format {
+        let (manifest, parts, extension, descriptor) = match &self.format {
             FileFormat::Parquet => return None,
-            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts, "samples"),
-            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts, "series"),
+            FileFormat::NarthexSamples(meta) => {
+                (meta.index_size, &meta.parts, "samples", "samples.idx")
+            }
+            FileFormat::NarthexSeriesIndex(meta) => {
+                (meta.manifest_size, &meta.parts, "series", "manifest.json")
+            }
         };
         let dir = location::narthex_file_dir(region_dir, self.file_id);
         let mut objects = Vec::with_capacity(parts.len() + 1);
@@ -621,7 +629,7 @@ impl FileMeta {
             });
         }
         objects.push(ArtifactObject {
-            path: format!("{dir}manifest.json"),
+            path: format!("{dir}{descriptor}"),
             file_size: manifest,
         });
         Some(objects)
@@ -631,7 +639,7 @@ impl FileMeta {
     pub(crate) fn valid_inventory(&self) -> bool {
         let (manifest, parts) = match &self.format {
             FileFormat::Parquet => return true,
-            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts),
+            FileFormat::NarthexSamples(meta) => (meta.index_size, &meta.parts),
             FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts),
         };
         !parts.is_empty()
@@ -1518,7 +1526,7 @@ mod tests {
     #[test]
     fn test_narthex_part_paths_follow_inventory_order() {
         let samples = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
-            manifest_size: 5,
+            index_size: 5,
             parts: smallvec::smallvec![
                 NarthexPartMeta { file_size: 11 },
                 NarthexPartMeta { file_size: 7 }
@@ -1536,7 +1544,10 @@ mod tests {
                 NarthexPartMeta { file_size: 7 }
             ],
         }));
-        for (format, extension) in [(samples, "samples"), (series, "series")] {
+        for (format, extension, descriptor) in [
+            (samples, "samples", "samples.idx"),
+            (series, "series", "manifest.json"),
+        ] {
             let meta = FileMeta {
                 file_size: 23,
                 format,
@@ -1554,7 +1565,7 @@ mod tests {
                 [
                     (format!("{dir}part-0.{extension}"), 11),
                     (format!("{dir}part-1.{extension}"), 7),
-                    (format!("{dir}manifest.json"), 5),
+                    (format!("{dir}{descriptor}"), 5),
                 ]
             );
         }
