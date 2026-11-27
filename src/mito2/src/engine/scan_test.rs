@@ -60,7 +60,7 @@ use store_api::region_request::{
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{
-    FileId, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+    CursorShard, FileId, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 
 use crate::config::MitoConfig;
@@ -1105,9 +1105,12 @@ async fn test_flush_aligns_different_json2_layouts() -> WhateverResult<()> {
     Ok(())
 }
 
+/// A cursor below the flushed frontier is rejected by the **flushed-frontier fence**, not by
+/// an edit boundary: `last_invalid_seq` is gone, so the `min_readable_seq` the error reports
+/// is `flushed_sequence`. An incremental read at the frontier serves the rows above it.
 #[tokio::test]
-async fn test_incremental_query_stale_error() {
-    let mut env = TestEnv::with_prefix("test_incremental_query_stale_error").await;
+async fn test_incremental_read_below_flushed_frontier_is_rejected_by_the_frontier() {
+    let mut env = TestEnv::with_prefix("test_incremental_read_below_flushed_frontier").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -1126,6 +1129,14 @@ async fn test_incremental_query_stale_error() {
     test_util::put_rows(&engine, region_id, rows).await;
     test_util::flush_region(&engine, region_id, None).await;
 
+    // A cursor at 0 is below the flushed frontier (3), so the frontier fence rejects it and
+    // names the frontier as the minimum readable sequence.
+    let flushed = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .flushed_sequence;
+    assert_eq!(3, flushed);
     let err = engine
         .scanner(
             region_id,
@@ -1136,40 +1147,32 @@ async fn test_incremental_query_stale_error() {
         )
         .await
         .err()
-        .expect("expect stale incremental error");
-
-    let min_readable_seq = match &err {
-        Error::IncrementalQueryStale {
-            region_id: err_region_id,
-            given_seq,
-            min_readable_seq,
-            ..
-        } => {
-            assert_eq!(*err_region_id, region_id);
-            assert_eq!(*given_seq, 0);
-            assert!(*min_readable_seq > 0);
-            *min_readable_seq
-        }
-        _ => panic!("unexpected err: {err}"),
-    };
+        .expect("a cursor below the flushed frontier is rejected by the frontier fence");
+    assert!(
+        matches!(
+            err,
+            Error::IncrementalQueryStale {
+                given_seq: 0,
+                min_readable_seq,
+                ..
+            } if min_readable_seq == flushed
+        ),
+        "the fence reports the flushed frontier, not an edit boundary: {err}"
+    );
     assert_eq!(StatusCode::RequestOutdated, err.status_code());
-    let err_msg = err.to_string();
-    assert!(err_msg.contains("STALE_CURSOR"));
-    assert!(err_msg.contains(&region_id.to_string()));
-    assert!(err_msg.contains("given_seq: 0"));
-    assert!(err_msg.contains(&format!("min_readable_seq: {min_readable_seq}")));
 
-    let incremental_rows = Rows {
+    let memtable_only_rows = Rows {
         schema: column_schemas,
         rows: test_util::build_rows(3, 5),
     };
-    test_util::put_rows(&engine, region_id, incremental_rows).await;
+    test_util::put_rows(&engine, region_id, memtable_only_rows).await;
 
+    // An incremental read above the flushed frontier serves exactly the rows above it.
     let scanner = engine
         .scanner(
             region_id,
             ScanRequest {
-                memtable_min_sequence: Some(min_readable_seq),
+                memtable_min_sequence: Some(flushed),
                 skip_sst_files: true,
                 ..Default::default()
             },
@@ -1245,6 +1248,165 @@ async fn test_full_snapshot_upper_bound_returns_outdated_after_late_flush() {
     assert!(err_msg.contains("STALE_SNAPSHOT_FENCE"));
     assert!(err_msg.contains(&region_id.to_string()));
     assert!(err_msg.contains(&format!("given_seq: {snapshot_upper_bound}")));
+}
+
+/// A scan states the creators of the files another region left in its file list: a read that
+/// prunes every file away still says which regions' rows the region may hold, and says the empty
+/// set when every visible file is its own.
+#[tokio::test]
+async fn test_snapshot_identity_states_visible_foreign_file_creators() {
+    let mut env = TestEnv::with_prefix("test_snapshot_identity_file_creators").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let foreign_creator = RegionId::new(1, 2);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Every visible file was created by the region itself: a positive "nothing foreign" answer.
+    let own = engine
+        .handle_query(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    assert_eq!(Some(Vec::new()), own.visible_foreign_file_creators);
+
+    // Publish a file another region created into this region's file list, which is what a
+    // repartition leaves behind.
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    region_id: foreign_creator,
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    level: 0,
+                    file_size: 0,
+                    max_row_group_uncompressed_size: 0,
+                    available_indexes: Default::default(),
+                    indexes: vec![],
+                    index_file_size: 0,
+                    index_version: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
+                    sequence: None,
+                    partition_expr: None,
+                    num_series: 0,
+                    preserve_row_sequence: true,
+                    ..Default::default()
+                }],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // A read whose time range prunes everything still states the creator: the file list is read
+    // from the version in memory, before any pruning.
+    let pruned = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                filters: vec![col("ts").gt(lit(Timestamp::new_millisecond(i64::MAX / 2).value()))],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    assert_eq!(
+        Some(vec![foreign_creator.as_u64()]),
+        pruned.visible_foreign_file_creators
+    );
+}
+
+/// A scan states the partition expression of the **one** version whose `committed_sequence` it
+/// bound as its upper bound, in the canonical form a flow cursor entry is keyed by - and states
+/// the region's whole domain as `None` when that version has no expression.
+#[tokio::test]
+async fn test_snapshot_identity_states_the_partition_expr_of_the_bound_version() {
+    let mut env = TestEnv::with_prefix("test_snapshot_identity_partition_expr").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Value-first shape: the identity a cursor entry keys must be canonicalized before it is
+    // stated, or the same slice would be keyed two ways.
+    let expr_json =
+        r#"{"Expr":{"lhs":{"Value":{"String":"k5"}},"op":"Gt","rhs":{"Column":"tag_0"}}}"#;
+    let partitioned = RegionId::new(1, 1);
+    let unpartitioned = RegionId::new(1, 2);
+    for (region_id, request) in [
+        (
+            partitioned,
+            CreateRequestBuilder::new()
+                .partition_expr_json(Some(expr_json.to_string()))
+                .build(),
+        ),
+        (unpartitioned, CreateRequestBuilder::new().build()),
+    ] {
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+    }
+
+    let expected_snapshot = engine.get_committed_sequence(partitioned).await.unwrap();
+    let scanner = engine
+        .handle_query(
+            partitioned,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let identity = scanner
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    let expected_identity = partition::expr::PartitionExpr::from_json_str(expr_json)
+        .unwrap()
+        .unwrap()
+        .as_json_str()
+        .unwrap();
+    assert_eq!(Some(expected_snapshot), identity.bound_sequence);
+    assert_eq!(Some(expected_identity), identity.partition_expr);
+
+    // One version, both fields: the sequence the trait reports is the identity's bound.
+    assert_eq!(scanner.snapshot_sequence(), identity.bound_sequence);
+
+    let whole_domain = engine
+        .handle_query(unpartitioned, ScanRequest::default())
+        .await
+        .unwrap()
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    assert_eq!(None, whole_domain.partition_expr);
 }
 
 #[tokio::test]
@@ -3182,7 +3344,12 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
         committed_sequence: None,
         ..Default::default()
     };
-    engine.edit_region(region_id, edit).await.unwrap();
+    // Absorb the file through a flush-shaped edit, which is how a legacy unmarked
+    // SST appears.
+    let region = engine.get_region(region_id).unwrap();
+    region
+        .version_control
+        .apply_edit(Some(edit), &[], region.file_purger.clone());
 
     let err = engine
         .scanner(
@@ -3206,12 +3373,12 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
 
 /// Region edit assigns a target-local barrier to an imported foreign SST, so
 /// exact sequence-range capability can admit it without trusting its source
-/// region marker.
+/// region marker: below the barrier the edit layer cannot disprove that the rows
+/// were renumbered, so the read stays unsupported; at the barrier the file is
+/// provably consumed.
 #[tokio::test]
-async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
-    let mut env =
-        TestEnv::with_prefix("test_exact_sequence_range_accepts_foreign_file_with_target_barrier")
-            .await;
+async fn test_exact_sequence_range_gates_foreign_file_with_barrier() {
+    let mut env = TestEnv::with_prefix("test_exact_sequence_range_gates_foreign_file").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -3287,18 +3454,44 @@ async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
         "region edit must assign a target-local barrier"
     );
 
+    // The edit allocated `last_sequence + 1` = 4 as the file barrier: a cursor at 3
+    // cannot prove the adopted rows are consumed.
+    let boundary = foreign_file
+        .meta_ref()
+        .sequence
+        .map(|sequence| sequence.get())
+        .expect("region edit assigned the barrier");
+    assert_eq!(4, boundary);
     engine
         .scanner(
             region_id,
             ScanRequest {
-                memtable_min_sequence: Some(3),
-                memtable_max_sequence: Some(4),
+                memtable_min_sequence: Some(boundary - 1),
+                memtable_max_sequence: Some(boundary),
                 exact_sequence_range: true,
                 ..Default::default()
             },
         )
         .await
-        .expect("foreign file with target barrier should be exact-capable");
+        .expect("a cursor below the file barrier is served by row-level filtering");
+    // The stale-cursor rejection went away with `last_invalid_seq`: the adopted file's own
+    // barrier keeps the exact range available, so the rows are filtered row by row instead
+    // of the whole read being refused.
+
+    // At the boundary the foreign file is provably fully consumed, so it cannot
+    // break the exact capability even though its source marker is foreign.
+    engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(boundary),
+                memtable_max_sequence: Some(boundary + 1),
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("foreign file with target barrier should be exact-capable at the boundary");
 }
 
 /// Exact sequence-range reads only require preserved row sequences in the
@@ -4524,10 +4717,22 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
             "unexpected error: {err:?}"
         );
     } else {
+        // No flush after the edit, so the flushed frontier cannot fire. The
+        // edit-boundary rejection went away with `last_invalid_seq`; what is left
+        // is the exact-sequence rule: the adopted files carry no trusted per-row
+        // numbering, so the range stays unproven and the read fails closed.
         assert!(
-            matches!(err, Error::SequenceRangeUnsupported { .. }),
+            matches!(
+                err,
+                Error::SequenceRangeUnsupported {
+                    min_seq: 6,
+                    max_seq: 7,
+                    ..
+                }
+            ),
             "unexpected error: {err:?}"
         );
+        assert_eq!(StatusCode::Unsupported, err.status_code());
     }
 
     // Once C reaches the barrier the untrusted file is skipped, so exact
@@ -5250,6 +5455,131 @@ async fn test_range_cache_key_separates_sequence_ranges() {
     );
 }
 
+/// A range result is only reusable for a read whose **per-piece** selection is the same.
+///
+/// A physical-sequence read decides each row of an adopted file by the creator cursor slice
+/// that selects it, and bounds the file by `(least advanced cursor, least until]`. Neither is
+/// stated by the file, so two reads of the same file under the same region-level `(C, H]`
+/// deliver different rows once a piece cursor or an `until` advances; a cache key that only
+/// records `(C, H]` replays the first read's rows to all of them.
+///
+/// The counterexample this pins: `(cursor 0, until 6]` caches the rows 1..6, `(cursor 3,
+/// until 8]` requires the rows 4..8, and `(cursor 0, until 2]` requires the rows 1..2 and
+/// nothing above its `until`. Replaying the first result delivers the rows 1..6 to all three:
+/// rows an advanced piece already consumed, rows the new range requires that are missing, and
+/// rows above the new `until`.
+///
+/// The `LastRow` selector is what puts this read on the sequential scan, the only path that
+/// fills the range result cache: without it an append-only region reads through the unordered
+/// scan, which bypasses the cache entirely.
+#[tokio::test]
+async fn test_range_cache_never_replays_a_range_read_under_other_creator_cursors() {
+    let mut env = TestEnv::with_prefix("test_range_cache_creator_cursor_slices").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            // The flat format is the one the range result cache covers.
+            default_flat_format: true,
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // Eight rows numbered 1..8, one per series, all of them in one file of the creator. The
+    // holder adopts that file as a foreign file.
+    let create = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(source, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    for series in 0..8_usize {
+        rows.extend(test_util::build_rows_for_key(
+            &series.to_string(),
+            series,
+            series + 1,
+            0,
+        ));
+    }
+    test_util::put_rows(&engine, source, Rows { schema, rows }).await;
+    test_util::flush_region(&engine, source, None).await;
+    let source_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("flushed file");
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 20, true, None);
+
+    // The `(cursor, until]` of the one piece the rows of the adopted file belong to. The
+    // region-level `(0, 20]` is the same in every read, so only the slice separates them; the
+    // tag filter is what makes the range eligible for the cache.
+    let request = |cursor: u64, until: u64| {
+        let mut request = creator_cursor_scan(
+            source,
+            vec![partition_str_slice_cursor("0", "9", cursor).with_until(until)],
+            0,
+            20,
+        );
+        request.filters = vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("0".to_string()))))];
+        request.series_row_selector = Some(TimeSeriesRowSelector::LastRow { after_merge: false });
+        request
+    };
+
+    let first = scan_partition_rows_and_foreign_creators(&engine, target, request(0, 6))
+        .await
+        .0;
+    assert_eq!(
+        vec![0, 1000, 2000, 3000, 4000, 5000],
+        first,
+        "the first read delivers the rows above its cursor and up to its `until`"
+    );
+
+    // Wait for the completed range result: the same read then replays it, which it reports by
+    // saying that the files its rows came from are not readable from that call.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (rows, creators) =
+                scan_partition_rows_and_foreign_creators(&engine, target, request(0, 6)).await;
+            assert_eq!(first, rows, "a replay delivers the rows it replayed");
+            if creators.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the range result cache did not replay the range within the timeout");
+
+    // An advanced piece cursor with a higher `until`: the rows 4..8 are what this range
+    // requires, and the rows 1..3 are already consumed.
+    let advanced = scan_partition_rows_and_foreign_creators(&engine, target, request(3, 8))
+        .await
+        .0;
+    assert_eq!(
+        vec![3000, 4000, 5000, 6000, 7000],
+        advanced,
+        "a read under an advanced piece cursor must not replay the rows of the earlier read: \
+         only its own `(cursor, until]` decides"
+    );
+
+    // A narrower `until`: no row above it may be delivered, whatever an earlier read of the
+    // same files cached.
+    let bounded = scan_partition_rows_and_foreign_creators(&engine, target, request(0, 2))
+        .await
+        .0;
+    assert_eq!(
+        vec![0, 1000],
+        bounded,
+        "a range result must never deliver a row above the `until` of the read it serves"
+    );
+}
+
 #[tokio::test]
 async fn test_single_source_ranges_preserve_batches() {
     for (file_count, row_group_size) in [(1, 64), (1, 16), (2, 16)] {
@@ -5512,6 +5842,2666 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
             (0..batch.num_rows()).map(move |row| fields.value(row))
         })
         .collect()
+}
+
+/// A read that may cross an invalid boundary virtualizes every selected file's rows at
+/// the file's own admission barrier, even for a local file whose
+/// `preserve_row_sequence` marker is off: such a read must not depend on the file's
+/// row-level sequences being trusted.
+#[tokio::test]
+async fn test_read_across_invalid_boundary_forces_sequence_override() {
+    let mut env =
+        TestEnv::with_prefix("test_read_across_invalid_boundary_forces_sequence_override").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Re-admit the same file id unmarked: the edit clears `preserve_row_sequence`
+    // and moves the barrier to the next sequence.
+    let region = engine.get_region(region_id).unwrap();
+    let file_meta = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("flushed SST")
+        .meta_ref()
+        .clone();
+    let mut readmit = file_meta;
+    readmit.preserve_row_sequence = false;
+    readmit.sequence = None;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![readmit],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    let file_barrier = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("admitted SST")
+        .meta_ref()
+        .sequence
+        .expect("edit assigns a barrier")
+        .get();
+    assert!(file_barrier > 0);
+    assert!(
+        !version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .all(|file| file.meta_ref().preserve_row_sequence)
+    );
+
+    // Discovery reads the file anyway and every row's sequence is the barrier.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(file_barrier - 1),
+                exact_sequence_range: true,
+                read_across_invalid_boundary: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a read across an invalid boundary must admit an unmarked file");
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "a read across an invalid boundary reads every row of the unmarked file instead of failing closed"
+    );
+}
+
+/// A read that may cross an invalid boundary must report an empty candidate set instead
+/// of silently reporting "no window"; the caller decides whether to accept it or advance
+/// the cursor instead.
+#[tokio::test]
+async fn test_read_across_invalid_boundary_reports_empty_candidates() {
+    let mut env =
+        TestEnv::with_prefix("test_read_across_invalid_boundary_reports_empty_candidates").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(0),
+                exact_sequence_range: true,
+                read_across_invalid_boundary: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("an empty candidate set must be reported");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.starts_with("exact sequence range unavailable:"),
+        "unexpected err msg: {msg}"
+    );
+    assert!(msg.contains("no candidate file above the cursor"), "{msg}");
+}
+
+/// A discovery read (`read_across_invalid_boundary`) applies no lower sequence bound to
+/// memtables, while an ordinary incremental read keeps its own.
+///
+/// This is the shape a merge of regions produces: the merged region admits rows that the
+/// old cursor cannot explain (staging writes that the old partition expression does not
+/// select, or rows whose numbers the region can no longer vouch for). A lower bound of
+/// `C` would hide exactly those rows, so their windows would never be reported and a
+/// repair would advance the cursor past them. Discovery therefore reads them; the
+/// ordinary delta keeps hiding everything at or below its cursor.
+#[tokio::test]
+async fn test_read_across_invalid_boundary_reads_memtable_rows_below_cursor() {
+    let mut env = TestEnv::with_prefix("test_read_across_invalid_boundary_memtable").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Rows 0..3 are flushed (their numbers are 1..3), rows 3..5 stay in the memtable
+    // with the numbers 4 and 5.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(3, 5),
+        },
+    )
+    .await;
+
+    // The cursor is at 5: every memtable row is at or below it.
+    let ordinary = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(5),
+                skip_sst_files: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(ordinary.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        0,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "an ordinary delta must not deliver rows its cursor already consumed"
+    );
+
+    // The same cursor as a discovery read: the memtable rows are exactly the rows whose
+    // windows the cursor can no longer explain, so they must be visible.
+    let discovery = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: Some(5),
+                skip_sst_files: true,
+                read_across_invalid_boundary: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(discovery.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![("3", 3.0), ("4", 4.0)],
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let tags = batch.column_by_name("tag_0").unwrap().as_string::<i32>();
+                let fields = batch
+                    .column_by_name("field_0")
+                    .unwrap()
+                    .as_primitive::<Float64Type>();
+                (0..batch.num_rows())
+                    .map(|row| (tags.value(row), fields.value(row)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        "discovery must see the rows at or below the cursor, or their windows are never reported"
+    );
+}
+
+/// A fenced repair DML has no incremental lower bound and no exact sequence-range
+/// mode, so `H` bounds memtables only. If `H` is behind the flushed frontier, a
+/// flush that landed after `H` was frozen would be aggregated into the repaired
+/// window and counted again by the next round; the SST upper-bound fence must stay
+/// in force.
+#[tokio::test]
+async fn test_fenced_repair_rejects_upper_bound_behind_flushed_frontier() {
+    let mut env =
+        TestEnv::with_prefix("test_fenced_repair_rejects_upper_bound_behind_flushed").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // A high watermark frozen before the write, then the write is flushed.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let frozen_high = 2;
+    let flushed_sequence = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .flushed_sequence;
+    assert!(flushed_sequence > frozen_high);
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_max_sequence: Some(frozen_high),
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a fenced repair behind the flushed frontier must be rejected");
+    assert!(
+        matches!(
+            err,
+            Error::SnapshotFenceStale {
+                given_seq,
+                min_enforceable_seq,
+                ..
+            } if given_seq == frozen_high && min_enforceable_seq == flushed_sequence
+        ),
+        "unexpected err: {err}"
+    );
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+}
+
+/// A scan whose cursor sits exactly on an SST's admission barrier keeps that file: without an
+/// exact sequence range there is no file-granularity pruning by the cursor (even when a file's
+/// own barrier is at or below it) and no row-level sequence range at all. Only a read that may
+/// cross a boundary a stale cursor can no longer explain forces a row-sequence override, so this
+/// read reports the numbers its writer allocated instead of virtualizing every row at the file's
+/// barrier, and the rows below the barrier are read instead of being cut by a region-level
+/// boundary.
+#[tokio::test]
+async fn test_scan_with_cursor_on_file_barrier_reads_the_complete_window() {
+    let mut env =
+        TestEnv::with_prefix("test_scan_with_cursor_on_file_barrier_reads_complete_window").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Three rows land in an SST (sequences 1..=3, barrier 3) ...
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+    // ... and three more stay in the memtable (sequences 4..=6).
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(3, 6),
+        },
+    )
+    .await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let file_barrier = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("flushed SST")
+        .meta_ref()
+        .sequence
+        .expect("a flush admits its file")
+        .get();
+    let frozen_high = region.version_control.current().last_sequence;
+    drop(region);
+    assert_eq!(
+        3, file_barrier,
+        "the flush's barrier is the last number it wrote"
+    );
+    assert!(
+        frozen_high > file_barrier,
+        "the memtable must hold rows above the file"
+    );
+
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region_id,
+        ScanRequest {
+            // The cursor sits exactly on the file's barrier: an exact range would prune the
+            // whole file, while this plain scan keeps it.
+            memtable_min_sequence: Some(file_barrier),
+            memtable_max_sequence: Some(frozen_high),
+            ..Default::default()
+        },
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![
+            (0, 1),
+            (1_000, 2),
+            (2_000, 3),
+            (3_000, 4),
+            (4_000, 5),
+            (5_000, 6)
+        ],
+        rows,
+        "a plain scan keeps the rows below the cursor's barrier and reports the numbers their \
+         writer allocated, not the file's barrier"
+    );
+}
+
+/// Creates a source region, writes `num_rows` rows of one series, flushes them, and returns the
+/// flushed file plus its source file id.
+///
+/// `preserve_row_sequence` selects the numbering the bytes carry: `true` gives every row the
+/// number its writer allocated, `false` leaves the column at zero (a legacy import, which is
+/// what a substituted cut of `Some(0)` describes). The returned handle is what a repartition
+/// publishes in the target region: the bytes stay source-owned, so the target's reader has to
+/// decide what to do with their sequence column.
+async fn build_foreign_source_file(
+    engine: &crate::engine::MitoEngine,
+    source: RegionId,
+    num_rows: usize,
+    preserve_row_sequence: bool,
+) -> (FileId, FileMeta) {
+    let mut request_builder = CreateRequestBuilder::new().insert_option("append_mode", "true");
+    if preserve_row_sequence {
+        request_builder = request_builder.insert_option("preserve_row_sequence", "true");
+    }
+    let request = request_builder.build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        engine,
+        source,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("0", 0, num_rows, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(engine, source, None).await;
+
+    let meta = engine
+        .get_region(source)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .next()
+        .expect("source file")
+        .as_ref()
+        .clone();
+    assert_eq!(
+        preserve_row_sequence, meta.preserve_row_sequence,
+        "the source file must state the numbering its bytes carry"
+    );
+    (meta.file_id, meta)
+}
+
+/// Adopts `source_file` into `target` the way a repartition publishes it: still source-owned,
+/// re-marked at the holder's admission barrier, with `cut` as the substituted bound of the
+/// bytes and `preserve_row_sequence` as the design's supported marker.
+fn adopt_foreign_file(
+    engine: &crate::engine::MitoEngine,
+    target: RegionId,
+    source_file: FileMeta,
+    admission: u64,
+    preserve_row_sequence: bool,
+    cut: Option<u64>,
+) -> FileHandle {
+    let region = engine.get_region(target).unwrap();
+    let mut adopted = source_file;
+    adopted.sequence = std::num::NonZeroU64::new(admission);
+    adopted.preserve_row_sequence = preserve_row_sequence;
+    adopted.substituted_up_to = cut;
+    adopted.level = 0;
+    let handle = FileHandle::new(adopted.clone(), region.file_purger.clone());
+    let edit = RegionEdit {
+        files_to_add: vec![adopted],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+        ..Default::default()
+    };
+    // Applied as a flush-shaped edit: the tests below exercise the reader, not the cursor.
+    region
+        .version_control
+        .apply_edit(Some(edit), &[], region.file_purger.clone());
+    handle
+}
+
+/// Creates the target region of a repartition with the same preserved-sequence option.
+async fn create_foreign_target(engine: &crate::engine::MitoEngine, target: RegionId) {
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    engine
+        .handle_request(target, RegionRequest::Create(request))
+        .await
+        .unwrap();
+}
+
+/// Scans one partition through the region-scan path a datanode uses and returns the
+/// timestamps of the surviving rows plus the substituted row ranges the scan reported.
+///
+/// This is the path that carries proof with the result: `scan_partition`'s stream reports
+/// its substituted ranges through `metrics()`, exactly like the snapshot watermark.
+async fn scan_partition_substituted_row_ranges(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> (
+    Vec<i64>,
+    Vec<common_recordbatch::adapter::SubstitutedRowRanges>,
+) {
+    use store_api::region_engine::QueryScanContext;
+
+    let scanner = engine.handle_query(region_id, request).await.unwrap();
+    let mut stream = scanner
+        .scan_partition(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+        )
+        .unwrap();
+    let mut timestamps = Vec::new();
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        let column = batch
+            .column_by_name("ts")
+            .expect("time index column")
+            .clone();
+        timestamps.extend_from_slice(crate::read::timestamp_array_to_i64_slice(&column));
+    }
+    let substituted = stream
+        .metrics()
+        .map(|metrics| metrics.substituted_row_ranges)
+        .unwrap_or_default();
+    (timestamps, substituted)
+}
+
+/// Scans one partition and returns the `(region, expression slice)` pairs the scan
+/// reported as read.
+async fn scan_partition_observed_slices(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> Vec<common_recordbatch::adapter::ObservedPartitionExpr> {
+    use store_api::region_engine::QueryScanContext;
+
+    let scanner = engine.handle_query(region_id, request).await.unwrap();
+    let mut stream = scanner
+        .scan_partition(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+        )
+        .unwrap();
+    while stream.try_next().await.unwrap().is_some() {}
+    stream
+        .metrics()
+        .map(|metrics| metrics.observed_slices)
+        .unwrap_or_default()
+}
+
+/// Scans every partition through the batch path, whose flat batches still carry the
+/// physical `__sequence` column, and returns `(timestamp, sequence)` per surviving row.
+async fn scan_flat_row_sequences(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> Vec<(i64, u64)> {
+    use crate::read::stream::ScanBatch;
+
+    let mut stream = engine.scan_batch(region_id, request, true).await.unwrap();
+    let mut rows = Vec::new();
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        let ScanBatch::RecordBatch(batch) = batch else {
+            panic!("a flat scan yields record batches");
+        };
+        let num_columns = batch.num_columns();
+        let timestamps = crate::read::timestamp_array_to_i64_slice(batch.column(num_columns - 4));
+        let sequences = batch
+            .column(num_columns - 2)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+            .expect("sequence column");
+        for (idx, sequence) in sequences.values().iter().enumerate() {
+            rows.push((timestamps[idx], *sequence));
+        }
+    }
+    rows
+}
+
+/// The exact `(C, H]` delta a physical-sequence read asks for: it needs a lower bound to
+/// select files and an upper bound to prove the range.
+///
+/// A physical-sequence read of a *foreign* file must carry the creator's cursor slices
+/// ([`creator_cursor_scan`]); without them the read fails closed, because this region's
+/// own bound does not describe the numbers in that file.
+fn physical_sequence_scan(read_row_sequence: bool) -> ScanRequest {
+    ScanRequest {
+        exact_sequence_range: true,
+        read_row_sequence,
+        memtable_min_sequence: Some(0),
+        memtable_max_sequence: Some(4),
+        ..Default::default()
+    }
+}
+
+/// The exact `(creator cursor, H]` delta a physical-sequence read of an adopted file asks
+/// for: the lower bound comes from the slices the *creator* region allocated, the upper
+/// bound is this scan's own snapshot.
+fn creator_cursor_scan(
+    creator: RegionId,
+    shards: Vec<CursorShard>,
+    min: u64,
+    max: u64,
+) -> ScanRequest {
+    ScanRequest {
+        exact_sequence_range: true,
+        read_row_sequence: true,
+        memtable_min_sequence: Some(min),
+        memtable_max_sequence: Some(max),
+        creator_cursor_shards: Some(Arc::new(BTreeMap::from([(creator.as_u64(), shards)]))),
+        ..Default::default()
+    }
+}
+
+/// The same read with a creator cursor that consumed nothing yet: what a scan of adopted
+/// files carries, and what makes their rows comparable with the creator's domain at all.
+fn adopted_physical_sequence_scan(creator: RegionId) -> ScanRequest {
+    creator_cursor_scan(creator, vec![CursorShard::whole_domain(0)], 0, 4)
+}
+
+/// The partition expression a file states: `tag_0 >= lo AND tag_0 < hi`.
+///
+/// The bounds are zero padded so that their lexicographic order (the order the string tag
+/// column has) is their numeric order: the expression comparison normalizes each column's
+/// values in that order, and `"100" < "50"` would otherwise make the range inverted.
+fn partition_slice(lo: u64, hi: u64) -> partition::expr::PartitionExpr {
+    partition_str_slice(&format!("{lo:03}"), &format!("{hi:03}"))
+}
+
+/// The partition expression `tag_0 >= lo AND tag_0 < hi` over the string tag column of the
+/// test schema.
+///
+/// The bounds are strings because the reader compiles a partition expression into a row
+/// filter of the column's own type: the tag column `k0` of the test schema is a string, so a
+/// numeric bound would not be evaluable at all.
+fn partition_str_slice(lo: &str, hi: &str) -> partition::expr::PartitionExpr {
+    use datatypes::value::Value;
+    use partition::expr::{Operand, col as partition_col};
+
+    // `tag_0` is the string tag of the test schema (`[tag_0, field_0, ts]`).
+    partition_col("tag_0")
+        .gt_eq(Operand::Value(Value::String(lo.into())))
+        .and(partition_col("tag_0").lt(Operand::Value(Value::String(hi.into()))))
+}
+
+/// The identity a cursor slice carries for the expression `partition_slice(lo, hi)`.
+fn partition_slice_identity(lo: u64, hi: u64) -> String {
+    partition_slice(lo, hi).as_json_str().unwrap()
+}
+
+/// The cursor slice of `partition_slice(lo, hi)` consumed up to `seq`.
+fn partition_slice_cursor(lo: u64, hi: u64, seq: u64) -> CursorShard {
+    CursorShard::new(Some(partition_slice_identity(lo, hi)), seq)
+}
+
+/// The cursor slice of `partition_str_slice(lo, hi)` consumed up to `seq`.
+fn partition_str_slice_cursor(lo: &str, hi: &str, seq: u64) -> CursorShard {
+    CursorShard::new(
+        Some(partition_str_slice(lo, hi).as_json_str().unwrap()),
+        seq,
+    )
+}
+
+/// An adopted file is filtered by the cursor of the region that allocated its numbers, not
+/// by this region's own `(C, H]`: the numbers in its column never belonged to this region's
+/// sequence space. Without that filter the file would be read whole and every row above its
+/// substituted cut delivered again on every round.
+#[tokio::test]
+async fn test_read_row_sequence_filters_adopted_rows_by_creator_cursor() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_filters_by_creator_cursor").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // The creator's file states the numbers 1, 2 and 3, and the cut 2 says a substitution
+    // produced the first two of them, so only the third is this file's own.
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 4, true, Some(2));
+
+    // The region-keyed form of the cursor (one whole-domain slice) with cursor 1: every row
+    // the cut leaves is above it, so the cut alone decides what is delivered.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(1)], 1, 10),
+    )
+    .await;
+    assert_eq!(
+        vec![(2000, 3)],
+        rows,
+        "the substituted rows are dropped and the row above the cursor is delivered"
+    );
+
+    // A cursor at 3 consumes the only row above the cut: the file delivers nothing. The
+    // reader before this change could not express that at all — it skipped the row filter
+    // of every adopted file because the holder's cursor does not bound these numbers.
+    let (timestamps, substituted) = scan_partition_substituted_row_ranges(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(3)], 1, 10),
+    )
+    .await;
+    assert!(
+        timestamps.is_empty(),
+        "a row at or below the creator's cursor is already consumed"
+    );
+    assert_eq!(
+        vec![common_recordbatch::adapter::SubstitutedRowRanges {
+            region_id: target.as_u64(),
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 0,
+                end_millis: 1000,
+            }],
+        }],
+        substituted,
+        "the rows the cut hides are still reported for recomputation"
+    );
+
+    // Without a creator cursor the read fails closed instead of falling back to this
+    // region's own `(C, H]`: comparing the creator's numbers with a bound of another domain
+    // silently drops live rows, and reading the file unfiltered delivers every consumed row
+    // again. `test_read_row_sequence_fails_closed_without_creator_cursor` covers the error.
+}
+
+/// The cursor is keyed by `(region, expression slice)`: a file is filtered by the slice it
+/// belongs to, not by the region projection of the creator's slices.
+#[tokio::test]
+async fn test_read_row_sequence_picks_the_intersecting_creator_slice() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_picks_intersecting_slice").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // The creator's file states the numbers 1..12 and belongs to its `[50, 100)` slice; the
+    // cut 3 says a substitution produced the first three of them.
+    let (_, mut source_file) = build_foreign_source_file(&engine, source, 12, true).await;
+    source_file.partition_expr = Some(partition_slice(50, 100).into());
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 4, true, Some(3));
+
+    // `[0, 50)` is at 3 and the file's own `[50, 100)` at 10: the lower bound is 10, so only
+    // the rows 11 and 12 are delivered. The region projection of the same cursor (`min` = 3)
+    // would deliver the rows 4..12 again, which is exactly the duplication this keying
+    // removes.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_slice_cursor(0, 50, 3),
+                partition_slice_cursor(50, 100, 10),
+            ],
+            1,
+            20,
+        ),
+    )
+    .await;
+    assert_eq!(vec![(10_000, 11), (11_000, 12)], rows);
+
+    // The mirror image: `[0, 50)` at 10 and the file's own `[50, 100)` at 3. The lower bound
+    // is the file's slice, so the rows 4..12 are delivered — the other slice's cursor must
+    // not be applied to a file it does not cover.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_slice_cursor(0, 50, 10),
+                partition_slice_cursor(50, 100, 3),
+            ],
+            1,
+            20,
+        ),
+    )
+    .await;
+    let expected = (4_u64..=12)
+        .map(|seq| (((seq - 1) * 1000) as i64, seq))
+        .collect::<Vec<(i64, u64)>>();
+    assert_eq!(expected, rows);
+}
+
+/// Reads the manifest files of `region`.
+async fn manifest_files(
+    engine: &crate::engine::MitoEngine,
+    region: RegionId,
+) -> HashMap<FileId, FileMeta> {
+    engine
+        .get_region(region)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .iter()
+        .map(|(id, file)| (*id, file.as_ref().clone()))
+        .collect()
+}
+
+/// Two files of **one** creator region, each stating a different expression of its domain,
+/// with different consumed progress on the two expressions: a merged read delivers exactly
+/// the rows above the cursor of the expression each file states.
+///
+/// The numbers are allocated in write order, so the slices are cross-wired on purpose: the
+/// right slice (`k0 >= 50`) holds the *older* numbers (1..6) while the left slice
+/// (`k0 < 50`) holds the newer ones (7..12). A read that applied the left cursor to both
+/// files would lose the right slice's rows 3..6 (the left cursor is higher than the right
+/// one), and a read that applied the region projection (`min` = 2) to both would deliver
+/// the left slice's 7..10 again. Only selecting the slice each file belongs to delivers
+/// both correctly.
+#[tokio::test]
+async fn test_read_row_sequence_filters_each_creator_expression_by_its_own_cursor() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_filters_each_expression").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    test_util::put_rows(
+        &engine,
+        source,
+        Rows {
+            schema: schema.clone(),
+            rows: test_util::build_rows_for_key("0", 0, 6, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, source, None).await;
+    let mut right_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("first flushed file");
+    assert_eq!(None, right_file.partition_expr);
+    right_file.partition_expr = Some(partition_slice(50, 100).into());
+
+    test_util::put_rows(
+        &engine,
+        source,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("0", 6, 12, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, source, None).await;
+    let mut left_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .find(|file| file.file_id != right_file.file_id)
+        .expect("second flushed file");
+    assert_eq!(None, left_file.partition_expr);
+    left_file.partition_expr = Some(partition_slice(0, 50).into());
+
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, right_file, 13, true, None);
+    adopt_foreign_file(&engine, target, left_file, 14, true, None);
+
+    // The left expression was consumed up to 10, the right one only up to 2.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_slice_cursor(0, 50, 10),
+                partition_slice_cursor(50, 100, 2),
+            ],
+            1,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+
+    assert_eq!(
+        vec![
+            (2000, 3),
+            (3000, 4),
+            (4000, 5),
+            (5000, 6),
+            (10000, 11),
+            (11000, 12)
+        ],
+        rows,
+        "each file is filtered by the cursor of the expression it states: the right slice \
+         keeps the rows above 2 (no loss) and the left slice starts above 10 (no duplicate)"
+    );
+}
+
+/// The counterexample per-row selection exists for: **one** file of one creator holds rows
+/// of two of its expressions, and the two cursors advanced differently.
+///
+/// The file was written under the coarse expression `k0 >= "0" AND k0 < "9"`, which the
+/// creator's domain has since been split out of. Its rows belong to `k0 < "5"` (consumed up
+/// to 5) and to `k0 >= "5"` (consumed up to 2). The least advanced cursor of the file is 2,
+/// so a file-level bound would deliver the already consumed rows 3, 4 and 5 again; the most
+/// advanced one (5) would drop the live row 6. Only splitting the rows by the expression
+/// each of them satisfies delivers the row at 6 and nothing else.
+#[tokio::test]
+async fn test_read_row_sequence_splits_one_file_by_the_expression_of_each_row() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_splits_by_row_expression").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // One file of the creator: five rows of the left expression (numbers 1..5) and one row
+    // of the right one (number 6).
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut rows = test_util::build_rows_for_key("1", 0, 5, 0);
+    rows.extend(test_util::build_rows_for_key("6", 5, 6, 0));
+    test_util::put_rows(&engine, source, Rows { schema, rows }).await;
+    test_util::flush_region(&engine, source, None).await;
+
+    let mut source_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("flushed file");
+    // The coarse expression the file was written under: it holds rows of both slices.
+    source_file.partition_expr = Some(partition_str_slice("0", "9").into());
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 7, true, None);
+
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_str_slice_cursor("0", "5", 5),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            1,
+            20,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        vec![(5000, 6)],
+        rows,
+        "the row at 6 belongs to the slice consumed up to 2 and must be delivered; the rows \
+         at 3, 4 and 5 belong to the slice consumed up to 5 and must not be delivered again"
+    );
+
+    // The same read with only `field_0` projected: the tag column the slice expressions
+    // reference is added to the read columns as an internal column, so the per-row decision
+    // still works and the output schema stays the projected one.
+    let mut request = creator_cursor_scan(
+        source,
+        vec![
+            partition_str_slice_cursor("0", "5", 5),
+            partition_str_slice_cursor("5", "9", 2),
+        ],
+        1,
+        20,
+    );
+    request.projection = Some(vec![1]);
+    let rows = scan_flat_row_sequences(&engine, target, request).await;
+    assert_eq!(
+        vec![(5000, 6)],
+        rows,
+        "the partition column is read even though the scan does not project it"
+    );
+}
+
+/// Several candidate slices may select one row, and then the **least advanced** of their
+/// cursors decides it — exactly like the time-series and bulk memtable filters
+/// (`Batch::filter_by_creator_slices`, `creator_slice_mask`), which take the minimum over the
+/// candidates that select a row. Taking the first match instead drops the rows a less advanced
+/// piece still holds.
+///
+/// The counterexample this pins: the retired records `A = [0,8): 1` and `B = [5,9): 0` — the
+/// domain was not split cleanly, so both select a row at `k0 = 7` — and a merged holder file
+/// holding one row at `k0 = 7, sequence = 1`. The row is required because
+/// `1 > min(1, 0) = 0`; taking `A` first, as the reader did, drops it. It matches candidates,
+/// so the fail-closed rule for a row no candidate selects does not apply.
+#[tokio::test]
+async fn test_read_row_sequence_takes_the_least_cursor_when_several_slices_select_a_row() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_least_cursor_of_several").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // One file of the creator holding one row of the series `k0 = "7"`, numbered 1, under a
+    // coarse statement (`k0 >= "0" AND k0 < "9"`) that covers both retired records: the file
+    // merges the rows of both pieces. The bounds are single characters, so their lexicographic
+    // order (the order of the string tag column) is the numeric order of the tag values.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        source,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("7", 0, 1, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, source, None).await;
+
+    let mut source_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("flushed file");
+    source_file.partition_expr = Some(partition_str_slice("0", "9").into());
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 2, true, None);
+
+    // `A` is consumed up to 1, `B` only up to 0, and the row at 7 falls into both domains.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_str_slice_cursor("0", "8", 1),
+                partition_str_slice_cursor("5", "9", 0),
+            ],
+            0,
+            10,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        vec![(0, 1)],
+        rows,
+        "the row at sequence 1 is above the least advanced of the slices that select it (0), so \
+         it must be delivered even though the first matching slice is consumed up to 1"
+    );
+}
+
+/// The same per-row rule for a **memtable** of this region: a memtable row is filtered by
+/// the cursor of the piece its own tag values fall into, not by the single floor of the
+/// region.
+///
+/// The region's own pieces are the only candidates, because a memtable holds the rows this
+/// region allocated. The rows of the piece consumed up to 5 (the rows at 3, 4 and 5) are
+/// not delivered again, and the row at 6 of the piece consumed up to 2 still is.
+#[tokio::test]
+async fn test_read_row_sequence_splits_memtable_rows_by_the_expression_of_each_row() {
+    let mut env =
+        TestEnv::with_prefix("test_read_row_sequence_splits_memtable_rows_by_expression").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region = RegionId::new(1, 1);
+
+    // Five rows of the left expression (numbers 1..5) and one row of the right one
+    // (number 6), all of them in the memtable: no flush, so no file takes part in the read.
+    // The primary-key SST format keeps the time-series memtable (the flat format would put
+    // the rows in the bulk memtable, which does not apply the per-piece rule), and
+    // `preserve_row_sequence` keeps the exact `(C, H]` delta admissible.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("sst_format", "primary_key")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut rows = test_util::build_rows_for_key("1", 0, 5, 0);
+    rows.extend(test_util::build_rows_for_key("6", 5, 6, 0));
+    test_util::put_rows(&engine, region, Rows { schema, rows }).await;
+
+    // One cursor value for every piece: the delivered rows are exactly the rows above the
+    // region-level floor 2, which is what the read delivered before the per-row rule.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 2),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(2000, 3), (3000, 4), (4000, 5), (5000, 6)],
+        rows,
+        "one cursor value for every piece is the region-level floor of the whole read"
+    );
+
+    // The pieces advanced differently: the rows of the left one (3, 4 and 5) are consumed,
+    // the row at 6 belongs to the right one and stays live.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 5),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(5000, 6)],
+        rows,
+        "each memtable row is filtered by the cursor of the piece it belongs to: the rows at \
+         3, 4 and 5 were consumed by the piece advanced to 5, the row at 6 was not"
+    );
+}
+
+/// The same rule at the memtable end of a scan: the per-piece rule of this region's own
+/// memtable is built from the region's own cursor slices, so a slice set the read cannot
+/// apply per row (a slice covering the whole value domain, or an identity this build cannot
+/// read back) keeps the region-level floor only while every candidate carries it. With
+/// several cursor values the floor delivers the rows a more advanced piece consumed, so the
+/// read fails just like it does for a file of an adopted creator.
+#[tokio::test]
+async fn test_read_row_sequence_fails_closed_when_memtable_pieces_are_unresolved() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_fails_closed_memtable_pieces").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region = RegionId::new(1, 1);
+
+    // Five rows in the time-series memtable (numbers 1..5): no flush, so no file takes part
+    // in the read.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("sst_format", "primary_key")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("1", 0, 5, 0),
+        },
+    )
+    .await;
+
+    // A whole-domain slice at 3 next to a piece slice at 1: no row of the memtable can be
+    // attributed to a piece, and the region-level floor (1) would deliver the rows 2 and 3
+    // the more advanced piece has already consumed.
+    let err = match engine
+        .scan_batch(
+            region,
+            creator_cursor_scan(
+                region,
+                vec![
+                    CursorShard::whole_domain(3),
+                    partition_str_slice_cursor("0", "5", 1),
+                ],
+                1,
+                20,
+            ),
+            true,
+        )
+        .await
+    {
+        Err(err) => err,
+        Ok(mut stream) => match stream.try_next().await {
+            Err(err) => err,
+            Ok(_) => panic!("an unresolvable memtable piece with disagreeing cursors must fail"),
+        },
+    };
+    let message = format!("{err}");
+    assert!(
+        message.contains("exact sequence range unavailable"),
+        "the shared exact-range contract prefix must reach the caller: {message}"
+    );
+    assert!(
+        message.contains("the memtable of region")
+            && message.contains("covers the whole value domain"),
+        "the failure must name the memtable and say what could not be resolved: {message}"
+    );
+
+    // One cursor value for every candidate: the region-level floor is the per-row answer, so
+    // the rows above 1 are delivered exactly as before.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                CursorShard::whole_domain(1),
+                partition_str_slice_cursor("0", "5", 1),
+            ],
+            1,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(1000, 2), (2000, 3), (3000, 4), (4000, 5)],
+        rows,
+        "one cursor value for every piece is the region-level floor of the whole read"
+    );
+}
+
+/// The same per-row rule for a **bulk** memtable: a bulk part keeps the tag columns and the
+/// physical sequence of every row as real columns, so the piece a row belongs to is resolved
+/// per row there too, instead of by the single floor of the region.
+///
+/// As above, the rows of the piece consumed up to 5 (3, 4 and 5) are not delivered again
+/// while the row at 6 of the piece consumed up to 2 still is.
+#[tokio::test]
+async fn test_read_row_sequence_splits_bulk_memtable_rows_by_the_expression_of_each_row() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_splits_bulk_memtable_rows").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region = RegionId::new(1, 1);
+
+    // Five rows of the left expression (numbers 1..5) and one row of the right one
+    // (number 6), all of them in the bulk memtable: no flush, so no file takes part in the
+    // read, and `preserve_row_sequence` keeps the exact `(C, H]` delta admissible.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("memtable.type", "bulk")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut rows = test_util::build_rows_for_key("1", 0, 5, 0);
+    rows.extend(test_util::build_rows_for_key("6", 5, 6, 0));
+    test_util::put_rows(&engine, region, Rows { schema, rows }).await;
+
+    // The rows really are in a bulk memtable, so the read below goes through a bulk part
+    // and the per-row rule there, not through the time-series memtable.
+    assert!(
+        matches!(
+            engine
+                .get_region(region)
+                .unwrap()
+                .version_control
+                .current()
+                .version
+                .options
+                .memtable,
+            Some(crate::region::options::MemtableOptions::Bulk(_))
+        ),
+        "the region must hold the bulk memtable"
+    );
+
+    // One cursor value for every piece: the delivered rows are exactly the rows above the
+    // region-level floor 2, which is what the read delivered before the per-row rule.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 2),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(2000, 3), (3000, 4), (4000, 5), (5000, 6)],
+        rows,
+        "one cursor value for every piece is the region-level floor of the whole read"
+    );
+
+    // The pieces advanced differently: the rows of the left one (3, 4 and 5) are consumed,
+    // the row at 6 belongs to the right one and stays live.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 5),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(5000, 6)],
+        rows,
+        "each bulk memtable row is filtered by the cursor of the piece it belongs to: the \
+         rows at 3, 4 and 5 were consumed by the piece advanced to 5, the row at 6 was not"
+    );
+}
+
+/// A row whose number a substitution produced is hidden **and reported** by the substitution
+/// rule (`SubstitutedRowRanges`), so per-row slice selection must leave it to that rule
+/// instead of dropping it silently: its number says nothing about progress.
+#[tokio::test]
+async fn test_read_row_sequence_leaves_substituted_rows_to_the_cut() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_leaves_substituted_rows").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // Numbers 1..6, all in the left expression's domain, and the cut 3 says a substitution
+    // produced the first three of them.
+    let (_, source_file) = build_foreign_source_file(&engine, source, 6, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 7, true, Some(3));
+
+    // The left slice is consumed up to 2, so only the rows 4, 5 and 6 are above it; the
+    // substituted rows 1..3 are dropped by the cut and their window is reported.
+    let (timestamps, substituted) = scan_partition_substituted_row_ranges(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_str_slice_cursor("", "5", 2),
+                partition_str_slice_cursor("5", "z", 0),
+            ],
+            1,
+            20,
+        ),
+    )
+    .await;
+    assert_eq!(
+        vec![3000, 4000, 5000],
+        timestamps,
+        "the substituted rows are hidden by the cut, the rest is above the slice cursor"
+    );
+    assert_eq!(
+        vec![common_recordbatch::adapter::SubstitutedRowRanges {
+            region_id: target.as_u64(),
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 0,
+                end_millis: 2_000,
+            }],
+        }],
+        substituted,
+        "the substituted rows are still reported for recomputation"
+    );
+}
+
+/// A physical-sequence read keeps an adopted file's own column: with the switch on, the rows
+/// carry the numbers their writer allocated (1, 2, 3), not the holder's admission barrier
+/// (4). With the switch off the reader virtualizes every row at the barrier, which is the
+/// behavior compaction and ordinary queries depend on.
+#[tokio::test]
+async fn test_read_row_sequence_keeps_physical_column_of_foreign_file() {
+    let mut env =
+        TestEnv::with_prefix("test_read_row_sequence_keeps_physical_column_of_foreign_file").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
+    create_foreign_target(&engine, target).await;
+    // The bytes carry no substitution, so nothing is substituted either way.
+    adopt_foreign_file(&engine, target, source_file, 4, true, None);
+
+    let rows =
+        scan_flat_row_sequences(&engine, target, adopted_physical_sequence_scan(source)).await;
+    assert_eq!(
+        vec![(0, 1), (1000, 2), (2000, 3)],
+        rows,
+        "a physical-sequence read must keep the source's own numbering"
+    );
+
+    // The default reader substitutes the handle's barrier, which is why the design needs
+    // the switch: every row looks published by the import.
+    let rows = scan_flat_row_sequences(&engine, target, physical_sequence_scan(false)).await;
+    assert_eq!(vec![(0, 4), (1000, 4), (2000, 4)], rows);
+}
+
+/// Rows whose number a substitution produced are substituted, and the ranges they occupy
+/// are reported, so Flow recomputes them instead of counting them again.
+#[tokio::test]
+async fn test_read_row_sequence_hides_rows_below_substituted_cut() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_hides_rows_below_cut").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
+    create_foreign_target(&engine, target).await;
+    // Rows at or below 2 carry a substituted number; only the row at 3 is this file's own.
+    adopt_foreign_file(&engine, target, source_file, 4, true, Some(2));
+
+    let (timestamps, substituted) = scan_partition_substituted_row_ranges(
+        &engine,
+        target,
+        adopted_physical_sequence_scan(source),
+    )
+    .await;
+    assert_eq!(
+        vec![2000],
+        timestamps,
+        "the two substituted rows must not reach the caller"
+    );
+    assert_eq!(
+        vec![common_recordbatch::adapter::SubstitutedRowRanges {
+            region_id: target.as_u64(),
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 0,
+                end_millis: 1000,
+            }],
+        }],
+        substituted,
+        "the ranges of the substituted rows must travel with the result"
+    );
+
+    // The surviving row carries its own number, not the barrier.
+    let rows =
+        scan_flat_row_sequences(&engine, target, adopted_physical_sequence_scan(source)).await;
+    assert_eq!(vec![(2000, 3)], rows);
+
+    // With the switch off nothing is substituted and no range is reported: the query keeps
+    // today's substitution, which is what compaction and ordinary reads see.
+    let (timestamps, substituted) =
+        scan_partition_substituted_row_ranges(&engine, target, physical_sequence_scan(false)).await;
+    assert_eq!(vec![0, 1000, 2000], timestamps);
+    assert!(substituted.is_empty());
+}
+
+/// A legacy import states `Some(0)`: the column carries no per-row numbering at all, so every
+/// row is substituted and the whole time range is reported.
+#[tokio::test]
+async fn test_read_row_sequence_hides_all_rows_of_legacy_cut() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_hides_all_rows_legacy_cut").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // A legacy file: its `__sequence` column carries no per-row numbering at all, which is
+    // exactly what the substituted cut `Some(0)` states. The import still re-marks the handle
+    // as trusted, so the physical read is admissible and every row is substituted.
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, false).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 4, true, Some(0));
+
+    let (timestamps, substituted) = scan_partition_substituted_row_ranges(
+        &engine,
+        target,
+        adopted_physical_sequence_scan(source),
+    )
+    .await;
+    assert!(timestamps.is_empty(), "a legacy cut hides every row");
+    assert_eq!(
+        vec![common_recordbatch::adapter::SubstitutedRowRanges {
+            region_id: target.as_u64(),
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 0,
+                end_millis: 2000,
+            }],
+        }],
+        substituted,
+        "every substituted row is inside the reported range"
+    );
+}
+
+/// Raises the region's committed watermark to `sequence`, which is what an admission does: the
+/// manifest handler stamps the imported files with `last_sequence + 1` and sets
+/// `committed_sequence` to it in the same action list (`worker/handle_manifest.rs`). Local writes
+/// that follow are therefore numbered above the constant the holder substitutes for the imported
+/// rows, which is the state the reader below is written for.
+fn raise_committed_watermark(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    sequence: u64,
+) {
+    let region = engine.get_region(region_id).unwrap();
+    let edit = RegionEdit {
+        files_to_add: vec![],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: Some(sequence),
+        ..Default::default()
+    };
+    region
+        .version_control
+        .apply_edit(Some(edit), &[], region.file_purger.clone());
+}
+
+/// A compaction output is a **local** file, and a local file states a substituted cut too: the
+/// merge substitutes the handle bound of every foreign input for its rows and the output states
+/// the bound the merge produced (`sst/file.rs::substituted_up_to_after_merge`). Those rows carry
+/// a number this region never allocated, so the cut has to hide them here as well — a reader
+/// that trusts "local means nothing is substituted" delivers them again on every round, and Flow
+/// counts the same rows twice.
+#[tokio::test]
+async fn test_read_row_sequence_hides_substituted_rows_of_local_compaction_output() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_hides_local_compaction_cut").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
+
+    // The holder of the repartition target, created the way `create_foreign_target` creates it.
+    // The request is kept because the test has to write a local row of the same schema.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(target, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Admitted at barrier 4, with the cut 2 the bytes of the imported file carry.
+    adopt_foreign_file(&engine, target, source_file, 4, true, Some(2));
+    raise_committed_watermark(&engine, target, 4);
+
+    // One local row of the holder itself: the region numbers it 5, above the constant the
+    // reader substitutes for the imported rows.
+    test_util::put_rows(
+        &engine,
+        target,
+        Rows {
+            schema: schema.clone(),
+            rows: test_util::build_rows_for_key("0", 3, 4, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, target, None).await;
+
+    // Merge the imported and the local file, as a background compaction of the target would.
+    engine
+        .handle_request(
+            target,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let version = engine.get_region(target).unwrap().version();
+    let outputs = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(1, outputs.len(), "both input files are merged into one");
+    let output = outputs[0].meta_ref();
+    assert_eq!(target, output.region_id, "the output is a local file");
+    // The merge read the imported rows at this region's own barrier (4), so that number is what
+    // they now carry, and the local row kept the number the region gave it (5).
+    assert_eq!(Some(4), output.substituted_up_to);
+
+    // A cursor below the cut (0 < 4) must not be handed the rows the merge substituted: they are
+    // hidden and their time range is reported, so the caller recomputes exactly that window
+    // instead of receiving the rows a second time.
+    let (timestamps, substituted) = scan_partition_substituted_row_ranges(
+        &engine,
+        target,
+        ScanRequest {
+            exact_sequence_range: true,
+            read_row_sequence: true,
+            memtable_min_sequence: Some(0),
+            memtable_max_sequence: Some(5),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        vec![3000],
+        timestamps,
+        "the three substituted rows must not be delivered again: only the local row survives"
+    );
+    assert_eq!(
+        vec![common_recordbatch::adapter::SubstitutedRowRanges {
+            region_id: target.as_u64(),
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 0,
+                end_millis: 2000,
+            }],
+        }],
+        substituted,
+        "the rows the cut of the local output hides are still reported for recomputation"
+    );
+}
+
+/// An exact `(C, H]` read of a region measured only by this request: both bounds are this
+/// region's own numbers and the read keeps the physical sequence column.
+fn local_exact_scan(min: u64, max: u64) -> ScanRequest {
+    ScanRequest {
+        exact_sequence_range: true,
+        read_row_sequence: true,
+        memtable_min_sequence: Some(min),
+        memtable_max_sequence: Some(max),
+        ..Default::default()
+    }
+}
+
+/// A **local** file states a substitution as well: a merge substitutes a file-level constant
+/// for the rows of its foreign inputs and records the bound it produced
+/// (`sst/file.rs::substituted_up_to_after_merge`), so a local file may carry
+/// `preserve_row_sequence = false` **and** a substituted cut.
+///
+/// Such a file is attributable. The physical-sequence read hides the rows at or below the cut
+/// and reports their time windows, and every row above the cut carries a number this region
+/// allocated, which the scan's own `(C, H]` bounds row by row — so the region keeps serving
+/// its exact range instead of failing every later delta closed. A local file with no marker
+/// **and** no cut has nothing to attribute its rows with, and still fails closed.
+#[tokio::test]
+async fn test_read_row_sequence_keeps_exact_sequence_range_of_local_file_with_cut() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_local_file_with_cut").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("0", 0, 3, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let file = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .expect("flushed file")
+        .meta_ref()
+        .clone();
+    assert_eq!(region_id, file.region_id);
+    assert!(file.preserve_row_sequence);
+
+    // The merge that produced this file substituted the constant 2 for the rows it took
+    // from a foreign input: those bytes carry 2, the row that stayed local carries 3.
+    let mut substituted = file.clone();
+    substituted.preserve_row_sequence = false;
+    substituted.substituted_up_to = Some(2);
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![substituted.clone()],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // The rows at or below the cut are hidden and reported, so the caller recomputes them
+    // instead of counting them again; the row above it is delivered.
+    let (timestamps, substituted_ranges) =
+        scan_partition_substituted_row_ranges(&engine, region_id, local_exact_scan(0, 4)).await;
+    assert_eq!(vec![2000], timestamps);
+    assert_eq!(
+        vec![common_recordbatch::adapter::SubstitutedRowRanges {
+            region_id: region_id.as_u64(),
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 0,
+                end_millis: 1000,
+            }],
+        }],
+        substituted_ranges,
+        "the rows the cut hides are reported for recomputation"
+    );
+
+    // What remains is filtered by this region's own `(C, H]`: a cursor that already consumed
+    // the row above the cut receives nothing, which is the exactness the range promises.
+    let (timestamps, _) =
+        scan_partition_substituted_row_ranges(&engine, region_id, local_exact_scan(3, 4)).await;
+    assert!(
+        timestamps.is_empty(),
+        "a local file's rows above its cut are filtered by (C, H]"
+    );
+
+    // Without the cut the same file has nothing that attributes its rows, so the region
+    // refuses the exact range instead of delivering rows outside `(C, H]`.
+    let mut unmarked = substituted;
+    unmarked.substituted_up_to = None;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![unmarked],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // The same request that was served above now has no evidence left: both bounds are still
+    // enforceable against the flushed frontier, so the capability check is what rejects it.
+    let err = engine
+        .scanner(region_id, local_exact_scan(3, 4))
+        .await
+        .err()
+        .expect("a local file with no marker and no cut must deny the exact range");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// An import re-marks an adopted file with `preserve_row_sequence = false` and copies its bytes
+/// verbatim, so the column still carries the creator's numbers and the file's cut still says
+/// which of them a substitution produced. A physical-sequence read must therefore ignore the
+/// marker: it keeps the physical column and hides the rows the cut covers, and its own
+/// substituted cut stays the only thing that decides what a Flow cursor may compare.
+#[tokio::test]
+async fn test_read_row_sequence_splits_imported_file_without_marker() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_splits_imported_file").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
+    create_foreign_target(&engine, target).await;
+    // What an import of a file whose bytes already carry a substitution publishes: the handle
+    // is re-marked as marking nothing, holds barrier 4, and states the cut 2 the bytes carry.
+    adopt_foreign_file(&engine, target, source_file, 4, false, Some(2));
+
+    let (timestamps, substituted) = scan_partition_substituted_row_ranges(
+        &engine,
+        target,
+        adopted_physical_sequence_scan(source),
+    )
+    .await;
+    assert_eq!(
+        vec![2000],
+        timestamps,
+        "the two substituted rows must not reach the caller even though the marker is off"
+    );
+    assert_eq!(
+        vec![common_recordbatch::adapter::SubstitutedRowRanges {
+            region_id: target.as_u64(),
+            ranges: vec![common_recordbatch::adapter::SubstitutedRange {
+                start_millis: 0,
+                end_millis: 1000,
+            }],
+        }],
+        substituted,
+        "the ranges of the substituted rows must travel with the result"
+    );
+
+    // The surviving row carries the creator's number the bytes hold, not the barrier.
+    let rows =
+        scan_flat_row_sequences(&engine, target, adopted_physical_sequence_scan(source)).await;
+    assert_eq!(vec![(2000, 3)], rows);
+
+    // With the switch off nothing changes: the reader substitutes the handle's barrier for
+    // every row and reports no window, which is what compaction and ordinary reads depend on.
+    let (timestamps, substituted) =
+        scan_partition_substituted_row_ranges(&engine, target, physical_sequence_scan(false)).await;
+    assert_eq!(vec![0, 1000, 2000], timestamps);
+    assert!(substituted.is_empty());
+    let rows = scan_flat_row_sequences(&engine, target, physical_sequence_scan(false)).await;
+    assert_eq!(vec![(0, 4), (1000, 4), (2000, 4)], rows);
+}
+
+/// A `cut = None` adopted file is filtered by the creator's cursor exactly like one that
+/// states a cut. Its numbers were allocated in the creator's domain whether or not a
+/// substitution touched them, so the holder's own `(C, H]` neither bounds them nor may
+/// replace the creator's slice.
+#[tokio::test]
+async fn test_read_row_sequence_filters_adopted_file_without_cut_by_creator_cursor() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_filters_adopted_without_cut").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // The creator consumed up to 3, so only its rows 4 and 5 are still owed. The holder's
+    // own cursor (0 in this scan) would deliver all five again.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(3)], 0, 10),
+    )
+    .await;
+    assert_eq!(
+        vec![(3000, 4), (4000, 5)],
+        rows,
+        "an adopted file without a cut is still bounded by the creator's cursor"
+    );
+}
+
+/// A creator slice that states the last sequence its delta covers bounds an adopted file from
+/// above as well: a row above that bound was numbered after the delta this read stands for,
+/// so delivering it here reports identity the caller has not consumed yet while its marker
+/// stays below the row's number.
+#[tokio::test]
+async fn test_read_row_sequence_drops_adopted_rows_above_creator_upper_bound() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_creator_upper_bound").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // The creator's file states the numbers 1..5 and no cut, so the cursor decides alone.
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // The delta is `(1, 3]`: rows 4 and 5 carry numbers the creator's cursor did not consume
+    // and its bound does not cover, so this round must not read them.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![CursorShard::whole_domain(1).with_until(3)],
+            0,
+            10,
+        ),
+    )
+    .await;
+    assert_eq!(
+        vec![(1000, 2), (2000, 3)],
+        rows,
+        "the rows above the creator's upper bound belong to a later delta, not to this read"
+    );
+
+    // The bound is a filter on the creator's domain, not a change of the cursor: stating a
+    // bound that covers every row delivers every row above the cursor, as before.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![CursorShard::whole_domain(1).with_until(5)],
+            0,
+            10,
+        ),
+    )
+    .await;
+    assert_eq!(vec![(1000, 2), (2000, 3), (3000, 4), (4000, 5)], rows);
+}
+
+/// A slice that states no upper bound keeps the unbounded `(cursor, +inf)` filter it always
+/// had: the bound is optional evidence, and a read that lacks it must not lose a row that no
+/// bound excludes.
+#[tokio::test]
+async fn test_read_row_sequence_reads_above_cursor_without_creator_upper_bound() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_without_upper_bound").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(1)], 0, 10),
+    )
+    .await;
+    assert_eq!(
+        vec![(1000, 2), (2000, 3), (3000, 4), (4000, 5)],
+        rows,
+        "without a bound every row above the creator's cursor is still owed"
+    );
+}
+
+/// Several candidate slices: the file-level upper bound is the **least** bound any of them
+/// states, because the file-level filter cannot tell which slice a row belongs to. The
+/// counterexample this pins: the slice holding the file's rows proves the delta ends at 3
+/// while another candidate's bound reaches 9, and reading up to 9 delivers rows 4 and 5,
+/// which no slice yields this round.
+#[tokio::test]
+async fn test_read_row_sequence_takes_the_least_creator_upper_bound() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_least_upper_bound").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // One file stating no expression, so every slice of the creator is a candidate for it.
+    // Its five rows carry the tag `0`, i.e. they all fall in the `[0, 5)` slice.
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    assert_eq!(None, source_file.partition_expr);
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                // The slice the file's rows belong to: consumed up to 1, delta ends at 3.
+                partition_str_slice_cursor("0", "5", 1).with_until(3),
+                // A candidate that overlaps no row of this file, with a looser bound.
+                partition_str_slice_cursor("5", "9", 3).with_until(9),
+            ],
+            0,
+            10,
+        ),
+    )
+    .await;
+    assert_eq!(
+        vec![(1000, 2), (2000, 3)],
+        rows,
+        "the file-level bound is the least bound of the candidates, so row 4 is left out"
+    );
+}
+
+/// A creator this scan has no cursor slice for fails closed. Reading the file against this
+/// region's own `(C, H]` compares two sequence domains, and reading it unfiltered delivers
+/// every already consumed row again on every round; the scan reports the shared
+/// "exact range unavailable" contract instead of choosing one of them.
+#[tokio::test]
+async fn test_read_row_sequence_fails_closed_without_creator_cursor() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_fails_closed").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 4, true, None);
+
+    // No creator slice, and no cut either: the file states nothing this scan can filter
+    // with.
+    let mut stream = engine
+        .scan_batch(target, physical_sequence_scan(true), true)
+        .await
+        .unwrap();
+    let err = match stream.try_next().await {
+        Err(err) => err,
+        Ok(_) => panic!("a foreign file without a creator cursor must fail closed"),
+    };
+    let message = format!("{err}");
+    assert!(
+        message.contains("exact sequence range unavailable"),
+        "the shared exact-range contract prefix must reach the caller: {message}"
+    );
+    assert!(
+        message.contains("no cursor slice of its creator region"),
+        "the failure must say what is missing: {message}"
+    );
+}
+
+/// The `Display` of `err` and of every cause below it, one per line.
+///
+/// A file-level decision is taken while the file is pruned, and the pruner reports a failed
+/// file through a wrapper whose own `Display` does not repeat the cause, so the failure is
+/// found in the chain.
+fn error_chain(err: &Error) -> String {
+    let mut text = format!("{err}");
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        text.push('\n');
+        text.push_str(&format!("{cause}"));
+        source = cause.source();
+    }
+    text
+}
+
+/// The counterexample to the file-level fallback of a physical-sequence read: when the
+/// per-row rule of a file cannot be applied, the file is bounded by the **least** advanced
+/// candidate. That floor is exact only while every candidate carries it — with several cursor
+/// values it re-delivers the rows a more advanced piece has already consumed, so the read
+/// fails instead of degrading an exact read into a duplicate.
+///
+/// Two shapes the per-row rule cannot apply, both on a file of an adopted creator: a slice
+/// identity this build cannot read back, and a slice covering the whole value domain.
+#[tokio::test]
+async fn test_read_row_sequence_fails_closed_when_pieces_disagree_and_piece_is_unresolved() {
+    let mut env =
+        TestEnv::with_prefix("test_read_row_sequence_fails_closed_disagreeing_pieces").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // One file stating no expression, so every slice of the creator is a candidate for it.
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    assert_eq!(None, source_file.partition_expr);
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // The JSON `"MaxValue"` is a partition *bound*, not an expression: this build cannot read
+    // it back, so the file cannot be split per row. The two candidates carry different
+    // cursors, so the file-level floor (1) would deliver the rows 2 and 3 a piece consumed up
+    // to 3 again.
+    let unreadable = |cursor| CursorShard::new(Some("\"MaxValue\"".to_string()), cursor);
+    let mut stream = engine
+        .scan_batch(
+            target,
+            creator_cursor_scan(
+                source,
+                vec![partition_str_slice_cursor("0", "5", 1), unreadable(3)],
+                0,
+                10,
+            ),
+            true,
+        )
+        .await
+        .unwrap();
+    let err = match stream.try_next().await {
+        Err(err) => err,
+        Ok(_) => {
+            panic!("an unreadable slice identity with disagreeing cursors must fail the read")
+        }
+    };
+    let message = error_chain(&err);
+    assert!(
+        message.contains("exact sequence range unavailable"),
+        "the shared exact-range contract prefix must reach the caller: {message}"
+    );
+    assert!(
+        message.contains("cannot resolve a per-piece cursor"),
+        "the failure must say what could not be resolved: {message}"
+    );
+
+    // One cursor value for every candidate: the file-level floor *is* the per-row answer, so
+    // the unreadable identity keeps today's fallback and the rows above it are delivered.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![partition_str_slice_cursor("0", "5", 1), unreadable(1)],
+            0,
+            10,
+        ),
+    )
+    .await;
+    assert_eq!(
+        vec![(1000, 2), (2000, 3), (3000, 4), (4000, 5)],
+        rows,
+        "with one cursor value the file-level floor is exact and nothing is dropped"
+    );
+
+    // A whole-domain slice cannot be evaluated per row either: it applies to every row, so no
+    // slice expression can tell which piece a row belongs to. With disagreeing cursors the
+    // same rule applies.
+    let mut stream = engine
+        .scan_batch(
+            target,
+            creator_cursor_scan(
+                source,
+                vec![
+                    CursorShard::whole_domain(3),
+                    partition_str_slice_cursor("0", "5", 1),
+                ],
+                0,
+                10,
+            ),
+            true,
+        )
+        .await
+        .unwrap();
+    let err = match stream.try_next().await {
+        Err(err) => err,
+        Ok(_) => panic!("a whole-domain slice with disagreeing cursors must fail the read"),
+    };
+    let message = error_chain(&err);
+    assert!(
+        message.contains("cannot resolve a per-piece cursor")
+            && message.contains("covers the whole value domain"),
+        "the failure must say that the slice covers the whole domain: {message}"
+    );
+
+    // The same whole-domain read with one cursor value for every candidate keeps the
+    // file-level floor, exactly as before.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                CursorShard::whole_domain(1),
+                partition_str_slice_cursor("0", "5", 1),
+            ],
+            0,
+            10,
+        ),
+    )
+    .await;
+    assert_eq!(
+        vec![(1000, 2), (2000, 3), (3000, 4), (4000, 5)],
+        rows,
+        "one cursor value for every piece is the file-level floor of the whole file"
+    );
+}
+
+/// The third shape the per-row rule cannot answer: a row of the file that **no** candidate
+/// expression selects, i.e. a row outside the value domain of every piece of the creator.
+///
+/// Such a row has no piece to attribute it to, so only the least advanced candidate is left.
+/// That floor is exact while every candidate carries the same cursor value — it then *is* what
+/// the row's own piece states — and says nothing once they differ: it delivers the rows a more
+/// advanced piece already consumed, so the read fails instead of replaying them.
+#[tokio::test]
+async fn test_read_row_sequence_fails_closed_when_no_piece_selects_a_row() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_fails_closed_unselected_row").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // One file of the creator: four rows of the series `k0 = "1"`, inside the domain of the
+    // left piece (`k0 < "5"`), and one row of `k0 = "9"`, outside the domain of both candidates.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut rows = test_util::build_rows_for_key("1", 0, 4, 0);
+    rows.extend(test_util::build_rows_for_key("9", 4, 5, 0));
+    test_util::put_rows(&engine, source, Rows { schema, rows }).await;
+    test_util::flush_region(&engine, source, None).await;
+    let source_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("flushed file");
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // The candidates carry 5 and 2. The row at 5 (`k0 = "9"`) belongs to no piece, and the
+    // least advanced cursor (2) does not stand for the pieces: it would deliver the rows 3 and
+    // 4 the left piece already consumed up to 5.
+    let mut stream = engine
+        .scan_batch(
+            target,
+            creator_cursor_scan(
+                source,
+                vec![
+                    partition_str_slice_cursor("0", "5", 5),
+                    partition_str_slice_cursor("5", "9", 2),
+                ],
+                0,
+                10,
+            ),
+            true,
+        )
+        .await
+        .unwrap();
+    let err = match stream.try_next().await {
+        Err(err) => err,
+        Ok(_) => panic!("a row no candidate selects with disagreeing cursors must fail the read"),
+    };
+    let message = error_chain(&err);
+    assert!(
+        message.contains("exact sequence range unavailable"),
+        "the shared exact-range contract prefix must reach the caller: {message}"
+    );
+    assert!(
+        message.contains("cannot resolve a per-piece cursor"),
+        "the failure must say what could not be resolved: {message}"
+    );
+    assert!(
+        message.contains("match no candidate creator cursor slice") && message.contains("(2..=5)"),
+        "the failure must name the unselected row and the cursors' own span: {message}"
+    );
+
+    // One cursor value for every candidate: the least advanced cursor is then every piece's
+    // cursor, so the row outside both domains keeps today's treatment and nothing is dropped.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_str_slice_cursor("0", "5", 2),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            0,
+            10,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(2000, 3), (3000, 4), (4000, 5)],
+        rows,
+        "with one cursor value the row no candidate selects is bounded by it exactly, so the \
+         rows above 2 are delivered and the rows at or below it are not"
+    );
+}
+
+/// The creator's cursor and the holder's snapshot are two different sequence domains, so a
+/// foreign file is filtered by the creator's cursor alone — never by the holder's `(C, H]`,
+/// which is what bounds the rows of every *local* file of the same scan.
+///
+/// The counterexample this pins: the creator published the rows `10..=12` while its cursor
+/// sits at 9, and the holder admitted the file at barrier 6 with its own cursor at 6. The
+/// holder's range is then empty (`(6, 6]`) and its cursor stands exactly at the file's
+/// admission barrier, so a filter or a file-pruning rule that uses either of them drops all
+/// three live rows — for good, because both repeat on every round.
+#[tokio::test]
+async fn test_read_row_sequence_ignores_holder_bounds_for_foreign_file() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_foreign_bounds").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 12, true).await;
+    create_foreign_target(&engine, target).await;
+    // Admitted at barrier 6: below the numbers its bytes carry, which is the whole point.
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // The creator consumed up to 9; the holder is caught up, so its cursor *and* its
+    // snapshot bound both stand at the file's admission barrier.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(9)], 6, 6),
+    )
+    .await;
+    assert_eq!(
+        vec![(9000, 10), (10_000, 11), (11_000, 12)],
+        rows,
+        "the rows above the creator's cursor must be delivered although the holder's own \
+         range is empty and the file sits at its admission barrier"
+    );
+
+    // The same file selected by a scan whose holder range is *not* empty: the creator's
+    // cursor still decides, so the holder's upper end must not truncate the file either.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(9)], 6, 7),
+    )
+    .await;
+    assert_eq!(
+        vec![(9000, 10), (10_000, 11), (11_000, 12)],
+        rows,
+        "a holder bound above the barrier must not cut the creator's rows"
+    );
+
+    // A creator cursor below every row still filters: what the creator consumed is not
+    // delivered again, whether or not it is above the holder's bound.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(11)], 6, 6),
+    )
+    .await;
+    assert_eq!(
+        vec![(11_000, 12)],
+        rows,
+        "row 11 is at the cursor, row 12 above it"
+    );
+}
+
+/// A physical row-sequence read needs the creator's cursor slice and the adopted file's
+/// substituted cut, and the `PerSeries` distribution applies neither: its per-series readers
+/// bound a file by this region's own `(C, H]` only, and its legacy distributor reads the
+/// same files through the plain flat reader. The combination is therefore refused with the
+/// shared "exactness is not provable" contract instead of being silently approximated. A
+/// plain `PerSeries` read is unaffected.
+#[tokio::test]
+async fn test_read_row_sequence_rejects_per_series_distribution() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_rejects_per_series").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 3, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 4, true, Some(2));
+
+    // Every other reader of the same rows is untouched: an ordinary `PerSeries` read reads
+    // the file (substituted rows and all) through the per-series path.
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let mut stream = engine.scan_batch(target, request, true).await.unwrap();
+    let mut num_rows = 0;
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        num_rows += match batch {
+            crate::read::stream::ScanBatch::RecordBatch(batch) => batch.num_rows(),
+            crate::read::stream::ScanBatch::Series(series) => series.num_rows(),
+        };
+    }
+    assert_eq!(3, num_rows, "a plain PerSeries read must keep working");
+
+    // The physical-sequence read asks for the same distribution: refused at construction,
+    // before any file is opened.
+    let rejected = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..creator_cursor_scan(source, vec![CursorShard::whole_domain(0)], 0, 10)
+    };
+    let err = match engine.scan_batch(target, rejected, true).await {
+        Ok(_) => panic!("read_row_sequence + PerSeries must be refused"),
+        Err(err) => err,
+    };
+    let message = format!("{err}");
+    assert!(
+        message.contains("exact sequence range unavailable"),
+        "the shared exact-range contract prefix must reach the caller: {message}"
+    );
+    assert!(
+        message.contains("the PerSeries distribution cannot carry a physical row-sequence read"),
+        "the refusal must name the combination: {message}"
+    );
+}
+
+/// The read reports which `(region, expression slice)` pairs it observed, so the owner of a
+/// `(region, slice)` cursor can split a whole-domain entry and advance only the slices this
+/// round actually read. A file whose expression cannot be read back states the region's
+/// complete domain.
+#[tokio::test]
+async fn test_read_row_sequence_reports_observed_slices() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_observed_slices").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let narrow = RegionId::new(1, 2);
+    let coarse = RegionId::new(1, 3);
+    let target = RegionId::new(1, 1);
+
+    // One creator's file states `[50, 100)`.
+    let (_, mut narrow_file) = build_foreign_source_file(&engine, narrow, 3, true).await;
+    narrow_file.partition_expr = Some(partition_slice(50, 100).into());
+    // The other states no expression at all, so it can only be reported as the complete
+    // domain.
+    let (_, coarse_file) = build_foreign_source_file(&engine, coarse, 2, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, narrow_file, 4, true, None);
+    adopt_foreign_file(&engine, target, coarse_file, 5, true, None);
+
+    let request = ScanRequest {
+        exact_sequence_range: true,
+        read_row_sequence: true,
+        memtable_min_sequence: Some(0),
+        memtable_max_sequence: Some(10),
+        creator_cursor_shards: Some(Arc::new(BTreeMap::from([
+            (narrow.as_u64(), vec![CursorShard::whole_domain(0)]),
+            (coarse.as_u64(), vec![CursorShard::whole_domain(0)]),
+        ]))),
+        ..Default::default()
+    };
+    let observed = scan_partition_observed_slices(&engine, target, request).await;
+
+    let mut expected = vec![
+        common_recordbatch::adapter::ObservedPartitionExpr::new(
+            narrow.as_u64(),
+            Some(partition_slice_identity(50, 100)),
+        ),
+        common_recordbatch::adapter::ObservedPartitionExpr::whole_domain(coarse.as_u64()),
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        expected, observed,
+        "every file the scan read reports its creator and the value domain it states"
+    );
+}
+
+/// Scans one partition the way a datanode does and returns the timestamps it delivered together
+/// with the adopted files' creators its terminal metrics report.
+async fn scan_partition_rows_and_foreign_creators(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> (Vec<i64>, Option<Vec<u64>>) {
+    use store_api::region_engine::QueryScanContext;
+
+    let scanner = engine.handle_query(region_id, request).await.unwrap();
+    let mut stream = scanner
+        .scan_partition(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+        )
+        .unwrap();
+    let mut timestamps = Vec::new();
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        let column = batch
+            .column_by_name("ts")
+            .expect("time index column")
+            .clone();
+        timestamps.extend_from_slice(crate::read::timestamp_array_to_i64_slice(&column));
+    }
+    let creators = stream
+        .metrics()
+        .and_then(|metrics| metrics.foreign_file_row_creators);
+    (timestamps, creators)
+}
+
+/// A read of an adopted file names the region that created it, so a caller that must not count
+/// a row above its creator's proved watermark learns that this read could have delivered one.
+#[tokio::test]
+async fn test_read_row_sequence_reports_foreign_file_row_creators() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_foreign_row_creators").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    let (timestamps, creators) = scan_partition_rows_and_foreign_creators(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(1)], 0, 10),
+    )
+    .await;
+
+    assert_eq!(vec![1000, 2000, 3000, 4000], timestamps);
+    assert_eq!(
+        Some(vec![source.as_u64()]),
+        creators,
+        "the rows of the adopted file reached the output, so its creator is named"
+    );
+}
+
+/// The base read of a repair is a **full** read: it carries no creator cursor and reads every
+/// row of the adopted file. It still has to report that it did.
+#[tokio::test]
+async fn test_read_row_sequence_reports_foreign_file_row_creators_on_a_full_read() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_foreign_rows_full_read").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // No `read_row_sequence`, no creator cursors: nothing filters the adopted file.
+    let (timestamps, creators) =
+        scan_partition_rows_and_foreign_creators(&engine, target, ScanRequest::default()).await;
+
+    assert_eq!(vec![0, 1000, 2000, 3000, 4000], timestamps);
+    assert_eq!(
+        Some(vec![source.as_u64()]),
+        creators,
+        "a full read reads every row of the adopted file and says so"
+    );
+}
+
+/// A read that delivers no adopted row answers "none" instead of saying nothing: a caller can
+/// tell the two apart only because the empty answer is stated, never defaulted.
+#[tokio::test]
+async fn test_read_row_sequence_reports_no_foreign_file_row_creators_for_a_local_read() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_no_foreign_row_creators").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // A cursor of the creator's domain that has consumed every row the file states: the read
+    // opens the file and delivers nothing.
+    let (timestamps, creators) = scan_partition_rows_and_foreign_creators(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(5)], 0, 10),
+    )
+    .await;
+
+    assert!(timestamps.is_empty(), "{timestamps:?}");
+    assert_eq!(
+        Some(Vec::new()),
+        creators,
+        "an opened file that delivered no row is not evidence of a delivered row, and the \
+         answer is still stated"
+    );
+}
+
+/// A read that replays a cached range result does not open the files that produced its rows, so
+/// it cannot say which other regions created them: it must answer "unknown" instead of the
+/// "delivered none" an empty recorded set would say.
+#[tokio::test]
+async fn test_range_cache_replay_reports_unknown_foreign_file_row_creators() {
+    use std::time::Duration;
+
+    let mut env =
+        TestEnv::with_prefix("test_range_cache_replay_unknown_foreign_row_creators").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            // The flat format is the one the range result cache covers.
+            default_flat_format: true,
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // A source region that is not in append mode: its reads go through the ordered scan, which
+    // is the one that reads and fills the range cache.
+    let request = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        source,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("0", 0, 5, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, source, None).await;
+    let source_file = engine
+        .get_region(source)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .next()
+        .expect("source file")
+        .as_ref()
+        .clone();
+    engine
+        .handle_request(target, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    adopt_foreign_file(&engine, target, source_file, 6, false, None);
+
+    // A tag filter selects every row of the file and makes the range eligible for the cache.
+    let scan = || ScanRequest {
+        filters: vec![col("tag_0").eq(lit(ScalarValue::Utf8(Some("0".to_string()))))],
+        ..Default::default()
+    };
+
+    // The first read opens the adopted file and names its creator.
+    let (cold_rows, cold_creators) =
+        scan_partition_rows_and_foreign_creators(&engine, target, scan()).await;
+    assert_eq!(vec![0, 1000, 2000, 3000, 4000], cold_rows);
+    assert_eq!(Some(vec![source.as_u64()]), cold_creators);
+
+    // A later read of the same range replays the completed result once the publisher ran. It
+    // delivers the same rows without reading the file, so it states no creator at all.
+    let warm_creators = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (rows, creators) =
+                scan_partition_rows_and_foreign_creators(&engine, target, scan()).await;
+            assert_eq!(cold_rows, rows, "a replay delivers the rows it replayed");
+            if creators.is_none() {
+                return creators;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the range result cache did not replay the range within the timeout");
+    assert_eq!(
+        None, warm_creators,
+        "a replayed range did not open the files its rows came from, so its creators are \
+         unknown rather than none"
+    );
 }
 
 /// Raw Mito output contains candidates after projection, filtering, and MVCC read processing.

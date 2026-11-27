@@ -58,10 +58,10 @@ use crate::memtable::bulk::part::{
 use crate::memtable::bulk::part_reader::BulkPartBatchIter;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
-    IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
-    group_by_sequence,
+    AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, CreatorSliceCursors,
+    EncodedBulkPart, EncodedRange, IterBuilder, KeyValues, MemScanMetrics, Memtable,
+    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
+    MemtableStats, RangesOptions, group_by_sequence,
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
@@ -535,6 +535,7 @@ impl Memtable for BulkMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
+        let creator_slices = options.creator_slices;
         let mut ranges = BTreeMap::new();
         let mut range_id = 0;
 
@@ -565,6 +566,7 @@ impl Memtable for BulkMemtable {
                             part: unordered_bulk_part,
                             context: context.clone(),
                             sequence,
+                            creator_slices: creator_slices.clone(),
                         }),
                         predicate.clone(),
                     )),
@@ -587,11 +589,13 @@ impl Memtable for BulkMemtable {
                         part: part.clone(),
                         context: context.clone(),
                         sequence,
+                        creator_slices: creator_slices.clone(),
                     }),
                     PartToMerge::Multi { part, .. } => Box::new(MultiBulkRangeIterBuilder {
                         part: part.clone(),
                         context: context.clone(),
                         sequence,
+                        creator_slices: creator_slices.clone(),
                     }),
                     PartToMerge::Encoded { part, file_id } => {
                         Box::new(EncodedBulkRangeIterBuilder {
@@ -599,6 +603,7 @@ impl Memtable for BulkMemtable {
                             part: part.clone(),
                             context: context.clone(),
                             sequence,
+                            creator_slices: creator_slices.clone(),
                         })
                     }
                 };
@@ -902,6 +907,8 @@ pub struct BulkRangeIterBuilder {
     pub part: BulkPart,
     pub context: Arc<BulkIterContext>,
     pub sequence: Option<SequenceRange>,
+    /// Cursor of each piece a row may belong to ([`RangesOptions::creator_slices`]).
+    pub creator_slices: Option<CreatorSliceCursors>,
 }
 
 /// Iterator builder for multi bulk range
@@ -909,6 +916,8 @@ struct MultiBulkRangeIterBuilder {
     part: MultiBulkPart,
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
+    /// Cursor of each piece a row may belong to ([`RangesOptions::creator_slices`]).
+    creator_slices: Option<CreatorSliceCursors>,
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
@@ -940,7 +949,8 @@ impl IterBuilder for BulkRangeIterBuilder {
             self.sequence,
             series_count,
             metrics,
-        );
+        )
+        .with_creator_slices(self.creator_slices.clone());
 
         Ok(Box::new(iter))
     }
@@ -971,10 +981,12 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
         _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        match self
-            .part
-            .read(self.context.clone(), self.sequence, metrics)?
-        {
+        match self.part.read(
+            self.context.clone(),
+            self.sequence,
+            self.creator_slices.clone(),
+            metrics,
+        )? {
             Some(iter) => Ok(iter),
             // All batches were pruned by the predicate. Return an empty iterator.
             None => Ok(Box::new(std::iter::empty())),
@@ -996,6 +1008,8 @@ struct EncodedBulkRangeIterBuilder {
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
+    /// Cursor of each piece a row may belong to ([`RangesOptions::creator_slices`]).
+    creator_slices: Option<CreatorSliceCursors>,
 }
 
 impl IterBuilder for EncodedBulkRangeIterBuilder {
@@ -1015,10 +1029,12 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
         _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        if let Some(iter) = self
-            .part
-            .read(self.context.clone(), self.sequence, metrics)?
-        {
+        if let Some(iter) = self.part.read(
+            self.context.clone(),
+            self.sequence,
+            self.creator_slices.clone(),
+            metrics,
+        )? {
             Ok(iter)
         } else {
             // Return an empty iterator if no data to read
@@ -1222,8 +1238,8 @@ impl PartToMerge {
                 );
                 Some(Box::new(iter) as BoxedRecordBatchIterator)
             }
-            PartToMerge::Multi { part, .. } => part.read(context, None, None)?,
-            PartToMerge::Encoded { part, .. } => part.read(context, None, None)?,
+            PartToMerge::Multi { part, .. } => part.read(context, None, None, None)?,
+            PartToMerge::Encoded { part, .. } => part.read(context, None, None, None)?,
         };
         if plans.is_empty() {
             Ok(iter)

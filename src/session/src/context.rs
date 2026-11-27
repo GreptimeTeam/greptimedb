@@ -89,6 +89,42 @@ pub fn generate_remote_query_id_value() -> QueryId {
     QueryId::new()
 }
 
+/// The partition-expression identity the scans of one query stated for one region, i.e. which
+/// part of the region's value domain the snapshot they read under covers.
+///
+/// A region states its identity through its scan (`RegionScanner::snapshot_identity` in the
+/// engine's terms); the engine states the identity and the pinned snapshot sequence together, so
+/// a watermark reported for the region can be paired with the expression it was measured under.
+/// `store-api` owns that statement; this crate only records what the scans of one query said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanPartitionExpr {
+    /// The region's complete value domain: it has no partition expression, so the whole domain
+    /// is the only slice it has. Never means "not known".
+    WholeDomain,
+    /// One partition expression of the region, in the canonical `PartitionExpr::as_json_str()`
+    /// form a cursor entry and an observed slice also carry.
+    Slice(String),
+    /// The query's scans stated two different identities for the region, so the query states
+    /// none: either expression would describe a read the region did not all happen under.
+    Conflicting,
+}
+
+/// The creators of the files one query's scans saw visible when they opened one region.
+///
+/// It travels beside [`ScanPartitionExpr`] because both are statements about the same version
+/// snapshot: the expression says which part of the region's value domain the read covered, this
+/// says which other regions' rows were sitting in the region's files before the read pruned
+/// anything away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanVisibleFileCreators {
+    /// The stated set, sorted and deduplicated, never containing the region itself. It may be
+    /// empty, which states "no file of another region was visible" - a positive answer.
+    Stated(Vec<u64>),
+    /// The query's scans saw two different sets, so the query states none: either set would
+    /// leave out files another scan held.
+    Conflicting,
+}
+
 #[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
@@ -97,6 +133,17 @@ pub struct QueryContext {
     /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
     /// container data that was committed before(and include) the given sequence number
     snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
+    /// Mappings of the RegionId to the partition-expression identity its scans read the
+    /// snapshot above under. Process-local: it describes what this process's scans stated, so
+    /// it is never transported and never accepted from a wire context. A region is absent until
+    /// a scan states its identity.
+    #[builder(default)]
+    scan_partition_exprs: Arc<RwLock<HashMap<u64, ScanPartitionExpr>>>,
+    /// Mappings of the RegionId to the creators of the files its scans saw visible when they
+    /// opened it. Process-local, like [`Self::scan_partition_exprs`]. A region is absent until a
+    /// scan states a set.
+    #[builder(default)]
+    scan_visible_file_creators: Arc<RwLock<HashMap<u64, ScanVisibleFileCreators>>>,
     /// Mappings of the RegionId to the minimal sequence of SST file to scan.
     sst_min_sequences: Arc<RwLock<HashMap<u64, u64>>>,
     // we use Arc<RwLock>> for modifiable fields
@@ -802,6 +849,71 @@ impl QueryContext {
             .insert(region_id, sequence);
     }
 
+    /// Records the partition-expression identity a scan of `region_id` read the query's pinned
+    /// snapshot under: `None` states the region's complete value domain.
+    ///
+    /// A region's first statement stands. A later scan that states another identity for the same
+    /// region marks it [`ScanPartitionExpr::Conflicting`]: the query then states no identity for
+    /// it, because each expression would describe a read the region did not all happen under.
+    pub fn bind_scan_partition_expr(&self, region_id: u64, partition_expr: Option<String>) {
+        let stated = match partition_expr {
+            Some(expr) => ScanPartitionExpr::Slice(expr),
+            None => ScanPartitionExpr::WholeDomain,
+        };
+        let mut exprs = self.scan_partition_exprs.write().unwrap();
+        match exprs.get(&region_id) {
+            Some(existing) if *existing == stated => {}
+            Some(_) => {
+                exprs.insert(region_id, ScanPartitionExpr::Conflicting);
+            }
+            None => {
+                exprs.insert(region_id, stated);
+            }
+        }
+    }
+
+    /// Records the creators of the files a scan of `region_id` saw visible when it opened the
+    /// region. `creators` is sorted and deduplicated and must not contain the region itself.
+    ///
+    /// A region's first statement stands. A later scan that saw another set marks it
+    /// [`ScanVisibleFileCreators::Conflicting`]: the query then states none, because a set that
+    /// omits files another scan held would hide the regions those files' rows come from.
+    pub fn bind_scan_visible_file_creators(&self, region_id: u64, creators: Vec<u64>) {
+        let stated = ScanVisibleFileCreators::Stated(creators);
+        let mut sets = self.scan_visible_file_creators.write().unwrap();
+        match sets.get(&region_id) {
+            Some(existing) if *existing == stated => {}
+            Some(_) => {
+                sets.insert(region_id, ScanVisibleFileCreators::Conflicting);
+            }
+            None => {
+                sets.insert(region_id, stated);
+            }
+        }
+    }
+
+    /// The creators of the files the query's scans of `region_id` saw visible when they opened
+    /// it, or `None` when no scan stated a set. A caller must report "unknown" for such a region
+    /// rather than assume it holds no file of another region.
+    pub fn scan_visible_file_creators(&self, region_id: u64) -> Option<ScanVisibleFileCreators> {
+        self.scan_visible_file_creators
+            .read()
+            .unwrap()
+            .get(&region_id)
+            .cloned()
+    }
+
+    /// The partition-expression identity the query's scans of `region_id` stated, or `None` when
+    /// no scan stated one. A caller must not report an identity for such a region rather than
+    /// assume the region's whole domain.
+    pub fn scan_partition_expr(&self, region_id: u64) -> Option<ScanPartitionExpr> {
+        self.scan_partition_exprs
+            .read()
+            .unwrap()
+            .get(&region_id)
+            .cloned()
+    }
+
     /// Returns `true` if the session can cast strings to numbers in MySQL style.
     pub fn auto_string_to_numeric(&self) -> bool {
         matches!(self.channel, Channel::Mysql)
@@ -846,6 +958,8 @@ impl QueryContextBuilder {
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
             snapshot_seqs: self.snapshot_seqs.unwrap_or_default(),
+            scan_partition_exprs: self.scan_partition_exprs.unwrap_or_default(),
+            scan_visible_file_creators: self.scan_visible_file_creators.unwrap_or_default(),
             sst_min_sequences: self.sst_min_sequences.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),

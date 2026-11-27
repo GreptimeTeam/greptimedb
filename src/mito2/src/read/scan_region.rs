@@ -43,13 +43,14 @@ use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
 use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
 use partition::expr::PartitionExpr;
+use partition::overlap::associate_from_to;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
-use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::region_engine::{PartitionRange, RegionScannerRef, ScanSnapshotIdentity};
 use store_api::storage::{
-    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
-    TimeSeriesRowSelector,
+    ColumnId, CursorShard, RegionId, ScanRequest, SequenceNumber, SequenceRange,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -69,12 +70,17 @@ use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
-use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
+use crate::read::range_cache::{
+    CreatorCursorSlice, ScanRequestFingerprint, implied_time_range_from_exprs,
+};
 use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
-use crate::read::substituted_rows::{SubstitutedRowsAccumulator, SubstitutedRowsAccumulatorRef};
+use crate::read::substituted_rows::{
+    ForeignFileRowCreators, ForeignFileRowCreatorsRef, ObservedPartitionExprs,
+    ObservedPartitionExprsRef, SubstitutedRowsAccumulator, SubstitutedRowsAccumulatorRef,
+};
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
@@ -89,9 +95,14 @@ use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBui
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::parquet::Json2RewriteTargets;
-use crate::sst::parquet::file_range::PreFilterMode;
+use crate::sst::parquet::file_range::{CreatorSliceCursors, PreFilterMode};
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
+
+/// The cursor of each piece a row of this region's own data may belong to, as the read
+/// compiles them: `(partition expression, last consumed sequence, last sequence the piece's
+/// delta covers)` triples (`RangesOptions::creator_slices`).
+type RegionCreatorSlices = crate::memtable::CreatorSliceCursors;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -102,7 +113,6 @@ pub(crate) enum Scanner {
     /// Per-series scan.
     Series(SeriesScan),
 }
-
 impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
@@ -475,9 +485,9 @@ impl ScanRegion {
     /// Scans by series.
     ///
     /// A physical row-sequence read is refused here: neither the per-series readers nor the
-    /// legacy distributor (`SeqScan::build_flat_partition_range_read`) applies the file's
-    /// substituted cut, so the read fails closed with the shared "exactness is not provable"
-    /// error.
+    /// legacy distributor (`SeqScan::build_flat_partition_range_read`) applies the creator's
+    /// cursor slice or the file's substituted cut, so the read fails closed with the shared
+    /// "exactness is not provable" error.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
         if self.request.read_row_sequence {
@@ -486,9 +496,10 @@ impl ScanRegion {
                 min_seq: self.request.memtable_min_sequence.unwrap_or_default(),
                 max_seq: self.request.memtable_max_sequence.unwrap_or_default(),
                 reason: "the PerSeries distribution cannot carry a physical row-sequence read: \
-                         its series readers do not apply the substituted cut of a file, so rows \
-                         a substitution produced would be delivered as if this region \
-                         allocated them; plan the incremental delta as a flat ordered read"
+                         its series readers apply neither the creator's cursor slice nor the \
+                         substituted cut of an adopted file, so rows the caller already consumed \
+                         would be delivered again and a foreign sequence domain would be compared \
+                         with this region's bounds; plan the incremental delta as a flat ordered read"
                     .to_string(),
             }
             .fail();
@@ -517,9 +528,135 @@ impl ScanRegion {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
     }
 
+    /// The region's partition-expression identity at this scan's version snapshot.
+    ///
+    /// [`Self::version`] is the `Version` whose `committed_sequence` the engine bound as this
+    /// scan's `memtable_max_sequence` (see `EngineHandle::scan_region`), so the identity read
+    /// here and that watermark describe one snapshot: a repartition that gives the region
+    /// another expression publishes a new `Version`, which this scan never consults again.
+    ///
+    /// The expression is reported in the canonical `PartitionExpr::as_json_str()` form an
+    /// observed slice and a cursor entry carry, so `(region, expression)` from this scan keys
+    /// the same slice as they do. `None` - no expression, or the explicit empty designation -
+    /// states the region's complete value domain.
+    fn snapshot_partition_expr(&self) -> Result<Option<String>> {
+        let Some(expr) =
+            crate::region::parse_partition_expr(self.version.metadata.partition_expr.as_deref())?
+        else {
+            return Ok(None);
+        };
+        let identity = expr
+            .canonicalize()
+            .as_json_str()
+            .context(crate::error::SerializePartitionExprSnafu)?;
+        Ok(Some(identity))
+    }
+
+    /// The creators of the files this scan's version snapshot has visible, excluding the region
+    /// itself, sorted and deduplicated.
+    ///
+    /// This reads the version's file list in memory - no manifest read, no file open - so it is
+    /// what the region held **when the scan opened**, before any predicate prunes a file away. A
+    /// consumer that enumerates the regions a flow's rows can come from needs exactly this: the
+    /// regions whose rows are sitting in this region's files, which a pruned read never delivers
+    /// and therefore never reports.
+    ///
+    /// The region's own files are its own rows, so its own id is not listed.
+    fn visible_foreign_file_creators(&self) -> Vec<u64> {
+        let region_id = self.region_id();
+        let mut creators = self
+            .version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .map(|file| file.meta_ref().region_id.as_u64())
+            .filter(|creator| *creator != region_id)
+            .collect::<Vec<_>>();
+        creators.sort_unstable();
+        creators.dedup();
+        creators
+    }
+
+    /// The cursor of each piece a memtable row of **this region** may belong to.
+    ///
+    /// A memtable holds the rows this region allocated, so the candidates are the region's
+    /// own slices: every one of them may hold a row, and no file metadata narrows the set the
+    /// way it does for the cursor slices of an SST. A row is then compared against the cursor
+    /// of the piece its tag values fall into instead of against the single floor of the
+    /// region, which is only the least advanced piece.
+    ///
+    /// Each slice carries the last sequence its delta covers ([`CursorShard::until`]) along
+    /// with its cursor, so the memtable bounds the rows of a piece from above as well: a row
+    /// numbered above that bound belongs to a later delta and is not delivered by this one.
+    ///
+    /// `Ok(None)` when there is no per-piece rule to state: the scan is not a
+    /// physical-sequence read, it may cross an invalid boundary (which applies no lower bound
+    /// at all), the region states one whole-domain cursor, or a stated expression cannot be
+    /// read back. The last two keep the region-level floor only while the candidates agree on
+    /// it ([`reject_disagreeing_creator_cursors`]); otherwise the read fails closed
+    /// instead of delivering the rows of a more advanced piece again.
+    fn memtable_creator_slices(&self) -> Result<Option<RegionCreatorSlices>> {
+        if !self.request.read_row_sequence || self.request.read_across_invalid_boundary {
+            return Ok(None);
+        }
+        let Some(shards) = self
+            .request
+            .creator_cursor_shards
+            .as_ref()
+            .and_then(|shards| shards.get(&self.region_id().as_u64()))
+        else {
+            return Ok(None);
+        };
+        let mut slices = Vec::with_capacity(shards.len());
+        for shard in shards {
+            let Some(identity) = shard.partition_expr.as_deref() else {
+                // A whole-domain cursor applies to every row of the region, so no slice
+                // expression can tell which piece a row belongs to: only the region-level
+                // floor is left, and it is the least advanced candidate.
+                reject_disagreeing_creator_cursors(
+                    self.region_id(),
+                    &format!("the memtable of region {}", self.region_id()),
+                    &shards.iter().collect::<Vec<_>>(),
+                    "one cursor slice of the region covers the whole value domain, so no row \
+                     of the memtable can be attributed to a piece",
+                )?;
+                return Ok(None);
+            };
+            let Ok(Some(expr)) = PartitionExpr::from_json_str(identity) else {
+                // An identity this build cannot read back cannot decide a row's piece;
+                // approximating it would be guesswork, so only the region-level floor is left.
+                debug!(
+                    "Cannot read back creator cursor slice expression {}; keeping the region-level floor",
+                    identity
+                );
+                reject_disagreeing_creator_cursors(
+                    self.region_id(),
+                    &format!("the memtable of region {}", self.region_id()),
+                    &shards.iter().collect::<Vec<_>>(),
+                    &format!(
+                        "the slice expression {} cannot be read back by this build, so no row \
+                         of the memtable can be attributed to a piece",
+                        identity
+                    ),
+                )?;
+                return Ok(None);
+            };
+            slices.push((expr, shard.seq, shard.until));
+        }
+        if slices.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Arc::new(slices)))
+    }
+
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(mut self) -> Result<ScanInput> {
+        // Pinned together with `snapshot_sequence` below, all from `self.version`.
+        let snapshot_partition_expr = self.snapshot_partition_expr()?;
+        let visible_foreign_file_creators = self.visible_foreign_file_creators();
         let metadata = &self.version.metadata;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
@@ -585,6 +722,19 @@ impl ScanRegion {
             self.version.options.merge_mode(),
         );
 
+        // A read that may cross an invalid boundary applies no lower bound to memtables: the
+        // rows at or below the cursor are exactly the windows it rediscover. The frozen `H`
+        // upper bound stays.
+        let memtable_min_sequence = if self.request.read_across_invalid_boundary {
+            None
+        } else {
+            self.request.memtable_min_sequence
+        };
+        // The per-piece cursors of this region's own slices: they replace the single floor
+        // `memtable_min_sequence` states (the least advanced piece), and the bound a slice
+        // states narrows the read's maximum for the rows of that piece.
+        let memtable_creator_slices = self.memtable_creator_slices()?;
+
         for m in memtables {
             // check if memtable is empty by reading stats.
             let Some((start, end)) = m.stats().time_range() else {
@@ -600,9 +750,10 @@ impl ScanRegion {
                 RangesOptions::default()
                     .with_predicate(predicate.clone())
                     .with_sequence(SequenceRange::new(
-                        self.request.memtable_min_sequence,
+                        memtable_min_sequence,
                         self.request.memtable_max_sequence,
                     ))
+                    .with_creator_slices(memtable_creator_slices.clone())
                     .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
@@ -666,8 +817,12 @@ impl ScanRegion {
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
             )
+            .with_snapshot_partition_expr(snapshot_partition_expr)
+            .with_visible_foreign_file_creators(visible_foreign_file_creators)
             .with_sequence_range(sequence_range)
+            .with_read_across_invalid_boundary(self.request.read_across_invalid_boundary)
             .with_read_row_sequence(self.request.read_row_sequence)
+            .with_creator_cursor_shards(self.request.creator_cursor_shards.clone())
             .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "enterprise")]
         let input = if !self.request.skip_sst_files
@@ -761,6 +916,26 @@ impl ScanRegion {
 
         if let Some(expr) = predicate.region_partition_expr() {
             expr.collect_column_names(&mut extra_col_names);
+        }
+
+        // A physical-sequence read evaluates the creator cursor slices of an adopted file
+        // row by row, so the columns those expressions reference must be read too. They are
+        // internal: the output projection happens after the flat batch
+        // (`ConvertBatchStream::convert`), so adding them does not change the result schema.
+        if self.request.read_row_sequence
+            && let Some(shards) = &self.request.creator_cursor_shards
+        {
+            for shard in shards.values().flatten() {
+                let Some(identity) = shard.partition_expr.as_deref() else {
+                    continue;
+                };
+                let Ok(Some(expr)) = PartitionExpr::from_json_str(identity) else {
+                    // An unreadable identity keeps the conservative file-level bound; the
+                    // reader reports the same conclusion when it compiles the slices.
+                    continue;
+                };
+                expr.collect_column_names(&mut extra_col_names);
+            }
         }
 
         if !extra_col_names.is_empty() {
@@ -1038,16 +1213,44 @@ pub struct ScanInput {
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
+    /// The region's partition expression stated by the same version snapshot as
+    /// [`Self::snapshot_sequence`] (`None` = the region's complete value domain), read once at
+    /// scan open and propagated back to the caller.
+    ///
+    /// Set for every query scan, not only for one that bound a sequence: a caller that reads at
+    /// a bound it supplied itself still reports the expression the read happened under. Both
+    /// fields come from [`ScanRegion::version`], the version whose `committed_sequence` the
+    /// engine bound as `memtable_max_sequence` (`EngineHandle::scan_region`).
+    pub(crate) snapshot_partition_expr: Option<String>,
+    /// The creators of the files the same version snapshot had visible, excluding this region
+    /// (`Some(vec![])` = the region held no file of another region), read once at scan open and
+    /// propagated back to the caller.
+    pub(crate) visible_foreign_file_creators: Option<Vec<u64>>,
     /// Set only when the region preserves per-row sequences
     /// (`preserve_row_sequence` on an append-only table) and the scan
     /// carries an explicit exact range. When set, SST readers apply the same
     /// `(checkpoint, upper_bound]` row-level filter as memtables.
     pub(crate) sequence_range: Option<SequenceRange>,
-    /// Whether this scan reads the physical `__sequence` column of a foreign file and hides the
-    /// rows a substitution produced ([`ScanRequest::read_row_sequence`]).
+    /// Whether this read may cross an invalid boundary: every selected SST's rows
+    /// are virtualized at the file's admission barrier.
+    pub(crate) read_across_invalid_boundary: bool,
+    /// Whether this scan reads the physical `__sequence` of a foreign file and hides
+    /// the rows a substitution produced ([`ScanRequest::read_row_sequence`]).
     pub(crate) read_row_sequence: bool,
+    /// Cursor slices of every region a file of this one may hold rows of
+    /// ([`ScanRequest::creator_cursor_shards`]): each file is bounded by the least advanced
+    /// slice of the region that allocated its numbers that may hold its rows — this region's
+    /// own slices for a file it created itself, a creator's for an adopted one.
+    creator_cursor_shards: Option<Arc<BTreeMap<u64, Vec<CursorShard>>>>,
     /// Collects the timestamp ranges of the rows this scan substituted; `None` turns it off.
     pub(crate) substituted_row_ranges: Option<SubstitutedRowsAccumulatorRef>,
+    /// Collects the `(region, partition expression)` pairs this scan read; `None` turns it off,
+    /// like [`Self::substituted_row_ranges`].
+    pub(crate) observed_slices: Option<ObservedPartitionExprsRef>,
+    /// Collects the creator regions of the files this scan delivered rows from; `None` turns
+    /// it off. Created for every query scan, not just a physical-sequence read: a full read
+    /// (`read_row_sequence` off) is exactly the read that has to report it.
+    pub(crate) foreign_file_row_creators: Option<ForeignFileRowCreatorsRef>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     /// Max number of compaction inputs decoded concurrently ahead of the merge.
@@ -1117,9 +1320,15 @@ impl ScanInput {
                 distribution: None,
                 explain_flat_format: false,
                 snapshot_sequence: None,
+                snapshot_partition_expr: None,
+                visible_foreign_file_creators: None,
                 sequence_range: None,
+                read_across_invalid_boundary: false,
                 read_row_sequence: false,
+                creator_cursor_shards: None,
                 substituted_row_ranges: None,
+                observed_slices: None,
+                foreign_file_row_creators: None,
                 compaction: false,
                 compaction_read_parallelism: 1,
                 json2_rewrite_targets: Arc::default(),
@@ -1203,6 +1412,12 @@ impl ScanInputBuilder {
     pub(crate) fn build(mut self) -> ScanInput {
         if self.input.compaction {
             self.input.scan_memory_tracker = None;
+        }
+        // A compaction read has no caller to report to. Every other scan states which other
+        // regions' files it delivered rows from — including a full read, which is the read
+        // that has no creator cursor to filter with.
+        if !self.input.compaction {
+            self.input.foreign_file_row_creators = Some(Arc::new(ForeignFileRowCreators::new()));
         }
         let input = &self.input;
         let eligible = !input.compaction
@@ -1477,18 +1692,58 @@ impl ScanInputBuilder {
     }
 
     #[must_use]
+    pub(crate) fn with_visible_foreign_file_creators(
+        mut self,
+        visible_foreign_file_creators: Vec<u64>,
+    ) -> Self {
+        self.input.visible_foreign_file_creators = Some(visible_foreign_file_creators);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_snapshot_partition_expr(
+        mut self,
+        snapshot_partition_expr: Option<String>,
+    ) -> Self {
+        self.input.snapshot_partition_expr = snapshot_partition_expr;
+        self
+    }
+
+    #[must_use]
     pub(crate) fn with_sequence_range(mut self, sequence_range: Option<SequenceRange>) -> Self {
         self.input.sequence_range = sequence_range;
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_read_across_invalid_boundary(
+        mut self,
+        read_across_invalid_boundary: bool,
+    ) -> Self {
+        self.input.read_across_invalid_boundary = read_across_invalid_boundary;
+        self
+    }
+
     /// Sets whether this scan reads physical row sequences and hides substituted rows. It turns
-    /// the substituted-row collector on with it.
+    /// the substituted-row and observed-partition-expression collectors on with it.
     #[must_use]
     pub(crate) fn with_read_row_sequence(mut self, read_row_sequence: bool) -> Self {
         self.input.read_row_sequence = read_row_sequence;
         self.input.substituted_row_ranges =
             read_row_sequence.then(|| Arc::new(SubstitutedRowsAccumulator::new()));
+        self.input.observed_slices =
+            read_row_sequence.then(|| Arc::new(ObservedPartitionExprs::new()));
+        self
+    }
+
+    /// Sets the cursor slices of the regions that created this region's files; only a
+    /// physical-sequence read uses them.
+    #[must_use]
+    pub(crate) fn with_creator_cursor_shards(
+        mut self,
+        creator_cursor_shards: Option<Arc<BTreeMap<u64, Vec<CursorShard>>>>,
+    ) -> Self {
+        self.input.creator_cursor_shards = creator_cursor_shards;
         self
     }
 
@@ -1731,7 +1986,12 @@ impl ScanInput {
         };
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
+            .force_sequence_override(self.read_across_invalid_boundary)
             .read_row_sequence(self.read_row_sequence)
+            // Only the slices whose expression may hold rows of this file are passed on; a file
+            // no slice covers keeps the file-level bound, and only a file of another region fails
+            // closed.
+            .creator_slice_cursors(self.creator_slice_cursors(file)?)
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
             .enable_predicate_prefilter(enable_predicate_prefilter)
@@ -1930,6 +2190,314 @@ impl ScanInput {
         self.mapper.metadata()
     }
 
+    /// The snapshot this scan pinned: the bound it set itself (if any) and the
+    /// partition-expression identity of the same version, in the canonical
+    /// `PartitionExpr::as_json_str()` form a cursor entry carries.
+    pub(crate) fn snapshot_identity(&self) -> ScanSnapshotIdentity {
+        ScanSnapshotIdentity {
+            bound_sequence: self.snapshot_sequence,
+            partition_expr: self.snapshot_partition_expr.clone(),
+            visible_foreign_file_creators: self.visible_foreign_file_creators.clone(),
+        }
+    }
+
+    pub(crate) fn substituted_row_ranges(&self) -> Option<&SubstitutedRowsAccumulator> {
+        self.substituted_row_ranges.as_deref()
+    }
+
+    pub(crate) fn substituted_row_ranges_ref(&self) -> Option<SubstitutedRowsAccumulatorRef> {
+        self.substituted_row_ranges.clone()
+    }
+
+    pub(crate) fn observed_slices(&self) -> Option<&ObservedPartitionExprs> {
+        self.observed_slices.as_deref()
+    }
+
+    pub(crate) fn observed_slices_ref(&self) -> Option<ObservedPartitionExprsRef> {
+        self.observed_slices.clone()
+    }
+
+    pub(crate) fn foreign_file_row_creators(&self) -> Option<&ForeignFileRowCreators> {
+        self.foreign_file_row_creators.as_deref()
+    }
+
+    pub(crate) fn foreign_file_row_creators_ref(&self) -> Option<ForeignFileRowCreatorsRef> {
+        self.foreign_file_row_creators.clone()
+    }
+
+    /// Returns the substituted cut `file` states for its own bytes, when this scan reads
+    /// physical row sequences.
+    ///
+    /// The cut describes the file's bytes, not who allocated the numbers in them, so it applies
+    /// to every file that states one, local files included
+    /// ([`crate::sst::file::substituted_up_to_after_merge`]). The file's
+    /// `preserve_row_sequence` marker takes no part.
+    pub(crate) fn substituted_sequence_cut(&self, file: &FileHandle) -> Option<SequenceNumber> {
+        if !self.read_row_sequence {
+            return None;
+        }
+        // `None` means no row of the column was substituted; `Some(0)` means the column
+        // carries no per-row numbering at all, so every row is substituted.
+        file.meta_ref().substituted_up_to
+    }
+
+    /// The row filter of a physical-sequence read of `file`:
+    /// `(candidate cursor, candidate bound]`, or `(candidate cursor, +inf)` when no candidate
+    /// slice states an upper bound.
+    ///
+    /// This is the candidate selection of [`cursor_slice_may_hold_file_rows`] followed by one
+    /// sequence range for the whole file, so a file whose expressions advanced differently is
+    /// read from the least advanced of them: the lower end is the *minimum* of the candidates'
+    /// cursors, and the upper end the *minimum* of the upper bounds they state
+    /// ([`CursorShard::until`]). The file-level filter cannot tell which slice a row belongs
+    /// to, so it may only prove what the least bound proves: a row above it may belong to the
+    /// slice whose delta ends exactly there, and delivering it would report progress this read
+    /// does not stand for.
+    ///
+    /// A region's **own** files are bounded the same way: the cursors are keyed by
+    /// `(region, piece)` and the map is keyed by the region that allocated the numbers, which
+    /// for such a file is this region, so the candidates are this region's own pieces. The one
+    /// difference is the upper end: own rows carry this region's numbers, so the scan's own `H`
+    /// bounds them whenever no candidate states a bound, instead of leaving the file unbounded
+    /// above. When a region's pieces carry one cursor value, that value is the minimum, so the
+    /// result is exactly the region-level floor `(C, H]` this read applied before.
+    ///
+    /// `None` means this scan has no cursor of the file's region (or is not a
+    /// physical-sequence read at all).
+    pub(crate) fn creator_domain_sequence_range(
+        &self,
+        file: &FileHandle,
+    ) -> Result<Option<SequenceRange>> {
+        if !self.read_row_sequence {
+            return Ok(None);
+        }
+        // A physical-sequence read only exists inside an exact `(C, H]` delta. If this
+        // scan could not prove one at all (`sequence_range` is `None`, e.g. a local file
+        // whose barrier cannot be trusted), a foreign file fails closed like every other
+        // uncertain case — but neither `C` nor `H` bounds *that* file's numbers, so the
+        // range itself is not reused below.
+        if self.sequence_range.is_none() {
+            return Ok(None);
+        }
+        let meta = file.meta_ref();
+        // Whose numbers the file carries: its own region's, or a creator's this read has to
+        // compare against the creator's cursors.
+        let own_numbers = meta.region_id == self.region_metadata().region_id;
+        let Some(shards) = self
+            .creator_cursor_shards
+            .as_ref()
+            .and_then(|shards| shards.get(&meta.region_id.as_u64()))
+        else {
+            return Ok(None);
+        };
+        let mut cursor: Option<SequenceNumber> = None;
+        let mut until: Option<SequenceNumber> = None;
+        for shard in shards {
+            if cursor_slice_may_hold_file_rows(shard, meta)? {
+                cursor = Some(cursor.map_or(shard.seq, |current| current.min(shard.seq)));
+                if let Some(shard_until) = shard.until {
+                    until = Some(until.map_or(shard_until, |current| current.min(shard_until)));
+                }
+            }
+        }
+        // Own rows carry this region's numbers, so the scan's own `H` bounds them even when
+        // every candidate piece is open-ended above. A creator's numbers no bound of this
+        // region states anything about, so an adopted file stays unbounded above instead.
+        let own_upper = if own_numbers {
+            match self.sequence_range {
+                Some(SequenceRange::GtLtEq { max, .. } | SequenceRange::LtEq { max }) => Some(max),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let until = until.or(own_upper);
+        Ok(cursor.map(|min| match until {
+            // `min < number <= max`: the rows of the delta, neither re-read nor read ahead.
+            Some(max) => SequenceRange::GtLtEq { min, max },
+            None => SequenceRange::Gt { min },
+        }))
+    }
+
+    /// The candidate cursor slices of `file`, as the reader compiles them:
+    /// `(partition expression identity, last consumed sequence)` pairs whose expression
+    /// may select a row of the file.
+    ///
+    /// This is the same candidate selection as [`Self::creator_domain_sequence_range`]:
+    /// the file-level bound it produces stays, and the reader uses the candidates to decide
+    /// per row which cursor applies. A file carrying this region's own numbers is read the
+    /// same way — the candidates are then this region's own pieces — so that a row is
+    /// compared against the cursor of the piece it belongs to rather than against one floor
+    /// for the whole region.
+    ///
+    /// `Ok(None)` means the per-row rule cannot narrow the file's floor any further: no cursor
+    /// of the file's region is known, no candidate may hold a row of it, or one candidate
+    /// covers the whole value domain. The first two are "no cursor to resolve", and the last
+    /// one keeps the file-level floor only while the candidates agree on it
+    /// ([`reject_disagreeing_creator_cursors`]); otherwise an exact read fails closed
+    /// rather than re-delivering the rows a more advanced piece has already consumed.
+    fn creator_slice_cursors(&self, file: &FileHandle) -> Result<Option<CreatorSliceCursors>> {
+        if !self.read_row_sequence {
+            return Ok(None);
+        }
+        let meta = file.meta_ref();
+        let Some(shards) = self
+            .creator_cursor_shards
+            .as_ref()
+            .and_then(|shards| shards.get(&meta.region_id.as_u64()))
+        else {
+            // No cursor of the file's creator region is known: there is no per-piece cursor
+            // to resolve (`row_sequence_filter` still fails an adopted file closed).
+            return Ok(None);
+        };
+        // The candidate set first. A whole-domain slice is a candidate of every file, so its
+        // own early return cannot stand in for the whole set: whether the *other* candidates
+        // carry its cursor is exactly what decides if the file-level floor is exact.
+        let mut candidates = Vec::with_capacity(shards.len());
+        for shard in shards {
+            if cursor_slice_may_hold_file_rows(shard, meta)? {
+                candidates.push(shard);
+            }
+        }
+        if candidates.is_empty() {
+            // No slice may hold a row of the file, so no piece's cursor is attributable to one
+            // of its rows: there is nothing to decide, and the file keeps its current bound
+            // (`row_sequence_filter` still fails an adopted file closed).
+            return Ok(None);
+        }
+        let mut cursors = Vec::with_capacity(candidates.len());
+        for shard in &candidates {
+            let Some(identity) = shard.partition_expr.as_ref() else {
+                // A whole-domain cursor applies to every row, so no slice expression can tell
+                // which piece a row belongs to: only the file-level floor is left, and it is
+                // the least advanced candidate.
+                reject_disagreeing_creator_cursors(
+                    self.region_metadata().region_id,
+                    &format!("file {} of region {}", meta.file_id, meta.region_id),
+                    &candidates,
+                    "one cursor slice of its region covers the whole value domain, so no row of \
+                     the file can be attributed to a piece",
+                )?;
+                return Ok(None);
+            };
+            cursors.push((identity.clone(), shard.seq));
+        }
+        Ok(Some(Arc::new(cursors)))
+    }
+
+    /// The candidate creator cursor slices of `file` as a **range-cache key** has to record
+    /// them: the same candidates [`Self::creator_slice_cursors`] compiles into row filters,
+    /// each with the `until` bound [`Self::creator_domain_sequence_range`] derives from it.
+    ///
+    /// The set decides two things the file itself does not state: the file-level bound
+    /// `(least advanced cursor, least until]` and the per-row cursor of every piece. A cached
+    /// range result built under one set therefore cannot be replayed under another — a piece
+    /// cursor that advanced would replay rows the new range requires and rows above its
+    /// `until`.
+    ///
+    /// `Ok(None)` means this read applies no per-piece rule to the file (it is not a
+    /// physical-sequence read, or no cursor of the file's creator region is known).
+    pub(crate) fn creator_cursor_slices(
+        &self,
+        file: &FileHandle,
+    ) -> Result<Option<Arc<Vec<CreatorCursorSlice>>>> {
+        if !self.read_row_sequence {
+            return Ok(None);
+        }
+        let meta = file.meta_ref();
+        let Some(shards) = self
+            .creator_cursor_shards
+            .as_ref()
+            .and_then(|shards| shards.get(&meta.region_id.as_u64()))
+        else {
+            return Ok(None);
+        };
+        let mut slices = Vec::with_capacity(shards.len());
+        for shard in shards {
+            // A slice that cannot hold a row of this file is not one of its candidates, so its
+            // cursor and its `until` do not bound it.
+            if !cursor_slice_may_hold_file_rows(shard, meta)? {
+                continue;
+            }
+            slices.push(CreatorCursorSlice {
+                partition_expr: shard.partition_expr.clone(),
+                cursor: shard.seq,
+                until: shard.until,
+            });
+        }
+        if slices.is_empty() {
+            return Ok(None);
+        }
+        // The outcome is decided by the set, not by its order (a row is bounded by the least
+        // advanced candidate that selects it, the file by the least advanced candidate), so
+        // one set must yield one key however the producer ordered it.
+        slices.sort_unstable_by(|a, b| {
+            a.partition_expr
+                .cmp(&b.partition_expr)
+                .then(a.cursor.cmp(&b.cursor))
+                .then(a.until.cmp(&b.until))
+        });
+        slices.dedup();
+        Ok(Some(Arc::new(slices)))
+    }
+
+    /// Whether `file` was created by another region, i.e. its rows carry a number this
+    /// region never allocated.
+    pub(crate) fn is_foreign_file(&self, file: &FileHandle) -> bool {
+        file.meta_ref().region_id != self.region_metadata().region_id
+    }
+
+    /// The row filter a physical-sequence read applies to `file`: every row of it is compared
+    /// against the cursor of the **piece it belongs to**, never against one floor for a whole
+    /// region.
+    ///
+    /// The cursors are keyed by `(region, piece)`, so a file is filtered by the slices of the
+    /// region that allocated its numbers — `(cursor, until]`, or `(cursor, +inf)` when no
+    /// candidate states a bound ([`Self::creator_domain_sequence_range`]) — with or without a
+    /// substituted cut. A file carrying this region's own numbers gets the same treatment: its
+    /// rows were allocated by this region's own pieces, and dropping the pointwise comparison
+    /// assumed a region has a single cursor value, which the flow model this serves does not
+    /// guarantee. When a region's pieces carry one cursor value, that value is the minimum, so
+    /// the outcome is exactly the region-level floor `(C, H]` of before.
+    ///
+    /// `Ok(None)` means no slice of the file's region applies (or this scan is not a
+    /// physical-sequence read at all). For a file of **this** region that is not a failure: rows
+    /// carrying this region's numbers are bounded by the scan's own `(C, H]`, which the caller
+    /// applies, exactly as before. For a file of another region it fails closed instead: the
+    /// holder's `(C, H]` states nothing about a number another region allocated.
+    /// [`exact_sequence_range`] never prunes such a file by this region's cursor.
+    pub(crate) fn row_sequence_filter(&self, file: &FileHandle) -> Result<Option<SequenceRange>> {
+        if !self.read_row_sequence {
+            return Ok(None);
+        }
+        if let Some(range) = self.creator_domain_sequence_range(file)? {
+            return Ok(Some(range));
+        }
+        if !self.is_foreign_file(file) {
+            // Every row of the file carries this region's own numbering, which its own
+            // `(C, H]` bounds, and no slice of the region narrowed it further: keep the
+            // region-level floor instead of failing a read of our own data closed.
+            return Ok(None);
+        }
+        let (min_seq, max_seq) = match self.sequence_range {
+            Some(SequenceRange::GtLtEq { min, max }) => (min, max),
+            Some(SequenceRange::Gt { min }) => (min, 0),
+            Some(SequenceRange::LtEq { max }) => (0, max),
+            None => (0, 0),
+        };
+        let meta = file.meta_ref();
+        SequenceRangeUnsupportedSnafu {
+            region_id: self.region_metadata().region_id,
+            min_seq,
+            max_seq,
+            reason: format!(
+                "the physical-sequence read of adopted file {} has no cursor slice of its creator region {}, so its rows cannot be split into consumed and live ones",
+                meta.file_id, meta.region_id
+            ),
+        }
+        .fail()
+    }
+
     fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
         if source_count <= 1 {
             // Duplicated rows in the same source is not a normal case and we don't provide
@@ -2035,33 +2603,6 @@ impl PruningStatistics for FileLevelPruningStats<'_> {
     }
 }
 
-impl ScanInput {
-    /// The timestamp ranges the rows this scan substituted occupy.
-    pub(crate) fn substituted_row_ranges(&self) -> Option<&SubstitutedRowsAccumulator> {
-        self.substituted_row_ranges.as_deref()
-    }
-
-    pub(crate) fn substituted_row_ranges_ref(&self) -> Option<SubstitutedRowsAccumulatorRef> {
-        self.substituted_row_ranges.clone()
-    }
-
-    /// Returns the substituted cut `file` states for its own bytes, when this scan reads
-    /// physical row sequences.
-    ///
-    /// The cut describes the file's bytes, not who allocated the numbers in them, so it applies
-    /// to every file that states one, local files included
-    /// ([`crate::sst::file::substituted_up_to_after_merge`]). The file's
-    /// `preserve_row_sequence` marker takes no part.
-    pub(crate) fn substituted_sequence_cut(&self, file: &FileHandle) -> Option<SequenceNumber> {
-        if !self.read_row_sequence {
-            return None;
-        }
-        // `None` means no row of the column was substituted; `Some(0)` means the column
-        // carries no per-row numbering at all, so every row is substituted.
-        file.meta_ref().substituted_up_to
-    }
-}
-
 #[cfg(test)]
 impl ScanInput {
     /// Returns SST file ids to scan.
@@ -2085,6 +2626,108 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
+/// Fails when the candidate cursor slices of one region disagree on the last consumed
+/// sequence, and succeeds when they all carry the same value.
+///
+/// This is the one rule for every case in which the per-row rule of a physical-sequence read
+/// cannot be applied — a file of an adopted creator, this region's own memtable, or a
+/// memtable part. When the candidates all carry the **same** cursor value, that value is the
+/// least advanced one and the bound the fallback states is exact: it delivers exactly the rows
+/// the per-row rule delivers, so the fallback stays, silently and without any evaluation of
+/// its own. When they carry several values, the least advanced one re-delivers the rows of the
+/// slices a more advanced piece has already consumed: that is a **duplicate**, not a replay,
+/// and an exact read must not degrade that way without saying so, so the read fails with
+/// [`SequenceRangeUnsupported`](crate::error::Error::SequenceRangeUnsupported).
+///
+/// The bounds the error reports are the cursors' own span, which is the disagreement the read
+/// cannot resolve. `target` names what could not be resolved.
+fn reject_disagreeing_creator_cursors(
+    region_id: RegionId,
+    target: &str,
+    candidates: &[&CursorShard],
+    detail: &str,
+) -> Result<()> {
+    let Some((min, max)) = candidate_cursor_bounds(candidates) else {
+        return Ok(());
+    };
+    if min == max {
+        return Ok(());
+    }
+    SequenceRangeUnsupportedSnafu {
+        region_id,
+        min_seq: min,
+        max_seq: max,
+        reason: format!(
+            "the physical-sequence read of {} cannot resolve a per-piece cursor while the \
+             candidate slices of the region that allocated its numbers disagree on the last \
+             consumed sequence ({}..={}): bounding it by the least advanced cursor {} would \
+             deliver the rows a more advanced piece has already consumed. {}",
+            target, min, max, min, detail
+        ),
+    }
+    .fail()
+}
+
+/// The least and the greatest cursor value of a candidate slice set, or `None` when the set
+/// is empty.
+///
+/// Equal bounds mean every candidate carries the same cursor value — the only case in which
+/// the least advanced cursor answers an unresolvable piece exactly
+/// ([`reject_disagreeing_creator_cursors`]).
+fn candidate_cursor_bounds(
+    candidates: &[&CursorShard],
+) -> Option<(SequenceNumber, SequenceNumber)> {
+    let mut bounds: Option<(SequenceNumber, SequenceNumber)> = None;
+    for shard in candidates {
+        bounds = Some(match bounds {
+            None => (shard.seq, shard.seq),
+            Some((min, max)) => (min.min(shard.seq), max.max(shard.seq)),
+        });
+    }
+    bounds
+}
+
+/// Whether `meta` may hold rows of the value domain the cursor slice `shard` was consumed in,
+/// i.e. whether `shard.seq` is one of the candidate cursors of this file.
+///
+/// This is a file-level selection: the caller bounds the whole file with the least advanced
+/// candidate ([`ScanInput::creator_domain_sequence_range`]).
+///
+/// * a whole-domain slice (`partition_expr: None`) is a candidate for every file;
+/// * a file that states no expression covers its region's complete value domain, so every
+///   slice of the region is a candidate;
+/// * otherwise the slice is a candidate when both expressions can be satisfied by a common
+///   row, which is the overlap question of `partition::overlap::associate_from_to`;
+/// * an expression that cannot be analysed is a candidate as well.
+fn cursor_slice_may_hold_file_rows(
+    shard: &CursorShard,
+    meta: &crate::sst::file::FileMeta,
+) -> crate::error::Result<bool> {
+    let Some(shard_expr) = shard.partition_expr.as_deref() else {
+        return Ok(true);
+    };
+    // Decoding can only fail for a cursor this build did not produce (the query layer
+    // validates the identity before it hands it to a scan), and the conservative reading
+    // of an unknown domain is the creator's whole value domain.
+    let Some(shard_expr) =
+        PartitionExpr::from_json_str(shard_expr).context(InvalidPartitionExprSnafu {
+            expr: shard_expr.to_string(),
+        })?
+    else {
+        return Ok(true);
+    };
+    let Some(file_expr) = meta.partition_expr.as_ref() else {
+        return Ok(true);
+    };
+
+    let shard_exprs = [shard_expr];
+    let file_exprs = [file_expr.as_ref().clone()];
+    match associate_from_to(&shard_exprs, &file_exprs) {
+        Ok(assoc) => Ok(assoc.first().is_some_and(|overlaps| !overlaps.is_empty())),
+        Err(_) => Ok(true),
+    }
+}
+
 /// Selects the SST files for a scan and, when requested, determines whether
 /// the selected files support an exact sequence-range scan.
 ///
@@ -2104,21 +2747,90 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 /// file without a barrier fails closed.
 ///
 /// A physical-sequence read (`read_row_sequence`) keeps the file's own numbers instead, so a
-/// foreign file is never excluded here: its numbers are the creator's, which the barrier does
-/// not bound.
+/// foreign file is never excluded here and is filtered by the creator's cursor
+/// ([`ScanInput::row_sequence_filter`]).
+///
+/// That filter bounds every file by the cursor of the piece each row belongs to, this region's
+/// own files included, but the exclusion above still uses the request's region-level floor `C`
+/// only: `C` is the least of a region's cursors, so a file is excluded only when every piece has
+/// consumed it whole. A file whose piece cursors differ is therefore kept — the conservative
+/// direction — and decided row by row instead.
 ///
 /// A **local** file may state a substitution as well: a merge substitutes a file-level constant
 /// for the rows of its foreign inputs and records the bound
 /// ([`crate::sst::file::substituted_up_to_after_merge`]). Such a file is attributable — the read
-/// hides the rows at or below the cut ([`ScanInput::substituted_sequence_cut`]) and the rest
-/// carries this region's numbering — and keeps the region's exact range. A local file with
-/// neither the marker nor a cut keeps failing closed.
+/// hides the rows at or below the cut ([`ScanInput::substituted_sequence_cut`]) and the cursors
+/// of this region's pieces bound the rest — and keeps the region's exact range. A local file with
+/// neither the marker nor a cut, or a cut outside a physical-sequence read, keeps failing closed.
 pub(crate) fn exact_sequence_range(
     request: &ScanRequest,
     version: &crate::region::version::Version,
 ) -> Result<(Vec<FileHandle>, Option<SequenceRange>)> {
     if request.skip_sst_files {
         return Ok((Vec::new(), None));
+    }
+
+    if request.read_across_invalid_boundary {
+        // A read that may cross an invalid boundary prunes at file granularity only: a file
+        // whose admission barrier is at or below the cursor was fully consumed, and a file
+        // without a barrier is kept. No `SequenceRange` is returned, so the result is a
+        // superset of the affected windows.
+        let after = request.memtable_min_sequence;
+        let time_index = version.metadata.time_index_column();
+        let unit = time_index
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .expect("Time index must have timestamp-compatible type")
+            .unit();
+        let time_range =
+            build_time_range_predicate(&time_index.column_schema.name, unit, &request.filters);
+        let files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .filter(|file| file_in_range(file, &time_range))
+            .filter(|file| match (after, file.meta_ref().sequence) {
+                (Some(after), Some(sequence)) => sequence.get() > after,
+                _ => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // A file without an admission barrier cannot be pruned, so the candidate set is
+        // reported as incomplete instead of degrading into a full scan.
+        let unprunable = files
+            .iter()
+            .filter(|file| file.meta_ref().sequence.is_none())
+            .count();
+        if unprunable > 0 {
+            return SequenceRangeUnsupportedSnafu {
+                region_id: version.metadata.region_id,
+                min_seq: after.unwrap_or_default(),
+                max_seq: after.unwrap_or_default(),
+                reason: format!(
+                    "recovery discovery cannot prove its candidate file set is complete: {unprunable} of {} selected files carry no admission barrier, so it would read the whole region",
+                    files.len()
+                ),
+            }
+            .fail();
+        }
+        if files.is_empty() && version.memtables.is_empty() {
+            // An empty candidate set is reported, never silently treated as "no
+            // window": the caller decides whether to accept it or advance instead.
+            // A non-empty memtable is a candidate too: its rows carry sequences the
+            // region itself assigned, so discovery must read it (the scan keeps no
+            // row-level range here, which only widens the discovered window set).
+            return SequenceRangeUnsupportedSnafu {
+                region_id: version.metadata.region_id,
+                min_seq: after.unwrap_or_default(),
+                max_seq: after.unwrap_or_default(),
+                reason: "recovery discovery found no candidate file above the cursor, so it cannot report an empty window set as complete"
+                    .to_string(),
+            }
+            .fail();
+        }
+        return Ok((files, None));
     }
 
     let time_index = version.metadata.time_index_column();
@@ -2145,7 +2857,7 @@ pub(crate) fn exact_sequence_range(
     {
         let meta = file.meta_ref();
         // A physical-sequence read keeps the creator's numbers, which the barrier does not
-        // bound: the file is kept and its substituted rows are hidden by the read.
+        // bound: the file is kept and filtered by the creator's cursor.
         let keeps_foreign_sequence_domain =
             request.read_row_sequence && meta.region_id != version.metadata.region_id;
         let selected = (!request.exact_sequence_range
@@ -3921,6 +4633,101 @@ mod tests {
             )
             .build();
         assert!(exact_sequence_range(&request, &version).is_err());
+    }
+
+    /// A physical-sequence read admits an imported file whatever its `preserve_row_sequence`
+    /// marker says: an import (a repartition's staging apply included) only re-marks the
+    /// handle and copies the bytes, so the column and the file's own cut still describe the
+    /// rows. The missing-barrier error stays, and the marker keeps gating ordinary reads.
+    #[test]
+    fn test_exact_sequence_selection_admits_imported_file_for_physical_read() {
+        use std::num::NonZeroU64;
+
+        use crate::test_util::new_noop_file_purger;
+
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
+            metadata.clone(),
+            Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
+            0,
+            None,
+        );
+        let request = ScanRequest {
+            exact_sequence_range: true,
+            read_row_sequence: true,
+            memtable_min_sequence: Some(5),
+            memtable_max_sequence: Some(10),
+            ..Default::default()
+        };
+
+        for (sequence, marked, expected_range, expected_error) in [
+            (NonZeroU64::new(6), false, true, false),
+            (NonZeroU64::new(6), true, true, false),
+            (None, false, false, true),
+            (None, true, false, true),
+        ] {
+            let version = crate::region::version::VersionBuilder::new(
+                metadata.clone(),
+                mutable.new_with_part_duration(None, None),
+            )
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: true,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: RegionId::new(1, 2),
+                    sequence,
+                    preserve_row_sequence: marked,
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
+            let result = exact_sequence_range(&request, &version);
+            if expected_error {
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::error::Error::RegionSequenceDomainBroken { .. })
+                    ),
+                    "a foreign file without an admission barrier must stay failed closed"
+                );
+            } else {
+                let (files, range) = result.unwrap();
+                assert_eq!(1, files.len());
+                assert_eq!(expected_range, range.is_some());
+            }
+        }
+
+        // A region whose option is off cannot serve an exact range at all, so the excluded
+        // plateau (a source file with `preserve_row_sequence = false` and no cut) still fails
+        // closed there instead of being read as an ordinary file.
+        let version = crate::region::version::VersionBuilder::new(
+            metadata,
+            mutable.new_with_part_duration(None, None),
+        )
+        .options(crate::region::options::RegionOptions {
+            preserve_row_sequence: false,
+            ..Default::default()
+        })
+        .add_files(
+            new_noop_file_purger(),
+            [FileMeta {
+                region_id: RegionId::new(1, 2),
+                sequence: NonZeroU64::new(6),
+                ..Default::default()
+            }]
+            .into_iter(),
+        )
+        .build();
+        let (files, range) = exact_sequence_range(&request, &version).unwrap();
+        assert_eq!(1, files.len());
+        assert_eq!(
+            None, range,
+            "a region that does not preserve row sequences keeps denying the exact range"
+        );
     }
 
     #[tokio::test]

@@ -1622,23 +1622,42 @@ pub fn build_flat_file_range_scan_stream(
                     .substituted_sequence_cut(range.file_handle())
                     .map(|cut| (cut, windows))
             });
-            let file_sequence_trusted = range
-                .file_handle()
-                .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id)
-                // A local file whose marker is unset is attributable above its substituted cut,
-                // which is applied just below.
-                || substituted_cut.is_some();
+            // Which rows of this file this round has already consumed: whichever region
+            // allocated a row's number decides, through the cursor of the piece the row
+            // belongs to (with or without the cut above). Only a file whose region states no
+            // cursor this scan can use falls back to the scan's own `(C, H]`, which bounds a
+            // local file's numbering, and fails closed for a foreign one.
+            let (file_sequence_range, file_sequence_trusted) =
+                match stream_ctx.input.row_sequence_filter(range.file_handle())? {
+                    Some(creator_range) => (Some(creator_range), true),
+                    None => (
+                        stream_ctx.input.sequence_range,
+                        // A local file whose marker is unset is attributable above its
+                        // substituted cut, which was applied just above.
+                        range
+                            .file_handle()
+                            .is_effective_target_sequence_trusted(
+                                stream_ctx.input.region_metadata().region_id,
+                            )
+                            || substituted_cut.is_some(),
+                    ),
+                };
+
+            // Which `(region, partition expression)` this read observed. Local files are
+            // reported too, so a region's own slices stay observable after compaction rewrote
+            // adopted rows into local ones.
+            if let Some(observed) = stream_ctx.input.observed_slices() {
+                let meta = range.file_handle().meta_ref();
+                observed.record(meta.region_id.as_u64(), meta.partition_expr.as_deref())?;
+            }
 
             while let Some(record_batch) = reader.next_batch().await? {
-                // Hides the rows a substitution produced and reports the windows they occupy,
-                // so the caller recomputes exactly those windows.
+                // Hides the rows a substitution produced and reports the windows they
+                // occupy, so the caller recomputes exactly those windows.
                 let record_batch = match substituted_cut {
                     Some((cut, windows)) => {
-                        let Some(record_batch) = filter_flat_batch_by_substituted_sequence(
-                            record_batch,
-                            Some(cut),
-                            windows,
-                        )?
+                        let Some(record_batch) =
+                            filter_flat_batch_by_substituted_sequence(record_batch, Some(cut), windows)?
                         else {
                             continue;
                         };
@@ -1648,11 +1667,23 @@ pub fn build_flat_file_range_scan_stream(
                 };
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
-                    stream_ctx.input.sequence_range,
+                    file_sequence_range,
                     file_sequence_trusted,
                 )? else {
                     continue;
                 };
+
+                // Evidence for the caller: rows of a file another region created are reaching
+                // this read's output. Recorded after this region's own row filters, so a file
+                // opened, pruned or filtered down to nothing is not reported; a later stage of
+                // the same query may still drop these rows, which makes the answer an
+                // over-approximation rather than a claim about the final result.
+                if let Some(creators) = stream_ctx.input.foreign_file_row_creators()
+                    && record_batch.num_rows() > 0
+                    && stream_ctx.input.is_foreign_file(range.file_handle())
+                {
+                    creators.record(range.file_handle().meta_ref().region_id.as_u64());
+                }
 
                 if let Some(flat_compat) = may_compat {
                     let batch = flat_compat.compat(record_batch)?;

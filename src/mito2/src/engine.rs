@@ -1528,6 +1528,14 @@ fn validate_sequence_fences(
     exact_sequence_range_available: bool,
     extension_provider_blocks_exact: bool,
 ) -> Result<()> {
+    // A read that may cross a boundary a stale cursor can no longer explain prunes at file
+    // granularity and reads no row-level sequence range, so the sequence fences below do not
+    // apply: the caller only needs the timestamps of the surviving rows, and rejecting the
+    // request would deadlock recovery.
+    if request.read_across_invalid_boundary {
+        return Ok(());
+    }
+
     if request.exact_sequence_range {
         // Exact `sequence_range` mode: when the capability is available the
         // requested (C, H] delta is enforced row-level on memtables and every
@@ -1568,7 +1576,11 @@ fn validate_sequence_fences(
                 region_id,
                 min_seq: request.memtable_min_sequence.unwrap_or_default(),
                 max_seq: request.memtable_max_sequence.unwrap_or_default(),
-                reason: sequence_range_unsupported_reason(version, extension_provider_blocks_exact),
+                reason: sequence_range_unsupported_reason(
+                    request,
+                    version,
+                    extension_provider_blocks_exact,
+                ),
             }
             .fail();
         }
@@ -1613,15 +1625,22 @@ fn validate_sequence_fences(
 }
 
 fn sequence_range_unsupported_reason(
+    request: &ScanRequest,
     version: &crate::region::version::Version,
     extension_provider_blocks_exact: bool,
 ) -> String {
     if extension_provider_blocks_exact {
         "region is a follower with an extension range provider, whose streams cannot be filtered by sequence".to_string()
-    } else if version.options.preserve_row_sequence {
-        "region has files without preserved per-row sequences".to_string()
-    } else {
+    } else if !version.options.preserve_row_sequence {
         "region does not preserve per-row sequences (preserve_row_sequence is off)".to_string()
+    } else if request.read_row_sequence {
+        // A file that states a substituted cut is attributable (its substituted rows are
+        // hidden and reported, the rest keep this region's numbering), so the remaining
+        // case is a local file with neither the preserved-sequence marker nor a cut.
+        "region has files without preserved per-row sequences and without a substituted cut, so a physical-sequence read cannot attribute their rows"
+            .to_string()
+    } else {
+        "region has files without preserved per-row sequences".to_string()
     }
 }
 

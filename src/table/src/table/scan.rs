@@ -24,8 +24,8 @@ use common_query::series_frame::{
     PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
 };
 use common_recordbatch::adapter::{
-    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME, SubstitutedRowRanges,
-    SubstitutedRowRangesReports,
+    ObservedPartitionExpr, RecordBatchStreamAdapter, RegionQueryStatCounters,
+    SERIES_SCAN_EXEC_NAME, SubstitutedRowRanges, TerminalScanReports,
 };
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
@@ -91,13 +91,15 @@ pub struct RegionScanExec {
     /// Dynamic filters accepted by the scanner and applied to decoded output batches.
     /// The wrappers themselves remain live and are updated by their producers.
     pushed_dyn_filters: Arc<Mutex<Vec<Arc<dyn PhysicalExpr>>>>,
-    /// The time ranges the partition streams substituted, each stream reporting them when it
-    /// ends.
+    /// What this node's partition streams stated when they ended: the other regions' files they
+    /// delivered rows from, the time ranges of the rows they substituted, and the
+    /// `(region, partition expression)` slices they read.
     ///
-    /// The scanner's stream states them in its terminal metrics, and this node is what a
-    /// plan-level collector can ask after the read: a rebuilt [`RecordBatchMetrics`] carries
-    /// figures, not the ranges a region's read stated.
-    substituted_row_ranges: Arc<SubstitutedRowRangesReports>,
+    /// The scanner's stream states them, and this node is what a plan-level collector can ask
+    /// after the read: DataFusion's metrics carry figures, not an answer about what was read, and
+    /// a rebuilt [`RecordBatchMetrics`] cannot recover one. Shared with the clones that re-assign
+    /// partition ranges, so an answer stated before a re-assignment is not lost.
+    terminal_reports: Arc<TerminalScanReports>,
 }
 
 impl std::fmt::Debug for RegionScanExec {
@@ -336,7 +338,7 @@ impl RegionScanExec {
             explain_verbose: false,
             query_memory_tracker,
             pushed_dyn_filters: Arc::new(Mutex::new(Vec::new())),
-            substituted_row_ranges: Arc::new(SubstitutedRowRangesReports::new()),
+            terminal_reports: Arc::new(TerminalScanReports::new()),
         })
     }
 
@@ -411,7 +413,7 @@ impl RegionScanExec {
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
             pushed_dyn_filters: self.pushed_dyn_filters.clone(),
-            substituted_row_ranges: self.substituted_row_ranges.clone(),
+            terminal_reports: self.terminal_reports.clone(),
         })
     }
 
@@ -419,12 +421,30 @@ impl RegionScanExec {
         self.distribution
     }
 
-    /// The time ranges this node's partition streams substituted, merged per region.
+    /// The creator regions this node's partition streams reported delivering rows from, or
+    /// `None` when they do not state an answer.
     ///
-    /// A partition states its ranges when its stream ends, so a caller asks after the read
-    /// finished; a partition that never ran contributed nothing and simply adds no range.
-    pub fn substituted_row_ranges(&self) -> Vec<SubstitutedRowRanges> {
-        self.substituted_row_ranges.ranges()
+    /// A partition states its answer when its stream ends, so a caller asks after the read
+    /// finished; a partition that is still running, that never ran or that ended without an
+    /// answer leaves this unknown instead of answering "delivered none".
+    pub fn foreign_file_row_creators(&self) -> Option<Vec<u64>> {
+        self.terminal_reports.foreign_file_row_creators()
+    }
+
+    /// The time ranges of the rows this node's partition streams substituted, per region, or
+    /// `None` when they do not state an answer (yet).
+    ///
+    /// Empty is the protocol's "substituted nothing": it tells a caller that recomputes the
+    /// windows of substituted rows that it has nothing to recompute, which is only true once the
+    /// partitions stated that they substituted nothing.
+    pub fn substituted_row_ranges(&self) -> Option<Vec<SubstitutedRowRanges>> {
+        self.terminal_reports.substituted_row_ranges()
+    }
+
+    /// The `(region, partition expression)` pairs this node's partition streams read, or `None`
+    /// when they do not state an answer (yet).
+    pub fn observed_slices(&self) -> Option<Vec<ObservedPartitionExpr>> {
+        self.terminal_reports.observed_slices()
     }
 
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
@@ -699,6 +719,12 @@ impl std::fmt::Debug for SeriesScanExec {
 }
 
 impl SeriesScanExec {
+    /// Returns the region scan this leaf packs, which is also what states what the read
+    /// delivered, substituted and observed once its partition streams ended.
+    pub fn region_scan(&self) -> &RegionScanExec {
+        &self.scan
+    }
+
     /// Returns the immutable label binding supplied to the storage scan.
     pub fn scan_binding(&self) -> &RawLabelSource {
         &self.scan_binding
@@ -802,6 +828,9 @@ impl ExecutionPlan for SeriesScanExec {
     fn reset_state(self: Arc<Self>) -> DfResult<Arc<dyn ExecutionPlan>> {
         self.scan.scanner.lock().unwrap().reset_state();
         self.scan.pushed_dyn_filters.lock().unwrap().clear();
+        // What the read stated belongs to the run that read it, so a reused plan starts with
+        // nothing stated instead of reporting the run before it.
+        self.scan.terminal_reports.reset();
         Ok(self)
     }
     fn execute(
@@ -908,7 +937,11 @@ impl ExecutionPlan for SeriesScanExec {
             span,
             await_timer: None,
             dyn_filter: None,
-            substituted_range_report: None,
+            terminal_report: Some(TerminalReport {
+                reports: self.scan.terminal_reports.clone(),
+                partition,
+                partitions,
+            }),
         }))
     }
 }
@@ -1002,9 +1035,10 @@ impl ExecutionPlan for RegionScanExec {
             span,
             await_timer: None,
             dyn_filter,
-            substituted_range_report: Some(SubstitutedRangeReport {
-                reports: self.substituted_row_ranges.clone(),
+            terminal_report: Some(TerminalReport {
+                reports: self.terminal_reports.clone(),
                 partition,
+                partitions: self.properties.output_partitioning().partition_count(),
             }),
         }))
     }
@@ -1016,6 +1050,9 @@ impl ExecutionPlan for RegionScanExec {
     fn reset_state(self: Arc<Self>) -> DfResult<Arc<dyn ExecutionPlan>> {
         self.scanner.lock().unwrap().reset_state();
         self.pushed_dyn_filters.lock().unwrap().clear();
+        // What the read stated belongs to the run that read it, so a reused plan starts with
+        // nothing stated instead of reporting the run before it.
+        self.terminal_reports.reset();
         Ok(self)
     }
 
@@ -1136,11 +1173,11 @@ impl DisplayAs for RegionScanExec {
     }
 }
 
-/// Where a partition stream of [`RegionScanExec`] reports the ranges it substituted when it
-/// ends.
-struct SubstitutedRangeReport {
-    reports: Arc<SubstitutedRowRangesReports>,
+/// Where a partition stream of [`RegionScanExec`] states what it read when it ends.
+struct TerminalReport {
+    reports: Arc<TerminalScanReports>,
     partition: usize,
+    partitions: usize,
 }
 
 pub struct StreamWithMetricWrapper {
@@ -1149,8 +1186,8 @@ pub struct StreamWithMetricWrapper {
     span: Span,
     await_timer: Option<Instant>,
     dyn_filter: Option<Arc<dyn PhysicalExpr>>,
-    /// Where this stream states the ranges it substituted, taken once the stream ended.
-    substituted_range_report: Option<SubstitutedRangeReport>,
+    /// Where this stream states what it read, taken once the stream ended.
+    terminal_report: Option<TerminalReport>,
 }
 
 impl Stream for StreamWithMetricWrapper {
@@ -1195,16 +1232,16 @@ impl Stream for StreamWithMetricWrapper {
                 }
             }
             Poll::Ready(None) => {
-                // The stream is over, so the ranges its metrics state now are terminal: they
-                // describe the rows this partition substituted, which the node has to keep for
-                // a plan-level collector.
-                if let Some(report) = this.substituted_range_report.take() {
-                    let ranges = this
-                        .stream
-                        .metrics()
-                        .map(|metrics| metrics.substituted_row_ranges)
-                        .unwrap_or_default();
-                    report.reports.record(report.partition, ranges);
+                // The stream is over, so what its metrics state now is the terminal answer. It
+                // is an answer about the rows it read, which is what the plan's collector must
+                // see: DataFusion's own metrics carry figures only, so the creators it delivered
+                // rows from, the ranges it substituted and the slices it observed can only
+                // cross that boundary through this report.
+                if let Some(report) = this.terminal_report.take() {
+                    let answer = this.stream.metrics();
+                    report
+                        .reports
+                        .record(report.partition, report.partitions, answer.as_ref());
                 }
                 Poll::Ready(None)
             }
@@ -1422,6 +1459,106 @@ mod test {
             schema,
             RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap(),
         )
+    }
+
+    /// A stream that states, when it ends, which other regions' files it delivered rows from,
+    /// the way a Mito region's stream does.
+    struct ReportedStream {
+        inner: SendableRecordBatchStream,
+        creators: Option<Vec<u64>>,
+    }
+
+    impl Stream for ReportedStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::pin::Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
+
+    impl common_recordbatch::RecordBatchStream for ReportedStream {
+        fn schema(&self) -> SchemaRef {
+            self.inner.schema()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            self.inner.output_ordering()
+        }
+
+        fn metrics(&self) -> Option<common_recordbatch::adapter::RecordBatchMetrics> {
+            Some(common_recordbatch::adapter::RecordBatchMetrics {
+                foreign_file_row_creators: self.creators.clone(),
+                ..Default::default()
+            })
+        }
+    }
+
+    fn reporting_region_scan(creators: Option<Vec<u64>>) -> RegionScanExec {
+        let (schema, _, metadata) = dynamic_filter_test_data(5688, false);
+        let batches = RecordBatches::try_new(schema, vec![]).unwrap();
+        let stream = ReportedStream {
+            inner: batches.as_stream(),
+            creators,
+        };
+        let scanner = Box::new(SinglePartitionScanner::new(
+            Box::pin(stream),
+            false,
+            metadata,
+            None,
+        ));
+        RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap()
+    }
+
+    async fn drain_plan(plan: Arc<dyn ExecutionPlan>, context: Arc<TaskContext>) {
+        let partitions = plan.properties().output_partitioning().partition_count();
+        for partition in 0..partitions {
+            let mut stream = plan.execute(partition, context.clone()).unwrap();
+            while stream.try_next().await.unwrap().is_some() {}
+        }
+    }
+
+    /// What a region scan delivered is stated by its stream when the stream ends, so the node
+    /// keeps that answer: DataFusion's own metrics carry figures, and a rebuilt
+    /// `RecordBatchMetrics` cannot recover the answer from them.
+    #[tokio::test]
+    async fn test_region_scan_keeps_the_terminal_creator_answer_of_its_stream() {
+        let ctx = SessionContext::new();
+
+        let plan = Arc::new(reporting_region_scan(Some(vec![7])));
+        assert_eq!(
+            None,
+            plan.foreign_file_row_creators(),
+            "a scan that has not read anything states nothing, not \"delivered none\""
+        );
+        drain_plan(plan.clone(), ctx.task_ctx()).await;
+        assert_eq!(
+            Some(vec![7]),
+            plan.foreign_file_row_creators(),
+            "the answer the stream stated when it ended is the node's answer"
+        );
+
+        // A stream that states nothing leaves the node's answer unknown: silence is not
+        // "delivered none".
+        let plan = Arc::new(reporting_region_scan(None));
+        drain_plan(plan.clone(), ctx.task_ctx()).await;
+        assert_eq!(None, plan.foreign_file_row_creators());
+
+        // One partition answers and another has nothing to say, so the answer covers only
+        // part of the read.
+        let plan = Arc::new(
+            reporting_region_scan(Some(vec![7]))
+                .with_new_partitions(vec![vec![], vec![]], 2)
+                .unwrap(),
+        );
+        drain_plan(plan.clone(), ctx.task_ctx()).await;
+        assert_eq!(
+            None,
+            plan.foreign_file_row_creators(),
+            "a silent partition makes the read uncovered, not empty"
+        );
     }
 
     #[test]
