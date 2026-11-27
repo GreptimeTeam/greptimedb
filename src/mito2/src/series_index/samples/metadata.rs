@@ -22,7 +22,10 @@ use crate::series_index::samples::{
 
 pub(super) const MAGIC: &[u8; 8] = b"GTSAMPLE";
 pub(super) const HEADER_SIZE: u64 = 16;
-pub(super) const TRAILER_SIZE: u64 = 120;
+pub(super) const FOOTER_SIZE: u64 = 24;
+const FOOTER_MAGIC: &[u8; 8] = b"NARTGRP1";
+/// Limit a single directory fetch even for a malformed footer.
+pub(super) const MAX_GROUPS: usize = (8 * 1024 * 1024) / GROUP_BYTES;
 pub(super) const PAGE_LIMIT: usize = 65536;
 pub(super) const ROOT_CAPACITY: usize = (PAGE_LIMIT - 12) / 72;
 /// Largest decoded block payload, and therefore the largest frame a decoder has to decompress.
@@ -30,7 +33,7 @@ pub(super) const CHUNK_LIMIT: usize = 1024 * 1024;
 /// Fixed part of a block descriptor, before its 44-byte column descriptors.
 ///
 /// The exact series key is not part of it. A descriptor keeps a fixed-size [`KeyRef`] into
-/// the part's key area instead, so descriptor size is independent of key length and a key
+/// the group's key area instead, so descriptor size is independent of key length and a key
 /// longer than a metadata page is representable.
 pub(super) const BLOCK_FIXED_BYTES: usize = 56;
 /// Smallest possible block descriptor: the fixed part plus its three mandatory columns.
@@ -119,6 +122,7 @@ impl PayloadReference {
     }
 }
 pub(super) fn pack(
+    compressor: &mut zstd::bulk::Compressor<'_>,
     bytes: &[u8],
     offset: u64,
     encoding: u16,
@@ -128,8 +132,9 @@ pub(super) fn pack(
         !bytes.is_empty() && bytes.len() <= if page { PAGE_LIMIT } else { CHUNK_LIMIT },
         "sample encoded payload exceeds limit",
     )?;
-    let compressed =
-        zstd::bulk::compress(bytes, 3).map_err(|e| invalid(format!("sample compression: {e}")))?;
+    let compressed = compressor
+        .compress(bytes)
+        .map_err(|e| invalid(format!("sample compression: {e}")))?;
     let (compression, stored) = if compressed.len() < bytes.len() {
         (1, compressed)
     } else {
@@ -219,10 +224,10 @@ pub(super) struct Column {
     pub payload: PayloadReference,
     pub nulls: u32,
 }
-/// The location of one exact series key inside a part's key area.
+/// The location of one exact series key inside a group's key area.
 ///
 /// This reference is the descriptor's whole identity. The key bytes themselves are stored
-/// once per series in the part's key area, outside every bounded metadata page, so a key may
+/// once per series in the group's key area, outside every bounded metadata page, so a key may
 /// be longer than a page and the descriptor stays 12 bytes whatever its length is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct KeyRef {
@@ -281,7 +286,7 @@ impl KeyRef {
 /// could not suffer: its keys sat in a page whose stored bytes were already checksummed.
 pub(super) const KEY_CHECKSUM_BYTES: u64 = std::mem::size_of::<u64>() as u64;
 
-/// A part's key area: exact series keys stored back to back, outside every metadata page.
+/// A group's key area: exact series keys stored back to back, outside every metadata page.
 ///
 /// Keys are appended in block order and are never page-bounded, so their length is bounded by
 /// the part, not by `PAGE_LIMIT`. Every copy is followed by its checksum. Because blocks are
@@ -293,9 +298,10 @@ pub(super) struct KeyArea {
     pub end: u64,
 }
 
-/// The three regions of one part, in file order: column payloads, exact series keys, pages.
+/// The three regions of one group, in file order: column payloads, exact series keys, pages.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Areas {
+    pub payload_start: u64,
     /// End of the column payload area and start of the key area.
     pub payload_end: u64,
     /// The key area every block descriptor references.
@@ -311,7 +317,7 @@ pub(super) struct Block {
     /// It prunes candidates but never names the owner: `(table_id, tsid)` is a hash, so two
     /// distinct series can share it. The owner is the key [`Self::key`] references.
     pub id: MetricSeriesId,
-    /// Fixed-size reference to the block's exact key in the part's key area.
+    /// Fixed-size reference to the block's exact key in the group's key area.
     ///
     /// Equal references mean the same exact series; a different series that collides on the
     /// identifier always carries a different reference.
@@ -322,16 +328,16 @@ pub(super) struct Block {
     pub rows: u32,
     pub columns: Vec<Column>,
 }
-/// The ordering boundary retained between pages and parts, without column descriptors.
+/// The ordering boundary retained between pages and groups, without column descriptors.
 ///
-/// A [`KeyRef`] is an offset inside one part's key area, so two references are comparable only
-/// when they belong to the same part; `part` carries that scope in the boundary itself so no
-/// caller can compare references across a part boundary by accident. Two parts hold unrelated
-/// key areas, which is why a series that spans parts is recognised by [`BlockOrder::continues`]
+/// A [`KeyRef`] is an offset inside one group's key area, so two references are comparable only
+/// when they belong to the same group; `group` carries that scope in the boundary itself so no
+/// caller can compare references across a group boundary by accident. Two groups hold unrelated
+/// key areas, which is why a series that spans groups is recognised by [`BlockOrder::continues`]
 /// on the exact key bytes instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockOrder {
-    part: u32,
+    group: u64,
     id: MetricSeriesId,
     key: KeyRef,
     min: i64,
@@ -340,32 +346,32 @@ pub(crate) struct BlockOrder {
 }
 
 impl BlockOrder {
-    /// The part this block belongs to.
-    pub(crate) fn part(&self) -> u32 {
-        self.part
+    /// The group this block belongs to.
+    pub(crate) fn group(&self) -> u64 {
+        self.group
     }
 
-    /// The coarse `(table_id, tsid)` prefix, which is ordered across parts as well.
+    /// The coarse `(table_id, tsid)` prefix, which is ordered across groups as well.
     pub(crate) fn id(&self) -> MetricSeriesId {
         self.id
     }
 
-    /// The block's key reference, a location inside [`Self::part`]'s key area.
+    /// The block's key reference, a location inside [`Self::group`]'s key area.
     pub(crate) fn key(&self) -> KeyRef {
         self.key
     }
 
-    /// Checks the next block of the *same* part against this boundary.
+    /// Checks the next block of the *same* group against this boundary.
     ///
-    /// Ownership and ordering of a part are decided on the exact `(table_id, tsid)` and on the
-    /// key reference only: two blocks of one part that share one reference share one key copy,
+    /// Ownership and ordering of a group are decided on the exact `(table_id, tsid)` and on the
+    /// key reference only: two blocks of one group that share one reference share one key copy,
     /// so they are one exact series, while a different series always has its own copy, placed
     /// after the previous one and restarting the ordinal. Only descriptor fields are read, so a
     /// block this request prunes is never fetched and its key content is not validated.
     pub(crate) fn precedes(&self, next: &Self, adjacent: bool) -> Result<()> {
         require(
-            self.part == next.part,
-            "sample key references compared across parts",
+            self.group == next.group,
+            "sample key references compared across groups",
         )?;
         require(self.id <= next.id, "unordered sample series keys")?;
         if next.key == self.key {
@@ -387,9 +393,9 @@ impl BlockOrder {
 
     /// Requires `next` to continue one exact series in time and ordinal.
     ///
-    /// Equal exact key bytes are what make two blocks the same series across a part boundary,
+    /// Equal exact key bytes are what make two blocks the same series across a group boundary,
     /// where their references belong to different key areas. A repeated key that restarts its
-    /// ordinal or goes back in time is a corrupt part, not a second series.
+    /// ordinal or goes back in time is a corrupt group, not a second series.
     pub(crate) fn continues(&self, next: &Self, adjacent: bool) -> Result<()> {
         require(
             self.max <= next.min && self.ordinal < next.ordinal,
@@ -406,10 +412,10 @@ impl BlockOrder {
 }
 
 impl Block {
-    /// The ordering boundary this block contributes, scoped to its part.
-    pub(crate) fn order(&self, part: u32) -> BlockOrder {
+    /// The ordering boundary this block contributes, scoped to its group.
+    pub(crate) fn order(&self, group: u64) -> BlockOrder {
         BlockOrder {
-            part,
+            group,
             id: self.id,
             key: self.key,
             min: self.min,
@@ -420,12 +426,12 @@ impl Block {
 
     /// Checks this block against the previous block of the same page.
     ///
-    /// A page never spans parts, so both references name one key area and are comparable; a block
-    /// in another part is compared through [`BlockOrder::continues`] and its exact key instead.
+    /// A page never spans groups, so both references name one key area and are comparable; a block
+    /// in another group is compared through [`BlockOrder::continues`] and its exact key instead.
     fn follows_in_page(&self, previous: &Self, adjacent: bool) -> Result<()> {
-        // One scope for both sides: a page belongs to exactly one part, and no reference built
+        // One scope for both sides: a page belongs to exactly one group, and no reference built
         // here outlives the page.
-        const PAGE_SCOPE: u32 = 0;
+        const PAGE_SCOPE: u64 = 0;
         previous
             .order(PAGE_SCOPE)
             .precedes(&self.order(PAGE_SCOPE), adjacent)
@@ -569,7 +575,7 @@ impl Page {
                 Self::Leaf(blocks) => {
                     blocks.capacity() * std::mem::size_of::<Block>()
                         // Each block owns its column descriptors on the heap. Its exact
-                        // series key is not retained: it stays in the part's key area.
+                        // series key is not retained: it stays in the group's key area.
                         + blocks
                             .iter()
                             .map(|block| block.columns.capacity() * std::mem::size_of::<Column>())
@@ -633,7 +639,7 @@ impl Page {
                     "sample block count exceeds page",
                 )?;
                 let mut blocks: Vec<Block> = Vec::with_capacity(count);
-                let mut end = HEADER_SIZE;
+                let mut end = areas.payload_start;
                 for _ in 0..count {
                     let block = Block::decode(&mut c, manifest, areas, &mut end)?;
                     if let Some(previous) = blocks.last() {
@@ -691,77 +697,20 @@ pub(super) fn validate_header(bytes: &[u8]) -> Result<()> {
     require(c.u32()? == 0, "nonzero sample header reserved field")?;
     c.end()
 }
-pub(super) struct Trailer {
+/// One part-directory entry. The first group starts after the header; subsequent
+/// groups start at the end of the preceding root page.
+pub(super) const GROUP_BYTES: usize = 72 + 4 + 4 * 8;
+#[derive(Debug, Clone)]
+pub(super) struct Group {
+    pub start: u64,
+    pub rows: u64,
+    pub blocks: u64,
     pub root: PageReference,
     pub depth: u32,
-    pub file_length: u64,
-    /// End of the payload area, which is where the key area starts.
     pub payload_end: u64,
-    /// End of the key area, which is where the metadata pages start.
     pub key_end: u64,
 }
-impl Trailer {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        self.root.encode(&mut out);
-        put_u32(&mut out, self.depth);
-        put_u32(&mut out, VERSION);
-        put_u64(&mut out, self.file_length);
-        put_u64(&mut out, self.payload_end);
-        put_u64(&mut out, self.key_end);
-        out.extend(MAGIC);
-        let sum = codec::checksum(&out);
-        put_u64(&mut out, sum);
-        out
-    }
-    pub fn decode(bytes: &[u8], file_length: u64) -> Result<Self> {
-        require(
-            bytes.len() == TRAILER_SIZE as usize,
-            "truncated sample trailer",
-        )?;
-        let mut c = Cursor::new(bytes);
-        let root = PageReference::decode(&mut c)?;
-        let depth = c.u32()?;
-        let version = c.u32()?;
-        if !(1..=2).contains(&depth) || version != VERSION {
-            return Err(unsupported("sample trailer version/depth"));
-        }
-        let length = c.u64()?;
-        let payload_end = c.u64()?;
-        let key_end = c.u64()?;
-        require(
-            // The checksum covers everything before it, magic included: the trailer body plus
-            // the 8-byte magic, which is `TRAILER_SIZE - 8` and not a frozen constant.
-            c.take(8)? == MAGIC
-                && c.u64()?
-                    == codec::checksum(
-                        &bytes[..TRAILER_SIZE as usize - std::mem::size_of::<u64>()],
-                    ),
-            "sample trailer checksum/magic",
-        )?;
-        require(
-            length == file_length
-                && payload_end >= HEADER_SIZE
-                && key_end >= payload_end
-                && file_length >= HEADER_SIZE + TRAILER_SIZE,
-            "invalid sample framing",
-        )?;
-        root.payload
-            .validate(key_end, file_length - TRAILER_SIZE, true)?;
-        require(
-            root.payload.end()? == file_length - TRAILER_SIZE,
-            "sample root must end at trailer",
-        )?;
-        Ok(Self {
-            root,
-            depth,
-            file_length,
-            payload_end,
-            key_end,
-        })
-    }
-
-    /// The key area every block descriptor in this part references.
+impl Group {
     pub fn keys(&self) -> KeyArea {
         KeyArea {
             start: self.payload_end,
@@ -769,12 +718,102 @@ impl Trailer {
         }
     }
 
-    /// The part's three regions, as page decoding needs them.
+    /// The group's three regions, as page decoding needs them.
     pub fn areas(&self) -> Areas {
         Areas {
+            payload_start: self.start,
             payload_end: self.payload_end,
             keys: self.keys(),
             metadata_start: self.key_end,
         }
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.root.encode(out);
+        put_u32(out, self.depth);
+        for value in [self.payload_end, self.key_end, self.rows, self.blocks] {
+            put_u64(out, value);
+        }
+    }
+}
+/// Encodes the directory followed by its fixed-size footer.
+pub(super) fn encode_directory(groups: &[Group]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(groups.len() * GROUP_BYTES + FOOTER_SIZE as usize);
+    for group in groups {
+        group.encode(&mut bytes);
+    }
+    let length = bytes.len() as u64;
+    let checksum = codec::checksum(&bytes);
+    bytes.extend(FOOTER_MAGIC);
+    put_u64(&mut bytes, length);
+    put_u64(&mut bytes, checksum);
+    bytes
+}
+
+pub(super) struct DirectoryFooter {
+    pub length: u64,
+    checksum: u64,
+}
+impl DirectoryFooter {
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let mut c = Cursor::new(bytes);
+        require(c.take(8)? == FOOTER_MAGIC, "invalid sample directory magic")?;
+        let length = c.u64()?;
+        require(
+            length > 0
+                && length <= (MAX_GROUPS * GROUP_BYTES) as u64
+                && length.is_multiple_of(GROUP_BYTES as u64),
+            "invalid sample directory length",
+        )?;
+        let checksum = c.u64()?;
+        c.end()?;
+        Ok(Self { length, checksum })
+    }
+
+    pub fn groups(&self, bytes: &[u8], end: u64) -> Result<Vec<Group>> {
+        require(
+            bytes.len() as u64 == self.length && self.checksum == codec::checksum(bytes),
+            "invalid sample directory checksum or length",
+        )?;
+        let mut start = HEADER_SIZE;
+        let mut c = Cursor::new(bytes);
+        let mut groups: Vec<Group> = Vec::with_capacity(bytes.len() / GROUP_BYTES);
+        while c.remaining() > 0 {
+            let root = PageReference::decode(&mut c)?;
+            let depth = c.u32()?;
+            let payload_end = c.u64()?;
+            let key_end = c.u64()?;
+            let rows = c.u64()?;
+            let blocks = c.u64()?;
+            let next = root.payload.end()?;
+            require(
+                (1..=2).contains(&depth)
+                    && rows >= blocks
+                    && blocks > 0
+                    && start < payload_end
+                    && payload_end < key_end
+                    && next <= end,
+                "invalid sample group boundaries",
+            )?;
+            root.payload.validate(key_end, next, true)?;
+            if let Some(previous) = groups.last() {
+                require(
+                    previous.root.bounds.last <= root.bounds.first,
+                    "unordered sample groups",
+                )?;
+            }
+            groups.push(Group {
+                start,
+                rows,
+                blocks,
+                root,
+                depth,
+                payload_end,
+                key_end,
+            });
+            start = next;
+        }
+        require(start == end, "sample directory does not follow last group")?;
+        Ok(groups)
     }
 }

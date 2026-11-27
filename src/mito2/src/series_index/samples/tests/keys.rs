@@ -36,9 +36,7 @@ use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadReques
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::purger::series_index_channel;
 use crate::series_index::samples::codec;
-use crate::series_index::samples::metadata::{
-    self, KeyRef, MAGIC, Page, PayloadReference, TRAILER_SIZE, Trailer,
-};
+use crate::series_index::samples::metadata::{self, Group, KeyRef, Page, PayloadReference};
 use crate::series_index::samples::{ColumnarSamplesFormat, Manifest};
 use crate::series_index::{TABLE_ID_COLUMN, TSID_COLUMN};
 use crate::test_util::sst_util::new_sparse_primary_key;
@@ -336,8 +334,7 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
         encoding: 1,
         compression: 0,
     };
-    trailer.file_length = (rewritten.len() + TRAILER_SIZE as usize) as u64;
-    rewritten.extend_from_slice(&trailer.encode());
+    rewritten.extend_from_slice(&metadata::encode_directory(&[trailer]));
     let handle = rewrite_part(&store, handle, manifest, rewritten).await;
     let reader = format.reader(store, handle).await.unwrap();
     let mut stream = reader.read(request(&[TABLE_ID_COLUMN])).unwrap();
@@ -420,50 +417,6 @@ async fn colliding_series_keep_their_own_exact_keys() {
         partner.as_slice(),
         &bytes[blocks[1].key.offset as usize..blocks[1].key.end().unwrap() as usize]
     );
-}
-
-/// A part written before the key area has a 112-byte trailer and no `key_end`. The reader locates
-/// a trailer from the recorded object size, so it always reads the last 120 bytes: the shifted
-/// frame must be rejected, never decoded as if it were current. There is no version bump to tell
-/// the two shapes apart, so an artifact from an earlier build of this branch is unreadable and
-/// has to be rebuilt.
-#[tokio::test]
-async fn legacy_112_byte_trailer_is_rejected() {
-    let store = store();
-    let meta = super::metadata();
-    let format = ColumnarSamplesFormat::default();
-    let key = new_sparse_primary_key(&["a", "b"], &meta, 1, 7);
-    let handle = build(
-        &format,
-        &store,
-        meta.clone(),
-        &[keyed_batch(&meta, &[key], &[100], false)],
-    )
-    .await;
-    let (_, trailer, _, _) = root_page(&store, &handle).await;
-    assert_eq!(120, TRAILER_SIZE);
-    // The pre-key-area frame: the same fields without `key_end`, which is 112 bytes.
-    let mut legacy = trailer.encode();
-    // Drop `key_end` (96..104) and the current magic/checksum, then seal the old way: the old
-    // checksum covers its 96 body bytes plus the magic, 104 in total.
-    legacy.drain(96..104);
-    legacy.truncate(96);
-    legacy.extend_from_slice(MAGIC);
-    let sum = codec::checksum(&legacy);
-    legacy.extend_from_slice(&sum.to_le_bytes());
-    assert_eq!(112, legacy.len());
-    // A 112-byte slice is not a trailer of this format at all.
-    let error = Trailer::decode(&legacy, trailer.file_length)
-        .err()
-        .expect("a 112-byte frame is not a trailer");
-    assert!(error.to_string().contains("truncated"), "{error}");
-    // What a reader actually does with an old part: the last 120 bytes of the file, which start
-    // 8 bytes before the old trailer. The magic still lands where this format expects it, so the
-    // frame is caught by the checksum over the shifted prefix rather than by the magic.
-    let mut window: Vec<u8> = vec![0; 8];
-    window.extend_from_slice(&legacy);
-    assert_eq!(TRAILER_SIZE as usize, window.len());
-    assert!(Trailer::decode(&window, trailer.file_length).is_err());
 }
 
 /// One request's key-area traffic: `(reads, bytes)` plus the rows it returned.
@@ -621,7 +574,7 @@ async fn part_root(
     store: &ObjectStore,
     handle: &SamplesFileHandle,
     part: u32,
-) -> (Trailer, Page, Vec<u8>) {
+) -> (Group, Page, Vec<u8>) {
     let manifest = super::manifest(store, handle).await;
     let bytes = store
         .read(&manifest.part_path(part))
@@ -629,8 +582,7 @@ async fn part_root(
         .unwrap()
         .to_bytes()
         .to_vec();
-    let start = bytes.len() - TRAILER_SIZE as usize;
-    let trailer = Trailer::decode(&bytes[start..], bytes.len() as u64).unwrap();
+    let [trailer]: [Group; 1] = super::part_groups(&bytes).try_into().unwrap();
     assert_eq!(1, trailer.depth, "one leaf keeps the root page addressable");
     let offset = trailer.root.payload.offset as usize;
     let stored = &bytes[offset..offset + trailer.root.payload.stored as usize];
@@ -1030,7 +982,7 @@ async fn unpayable_key_prefetch_issues_no_key_read() {
 /// plus the size of one key copy.
 ///
 /// `root_capacity` is one and `page_bytes` admits exactly one maximal descriptor per leaf, so the
-/// second block starts a new part while the series continues into it.
+/// second block starts a new group while the series continues into it.
 async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), u64) {
     use crate::series_index::format::FormatWriter;
     use crate::series_index::samples::writer::SamplesWriter;
@@ -1060,7 +1012,7 @@ async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), 
     )
     .unwrap();
     // A row is buffered before the next one flushes its block, so three single-row batches flush
-    // two blocks: the second one is the block that starts the new part.
+    // two blocks: the second one is the block that starts the new group.
     for (time, value) in [(10, None), (20, Some(0.0)), (30, Some(0.0))] {
         let batch = sample_batch(
             &meta,
@@ -1076,27 +1028,30 @@ async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), 
     (writer.part_accounting(), copy_bytes)
 }
 
-/// A series that crosses a metadata rollover must have its new part's key copy counted.
+/// A series that crosses a metadata rollover must have its new group's key copy counted.
 ///
-/// `finish_part` clears the part's key accounting, so a "is this the first copy" decision taken
-/// before the rollover skips the copy the new part makes. The part target then never sees the key
+/// `finish_group` clears the group's key accounting, so a "is this the first copy" decision taken
+/// before the rollover skips the copy the new group makes. The part target then never sees the key
 /// bytes and defers the part boundary by one part's worth of keys.
 #[tokio::test]
 async fn series_across_a_metadata_rollover_counts_its_key_copy() {
     let ((position, counted, blocks, parts), copy_bytes) =
         cross_rollover_accounting(u64::MAX).await;
-    assert_eq!(1, parts, "the metadata rule must complete one part");
-    assert_eq!(1, blocks, "the second block opens the new part");
+    assert_eq!(
+        0, parts,
+        "the metadata rule closes the group inside the part"
+    );
+    assert_eq!(1, blocks, "the second block opens the new group");
     assert_eq!(
         copy_bytes, counted,
-        "the new part must count its own copy of the series key"
+        "the new group must count its own copy of the series key"
     );
-    // `flush_block` compares exactly `position + part_key_bytes` with the part target, so a part
+    // `flush_block` compares exactly `position + pending key bytes` with the part target, so a part
     // target of that sum rolls the new part at once - only when the copy is counted.
     let ((_, _, blocks_again, parts_again), _) =
         cross_rollover_accounting(position + counted).await;
     assert_eq!(
-        2, parts_again,
+        1, parts_again,
         "the counted key copy must be what reaches the part target"
     );
     assert_eq!(
@@ -1518,6 +1473,7 @@ async fn pruned_block_does_not_hide_the_boundary_key() {
         block_rows: 1,
         page_bytes: 476,
         root_capacity: 1,
+        part_bytes: 150,
         ..Default::default()
     };
     let first = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7);
