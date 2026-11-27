@@ -37,7 +37,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
-use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -320,7 +319,6 @@ impl PromPlanner {
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
-        under_rate_or_increase: bool,
         // The expression this statement asks for. Its shape, not the catalog type of a field, is what says
         // whether the existing plan reports a `Float64` for a numeric field the raw scan reads as one.
         statement_expr: &PromExpr,
@@ -489,18 +487,6 @@ impl PromPlanner {
             return Ok(declined("selectors_disagree_on_field_kind"));
         }
         *statement_kind = Some(field_kind);
-        // Delta samples are increments: the existing planner sums float samples for `increase` and
-        // divides by the range for `rate`, and rates a native histogram as a counter whatever its
-        // marker says. A window over the raw samples does the same per series; decline when one of
-        // those calls reads a float selector through another expression.
-        if field_kind == FieldKind::Float
-            && tags
-                .iter()
-                .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
-            && under_rate_or_increase
-        {
-            return Ok(declined("delta_temporality_under_rate_or_increase"));
-        }
         let series_schema = Arc::new(SeriesSchema {
             fields: fields
                 .iter()
@@ -870,14 +856,10 @@ impl PromPlanner {
             None => &stmt.expr,
         };
         let mut selectors = Vec::new();
-        // The walk starts outside any `rate` or `increase`, and records that per selector as it
-        // descends: a selector is delta-temporality-sensitive only where one of those calls reads
-        // it, which is what keeps `rate(a) / b` admissible when only `b` carries the marker.
         let mut set_operations = Vec::new();
         if !collect_selectors_with_set_operations(
             &stmt,
             effective_expr,
-            false,
             &mut selectors,
             &mut set_operations,
         ) {
@@ -984,7 +966,7 @@ impl PromPlanner {
             // The kind every bound field carries. A statement declares one column per field, so
             // selectors that disagree have no column to declare and keep the existing plan.
             let mut statement_kind: Option<FieldKind> = None;
-            for (selector, under_rate_or_increase) in &selectors {
+            for selector in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
                 // query keeps the plan the existing path builds for it.
@@ -1128,7 +1110,6 @@ impl PromPlanner {
                         )) = self
                             .prepare_one_scan(
                                 matchers.clone(),
-                                *under_rate_or_increase,
                                 &stmt.expr,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
@@ -1258,7 +1239,6 @@ impl PromPlanner {
                 let Some(one) = self
                     .prepare_one_scan(
                         matchers,
-                        *under_rate_or_increase,
                         &stmt.expr,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
@@ -1355,7 +1335,7 @@ impl PromPlanner {
         // two walks agree: a mismatch is a compiler defect, not a query this route can plan.
         let identities: Vec<(Option<String>, Matchers, i64, Option<i64>)> = selectors
             .iter()
-            .map(|(selector, _)| {
+            .map(|selector| {
                 let offset_ms = selector
                     .offset
                     .as_ref()
@@ -2214,15 +2194,6 @@ fn epoch_millis(millis: i64) -> Option<SystemTime> {
     }
 }
 
-/// Finds a range selector at the statement root, treating parentheses as transparent.
-fn root_matrix_selector(expr: &PromExpr) -> Option<&MatrixSelector> {
-    match expr {
-        PromExpr::MatrixSelector(selector) => Some(selector),
-        PromExpr::Paren(paren) => root_matrix_selector(&paren.expr),
-        _ => None,
-    }
-}
-
 /// Finds a subquery at the statement root, treating parentheses as transparent.
 fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
     match expr {
@@ -2621,60 +2592,32 @@ struct SetOperation {
 fn collect_selectors_with_set_operations<'a>(
     stmt: &EvalStmt,
     expr: &'a PromExpr,
-    under_rate_or_increase: bool,
-    out: &mut Vec<(Cow<'a, VectorSelector>, bool)>,
+    out: &mut Vec<Cow<'a, VectorSelector>>,
     set_operations: &mut Vec<SetOperation>,
 ) -> bool {
     match expr {
-        PromExpr::VectorSelector(selector) => {
-            out.push((Cow::Borrowed(selector), under_rate_or_increase))
-        }
-        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
-            out.push((Cow::Borrowed(vs), under_rate_or_increase))
-        }
+        PromExpr::VectorSelector(selector) => out.push(Cow::Borrowed(selector)),
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(Cow::Borrowed(vs)),
         PromExpr::Paren(ParenExpr { expr }) => {
-            return collect_selectors_with_set_operations(
-                stmt,
-                expr,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            );
+            return collect_selectors_with_set_operations(stmt, expr, out, set_operations);
         }
         PromExpr::Call(call) if call.func.name == "info" => {
             let Ok(InfoInput { selector, .. }) = info_input(stmt, &call.args.args) else {
                 return false;
             };
-            if !collect_selectors_with_set_operations(
-                stmt,
-                &call.args.args[0],
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) {
+            if !collect_selectors_with_set_operations(stmt, &call.args.args[0], out, set_operations)
+            {
                 return false;
             }
-            out.push((Cow::Owned(selector), under_rate_or_increase));
+            out.push(Cow::Owned(selector));
         }
         PromExpr::Binary(binary) => {
             let lhs_start = out.len();
-            if !collect_selectors_with_set_operations(
-                stmt,
-                &binary.lhs,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) {
+            if !collect_selectors_with_set_operations(stmt, &binary.lhs, out, set_operations) {
                 return false;
             }
             let lhs_end = out.len();
-            if !collect_selectors_with_set_operations(
-                stmt,
-                &binary.rhs,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) {
+            if !collect_selectors_with_set_operations(stmt, &binary.rhs, out, set_operations) {
                 return false;
             }
             if binary.op.is_set_operator() {
@@ -2694,13 +2637,7 @@ fn collect_selectors_with_set_operations<'a>(
         // Literals contribute no selector; the compiler decides which scalar forms can be bound.
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => {
-            return collect_selectors_with_set_operations(
-                stmt,
-                &unary.expr,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            );
+            return collect_selectors_with_set_operations(stmt, &unary.expr, out, set_operations);
         }
         // `histogram_quantile` and `histogram_fraction` take their vector last, and the compiler
         // compiles that vector before the arguments in front of it, so the walk reads it first: the
@@ -2711,21 +2648,10 @@ fn collect_selectors_with_set_operations<'a>(
             let Some((vector, parameters)) = call.args.args.split_last() else {
                 return false;
             };
-            return collect_selectors_with_set_operations(
-                stmt,
-                vector,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) && parameters.iter().all(|parameter| {
-                collect_selectors_with_set_operations(
-                    stmt,
-                    parameter,
-                    under_rate_or_increase,
-                    out,
-                    set_operations,
-                )
-            });
+            return collect_selectors_with_set_operations(stmt, vector, out, set_operations)
+                && parameters.iter().all(|parameter| {
+                    collect_selectors_with_set_operations(stmt, parameter, out, set_operations)
+                });
         }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
@@ -2739,23 +2665,12 @@ fn collect_selectors_with_set_operations<'a>(
                     && collect_selectors_with_set_operations(
                         stmt,
                         &call.args.args[0],
-                        under_rate_or_increase,
                         out,
                         set_operations,
                     );
             }
             for arg in &call.args.args {
-                // A window `rate` or `increase` reads straight off the raw samples picks the delta
-                // math per series itself; one read through another expression does not.
-                let reads_raw_window = root_matrix_selector(arg).is_some();
-                if !collect_selectors_with_set_operations(
-                    stmt,
-                    arg,
-                    under_rate_or_increase
-                        || (matches!(call.func.name, "rate" | "increase") && !reads_raw_window),
-                    out,
-                    set_operations,
-                ) {
+                if !collect_selectors_with_set_operations(stmt, arg, out, set_operations) {
                     return false;
                 }
             }
@@ -2767,17 +2682,12 @@ fn collect_selectors_with_set_operations<'a>(
             return collect_selectors_with_set_operations(
                 stmt,
                 &aggregate.expr,
-                under_rate_or_increase,
                 out,
                 set_operations,
             ) && match &aggregate.param {
-                Some(param) => collect_selectors_with_set_operations(
-                    stmt,
-                    param,
-                    under_rate_or_increase,
-                    out,
-                    set_operations,
-                ),
+                Some(param) => {
+                    collect_selectors_with_set_operations(stmt, param, out, set_operations)
+                }
                 None => true,
             };
         }
@@ -2789,7 +2699,6 @@ fn collect_selectors_with_set_operations<'a>(
             return collect_selectors_with_set_operations(
                 stmt,
                 &subquery.expr,
-                under_rate_or_increase,
                 out,
                 set_operations,
             );
@@ -3275,13 +3184,12 @@ mod tests {
         assert!(collect_selectors_with_set_operations(
             &statement,
             &expr,
-            false,
             &mut selectors,
             &mut Vec::new()
         ));
         selectors
             .iter()
-            .map(|(selector, _)| selector.name.clone().unwrap_or_default())
+            .map(|selector| selector.name.clone().unwrap_or_default())
             .collect()
     }
 

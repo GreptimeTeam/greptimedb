@@ -2863,6 +2863,33 @@ async fn native_promql_delta_temporality_corpus_matches_legacy() {
         let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
         assert_eq!(legacy, native, "{sql}");
     }
+    // A subquery keeps the marker on its evaluated series, so the outer window sums the delta
+    // series' points in it: 20 + 15 at 120 and 180, and 10 + 20 + 15 over 180s for `rate`.
+    for (sql, expected) in [
+        (
+            "TQL EVAL (180, 180, '1m') increase(delta_temporality[2m:1m])",
+            [("delta", 35.0), ("single", 7.0)],
+        ),
+        (
+            "TQL EVAL (180, 180, '1m') rate(delta_temporality[3m:1m])",
+            [("delta", 45.0 / 180.0), ("single", 7.0 / 180.0)],
+        ),
+    ] {
+        observer.clear();
+        let output = collected(native_tql_output(&instance, sql, true).await).await;
+        assert!(observer.fused().is_some(), "{sql} must run natively");
+        let native = eval_text_rows(output, ReportedName::Nothing);
+        let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+        assert_eq!(legacy, native, "{sql}");
+        for (series, value) in expected {
+            let line = native
+                .lines()
+                .find(|line| line.contains(&format!("| {series} |")))
+                .unwrap_or_else(|| panic!("{sql}: no `{series}` row in {native}"));
+            let actual = line.rsplit_once(" | ").unwrap().1.parse::<f64>().unwrap();
+            assert!((actual - value).abs() <= 1e-12, "{sql}: {native}");
+        }
+    }
 }
 
 /// `rate` and `increase` over OTLP delta exponential histograms run natively and answer what the

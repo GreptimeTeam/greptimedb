@@ -5221,10 +5221,9 @@ async fn native_fused_or_matchers_fall_back() {
     }
 }
 
-/// `rate` and `increase` over a table carrying the OTLP temporality marker run natively when they
-/// read the raw window themselves: the window picks the delta math per series, as the existing
-/// planner does. Read through another expression - here a subquery - the call has no raw window to
-/// switch, and the statement keeps the existing plan.
+/// `rate` and `increase` over a table carrying the OTLP temporality marker run natively, also
+/// through a subquery: the window picks the delta math per series from the labels that reach it,
+/// as the existing planner does.
 #[tokio::test]
 async fn native_fused_delta_temporality_rates_run_natively() {
     for query in [
@@ -5235,6 +5234,8 @@ async fn native_fused_delta_temporality_rates_run_natively() {
         "sum(rate(some_metric[5m]))",
         "sum(increase(some_metric[5m]))",
         "max_over_time(rate(some_metric[5m])[10m:1m])",
+        "rate((some_metric)[5m:1m])",
+        "increase(some_metric[5m:1m])",
     ] {
         let plan = build_native_fused_plan_with_provider(
             query,
@@ -5249,22 +5250,6 @@ async fn native_fused_delta_temporality_rates_run_natively() {
         );
         assert_eq!(take_reported_decline(), None, "`{query}`");
     }
-    let query = "rate((some_metric)[5m:1m])";
-    let plan = build_native_fused_plan_with_provider(
-        query,
-        true,
-        native_engine_temporality_marker_provider().await,
-    )
-    .await;
-    assert!(
-        find_fused_series(&plan).is_none(),
-        "`{query}`: {}",
-        plan.display_indent()
-    );
-    assert_eq!(
-        take_reported_decline(),
-        Some("delta_temporality_under_rate_or_increase")
-    );
 }
 
 /// `rate` and `increase` over native histograms marked as delta temporality run natively.
