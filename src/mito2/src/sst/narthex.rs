@@ -14,20 +14,28 @@
 
 //! Authoritative narthex samples SST writing.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::{cast, max, min};
 use datatypes::arrow::datatypes::DataType;
+use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::storage::FileId;
 
 use crate::access_layer::SstInfoArray;
 use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
-use crate::series_index::format::SamplesFormat;
+use crate::series_index::artifact::SamplesFileHandle;
+use crate::series_index::columnar::{ColumnarSeriesFormat, require};
+use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
 use crate::series_index::samples::ColumnarSamplesFormat;
-use crate::sst::file::{FileFormat, NarthexPartMeta, NarthexSamplesMeta, RegionFileId};
+use crate::series_index::samples::reader::SamplesReader;
+use crate::sst::file::{
+    FileFormat, FileMeta, NarthexPartMeta, NarthexSamplesMeta, NarthexSeriesIndexMeta, RegionFileId,
+};
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
@@ -159,17 +167,13 @@ pub(crate) async fn write_samples(
     }])
 }
 
-/// Explicit PoC builder: merge sample keys with the existing SeqScan before writing
-/// a durable series index. A separate manifest edit publishes the result.
-#[cfg(test)]
+/// Merge the sorted sample key areas. A separate manifest edit publishes the index.
 pub(crate) async fn write_series(
     layer: &AccessLayer,
     metadata: store_api::metadata::RegionMetadataRef,
     sources: &[crate::sst::file::FileHandle],
-    mut batches: crate::read::FlatSource,
+    window: crate::sst::file::WindowSequence,
 ) -> Result<crate::sst::file::FileMeta> {
-    use crate::series_index::columnar::{ColumnarSeriesFormat, require};
-    use crate::sst::file::{FileMeta, NarthexSeriesIndexMeta};
     require(!sources.is_empty(), "narthex series index requires samples")?;
     require(
         sources
@@ -192,7 +196,7 @@ pub(crate) async fn write_series(
         format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             manifest_size: 0,
             parts: Default::default(),
-            sources: sources.iter().map(|file| file.file_id()).collect(),
+            window,
         })),
         ..Default::default()
     };
@@ -207,8 +211,26 @@ pub(crate) async fn write_series(
         prefix,
     )?;
     let write_result: Result<()> = async {
-        while let Some(batch) = batches.next_batch().await? {
-            writer.write(&batch).await?;
+        let mut streams = Vec::with_capacity(sources.len());
+        let mut heads = BinaryHeap::new();
+        for source in sources {
+            let handle = SamplesFileHandle::from_narthex(
+                source.clone(),
+                &layer.build_region_dir(source.region_id()),
+            )?;
+            let reader = SamplesReader::open(layer.object_store().clone(), handle).await?;
+            // Empty projection and no time predicate read only metadata and exact keys.
+            let mut stream = reader.read(Default::default())?;
+            if let Some(block) = stream.try_next().await? {
+                heads.push(Reverse((block.key, streams.len(), block.batch.num_rows())));
+            }
+            streams.push(stream);
+        }
+        while let Some(Reverse((key, index, rows))) = heads.pop() {
+            writer.append_key(key.bytes(), rows as u64).await?;
+            if let Some(block) = streams[index].try_next().await? {
+                heads.push(Reverse((block.key, index, block.batch.num_rows())));
+            }
         }
         Ok(())
     }

@@ -14,7 +14,7 @@
 
 //! Structures to describe metadata of files.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -275,6 +275,55 @@ pub struct NarthexSamplesMeta {
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
 }
 
+/// Sequence summary of a half-open time window in Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowSequence {
+    pub start: i64,
+    pub end: i64,
+    pub max_sequence: u64,
+}
+
+impl WindowSequence {
+    /// Every fixed window touched by the inclusive SST bounds, including pre-epoch timestamps.
+    pub(crate) fn starts(range: FileTimeRange, width: i64) -> impl Iterator<Item = i64> {
+        let first = range.0.split().0.div_euclid(width);
+        let last = range.1.split().0.div_euclid(width);
+        (first..=last).filter_map(move |n| {
+            n.checked_mul(width)
+                .filter(|s| s.checked_add(width).is_some())
+        })
+    }
+
+    pub(crate) fn intersects(&self, range: FileTimeRange) -> bool {
+        self.start <= range.1.split().0 && range.0.split().0 < self.end
+    }
+}
+
+/// Checks the collective watermark across every window spanned by a sample SST.
+pub(crate) fn series_windows_cover(
+    windows: &BTreeMap<i64, WindowSequence>,
+    file: &FileMeta,
+) -> bool {
+    let Some(seq) = file.sequence else {
+        return false;
+    };
+    let (first, last) = file.time_range;
+    let mut cursor = first.split().0;
+    let Some((&start, _)) = windows.range(..=cursor).next_back() else {
+        return false;
+    };
+    for (_, w) in windows.range(start..) {
+        if w.start > cursor || w.end <= cursor || w.max_sequence < seq.get() {
+            return false;
+        }
+        if last.split().0 < w.end {
+            return true;
+        }
+        cursor = w.end;
+    }
+    false
+}
+
 /// Immutable narthex series index. Coverage identifies samples; it does not own them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarthexSeriesIndexMeta {
@@ -282,11 +331,8 @@ pub struct NarthexSeriesIndexMeta {
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
-    /// Sample files recorded by the experimental builder. The manifest neither
-    /// validates coverage nor retires indexes when samples are replaced. Both
-    /// policies depend on how production series files will be organized and
-    /// maintained across compaction.
-    pub sources: Vec<RegionFileId>,
+    /// Fixed time window and sequence watermark covered by this index.
+    pub window: WindowSequence,
 }
 
 /// Metadata of a SST file.
@@ -533,6 +579,13 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    pub(crate) fn series_window(&self) -> Option<WindowSequence> {
+        match &self.format {
+            FileFormat::NarthexSeriesIndex(meta) => Some(meta.window),
+            _ => None,
+        }
+    }
+
     /// Returns the authoritative object path, using the artifact manifest for narthex files.
     pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
         match &self.format {
@@ -1434,6 +1487,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fixed_windows_cover_spanning_samples() {
+        let file = FileMeta {
+            time_range: (Timestamp::new_millisecond(-1), Timestamp::new_second(10)),
+            sequence: NonZeroU64::new(8),
+            ..Default::default()
+        };
+        let starts = WindowSequence::starts(file.time_range, 10).collect::<Vec<_>>();
+        assert_eq!(starts, [-10, 0, 10]);
+        let mut windows = starts
+            .into_iter()
+            .map(|start| {
+                (
+                    start,
+                    WindowSequence {
+                        start,
+                        end: start + 10,
+                        max_sequence: 8,
+                    },
+                )
+            })
+            .collect();
+        assert!(series_windows_cover(&windows, &file));
+        windows.get_mut(&0).unwrap().max_sequence = 7;
+        assert!(!series_windows_cover(&windows, &file));
+        windows.remove(&0);
+        assert!(!series_windows_cover(&windows, &file));
+    }
+
+    #[test]
     fn test_narthex_part_paths_follow_inventory_order() {
         let samples = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
             manifest_size: 5,
@@ -1443,7 +1525,11 @@ mod tests {
             ],
         }));
         let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
-            sources: vec![],
+            window: WindowSequence {
+                start: 0,
+                end: 10,
+                max_sequence: 7,
+            },
             manifest_size: 5,
             parts: smallvec::smallvec![
                 NarthexPartMeta { file_size: 11 },

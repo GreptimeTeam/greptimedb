@@ -1968,7 +1968,7 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
 }
 
 #[tokio::test]
-async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
+async fn test_narthex_shared_samples_and_pinned_index_gc_after_owner_drop() {
     use crate::series_index::format::{FormatReader, SamplesFormatReader};
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
     use common_recordbatch::RecordBatches;
@@ -1982,6 +1982,8 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
     ));
     let engine = env
         .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
             gc: GcConfig {
                 enable: true,
                 lingering_time: None,
@@ -2040,35 +2042,19 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
         .flat_map(|level| level.files.values().cloned())
         .collect();
     assert_eq!(sources.len(), 2);
-    let flat = crate::compaction::CompactionSstReaderBuilder {
-        narthex_format: true,
-        metadata: region.metadata(),
-        sst_layer: layer.clone(),
-        cache: engine.cache_manager(),
-        inputs: &sources,
-        append_mode: true,
-        filter_deleted: false,
-        time_range: None,
-        merge_mode: crate::region::options::MergeMode::LastRow,
-        read_parallelism: 1,
-    }
-    .build_flat_sst_reader()
-    .await
-    .unwrap();
-    let index = crate::sst::narthex::write_series(&layer, region.metadata(), &sources, flat)
-        .await
-        .unwrap();
-    let index_id = index.file_id();
     engine
-        .edit_region(
-            owner,
-            RegionEdit {
-                series_indexes_to_add: vec![index.clone()],
-                ..Default::default()
-            },
-        )
+        .handle_request(owner, crate::test_util::build_series_index_request())
         .await
         .unwrap();
+    let index = region
+        .version()
+        .ssts
+        .series_indexes()
+        .values()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
     let sample_metas: Vec<_> = sources.iter().map(|file| file.meta_ref().clone()).collect();
     engine
         .edit_region(
@@ -2093,16 +2079,6 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
             .sum::<usize>(),
         2
     );
-    engine
-        .edit_region(
-            destination,
-            RegionEdit {
-                series_indexes_to_add: vec![index.clone()],
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
     let mut sample_reader = Some(
         crate::series_index::samples::reader::SamplesReader::open(
             layer.object_store().clone(),
@@ -2161,19 +2137,9 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
             );
         }
     }
-    for phase in 0..5 {
+    for phase in 0..4 {
         match phase {
             1 => engine
-                .edit_region(
-                    destination,
-                    RegionEdit {
-                        series_indexes_to_remove: vec![index_id],
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap(),
-            2 => engine
                 .edit_region(
                     destination,
                     RegionEdit {
@@ -2183,8 +2149,8 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
                 )
                 .await
                 .unwrap(),
-            3 => drop(sample_reader.take()),
-            4 => drop(index_reader.take()),
+            2 => drop(sample_reader.take()),
+            3 => drop(index_reader.take()),
             _ => {}
         }
         let refs = engine
@@ -2208,9 +2174,9 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
         .unwrap();
         worker.run().await.unwrap();
         let expected = match phase {
-            0 | 1 => [true, true, true],
-            2 => [true, false, true], // Series coverage does not own the unpinned samples.
-            3 => [false, false, true],
+            0 => [true, true, true],
+            1 => [true, false, true], // Series coverage does not own the unpinned samples.
+            2 => [false, false, true],
             _ => [false, false, false],
         };
         for (paths, exists) in inventories.iter().zip(expected) {
@@ -2222,7 +2188,7 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
                 );
             }
         }
-        if phase < 2 {
+        if phase == 0 {
             let stream = engine
                 .scan_to_stream(
                     destination,

@@ -654,6 +654,9 @@ impl RegionScanner for SeqScan {
     }
 
     fn take_statistics_split(&mut self) -> Option<StatisticsSplit> {
+        if self.properties.distinguish_partition_range {
+            return None;
+        }
         let plan = self.statistics_split.take()?;
         let input = &self.stream_ctx.input;
         let residual = input.with_sources(plan.remaining_files, input.memtables.clone())?;

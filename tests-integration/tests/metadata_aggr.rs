@@ -101,15 +101,88 @@ async fn test_metadata_count_distributed(#[case] enabled: bool) {
     assert_count_and_scan(frontend, 4, !enabled).await;
 }
 
+#[rstest::rstest]
+#[case::enabled(true)]
+#[case::disabled(false)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_metadata_count_distributed_with_filter_and_memtables(#[case] enabled: bool) {
+    let cluster = GreptimeDbClusterBuilder::new("metadata_count_distributed_split")
+        .await
+        .with_datanodes(2)
+        .with_mito_config(MitoConfig {
+            experimental_metadata_aggr: enabled,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let frontend = cluster.fe_instance();
+    execute_sql(
+        frontend,
+        "CREATE TABLE split_count (
+            host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, v BIGINT
+        ) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')
+        ENGINE=mito WITH (append_mode = 'false', 'memtable.type' = 'bulk')",
+    )
+    .await;
+    execute_sql(
+        frontend,
+        "INSERT INTO split_count VALUES ('a', 500, 0), ('z', 500, 0)",
+    )
+    .await;
+    execute_sql(frontend, "ADMIN FLUSH_TABLE('split_count')").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO split_count VALUES
+            ('a', 1000, 1), ('a', 2000, 2), ('z', 1000, 3), ('z', 2000, 4)",
+    )
+    .await;
+    execute_sql(frontend, "ADMIN FLUSH_TABLE('split_count')").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO split_count VALUES ('a', 3000, 5), ('z', 3000, 6)",
+    )
+    .await;
+
+    let sql = "SELECT count(*) FROM split_count WHERE ts >= 1000";
+    assert_count(frontend, sql, 6).await;
+    let plan = explain_count(frontend, sql).await;
+    assert!(plan.contains("__count_state"), "{plan}");
+    assert!(plan.contains("SeqScan:"), "{plan}");
+    assert_eq!(
+        plan.matches("MetadataAggrExec").count(),
+        if enabled { 2 } else { 0 },
+        "{plan}"
+    );
+}
+
 async fn execute_sql(frontend: &Instance, sql: &str) -> Output {
     SqlQueryHandler::do_query(frontend, sql, QueryContext::arc())
         .await
         .remove(0)
-        .unwrap_or_else(|err| panic!("{sql}: {err}"))
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
 }
 
 async fn assert_count_and_scan(frontend: &Instance, expected: i64, expect_scan: bool) {
-    let output = execute_sql(frontend, COUNT_SQL).await;
+    assert_count(frontend, COUNT_SQL, expected).await;
+
+    // ANALYZE includes the actual region plan below the frontend MergeScan.
+    let plan = explain_count(frontend, COUNT_SQL).await;
+    assert_eq!(
+        plan.contains("SeqScan:"),
+        expect_scan,
+        "unexpected region plan:\n{plan}"
+    );
+    if !expect_scan {
+        assert!(
+            plan.contains("PlaceholderRowExec"),
+            "expected the region scan to be replaced by a literal projection:\n{plan}"
+        );
+    }
+}
+
+async fn assert_count(frontend: &Instance, sql: &str, expected: i64) {
+    let output = execute_sql(frontend, sql).await;
     let batches = match output.data {
         OutputData::RecordBatches(batches) => batches,
         OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
@@ -128,23 +201,13 @@ async fn assert_count_and_scan(frontend: &Instance, expected: i64, expect_scan: 
                 .iter()
         })
         .collect::<Vec<_>>();
-    assert_eq!(counts, vec![Some(expected)]);
+    assert_eq!(counts, vec![Some(expected)], "{sql}");
+}
 
-    // ANALYZE includes the actual region plan below the frontend MergeScan.
-    let plan = execute_sql(frontend, &format!("EXPLAIN ANALYZE {COUNT_SQL}"))
+async fn explain_count(frontend: &Instance, sql: &str) -> String {
+    execute_sql(frontend, &format!("EXPLAIN ANALYZE {sql}"))
         .await
         .data
         .pretty_print()
-        .await;
-    assert_eq!(
-        plan.contains("SeqScan:"),
-        expect_scan,
-        "unexpected region plan:\n{plan}"
-    );
-    if !expect_scan {
-        assert!(
-            plan.contains("PlaceholderRowExec"),
-            "expected the region scan to be replaced by a literal projection:\n{plan}"
-        );
-    }
+        .await
 }

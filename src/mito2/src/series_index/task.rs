@@ -14,11 +14,14 @@
 
 //! Worker-owned background maintenance for series indexes.
 
+use common_meta::key::SchemaMetadataManagerRef;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use common_telemetry::{info, warn};
+use itertools::Itertools;
 use object_store::ObjectStore;
 use snafu::ensure;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver};
@@ -32,8 +35,13 @@ use crate::metrics::{
 };
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
+use crate::request::{
+    BackgroundNotify, RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
+};
+
 use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_with_mode};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
+use crate::sst::file::{FileHandle, WindowSequence};
 use crate::time_provider::TimeProviderRef;
 
 /// Commands serialized with periodic series-index maintenance.
@@ -53,6 +61,7 @@ pub(crate) struct SeriesIndexTaskState {
     worker_id: u32,
     running: AtomicBool,
     sender: Sender<SeriesIndexCommand>,
+    pub(crate) worker: Option<Sender<WorkerRequestWithTime>>,
 }
 
 impl SeriesIndexTaskState {
@@ -63,6 +72,7 @@ impl SeriesIndexTaskState {
                 worker_id,
                 running: AtomicBool::new(true),
                 sender,
+                worker: None,
             },
             receiver,
         )
@@ -111,11 +121,13 @@ impl SeriesIndexTaskState {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
+    schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
     state: Arc<SeriesIndexTaskState>,
     receiver: Receiver<SeriesIndexCommand>,
     bucket_width: Duration,
+    min_files: usize,
     purger: IndexFilePurger,
     purge_receiver: UnboundedReceiver<PurgeRequest>,
     disk_usage: Arc<AtomicU64>,
@@ -132,10 +144,12 @@ pub(crate) fn spawn_series_index_tasks(
     ));
     common_runtime::spawn_compact(async move {
         SeriesIndexTask {
+            schema_manager,
             worker_id,
             store,
             regions,
             bucket_width,
+            min_files: min_files.max(1),
             purger,
             disk_usage,
             max_size,
@@ -153,9 +167,11 @@ pub(crate) fn spawn_series_index_tasks(
 
 /// Periodic series-index maintenance for one region worker.
 struct SeriesIndexTask {
+    schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
     bucket_width: Duration,
+    min_files: usize,
     purger: IndexFilePurger,
     disk_usage: Arc<AtomicU64>,
     max_size: u64,
@@ -236,9 +252,8 @@ impl SeriesIndexTask {
         self.refresh_usage();
         let result = self.reconcile_region_with_mode(region.clone(), true).await;
         self.refresh_usage();
-        let result = result?;
         self.validate_manual_region(&region)?;
-        Ok(result)
+        result
     }
 
     async fn reconcile_region(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
@@ -250,6 +265,12 @@ impl SeriesIndexTask {
         region: MitoRegionRef,
         manual: bool,
     ) -> Result<ReconcileStats> {
+        if region.version().options.sst_format == Some(crate::sst::FormatType::Narthex) {
+            if region.state() != RegionRoleState::Leader(RegionLeaderState::Writable) {
+                return Ok(ReconcileStats::default());
+            }
+            return self.reconcile_native(region, manual).await;
+        }
         // Full capacity defers builds, but cleanup must still reclaim published usage.
         let allow_builds = self.disk_usage.load(Ordering::Relaxed) < self.max_size;
         if !allow_builds {
@@ -273,6 +294,202 @@ impl SeriesIndexTask {
                 .inc();
         }
         result
+    }
+
+    async fn reconcile_native(
+        &self,
+        region: MitoRegionRef,
+        manual: bool,
+    ) -> Result<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
+        let (ssts, metadata, frontier, truncated_entry_id, options, series_window_seconds) = {
+            let current = region.version_control.current();
+            let version = current.version;
+            if !version.pending_tails.is_empty() {
+                return Ok(stats);
+            }
+            let frontier = if version.memtables.is_empty()
+                && current.last_sequence == current.committed_sequence
+            {
+                current.committed_sequence
+            } else {
+                version.flushed_sequence
+            };
+            (
+                version.ssts.clone(),
+                version.metadata.clone(),
+                frontier,
+                version.truncated_entry_id,
+                version.options.clone(),
+                version.series_window_seconds,
+            )
+        };
+        let ttl = match options.ttl {
+            Some(ttl) => ttl,
+            None => crate::compaction::find_dynamic_options(
+                region.region_id,
+                &options,
+                &self.schema_manager,
+            )
+            .await
+            .map(|(_, ttl)| ttl)
+            .unwrap_or_else(|error| {
+                warn!(error; "Failed to resolve database TTL for region {}", region.region_id);
+                common_time::TimeToLive::Forever
+            }),
+        };
+        let now = common_time::Timestamp::new_millisecond(self.time_provider.current_time_millis());
+        let expired = |f: &FileHandle| ttl.is_expired(&f.time_range().1, &now).unwrap_or(false);
+        let width = series_window_seconds.unwrap_or_else(|| {
+            i64::try_from(self.bucket_width.as_secs())
+                .unwrap_or(i64::MAX)
+                .max(1)
+        });
+        ensure!(
+            width > 0,
+            InvalidRequestSnafu {
+                region_id: region.region_id,
+                reason: "invalid series window width"
+            }
+        );
+        let files = || ssts.levels().iter().flat_map(|l| l.files.values());
+        let live_ranges: Vec<_> = files()
+            .filter(|f| !expired(f))
+            .map(FileHandle::time_range)
+            .collect();
+        let cutoff = match ttl {
+            common_time::TimeToLive::Duration(duration) => now.sub_duration(duration).ok(),
+            _ => None,
+        };
+        // Include expired samples in a partly live window: a later watermark covers
+        // the whole window, including samples still present after a TTL change.
+        let first_live_start = cutoff
+            .and_then(|cut| WindowSequence::starts((cut, cut), width).next())
+            .map(common_time::Timestamp::new_second);
+        let mut edit = crate::manifest::action::RegionEdit::default();
+        let mut watermarks = HashMap::<i64, u64>::new();
+        for file in ssts.series_indexes().values() {
+            if let Some(w) = file.meta_ref().series_window()
+                && !ttl
+                    .is_expired(&common_time::Timestamp::new_second(w.end), &now)
+                    .unwrap_or(false)
+                && live_ranges.iter().any(|range| w.intersects(*range))
+            {
+                let seq = watermarks.entry(w.start).or_default();
+                *seq = (*seq).max(w.max_sequence);
+            } else {
+                edit.series_indexes_to_remove.push(file.file_id());
+            }
+        }
+        let worker = self
+            .state
+            .worker
+            .as_ref()
+            .ok_or_else(|| WorkerStoppedSnafu { id: self.worker_id }.build())?;
+        let mut handles: Vec<FileHandle> = Vec::new();
+        // Merge the ordered window starts lazily. One wide SST can span many windows,
+        // and a periodic pass only needs the first buildable one.
+        let can_build = !ttl.is_instant() && live_ranges.len() >= self.min_files;
+        let mut windows = files()
+            .filter(|f| can_build && f.meta_ref().sequence.is_some_and(|s| s.get() <= frontier))
+            .map(|f| {
+                let (mut start, end) = f.time_range();
+                if let Some(first) = first_live_start {
+                    start = start.max(first);
+                }
+                let file = f.clone();
+                WindowSequence::starts((start, end), width).map(move |start| (start, file.clone()))
+            })
+            .kmerge_by(|a, b| a.0 < b.0)
+            .peekable();
+        while let Some(&(start, _)) = windows.peek() {
+            let previous = watermarks.get(&start).copied().unwrap_or_default();
+            let mut sources = Vec::new();
+            let mut live_sources = 0;
+            while let Some((_, file)) = windows.next_if(|(next, _)| *next == start) {
+                if file
+                    .meta_ref()
+                    .sequence
+                    .is_some_and(|seq| seq.get() > previous)
+                {
+                    live_sources += usize::from(!expired(&file));
+                    sources.push(file);
+                }
+            }
+            if live_sources < self.min_files {
+                continue;
+            }
+            let window = WindowSequence {
+                start,
+                end: start + width,
+                max_sequence: frontier,
+            };
+            let output = match crate::sst::narthex::write_series(
+                &region.access_layer,
+                metadata.clone(),
+                &sources,
+                window,
+            )
+            .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    for handle in handles {
+                        handle.mark_deleted();
+                    }
+                    return Err(error);
+                }
+            };
+            handles.push(FileHandle::new(output.clone(), region.file_purger.clone()));
+            edit.series_indexes_to_add.push(output);
+            stats.source_files += sources.len();
+            if !manual {
+                break;
+            }
+        }
+        stats.built_series = handles.len();
+        stats.removed_series = edit.series_indexes_to_remove.len();
+        if stats.built_series + stats.removed_series == 0 {
+            return Ok(stats);
+        }
+        if !self.state.is_running() {
+            for handle in &handles {
+                handle.mark_deleted();
+            }
+            return WorkerStoppedSnafu { id: self.worker_id }.fail();
+        }
+        let (tx, rx) = oneshot::channel();
+        let result = region
+            .manifest_ctx
+            .publish_series_indexes(&edit, truncated_entry_id, &watermarks)
+            .await;
+        if let Err(error) = &result
+            && (matches!(error, crate::error::Error::RegionBusy { .. })
+                || !error.may_have_persisted_manifest_update())
+        {
+            for handle in &handles {
+                handle.mark_deleted();
+            }
+        }
+        let notification = WorkerRequest::Background {
+            region_id: region.region_id,
+            notify: BackgroundNotify::RegionEdit(RegionEditResult {
+                region_id: region.region_id,
+                origin: region.clone(),
+                edit,
+                result: result.map_err(Arc::new),
+                waiters: Waiters::one(tx),
+                is_staging: false,
+                update_region_state: false,
+            }),
+        };
+        worker
+            .send(WorkerRequestWithTime::new(notification))
+            .await
+            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?;
+        rx.await
+            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())??;
+        Ok(stats)
     }
 
     /// Each worker contributes only its open regions, refreshed at maintenance boundaries.
@@ -333,22 +550,29 @@ mod tests {
     use object_store::layers::mock::{self, MockLayerBuilder, oio};
     use object_store::services::Memory;
     use store_api::region_engine::{RegionEngine, RegionRole};
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::RegionId;
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::config::MitoConfig;
     use crate::region::RegionMap;
     use crate::series_index::catalog::{range_catalog_path, series_catalog_path};
     use crate::series_index::purger::series_index_channel;
     use crate::series_index::tests::prepare_region;
-    use crate::test_util::TestEnv;
+    use crate::test_util::sst_util::new_sparse_primary_key;
+    use crate::test_util::{
+        TestEnv, build_series_index_request, flush_region, sparse_metric_create_request,
+        sparse_metric_put,
+    };
 
-    struct BlockingCatalogWriter {
+    struct BlockingIndexWriter {
         inner: oio::Writer,
         entered: Arc<Notify>,
         release: Arc<Notify>,
     }
 
-    impl mock::Write for BlockingCatalogWriter {
+    impl mock::Write for BlockingIndexWriter {
         async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
             self.inner.write(buffer).await
         }
@@ -379,9 +603,11 @@ mod tests {
         let (state, receiver) = SeriesIndexTaskState::new(0, 1);
         (
             SeriesIndexTask {
+                schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store,
                 regions,
                 bucket_width: Duration::from_secs(100),
+                min_files: 1,
                 purger,
                 disk_usage: Arc::default(),
                 max_size: u64::MAX,
@@ -395,6 +621,201 @@ mod tests {
             },
             purge_receiver,
         )
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn test_native_index_build_releases_flushed_memtables(#[case] truncate: bool) {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let writer_entered = entered.clone();
+        let writer_release = release.clone();
+        let pause_first_write = AtomicBool::new(true);
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _, inner| {
+                if path.ends_with(".series") && pause_first_write.swap(false, Ordering::Relaxed) {
+                    Box::new(BlockingIndexWriter {
+                        inner,
+                        entered: writer_entered.clone(),
+                        release: writer_release.clone(),
+                    })
+                } else {
+                    inner
+                }
+            }))
+            .build()
+            .unwrap();
+        let mut env = TestEnv::new().await.with_mock_layer(layer);
+        let engine = env
+            .create_engine(MitoConfig {
+                experimental_enable_series_index: true,
+                experimental_series_index_min_files: 1,
+                ..Default::default()
+            })
+            .await;
+        let id = RegionId::new(1, 0);
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(sparse_metric_create_request("narthex")),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(id).unwrap();
+        let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+        engine
+            .handle_request(id, sparse_metric_put(key.clone(), 1000, Some(1.0)))
+            .await
+            .unwrap();
+        flush_region(&engine, id, None).await;
+        let memtables = Arc::downgrade(&region.version().memtables);
+
+        let build = engine.handle_request(id, build_series_index_request());
+        let flush_during_build = async {
+            tokio::time::timeout(Duration::from_secs(10), entered.notified())
+                .await
+                .unwrap();
+            engine
+                .handle_request(id, sparse_metric_put(key, 2000, Some(2.0)))
+                .await
+                .unwrap();
+            flush_region(&engine, id, None).await;
+            assert!(
+                memtables.upgrade().is_none(),
+                "the build retained the old memtable version"
+            );
+            if truncate {
+                engine
+                    .handle_request(
+                        id,
+                        RegionRequest::Truncate(
+                            store_api::region_request::RegionTruncateRequest::All,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+            release.notify_one();
+        };
+        let (result, ()) = tokio::join!(build, flush_during_build);
+        if truncate {
+            use common_error::ext::ErrorExt;
+            assert_eq!(
+                result.unwrap_err().status_code(),
+                common_error::status_code::StatusCode::RegionBusy
+            );
+            assert!(
+                region
+                    .manifest_ctx
+                    .manifest()
+                    .await
+                    .series_indexes
+                    .is_empty()
+            );
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(region.version().ssts.series_indexes().is_empty(), truncate);
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_native_import_frontier_and_index_ttl() {
+        let mut env = TestEnv::new().await;
+        let clock = Arc::new(crate::time_provider::mock::MockTimeProvider::new(2000));
+        let engine = env
+            .create_engine_with_time(
+                MitoConfig {
+                    experimental_enable_series_index: true,
+                    experimental_series_index_min_files: 1,
+                    ..Default::default()
+                },
+                None,
+                None,
+                clock.clone(),
+            )
+            .await;
+        let source = RegionId::new(1, 0);
+        let target = RegionId::new(1, 1);
+        for id in [source, target] {
+            engine
+                .handle_request(
+                    id,
+                    RegionRequest::Create(sparse_metric_create_request("narthex")),
+                )
+                .await
+                .unwrap();
+        }
+        let owner = engine.get_region(source).unwrap();
+        let key = new_sparse_primary_key(&["api"], &owner.metadata(), 42, 7);
+        engine
+            .handle_request(source, sparse_metric_put(key.clone(), 1000, Some(1.0)))
+            .await
+            .unwrap();
+        flush_region(&engine, source, None).await;
+        // A dirty memtable must not prevent indexing the previous flush.
+        engine
+            .handle_request(source, sparse_metric_put(key, 2000, Some(2.0)))
+            .await
+            .unwrap();
+        engine
+            .handle_request(source, build_series_index_request())
+            .await
+            .unwrap();
+        assert_eq!(owner.version().ssts.series_indexes().len(), 1);
+
+        let region = engine.get_region(target).unwrap();
+        let sample = owner.version().ssts.levels()[0]
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .meta_ref()
+            .clone();
+        engine
+            .edit_region(
+                target,
+                crate::manifest::action::RegionEdit {
+                    files_to_add: vec![sample],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(region.version().flushed_sequence, 0);
+        let mut options = region.version().options.clone();
+        options.ttl = Some(common_time::TimeToLive::Duration(Duration::from_secs(1)));
+        region.version_control.alter_options(options);
+        engine
+            .handle_request(target, build_series_index_request())
+            .await
+            .unwrap();
+        let pinned = region.version();
+        assert_eq!(pinned.ssts.series_indexes().len(), 1);
+        clock.set_now(2001);
+        engine
+            .handle_request(target, build_series_index_request())
+            .await
+            .unwrap();
+        assert!(region.version().ssts.series_indexes().is_empty());
+        let index = pinned.ssts.series_indexes().values().next().unwrap();
+        for object in index
+            .meta_ref()
+            .narthex_objects(&region.access_layer.build_region_dir(target))
+            .unwrap()
+        {
+            assert!(
+                region
+                    .access_layer
+                    .object_store()
+                    .exists(&object.path)
+                    .await
+                    .unwrap()
+            );
+        }
+        engine.stop().await.unwrap();
     }
 
     #[test]
@@ -571,7 +992,7 @@ mod tests {
         let layer = MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _, inner| {
                 if path == catalog_path {
-                    Box::new(BlockingCatalogWriter {
+                    Box::new(BlockingIndexWriter {
                         inner,
                         entered: writer_entered.clone(),
                         release: writer_release.clone(),
@@ -701,9 +1122,11 @@ mod tests {
         regions.insert_region(region.clone());
         let (state, receiver) = SeriesIndexTaskState::new(0, 2);
         let mut task = SeriesIndexTask {
+            schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
+            min_files: 1,
             purger,
             disk_usage: Arc::default(),
             max_size: u64::MAX,
@@ -785,9 +1208,11 @@ mod tests {
         let usage = Arc::new(AtomicU64::new(0));
         let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
         let mut task = SeriesIndexTask {
+            schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
+            min_files: 1,
             purger,
             disk_usage: usage.clone(),
             max_size: u64::MAX,
@@ -906,7 +1331,7 @@ mod tests {
                 .next()
                 .unwrap()
                 .entry()
-                .source_file_ids
+                .source_file_ids()
                 .len()
         );
         assert_eq!(rebuilt.disk_usage(), usage.load(Ordering::Relaxed));
@@ -922,9 +1347,11 @@ mod tests {
         let make_task = || {
             let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
             SeriesIndexTask {
+                schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store: store.clone(),
                 regions: Arc::new(RegionMap::default()),
                 bucket_width: Duration::from_secs(100),
+                min_files: 1,
                 purger: series_index_channel(store.clone()).0,
                 disk_usage: usage.clone(),
                 max_size: 1024,

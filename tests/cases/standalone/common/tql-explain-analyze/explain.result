@@ -189,6 +189,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after partial_metadata_aggr_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
@@ -356,6 +357,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after partial_metadata_aggr_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
@@ -553,6 +555,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after partial_metadata_aggr_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
