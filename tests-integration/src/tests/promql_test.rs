@@ -2671,7 +2671,9 @@ fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, q
 /// the native root's columns would create a different table (with a metric-name column) than the
 /// same flow planned by the existing route. The aggregates are shapes the native planner places
 /// differently: one selector, and two occurrences of a selector. The rest keep one row per series
-/// with two labels each, so the published labels are paired with the native ones by name.
+/// with two labels each, so the published labels are paired with the native ones by name. In
+/// `m / scalar(sum(m))` the existing plan's only aggregate groups by time alone, yet both labels of
+/// `m` stay sink keys.
 #[test]
 fn native_promql_tql_flow_matches_the_sink_table() {
     // Flushing a flow overflows the default test stack in a debug build.
@@ -2786,6 +2788,10 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
         (
             "label_replace",
             "label_replace(native_flow_series, \"dst\", \"$1\", \"sensor\", \"(.*)\")",
+        ),
+        (
+            "scalar_ratio",
+            "native_flow_src / scalar(sum(native_flow_src))",
         ),
     ] {
         let mut sinks = Vec::new();
