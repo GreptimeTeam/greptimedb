@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{AsArray, Float64Array, Int32Array};
-use datafusion::arrow::datatypes::{DataType, Float64Type, Int32Type};
+use datafusion::arrow::datatypes::{DataType, Float64Type};
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
@@ -86,7 +86,7 @@ fn date_fields(value: f64) -> DateFields {
     let century = d / 146_097;
     let cd = (d % 146_097) as u32 | 3;
     let prod = 2_939_745u64 * cd as u64;
-    let cyear = (prod >> 32) as u64;
+    let cyear = prod >> 32;
     let ayday = (prod & 0xFFFF_FFFF) / 2_939_745 / 4;
 
     let jan_feb = u64::from(ayday >= MARCH_THRU_DECEMBER);
@@ -212,7 +212,7 @@ impl GoDatePart {
         .collect()
     }
 
-    fn field(self, f: &DateFields) -> i64 {
+    fn field(&self, f: &DateFields) -> i64 {
         match self.unit {
             DateUnit::Minute => f.minute,
             DateUnit::Hour => f.hour,
