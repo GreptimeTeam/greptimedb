@@ -434,6 +434,17 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot remap regions that hold files they did not create: {}",
+        offenders
+    ))]
+    ForeignFilePartitionExpr {
+        /// One entry per offending file: the holding region and the file it must settle.
+        offenders: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Files lost during remapping: old={}, new={}", old_count, new_count))]
     FilesLost {
         old_count: usize,
@@ -561,6 +572,14 @@ pub enum Error {
 
     #[snafu(display("Failed to check the WAL history, region_id: {}", region_id))]
     CheckWalHistory {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to hand the WAL of region {} over to this node", region_id))]
+    HandoffWal {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1701,7 +1720,8 @@ impl ErrorExt for Error {
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
-            | CheckWalHistory { source, .. } => source.status_code(),
+            | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1793,6 +1813,7 @@ impl ErrorExt for Error {
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             IndexBuildIncomplete { .. } => StatusCode::IllegalState,
+            ForeignFilePartitionExpr { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,
@@ -1947,6 +1968,7 @@ impl ErrorExt for Error {
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 

@@ -33,6 +33,24 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) fn handle_remap_manifests_request(&mut self, request: RemapManifestsRequest) {
         let region_id = request.region_id;
         let sender = request.sender;
+        if request.validate_only {
+            // The pre-publication check of the repartition procedure: nothing is staged yet, so
+            // this reads the region's ordinary manifest and reports whether it holds a file it
+            // did not create itself. It writes nothing and returns no manifest paths.
+            let Some(region) = self.regions.get_region(region_id) else {
+                let _ = sender.send(error::RegionNotFoundSnafu { region_id }.fail());
+                return;
+            };
+            common_runtime::spawn_global(async move {
+                let manifest = region.manifest_ctx.manifest().await;
+                let result =
+                    crate::remap_manifest::ensure_region_owns_its_files(region_id, &manifest)
+                        .map(|()| HashMap::new());
+                let _ = sender.send(result);
+            });
+            return;
+        }
+
         let region = match self.regions.staging_region(region_id) {
             Ok(region) => region,
             Err(e) => {

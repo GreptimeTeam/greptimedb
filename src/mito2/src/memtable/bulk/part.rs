@@ -195,6 +195,7 @@ impl BulkPart {
 
         MemtableStats {
             estimated_bytes: self.estimated_size(),
+            decoded_bytes: None,
             time_range: Some((min_ts, max_ts)),
             num_rows: self.num_rows(),
             num_ranges: 1,
@@ -1300,6 +1301,22 @@ impl EncodedBulkPart {
         self.schema.clone()
     }
 
+    /// Returns the estimated decoded size of all rows: the uncompressed column chunks, or the
+    /// variable-length values when dictionary encoding hides them from that size.
+    pub(crate) fn decoded_size(&self) -> u64 {
+        let encoded: u64 = self
+            .parquet_metadata()
+            .map_or(self.size_bytes() as u64, |metadata| {
+                metadata
+                    .row_groups()
+                    .iter()
+                    .flat_map(|row_group| row_group.columns())
+                    .map(|column| column.uncompressed_size() as u64)
+                    .sum()
+            });
+        encoded.max(self.metadata.var_len_bytes)
+    }
+
     /// Returns the size of the encoded data in bytes
     pub(crate) fn size_bytes(&self) -> usize {
         match &self.payload {
@@ -1325,6 +1342,7 @@ impl EncodedBulkPart {
 
         MemtableStats {
             estimated_bytes: self.size_bytes(),
+            decoded_bytes: Some(self.decoded_size() as usize),
             time_range: Some((min_ts, max_ts)),
             num_rows: meta.num_rows,
             num_ranges: 1,
@@ -2099,6 +2117,7 @@ impl MultiBulkPart {
 
         MemtableStats {
             estimated_bytes: self.estimated_size(),
+            decoded_bytes: None,
             time_range: Some((min_ts, max_ts)),
             num_rows: self.num_rows(),
             num_ranges: 1,

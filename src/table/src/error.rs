@@ -127,6 +127,16 @@ pub enum Error {
     #[snafu(display("Unsupported operation: {}", operation))]
     Unsupported { operation: String },
 
+    #[snafu(display(
+        "Cannot set {} on a logical table; configure it on the physical table",
+        key
+    ))]
+    PhysicalTableOption {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse table option, key: {}, value: {}", key, value))]
     ParseTableOption {
         key: String,
@@ -239,9 +249,9 @@ impl ErrorExt for Error {
             Error::InvalidColumnOption { .. } => StatusCode::InvalidArguments,
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::Unsupported { .. } => StatusCode::Unsupported,
-            Error::ParseTableOption { .. } | Error::ConflictingTableOptions { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::PhysicalTableOption { .. }
+            | Error::ParseTableOption { .. }
+            | Error::ConflictingTableOptions { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
             Error::SetSkippingOptions { .. }
             | Error::UnsetSkippingOptions { .. }

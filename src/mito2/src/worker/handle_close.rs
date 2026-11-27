@@ -137,7 +137,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.stop().await;
         self.regions.remove_region(region_id);
         self.granted_leases.remove(region_id);
-        self.lease_deferred_index_retries.remove(&region_id);
+        self.deferred_lease_work.remove(&region_id);
         region.deactivate_region_manifest_size_metric();
         self.cancel_tail_replay(region_id);
         self.fail_region_stalled_requests_as_not_found(&region_id);

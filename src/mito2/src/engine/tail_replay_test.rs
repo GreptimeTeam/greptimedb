@@ -44,9 +44,10 @@ use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    PathType, RegionAlterRequest, RegionBuildIndexRequest, RegionCatchupRequest,
-    RegionCloseRequest, RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    EnterStagingRequest, PathType, RegionAlterRequest, RegionBuildIndexRequest,
+    RegionCatchupRequest, RegionCloseRequest, RegionDiscardPendingTailsRequest, RegionDropRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -70,12 +71,12 @@ use crate::manifest::action::{
 };
 use crate::manifest::storage::delta_file;
 use crate::region::version::VersionRef;
-use crate::region::{MitoRegion, RegionLeaderState};
+use crate::region::{MitoRegion, RegionLeaderState, RegionRoleState};
 use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::file::RegionFileId;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CreateRequestBuilder, DeltaFaults, TestEnv, build_rows, build_rows_for_key, flush_region,
+    CreateRequestBuilder, DeltaFaults, Gate, TestEnv, build_rows, build_rows_for_key, flush_region,
     nop_action, put_rows, reopen_region, rows_schema,
 };
 use crate::time_provider::StdTimeProvider;
@@ -103,6 +104,12 @@ struct TailReplayListener {
     /// Index builds the worker learned stopped.
     index_builds_stopped: AtomicUsize,
     compactions_scheduled: AtomicUsize,
+    leader_lease_wait_ends: AtomicUsize,
+    became_writable: AtomicUsize,
+    backfill_saves: AtomicUsize,
+    park_deferred_work: Gate,
+    park_rebuild_admitted: Gate,
+    park_backfill: Gate,
 }
 
 #[async_trait]
@@ -127,6 +134,31 @@ impl EventListener for TailReplayListener {
 
     fn on_tail_lease_check(&self, _region_id: RegionId) {
         self.lease_checks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {
+        // Releases the index build counts recorded before it.
+        self.leader_lease_wait_ends.fetch_add(1, Ordering::Release);
+    }
+
+    fn on_region_became_writable(&self, _region_id: RegionId) {
+        self.became_writable.fetch_add(1, Ordering::Release);
+    }
+
+    async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {
+        self.park_deferred_work.pass().await;
+    }
+
+    async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {
+        self.park_backfill.pass().await;
+    }
+
+    fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {
+        self.backfill_saves.fetch_add(1, Ordering::Relaxed);
+    }
+
+    async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {
+        self.park_rebuild_admitted.pass().await;
     }
 
     fn on_tail_fence_begin(&self, _region_id: RegionId) {
@@ -395,8 +427,15 @@ impl TestRegion {
     }
 
     async fn catchup(&self) {
+        self.catchup_with_entry_id(None).await;
+    }
+
+    /// Makes the region writable through a catchup that carries `entry_id` as the last entry id
+    /// its source reported.
+    async fn catchup_with_entry_id(&self, entry_id: Option<EntryId>) {
         let catchup = RegionRequest::Catchup(RegionCatchupRequest {
             set_writable: true,
+            entry_id,
             ..Default::default()
         });
         self.engine
@@ -496,9 +535,10 @@ impl TestRegion {
     }
 
     /// Flushes this node's rows, records a listed tail of [REMOTE_NODE_ID] whose bound lies
-    /// above every entry of both nodes, loses that node's WAL and makes the region writable, so
-    /// the replay keeps failing. Returns the bound.
-    async fn start_lost_listed_tail(&self) -> EntryId {
+    /// above every entry of both nodes, loses that node's WAL and makes the region writable
+    /// through a catchup that carries `reported_entry_id`, so the replay keeps failing. Returns
+    /// the bound.
+    async fn start_lost_listed_tail(&self, reported_entry_id: Option<EntryId>) -> EntryId {
         // Rows of the region stay readable after a reopen from a flushed entry id at the bound.
         flush_region(&self.engine, self.region_id, None).await;
         self.write_remote_rows(self.region_id, 6, 9).await;
@@ -508,7 +548,7 @@ impl TestRegion {
         self.reopen_with_tails(vec![remote_tail(0, upto, UptoKind::Listed)])
             .await;
         self.delete_remote_objects().await;
-        self.catchup().await;
+        self.catchup_with_entry_id(reported_entry_id).await;
         wait_until(|| self.listener.failed()).await;
         upto
     }
@@ -1715,7 +1755,7 @@ async fn test_promotion_replays_tails_of_region_busy_meanwhile(#[case] busy: Reg
     region
         .engine
         .inner
-        .notify_if_became_writable(&mito_region, false);
+        .notify_if_became_writable(&mito_region, Some(RegionRoleState::Follower));
 
     wait_until(|| region.listener.commits() > 0).await;
     mito_region.switch_state_to_writable(busy);
@@ -1841,15 +1881,18 @@ async fn test_failed_replay_reloads_region_from_newer_manifest() {
 }
 
 /// With write leases the replay commits while the region awaits its Leader lease, and the lease
-/// that ends the wait builds the index the replay could not publish.
+/// that ends the wait builds the index the replay could not publish. If the region is staging
+/// then, the end of staging builds it.
 #[rstest]
-#[case::create_on_flush(true, false)]
-#[case::no_create_on_flush(false, false)]
-#[case::awaiting_leader_lease(true, true)]
+#[case::create_on_flush(true, false, false)]
+#[case::no_create_on_flush(false, false, false)]
+#[case::awaiting_leader_lease(true, true, false)]
+#[case::leader_lease_in_staging(true, true, true)]
 #[tokio::test]
 async fn test_replayed_ssts_build_index_as_flushed(
     #[case] create_on_flush: bool,
     #[case] leased: bool,
+    #[case] staging: bool,
 ) {
     let region = TestRegion::build(
         "tail-replay-index",
@@ -1909,17 +1952,41 @@ async fn test_replayed_ssts_build_index_as_flushed(
             "{err:?}"
         );
         assert_eq!(region.listener.index_builds_stopped(), 0);
+        let role = if staging {
+            let request = RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            });
+            region
+                .engine
+                .handle_request(region_id, request)
+                .await
+                .unwrap();
+            RegionRole::StagingLeader
+        } else {
+            RegionRole::Leader
+        };
         let now = Instant::now();
         region
             .engine
-            .set_region_role_with_lease(
-                region_id,
-                RegionRole::Leader,
-                now,
-                now + Duration::from_secs(10),
-                None,
-            )
+            .set_region_role_with_lease(region_id, role, now, now + Duration::from_secs(10), None)
             .unwrap();
+        if staging {
+            // The end of the wait finds the region staging and builds nothing.
+            wait_until(|| {
+                region
+                    .listener
+                    .leader_lease_wait_ends
+                    .load(Ordering::Acquire)
+                    == 1
+            })
+            .await;
+            assert_eq!(region.listener.index_builds_stopped(), 0);
+            region
+                .engine
+                .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+                .await
+                .unwrap();
+        }
     }
 
     wait_until(|| region.listener.index_builds_stopped() == 1).await;
@@ -1927,6 +1994,105 @@ async fn test_replayed_ssts_build_index_as_flushed(
     let files = &version.ssts.levels()[0].files;
     let has_index = files.values().any(|file| file.meta_ref().exists_index());
     assert_eq!(create_on_flush, has_index);
+}
+
+/// A role change outside the worker that stops the pass building the index the replay could not
+/// publish, before it starts or after it admitted the build, and is undone before the save the
+/// work ends with, leaves the pass due.
+#[rstest]
+#[case::before_pass(false)]
+#[case::at_admission(true)]
+#[tokio::test]
+async fn test_missing_index_pass_stopped_by_role_change_stays_due(#[case] at_admission: bool) {
+    let region = TestRegion::build(
+        "tail-replay-index-role-change",
+        true,
+        None,
+        None,
+        async_build_mode_config(true),
+    )
+    .await;
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    let region_id = RegionId::new(1, 2);
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
+        .build_with_index();
+    let table_dir = request.table_dir.clone();
+    region
+        .engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let last = region.write_remote_rows(region_id, 0, 3).await;
+    let tails = vec![remote_tail(0, last, UptoKind::Reported)];
+    commit_edit(&region.engine, region_id, pending_tails_edit(tails)).await;
+    reopen_region(&region.engine, region_id, table_dir, false, wal_options()).await;
+    let catchup = RegionRequest::Catchup(RegionCatchupRequest {
+        set_writable: true,
+        ..Default::default()
+    });
+    region
+        .engine
+        .handle_request(region_id, catchup)
+        .await
+        .unwrap();
+    let replayed = region.engine.get_region(region_id).unwrap();
+    wait_until(|| !replayed.version().has_pending_tails()).await;
+    assert!(replayed.manifest_ctx.awaits_leader_lease());
+    let listener = &region.listener;
+
+    // The lease starts the work, and a demotion lands before the pass.
+    let park = if at_admission {
+        &listener.park_rebuild_admitted
+    } else {
+        &listener.park_deferred_work
+    };
+    park.arm();
+    listener.park_backfill.arm();
+    let now = Instant::now();
+    region
+        .engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            now,
+            now + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    park.wait_entered().await;
+    region
+        .engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    park.release();
+    // A request the worker handles after the stopped pass, which a follower refuses: no build,
+    // no save.
+    let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
+    region
+        .engine
+        .handle_request(region_id, build)
+        .await
+        .unwrap_err();
+    assert_eq!(listener.index_builds_stopped(), 0);
+    assert_eq!(listener.backfill_saves.load(Ordering::Relaxed), 0);
+    // A promotion before any save checks the region.
+    let notified = listener.became_writable.load(Ordering::Acquire);
+    region
+        .engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+    listener.park_backfill.release();
+
+    // The work runs once.
+    wait_until(|| listener.index_builds_stopped() == 1).await;
+    let version = replayed.version();
+    let files = &version.ssts.levels()[0].files;
+    assert!(files.values().any(|file| file.meta_ref().exists_index()));
+    assert_eq!(listener.backfill_saves.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -2378,7 +2544,7 @@ async fn test_discard_awaiting_leader_lease_succeeds_after_it() {
 #[tokio::test]
 async fn test_discard_listed_tail_raises_flushed_entry_id_to_its_bound() {
     let region = TestRegion::new("tail-discard-listed", false, None).await;
-    let upto = region.start_lost_listed_tail().await;
+    let upto = region.start_lost_listed_tail(None).await;
 
     assert_eq!(
         1,
@@ -2723,17 +2889,19 @@ async fn test_conditional_discard_over_uncertain_replay_reloads_region() {
 /// A discard raises the flushed entry id to a listed tail's bound. After a crash, the
 /// object-store WAL, which by default does not accept missing history, checks history, so the
 /// region opens only if this node's WAL durably holds history through the bound, as whoever
-/// records the tail ensures.
+/// records the tail ensures: a later write past the bound, or a catchup that carries the last
+/// entry id the source reported and so hands the region over to this node's WAL.
 #[rstest]
-#[case::history_past_bound(true)]
-#[case::history_below_bound(false)]
+#[case::history_past_bound(BoundHistory::Written)]
+#[case::history_below_bound(BoundHistory::Below)]
+#[case::history_handed_over_past_bound(BoundHistory::HandedOver)]
 #[tokio::test]
-async fn test_discard_reopens_after_crash_with_history_past_bound(
-    #[case] history_past_bound: bool,
-) {
+async fn test_discard_reopens_after_crash_with_history_past_bound(#[case] history: BoundHistory) {
     let region = TestRegion::new("tail-discard-crash", false, None).await;
-    let upto = region.start_lost_listed_tail().await;
-    if history_past_bound {
+    let reported_entry_id =
+        (history == BoundHistory::HandedOver).then(|| region.version().flushed_entry_id);
+    let upto = region.start_lost_listed_tail(reported_entry_id).await;
+    if history == BoundHistory::Written {
         // Moves this node's next entry id past the bound and makes an entry there durable.
         let provider = region
             .engine
@@ -2756,12 +2924,20 @@ async fn test_discard_reopens_after_crash_with_history_past_bound(
 
     let opened = region.crash_and_open().await;
 
-    if history_past_bound {
-        opened.unwrap();
-    } else {
+    if history == BoundHistory::Below {
         let error = format!("{:?}", opened.unwrap_err());
         assert!(error.contains("does not hold the history"), "{error}");
+    } else {
+        opened.unwrap();
     }
+}
+
+/// How this node's WAL comes to hold history past a tail's bound before the tail is discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundHistory {
+    Below,
+    Written,
+    HandedOver,
 }
 
 #[tokio::test]

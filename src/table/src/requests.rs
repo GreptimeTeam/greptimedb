@@ -34,7 +34,8 @@ use greptime_proto::v1::region::{build_index_request, compact_request};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY, is_metric_engine_option_key,
+    LOGICAL_TABLE_METADATA_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
+    PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING, is_metric_engine_option_key,
 };
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_TYPE, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, FloatFieldEncoding,
@@ -47,7 +48,9 @@ use store_api::mito_engine_options::{
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
-use crate::error::{ConflictingTableOptionsSnafu, ParseTableOptionSnafu, Result};
+use crate::error::{
+    ConflictingTableOptionsSnafu, ParseTableOptionSnafu, PhysicalTableOptionSnafu, Result,
+};
 use crate::metadata::{TableId, TableVersion};
 
 mod semantic;
@@ -313,6 +316,17 @@ impl TableOptions {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+
+        if kvs.contains_key(LOGICAL_TABLE_METADATA_KEY) {
+            for key in [
+                PRIMARY_KEY_ENCODING,
+                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
+            ] {
+                if kvs.contains_key(key) {
+                    return PhysicalTableOptionSnafu { key }.fail();
+                }
+            }
+        }
 
         normalize_twcs_trigger_options(&mut kvs).map_err(|conflict| {
             ConflictingTableOptionsSnafu {
@@ -1154,6 +1168,24 @@ mod tests {
         assert!(validate_database_option(INGEST_ROWS_RATE_LIMIT_KEY));
         assert!(validate_database_option("ingest_rows_rate_limit"));
         assert!(!validate_database_option("foo"));
+    }
+
+    #[test]
+    fn test_primary_key_encoding_on_metric_tables() {
+        for key in [
+            PRIMARY_KEY_ENCODING,
+            MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
+        ] {
+            let error = TableOptions::try_from_iter([
+                (LOGICAL_TABLE_METADATA_KEY, "metrics"),
+                (key, "sparse"),
+            ])
+            .unwrap_err();
+            assert_eq!(StatusCode::InvalidArguments, error.status_code());
+            assert!(error.to_string().contains(key));
+            TableOptions::try_from_iter([(PHYSICAL_TABLE_METADATA_KEY, ""), (key, "sparse")])
+                .unwrap();
+        }
     }
 
     #[test]

@@ -39,6 +39,14 @@ pub enum Error {
         error: reqwest::Error,
     },
 
+    #[snafu(display("Invalid entry `{}` in query.remote_allowed_hosts: {}", entry, reason))]
+    InvalidAllowedHost {
+        entry: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to create directory {}", dir))]
     CreateDir {
         dir: String,
@@ -71,6 +79,7 @@ impl ErrorExt for Error {
         match self {
             InitBackend { .. } => StatusCode::StorageUnavailable,
             BuildHttpClient { .. } => StatusCode::Unexpected,
+            InvalidAllowedHost { .. } => StatusCode::InvalidArguments,
             CreateDir { .. } | RemoveDir { .. } => StatusCode::Internal,
         }
     }

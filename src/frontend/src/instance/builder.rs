@@ -23,7 +23,8 @@ use catalog::process_manager::ProcessManagerRef;
 use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
 use common_base::Plugins;
 use common_batcher::request_limiter::RequestLimiter;
-use common_datasource::object_store::LocalFileAccess;
+use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
+use common_error::ext::BoxedError;
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -365,6 +366,12 @@ impl FrontendBuilder {
             Some(process_manager.clone()),
             frontend_peer_addr.clone(),
             self.local_file_access,
+            RemoteStorageAccess::new(
+                &self.options.query.remote_allowed_hosts,
+                self.options.query.allow_server_credentials,
+            )
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?,
         );
 
         let statement_executor =

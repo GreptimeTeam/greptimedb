@@ -15,11 +15,13 @@
 use std::collections::HashMap;
 
 use object_store::ObjectStore;
+use object_store::remote_access::RemoteStorageAccess;
 use object_store::services::S3;
-use object_store::util::{with_instrument_layers, with_retry_layers};
-use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::object_store::{
+    connection_value, ensure_server_credentials_allowed, finish_remote_backend,
+};
 
 const ENDPOINT: &str = "endpoint";
 const ACCESS_KEY_ID: &str = "access_key_id";
@@ -46,6 +48,7 @@ pub fn build_s3_backend(
     host: &str,
     path: &str,
     connection: &HashMap<String, String>,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<ObjectStore> {
     let mut builder = S3::default().root(path).bucket(host);
 
@@ -57,16 +60,28 @@ pub fn build_s3_backend(
         builder = builder.region(region);
     }
 
-    if let Some(key_id) = connection.get(ACCESS_KEY_ID) {
-        builder = builder.access_key_id(key_id);
-    }
-
-    if let Some(key) = connection.get(SECRET_ACCESS_KEY) {
-        builder = builder.secret_access_key(key);
-    }
-
-    if let Some(session_token) = connection.get(SESSION_TOKEN) {
-        builder = builder.session_token(session_token);
+    let session_token = connection_value(connection, SESSION_TOKEN);
+    match (
+        connection_value(connection, ACCESS_KEY_ID),
+        connection_value(connection, SECRET_ACCESS_KEY),
+    ) {
+        (Some(key_id), Some(key)) => {
+            builder = builder.access_key_id(key_id).secret_access_key(key);
+            if let Some(session_token) = session_token {
+                builder = builder.session_token(session_token);
+            }
+        }
+        (None, None) if session_token.is_none() => {
+            ensure_server_credentials_allowed(remote_storage_access, "S3")?;
+        }
+        _ => {
+            return error::InvalidConnectionSnafu {
+                msg: format!(
+                    "{ACCESS_KEY_ID} and {SECRET_ACCESS_KEY} must be set together, and {SESSION_TOKEN} requires both"
+                ),
+            }
+            .fail();
+        }
     }
 
     if let Some(enable_str) = connection.get(ENABLE_VIRTUAL_HOST_STYLE) {
@@ -99,11 +114,7 @@ pub fn build_s3_backend(
         }
     }
 
-    let object_store = ObjectStore::new(builder).context(error::BuildBackendSnafu)?;
-    Ok(with_instrument_layers(
-        with_retry_layers(object_store),
-        true,
-    ))
+    finish_remote_backend(builder, remote_storage_access)
 }
 
 #[cfg(test)]

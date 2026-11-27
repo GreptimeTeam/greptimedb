@@ -23,8 +23,8 @@ pub(crate) const TARGET_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 /// Returns `(num_rows, bytes)` estimates of the row groups in a Parquet file: the uncompressed
 /// size of each row group, and one row of the largest decoded string and binary value bytes per
-/// row recorded by the writer. Dictionary encoding can make the uncompressed size far smaller
-/// than the decoded values.
+/// row of the file (see [max_row_value_width]). Dictionary encoding can make the uncompressed size
+/// far smaller than the decoded values.
 pub(crate) fn row_group_statistics(
     metadata: &ParquetMetaData,
 ) -> impl Iterator<Item = (u64, u64)> + '_ {

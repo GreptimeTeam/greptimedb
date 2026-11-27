@@ -59,12 +59,12 @@ use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
     EndStagingSnafu, Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu,
     InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionLeaseNotReceivedSnafu,
-    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
-    UpdateManifestSnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RegionStoppedSnafu, RegionTruncatedSnafu, Result,
+    UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
-    PendingTail, RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+    PendingTail, RegionChange, RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
@@ -768,7 +768,7 @@ impl MitoRegion {
         };
 
         // The checkpoint task is taken under the lock after the state change, so every commit
-        // that could start a checkpoint has registered it: a follower takes no commit, and a
+        // that could start a checkpoint has registered it: a follower's commit starts none, and a
         // commit of a downgrading leader starts no checkpoint. The wait holds no lock, so the
         // worker and other users of the manifest are not blocked while the checkpoint finishes.
         if wait_for_checkpoint {
@@ -801,15 +801,29 @@ impl MitoRegion {
 
     /// Persists the metadata backfilled when the region was opened if the manifest lacks it.
     /// A catchup cannot do it for a region that [awaits its Leader
-    /// lease](ManifestContext::awaits_leader_lease), so the lease that ends the wait does.
-    pub(crate) async fn persist_backfilled_metadata(&self) {
+    /// lease](ManifestContext::awaits_leader_lease), so the worker does once the region is a
+    /// writable leader with its lease. Returns false if it found the region not a writable
+    /// leader with its Leader lease, so it could not tell whether the metadata needs persisting.
+    pub(crate) async fn persist_backfilled_metadata(&self) -> bool {
         let mut manager = self.manifest_ctx.manifest_manager.write().await;
-        let pending = self.persist_backfilled_metadata_locked(&mut manager).await;
+        if !self.may_finish_deferred_lease_work() {
+            return false;
+        }
+        // Checked once: a change the worker starts now cannot commit before the lock is dropped.
+        let pending = self.commit_backfilled_metadata_locked(&mut manager).await;
         // The hook may read the manifest.
         drop(manager);
         if let Some(pending) = pending {
             pending.fire().await;
         }
+        true
+    }
+
+    /// Returns whether the region is a writable leader with its Leader lease, which may run the
+    /// work due once it is one.
+    pub(crate) fn may_finish_deferred_lease_work(&self) -> bool {
+        self.state() == RegionRoleState::Leader(RegionLeaderState::Writable)
+            && !self.manifest_ctx.awaits_leader_lease()
     }
 
     /// Persists the backfilled metadata of a writable leader that may commit, under the
@@ -818,11 +832,18 @@ impl MitoRegion {
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
     ) -> Option<PendingManifestHook> {
-        if self.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
-            || self.manifest_ctx.awaits_leader_lease()
-        {
+        if !self.may_finish_deferred_lease_work() {
             return None;
         }
+        self.commit_backfilled_metadata_locked(manager).await
+    }
+
+    /// Commits the backfilled metadata if the manifest lacks it, under the caller's manifest lock,
+    /// without checking the state. Returns the hook to fire after the lock is dropped.
+    async fn commit_backfilled_metadata_locked(
+        &self,
+        manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
+    ) -> Option<PendingManifestHook> {
         // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr).
         // Only the metadata and the format are kept, so the memtables of the version are not
         // pinned across the write below.
@@ -899,7 +920,7 @@ impl MitoRegion {
         let index_usage = version.ssts.owned_index_usage(self.region_id);
         let flushed_entry_id = version.flushed_entry_id;
 
-        let wal_usage = self.estimated_wal_usage(memtable_usage);
+        let wal_usage = self.estimated_wal_usage(memtables.decoded_bytes() as u64);
         let manifest_usage = self.manifest_size();
         let num_rows = version.ssts.owned_num_rows(self.region_id) + version.memtables.num_rows();
         let num_files = version.ssts.owned_num_files(self.region_id);
@@ -950,9 +971,9 @@ impl MitoRegion {
     }
 
     /// Estimated WAL size in bytes.
-    /// Use the memtables size to estimate the size of wal.
-    fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
-        ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
+    /// Use the decoded size of the memtable rows to estimate the size of wal.
+    fn estimated_wal_usage(&self, memtable_decoded_bytes: u64) -> u64 {
+        ((memtable_decoded_bytes as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
 
     /// Sets the state of the region to given state if the current state equals to
@@ -1457,6 +1478,16 @@ pub(crate) struct LeaderLeasePromotion {
     /// How long the region awaited its Leader lease, if this lease ended the wait, as
     /// [ManifestContext::record_leader_lease] returns it.
     pub(crate) ended_wait: Option<Duration>,
+    /// The state the promotion replaced, None if it left the state unchanged.
+    pub(crate) replaced: Option<RegionRoleState>,
+}
+
+/// What [ManifestContext::promote_unless_reload_pending] did.
+struct Promotion {
+    /// Whether it promoted the region; see the function.
+    promoted: bool,
+    /// The state the promotion replaced, as [ManifestContext::set_role] returns it.
+    replaced: Option<RegionRoleState>,
 }
 
 /// Context to update the region manifest.
@@ -1498,6 +1529,9 @@ pub(crate) struct ManifestContext {
     staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
     /// Optional region hook for observing manifest mutations.
     hook: Option<RegionHookRef>,
+    /// Notifications that the region became writable sent to its worker.
+    #[cfg(test)]
+    pub(crate) writable_notifications: std::sync::atomic::AtomicUsize,
 }
 
 impl ManifestContext {
@@ -1522,6 +1556,8 @@ impl ManifestContext {
             node_lease,
             staging_partition_info: Mutex::new(None),
             hook,
+            #[cfg(test)]
+            writable_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1795,6 +1831,70 @@ impl ManifestContext {
         .await
     }
 
+    /// Publish against the same truncate boundary and the watermarks used to select inputs.
+    pub(crate) async fn publish_series_indexes(
+        &self,
+        edit: &crate::manifest::action::RegionEdit,
+        truncated: Option<crate::wal::EntryId>,
+        expected: &HashMap<i64, u64>,
+    ) -> Result<()> {
+        let mut manager = self.manifest_manager.write().await;
+        let manifest = manager.manifest();
+        let region_id = manifest.metadata.region_id;
+        ensure!(
+            !manager.is_stopped()
+                && self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+                && manifest.truncated_entry_id == truncated
+                && manifest.pending_tails.is_empty(),
+            RegionBusySnafu { region_id }
+        );
+        // A competing merge may replace inputs without advancing the watermark.
+        for id in &edit.series_indexes_to_remove {
+            ensure!(
+                manifest
+                    .series_indexes
+                    .get(&id.file_id())
+                    .is_some_and(|file| file.file_id() == *id),
+                RegionBusySnafu { region_id }
+            );
+        }
+        let mut current = HashMap::<i64, u64>::new();
+        for w in manifest
+            .series_indexes
+            .values()
+            .filter_map(|f| f.series_window())
+        {
+            let seq = current.entry(w.start).or_default();
+            *seq = (*seq).max(w.max_sequence);
+        }
+        for window in edit
+            .series_indexes_to_add
+            .iter()
+            .filter_map(FileMeta::series_window)
+        {
+            ensure!(
+                manifest
+                    .series_window_seconds
+                    .is_none_or(|width| width == window.end - window.start)
+                    && current.get(&window.start) == expected.get(&window.start),
+                RegionBusySnafu { region_id }
+            );
+        }
+        let actions = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+        match self.update_locked(&mut manager, actions, false).await {
+            Ok(pending) => {
+                self.unlock_and_fire(manager, pending).await;
+            }
+            Err(error) => {
+                if error.may_have_persisted_manifest_update() {
+                    manager.stop().await;
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     /// Conditionally publishes rebuilt index metadata for `source`.
     ///
     /// The source SST and schema-generation checks share the manifest write lock
@@ -1928,6 +2028,54 @@ impl ManifestContext {
         Ok(TailPublication::Committed(result?))
     }
 
+    /// Commits the empty edit a catchup makes before the region becomes writable, as the version
+    /// after the manifest the region holds when it commits. A writer that committed other content
+    /// at that version conflicts with it. Two catchups that start from the same manifest version
+    /// commit the same content, so they are not told apart. Only a manifest published
+    /// conditionally detects a conflict, so without conditional publication it commits nothing.
+    ///
+    /// The region commits as a Follower, which needs no valid Leader deadline, so the commit
+    /// skips the deadline check. Like a commit of a region that awaits its Leader lease, it
+    /// starts no checkpoint and applies only if no checkpoint covers its version. A conflict
+    /// leaves the region and its manifest manager as they are: the next catchup reopens the
+    /// region from the newer manifest. A stopped region commits nothing.
+    ///
+    /// Returns the receipt of the manifest hook, which the caller fires once it holds no manifest
+    /// lock, or None if it committed nothing.
+    pub(crate) async fn commit_catchup(&self) -> Result<Option<PendingManifestHook>> {
+        let mut manager = self.manifest_manager.write().await;
+        if !manager.is_conditional_publication() {
+            return Ok(None);
+        }
+        let region_id = manager.manifest().metadata.region_id;
+        let state = self.state.load();
+        ensure!(
+            state == RegionRoleState::Follower,
+            RegionStateSnafu {
+                region_id,
+                state,
+                expect: RegionRoleState::Follower,
+            }
+        );
+        ensure!(!self.is_reload_pending(), RegionBusySnafu { region_id });
+        // A stop marks the region before it waits for this lock to stop the manager.
+        ensure!(!self.is_stopped(), RegionStoppedSnafu { region_id });
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default()));
+        let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
+        let version = manager
+            .update_with_verification(action_list, false, false, || true)
+            .await?;
+        let pending = PendingManifestHook::new(
+            region_id,
+            action_list_for_hook,
+            version,
+            self.hook.clone(),
+            false,
+        );
+        Ok(Some(pending))
+    }
+
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
     /// dropping the lock. It is the checked entry of the shared write
@@ -2024,10 +2172,9 @@ impl ManifestContext {
         commit: impl AsyncFnOnce(&mut RegionManifestManager) -> Result<T>,
     ) -> Result<T> {
         let region_id = manager.manifest().metadata.region_id;
-        let result = if manager.is_conditional_publication() && self.is_leader_lease_expired() {
-            RegionLeaseExpiredSnafu { region_id }.fail()
-        } else {
-            commit(manager).await
+        let result = match self.ensure_commit_deadline(manager) {
+            Ok(()) => commit(manager).await,
+            Err(error) => Err(error),
         };
         if let Err(e) = &result {
             error!(e; "Failed to update manifest, region_id: {}", region_id);
@@ -2036,6 +2183,17 @@ impl ManifestContext {
             }
         }
         result
+    }
+
+    /// Checks the leader deadline for a conditionally published manifest.
+    pub(crate) fn ensure_commit_deadline(&self, manager: &RegionManifestManager) -> Result<()> {
+        ensure!(
+            !manager.is_conditional_publication() || !self.is_leader_lease_expired(),
+            RegionLeaseExpiredSnafu {
+                region_id: manager.manifest().metadata.region_id
+            }
+        );
+        Ok(())
     }
 
     /// Returns whether a commit, once written, checks that no checkpoint covers its version: a
@@ -2235,6 +2393,7 @@ impl ManifestContext {
             return LeaderLeasePromotion {
                 promoted: true,
                 ended_wait: None,
+                replaced: None,
             };
         }
         let fence = self.promotion_fence.lock().unwrap();
@@ -2242,12 +2401,15 @@ impl ManifestContext {
             return LeaderLeasePromotion {
                 promoted: false,
                 ended_wait: None,
+                replaced: None,
             };
         }
         let ended_wait = self.record_leader_lease(issued_at);
+        let promotion = self.promote_unless_reload_pending(&fence, region_id, false);
         LeaderLeasePromotion {
-            promoted: self.promote_unless_reload_pending(&fence, region_id, false),
+            promoted: promotion.promoted,
             ended_wait,
+            replaced: promotion.replaced,
         }
     }
 
@@ -2257,6 +2419,7 @@ impl ManifestContext {
         let mut fence = self.promotion_fence.lock().unwrap();
         fence.catching_up = false;
         self.promote_unless_reload_pending(&fence, region_id, true)
+            .promoted
     }
 
     /// Returns whether the region was stopped, so no catchup promotes it.
@@ -2331,6 +2494,12 @@ impl ManifestContext {
         assert!(self.awaits_leader_lease());
     }
 
+    /// Marks the region stopped as [MitoRegion::stop] does before it stops the manifest manager.
+    #[cfg(test)]
+    pub(crate) fn mark_stopped_for_test(&self) {
+        self.promotion_fence.lock().unwrap().stopped = true;
+    }
+
     /// Promotes the region unless it waits for a reload or was stopped. The caller holds the fence
     /// lock.
     fn promote_unless_reload_pending(
@@ -2338,17 +2507,22 @@ impl ManifestContext {
         fence: &PromotionFence,
         region_id: RegionId,
         by_catchup: bool,
-    ) -> bool {
+    ) -> Promotion {
         if fence.reload_pending || fence.stopped {
-            return false;
+            return Promotion {
+                promoted: false,
+                replaced: None,
+            };
         }
         if by_catchup {
             // Before the role, so a lease that finds the region writable compares with it.
             self.catchup_promoted_at
                 .store(lease_nanos(Instant::now()).max(1), Ordering::Relaxed);
         }
-        self.set_role(RegionRole::Leader, region_id);
-        true
+        Promotion {
+            promoted: true,
+            replaced: self.set_role(RegionRole::Leader, region_id),
+        }
     }
 
     /// Counts an applied Leader lease (or StagingLeader lease, on a node whose writes need a lease)
@@ -3459,11 +3633,12 @@ mod tests {
             |r| r.manifest_ctx.demote_candidate(r.region_id),
             // What a catchup's promotion does under the lock.
             |fence| {
-                assert!(region.manifest_ctx.promote_unless_reload_pending(
-                    fence,
-                    region.region_id,
-                    true
-                ))
+                assert!(
+                    region
+                        .manifest_ctx
+                        .promote_unless_reload_pending(fence, region.region_id, true)
+                        .promoted
+                )
             },
         );
         assert_eq!(demoted, None);

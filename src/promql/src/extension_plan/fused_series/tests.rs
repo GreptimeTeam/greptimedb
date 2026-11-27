@@ -252,6 +252,97 @@ fn window_tree_of(function: RangeFunction) -> NativeTree {
     NativeTree::try_new(root).expect("a window function keeps the raw input and its grid")
 }
 
+/// `rate(x[5m])` as the canonical pass hands it over: one merge over the window's output.
+///
+/// A range function drops the metric name, so two series that agreed on every other label leave the
+/// window under one label set. Collecting them is what refuses a second value at one position: the
+/// merge groups by the label set the window handed out and reports the collision, as Prometheus
+/// refuses two series of one label set.
+fn canonical_rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
+    let window = rate_tree_of(schema);
+    let output = window.root().output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(window.root().clone()),
+        },
+        output,
+    })
+    .expect("a merge over a window on a grid is a legal tree")
+}
+
+/// A canonical merge on the aggregate's input side refuses the split.
+///
+/// The merge answers one series per canonical label set from every piece of that set, and the pieces
+/// of one set are not in one partition: the rewrite that created them ran after the scan split the
+/// rows. A split keeps the merge in its per-partition prefix, where it sees only the pieces its own
+/// partition holds, so two colliding series that landed in different partitions are each collected
+/// apart and the final half adds their states - a value where Prometheus reports
+/// `vector cannot contain metrics with the same labelset`.
+///
+/// So the split declines and the statement keeps the plan a collected subtree gets: the merge is the
+/// boundary, its producer collects each partition's pieces, and the canonical router collects one
+/// label set from every partition before anything folds it. That is the shape an overlap is reported
+/// in, whether the aggregate is the statement root or sits under the merge.
+#[test]
+fn a_canonical_merge_below_the_aggregate_refuses_the_split() {
+    let merged = canonical_rate_tree_of(raw_schema());
+    let output = merged.root().output.clone();
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(merged.root().clone()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::Without(Arc::from([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: output.clone(),
+    })
+    .expect("an aggregate over a collected window on a grid is a legal tree");
+    // `split_aggregate` reads a decline as "no split here", which is what leaves the merge above the
+    // partitions instead of inside them.
+    assert!(
+        FusedSeries::split_aggregate(&tree, TIME)
+            .unwrap_or_else(|error| panic!("a refused split is not a failure: {error}"))
+            .is_none(),
+        "a merge below the aggregate keeps the collected plan: {tree}"
+    );
+    let fields = crate::native::split::prefix_fields(&tree).expect("the prefix fields are bound");
+    let error = match crate::native::split::split(tree.root(), &fields, TIME) {
+        Ok(_) => panic!("a merge below the aggregate is not a prefix the split carries: {tree}"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("an aggregate split across a canonical merge"),
+        "{error}"
+    );
+
+    // A merge *above* the aggregate is refused for the same reason, and by the same arm: applying it
+    // to the merged state is what no arm of the split carries, and collecting the state it folds is
+    // what the merge cannot do.
+    let above = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(tree.root().clone()),
+        },
+        output,
+    })
+    .expect("a merge over an aggregate on a grid is a legal tree");
+    let fields = crate::native::split::prefix_fields(&above).expect("the prefix fields are bound");
+    let error = match crate::native::split::split(above.root(), &fields, TIME) {
+        Ok(_) => panic!("a merge above the aggregate has no arm that carries it: {above}"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("an aggregate split across a canonical merge"),
+        "{error}"
+    );
+}
+
 /// `left + right` on one grid, both operands reading the one actual source.
 fn binary_tree(left_schema: Arc<SeriesSchema>, right_schema: Arc<SeriesSchema>) -> NativeTree {
     binary_tree_over_sources(BinaryOp::Add, left_schema, right_schema, 0, 0)
@@ -1962,7 +2053,11 @@ fn zone_output_schema() -> SchemaRef {
 
 /// `rate(x[5m])` over frames that carry `zone` as well as `host`, with both in the output.
 fn zone_node() -> FusedSeries {
-    let tree = rate_tree();
+    zone_node_with(rate_tree())
+}
+
+/// The same node over `tree`, so a test can stage the tree the canonical pass produces.
+fn zone_node_with(tree: NativeTree) -> FusedSeries {
     let binding = binding_of(
         &tree,
         raw_schema(),
@@ -3414,7 +3509,7 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
 const DUPLICATE_LABEL_SET: &str =
     "vector cannot contain metrics with the same labelset {host=\"web-1\"}";
 
-/// Two raw series that are already one Prometheus identity are refused by the runtime that would
+/// Two raw series that are already one Prometheus identity are refused by the merge that would
 /// have to answer both.
 ///
 /// `{host="web-1", zone=""}` and `{host="web-1"}` are one identity to Prometheus: an empty label
@@ -3422,12 +3517,16 @@ const DUPLICATE_LABEL_SET: &str =
 /// What the two *raw* keys differ in is the empty `zone` against the absent one, which the scan
 /// encodes differently and the decoder therefore opens two input series for. `rate` drops the
 /// metric name and the empty value, so the second raw series arrives on the canonical label set the
-/// first one already occupies; the refusal names that label set rather than answering it, because
-/// answering would report one point twice.
+/// first one already occupies, and the merge collecting the window's output refuses it: the
+/// refusal names that label set rather than answering it, because answering would report one point
+/// twice.
 #[tokio::test]
 async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
-    let exec = plan_of(zone_node(), memory_exec(frames(&zone_chunks())))
-        .expect("the runtime executes a rate tree");
+    let exec = plan_of(
+        zone_node_with(canonical_rate_tree_of(raw_schema())),
+        memory_exec(frames(&zone_chunks())),
+    )
+    .expect("the runtime executes a canonical rate tree");
     let error = collect(exec, SessionContext::default().task_ctx())
         .await
         .expect_err("the second raw key cannot be answered under the first one's label set");
@@ -3441,13 +3540,25 @@ async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
 ///
 /// The decoder holds the batch it is reading, the chunks it decoded from it and its own source, so a
 /// stream that kept its input after the error would hold all three until the consumer drops it. The
-/// collision above is the error: it happens on the second series, after the first one's rows have
-/// been handed out.
+/// error staged here is the truncated second series: the first one's rows are handed out, and the
+/// second one ends the input without saying it was its last chunk, which the frame decoder refuses.
 #[tokio::test]
 async fn a_runtime_error_after_rows_releases_the_input() {
     let dropped = Arc::new(AtomicBool::new(false));
     let schema = frame_schema();
-    let batches = frames(&zone_chunks());
+    // The second series is cut off: its chunk does not close it.
+    let mut chunks = zone_chunks();
+    chunks.pop().expect("the collision stages two series");
+    let samples = series_samples(1.0);
+    chunks.push(chunk_of(
+        &raw_schema(),
+        "zone-absent",
+        metric(&[(HOST, "web-1")], Some(METRIC)),
+        &times_of(&samples),
+        vec![values_of(&samples)],
+        false,
+    ));
+    let batches = frames(&chunks);
     let source = staged(schema.clone(), {
         let dropped = Arc::clone(&dropped);
         move || Box::pin(StagedStream::new(schema.clone(), batches.clone()).dropped(&dropped))
@@ -3469,7 +3580,7 @@ async fn a_runtime_error_after_rows_releases_the_input() {
         }
     };
     assert!(
-        error.to_string().contains(DUPLICATE_LABEL_SET),
+        error.to_string().contains("ended before key was final"),
         "refused for another reason: {error}"
     );
     // The first series' rows were handed out before the error, and the input is gone although the
@@ -3484,16 +3595,17 @@ async fn a_runtime_error_after_rows_releases_the_input() {
     );
 }
 
-/// A collision produced inside one native execution is still refused by its local runtime state.
+/// A collision produced inside one native execution is refused by the merge that collects it.
 ///
 /// This is the collision the canonical label set exists for, at the layer that sees it:
 /// `http_requests_total{host="web-1"}` and `http_errors_total{host="web-1"}` reach the window as two
 /// identities and leave it as `{host="web-1"}`. [`FusedSeries`] reads one metric per scan, so this
 /// collision cannot be staged through it; the runtime is driven directly, with the names on the raw
-/// chunks.
+/// chunks. The window is handed over collected, as the canonical pass places it: nothing is answered
+/// until its input ends, and the merge then refuses the second value of the one label set.
 #[test]
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
-    let tree = rate_tree();
+    let tree = canonical_rate_tree_of(raw_schema());
     let mut execution = NativeExecutor::new(
         NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
             .expect("the runtime executes a rate tree"),
@@ -3512,13 +3624,6 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
             ),
         )
         .expect("the first series is a legal raw chunk");
-    assert!(
-        execution
-            .next_chunk()
-            .expect("the first series runs")
-            .is_some(),
-        "the first series is answered"
-    );
     execution
         .push_raw(
             InputId::new(0),
@@ -3532,8 +3637,11 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
             ),
         )
         .expect("the second series is a legal raw chunk");
+    // Both series sit in the merge's collection: the second one puts a value where the first one
+    // already holds one, and the merge refuses the pair as it collects them.
     let error = execution
-        .next_chunk()
+        .end_of_input()
+        .and_then(|()| execution.next_chunk().map(|_| ()))
         .expect_err("the second series puts a value where the first one already holds one");
     assert!(
         error.to_string().contains(DUPLICATE_LABEL_SET),

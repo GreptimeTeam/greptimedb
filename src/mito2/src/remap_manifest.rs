@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::error;
 pub use crate::error::{Error, Result};
@@ -55,6 +55,9 @@ impl RemapManifest {
     /// Main entry point. It copies files from old regions to new regions based on
     /// partition expression overlaps.
     pub fn remap_manifests(&mut self) -> Result<RemapResult> {
+        // A region may only be remapped while it holds files it produced itself.
+        self.ensure_regions_own_their_files()?;
+
         // initialize new manifests
         self.initialize_new_manifests()?;
 
@@ -74,6 +77,66 @@ impl RemapManifest {
             new_manifests,
             stats,
         })
+    }
+
+    /// Rejects a merge while a participant holds a file another region produced.
+    ///
+    /// A reader drops the region predicate exactly when the region's expression equals the
+    /// file's (`ScanRegion::should_skip_region_partition`), so once a holder materializes a copy
+    /// under a new file id the same row sits in the shared file and in the copy, and publishing
+    /// both reads it twice.
+    ///
+    /// The operator resolves the refusal by hand: abort the repartition (a region in a staging
+    /// session is skipped by the compaction scheduler), compact, retry. Nothing triggers that
+    /// compaction automatically.
+    ///
+    /// A split is exempt: each target receives only that source's files and no target combines
+    /// copies, so the region predicate still keeps their rows apart.
+    ///
+    /// A file that records no creator is *not* exempt. It can still hold rows of both children of
+    /// an earlier split, so it proves nothing about provenance: if both children inherited it and
+    /// only one of them compacted, the copy and the inherited file both hold that child's rows and
+    /// a merge would publish them twice. The region has to materialise (a compaction stamps its
+    /// output) before a merge.
+    fn ensure_regions_own_their_files(&self) -> Result<()> {
+        if self.is_split() {
+            return Ok(());
+        }
+
+        let mut offenders = Vec::new();
+        for &from_region_id in self.region_mapping.keys() {
+            let from_manifest = self.old_manifests.get(&from_region_id).context(
+                error::MissingOldManifestSnafu {
+                    region_id: from_region_id,
+                },
+            )?;
+            collect_foreign_files(from_region_id, from_manifest, &mut offenders)?;
+        }
+        ensure!(
+            offenders.is_empty(),
+            error::ForeignFilePartitionExprSnafu {
+                offenders: describe_offenders(&offenders),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Whether this remap publishes every target from at most one source: the shape that is
+    /// exempt from [`Self::ensure_regions_own_their_files`], because no target combines two
+    /// sources' file sets.
+    ///
+    /// The predicate is stated per target, not per source count, and the pre-publication check of
+    /// the repartition procedure reads it from the same place
+    /// ([`store_api::region_engine::sources_sharing_a_target`]), so the two stages agree on every
+    /// shape. One source feeding several targets (a split), one source feeding one target (a
+    /// one-to-one repartition, which may still hold a file an ancestor created) and several
+    /// sources feeding disjoint targets all hand each target a single source's files: the shared
+    /// object is then filtered by that target's own expression, never recombined with a copy of
+    /// itself. Only a target fed by two or more distinct sources can see both an inherited object
+    /// and a copy materialized from it, so only that shape is checked.
+    fn is_split(&self) -> bool {
+        store_api::region_engine::every_target_has_a_single_source(&self.region_mapping)
     }
 
     /// Initializes empty manifests for all new regions.
@@ -119,6 +182,7 @@ impl RemapManifest {
                 append_mode: None,
                 pending_tails: Default::default(),
                 series_indexes: Default::default(),
+                series_window_seconds: None,
                 handoff_floors: Default::default(),
             };
 
@@ -208,21 +272,7 @@ impl RemapManifest {
             }
         }
 
-        // Remap creates references, not physical copies: retain index owner,
-        // inventory and exact source identities together with the samples.
-        for (id, index) in &source_manifest.series_indexes {
-            if let Some(existing) = target_manifest.series_indexes.get(id) {
-                ensure!(
-                    existing == index,
-                    error::InconsistentFileSnafu {
-                        file_id: *id,
-                        reason: "narthex series identity mismatch",
-                    }
-                );
-            } else {
-                target_manifest.series_indexes.insert(*id, index.clone());
-            }
-        }
+        // The destination builds its own series coverage after admitting the samples.
         Ok(())
     }
 
@@ -385,6 +435,80 @@ impl RemapManifest {
     }
 }
 
+/// Checks that `region_id` holds only the files it created itself.
+///
+/// This is the single comparison the ownership rule is made of, factored out of
+/// [`RemapManifest::ensure_regions_own_their_files`] so a caller can run it *before* anything is
+/// staged: it reads one persisted manifest and returns an error naming the region and every
+/// offending file. It does not need a staging region, does not write and has no side effects.
+///
+/// A split is exempt at *group* scope: the caller that runs this early only asks the sources that
+/// take part in a merge, because a one-to-many split hands each target only that source's files
+/// and combines no copies.
+pub(crate) fn ensure_region_owns_its_files(
+    region_id: RegionId,
+    manifest: &RegionManifest,
+) -> Result<()> {
+    let mut offenders = Vec::new();
+    collect_foreign_files(region_id, manifest, &mut offenders)?;
+    ensure!(
+        offenders.is_empty(),
+        error::ForeignFilePartitionExprSnafu {
+            offenders: describe_offenders(&offenders),
+        }
+    );
+
+    Ok(())
+}
+
+/// Collects the `(region, file)` pairs of `manifest` whose recorded creator is not `region_id`'s
+/// expression.
+fn collect_foreign_files(
+    region_id: RegionId,
+    manifest: &RegionManifest,
+    offenders: &mut Vec<(RegionId, FileId)>,
+) -> Result<()> {
+    let region_expr =
+        crate::region::parse_partition_expr(manifest.metadata.partition_expr.as_deref())?;
+    for (file_id, file_meta) in &manifest.files {
+        // Exact match, including the case where the region serves an expression and the file
+        // records none: such a file may hold rows either child of an earlier split wrote, so it
+        // is not evidence that this region produced it.
+        if file_meta.partition_expr.as_deref() != region_expr.as_ref() {
+            offenders.push((region_id, *file_id));
+        }
+    }
+
+    Ok(())
+}
+
+/// Number of offending files an error message lists before it summarizes the rest.
+const MAX_LISTED_OFFENDERS: usize = 8;
+
+/// Renders the offending `(region, file)` pairs an error names.
+///
+/// A repartition can be refused by many files, so the message lists the first
+/// [`MAX_LISTED_OFFENDERS`] and only counts the rest: it stays bounded while every listed entry
+/// keeps the region and the file the operator has to settle.
+fn describe_offenders(offenders: &[(RegionId, FileId)]) -> String {
+    let mut message = offenders
+        .iter()
+        .take(MAX_LISTED_OFFENDERS)
+        .map(|(region_id, file_id)| {
+            format!("region {region_id} holds file {file_id} that another region created")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if let Some(rest) = offenders
+        .len()
+        .checked_sub(MAX_LISTED_OFFENDERS)
+        .filter(|rest| *rest > 0)
+    {
+        message.push_str(&format!("; and {rest} more"));
+    }
+    message
+}
+
 /// Result of manifest remapping, including new manifests and statistics.
 #[derive(Debug)]
 pub struct RemapResult {
@@ -501,8 +625,17 @@ mod tests {
             files.insert(file_id, file_meta.into());
         }
 
+        // The files are stamped with `partition_expr`, so the region serving that same
+        // expression produced them: a remap requires exactly that.
+        let mut metadata = (*create_region_metadata(region_id)).clone();
+        metadata.set_partition_expr(
+            partition_expr
+                .as_ref()
+                .map(|expr| expr.as_json_str().unwrap()),
+        );
+
         RegionManifest {
-            metadata: create_region_metadata(region_id),
+            metadata: Arc::new(metadata),
             files,
             removed_files: RemovedFilesRecord::default(),
             flushed_entry_id,
@@ -515,6 +648,7 @@ mod tests {
             append_mode: None,
             pending_tails: Default::default(),
             series_indexes: Default::default(),
+            series_window_seconds: None,
             handoff_floors: Default::default(),
         }
     }
@@ -597,6 +731,418 @@ mod tests {
         for file_meta in result.new_manifests[&new_region_id_2].files.values() {
             assert_eq!(file_meta.region_id, old_region_id);
         }
+    }
+
+    #[test]
+    fn test_rejects_files_another_region_produced() {
+        // Both participants of the merge hold a file the whole-domain source created: merging
+        // them could publish a row of it twice once a holder materializes its own copy, and the
+        // refusal has to name every offending region and file.
+        let old_region_id_1 = RegionId::new(1, 1);
+        let old_region_id_2 = RegionId::new(1, 2);
+        let new_region_id = RegionId::new(1, 3);
+
+        let creator_expr = range_expr("x", 0, 100);
+        let mut old_manifests = HashMap::new();
+        let mut file_ids = Vec::new();
+        for old_region_id in [old_region_id_1, old_region_id_2] {
+            let own_expr = if old_region_id == old_region_id_1 {
+                range_expr("x", 0, 50)
+            } else {
+                range_expr("x", 50, 100)
+            };
+            let mut old_manifest = create_manifest(old_region_id, 1, Some(own_expr), 100, 200);
+            let file_id = *old_manifest.files.keys().next().unwrap();
+            old_manifest.files.insert(
+                file_id,
+                create_file_meta(old_region_id, file_id, Some(creator_expr.clone())).into(),
+            );
+            file_ids.push(file_id);
+            old_manifests.insert(old_region_id, old_manifest);
+        }
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id, range_expr("x", 0, 100));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id_1, vec![new_region_id]);
+        region_mapping.insert(old_region_id_2, vec![new_region_id]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+
+        let err = remapper.remap_manifests().unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "unexpected error: {err:?}"
+        );
+        let message = err.to_string();
+        for (region_id, file_id) in [
+            (old_region_id_1, file_ids[0]),
+            (old_region_id_2, file_ids[1]),
+        ] {
+            assert!(message.contains(&region_id.to_string()), "{message}");
+            assert!(message.contains(&file_id.to_string()), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_one_to_one_repartition_is_exempt() {
+        // A one-to-one repartition reuses the region id and may still hold a file an ancestor
+        // created (a split installs the child's expression without rewriting the files it
+        // clones). No target receives files from two sources, so nothing is combined and the
+        // remap publishes the file under the region's own expression: the shape is exempt, which
+        // is what keeps the pre-publication check and this guard from disagreeing.
+        let old_region_id = RegionId::new(1, 1);
+        let own_expr = range_expr("x", 0, 50);
+        let ancestor_expr = range_expr("x", 0, 100);
+
+        let mut old_manifest = create_manifest(old_region_id, 1, Some(own_expr.clone()), 100, 200);
+        let file_id = *old_manifest.files.keys().next().unwrap();
+        old_manifest.files.insert(
+            file_id,
+            create_file_meta(old_region_id, file_id, Some(ancestor_expr)).into(),
+        );
+
+        let mut remapper = RemapManifest::new(
+            HashMap::from([(old_region_id, old_manifest)]),
+            HashMap::from([(old_region_id, own_expr)]),
+            HashMap::from([(old_region_id, vec![old_region_id])]),
+        );
+        let result = remapper.remap_manifests().unwrap();
+        assert_eq!(result.new_manifests[&old_region_id].files.len(), 1);
+        assert!(
+            result.new_manifests[&old_region_id]
+                .files
+                .contains_key(&file_id)
+        );
+    }
+
+    #[test]
+    fn test_target_fed_by_two_sources_is_still_checked() {
+        // The predicate is per target, not per source count: here each source feeds a target of
+        // its own *and* the shared one. The shared target combines both file sets, so the guard
+        // runs and reports the file the two sources would publish twice.
+        let left_region_id = RegionId::new(1, 1);
+        let right_region_id = RegionId::new(1, 2);
+        let shared_region_id = RegionId::new(1, 3);
+        let left_only_region_id = RegionId::new(1, 4);
+
+        let left_expr = range_expr("x", 0, 50);
+        let right_expr = range_expr("x", 50, 100);
+        let shared_expr = range_expr("x", 0, 100);
+
+        let mut left_manifest =
+            create_manifest(left_region_id, 1, Some(left_expr.clone()), 100, 200);
+        let left_file = *left_manifest.files.keys().next().unwrap();
+        left_manifest.files.insert(
+            left_file,
+            create_file_meta(left_region_id, left_file, Some(shared_expr.clone())).into(),
+        );
+        let right_manifest = create_manifest(right_region_id, 1, Some(right_expr), 100, 200);
+
+        let mut remapper = RemapManifest::new(
+            HashMap::from([
+                (left_region_id, left_manifest),
+                (right_region_id, right_manifest),
+            ]),
+            HashMap::from([
+                (shared_region_id, shared_expr),
+                (left_only_region_id, left_expr),
+            ]),
+            HashMap::from([
+                (left_region_id, vec![shared_region_id, left_only_region_id]),
+                (right_region_id, vec![shared_region_id]),
+            ]),
+        );
+        let err = remapper.remap_manifests().unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "unexpected error: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains(&left_region_id.to_string()), "{message}");
+        assert!(message.contains(&left_file.to_string()), "{message}");
+    }
+
+    #[test]
+    fn test_early_check_needs_no_staging_region() {
+        // `handle_remap` runs this predicate when the instruction asks for validation only, i.e.
+        // before any route is published and therefore before the region enters staging: it reads
+        // the ordinary manifest and reports the offenders it finds there.
+        let region_id = RegionId::new(1, 1);
+        let own_expr = range_expr("x", 0, 50);
+        let mut manifest = create_manifest(region_id, 1, Some(own_expr), 100, 200);
+        ensure_region_owns_its_files(region_id, &manifest).unwrap();
+
+        // A file another region created: the early check refuses it exactly like the remap does.
+        let foreign_expr = range_expr("x", 0, 100);
+        let file_id = *manifest.files.keys().next().unwrap();
+        manifest.files.insert(
+            file_id,
+            create_file_meta(region_id, file_id, Some(foreign_expr)).into(),
+        );
+
+        let err = ensure_region_owns_its_files(region_id, &manifest).unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "unexpected error: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains(&region_id.to_string()), "{message}");
+        assert!(message.contains(&file_id.to_string()), "{message}");
+    }
+
+    #[test]
+    fn test_early_check_is_not_exempt_for_a_split_source() {
+        // The shape exemption belongs to the repartition procedure, which asks only about the
+        // sources of a target that two sources feed: a split maps every target from that single
+        // source, so the procedure never asks, while the per-region predicate itself - the one a
+        // checked source is judged by - reports such a file. Keeping the exemption out of this
+        // predicate is what makes the pre-publication check as strict as the remap-time guard.
+        let old_region_id = RegionId::new(1, 1);
+        let new_region_id_1 = RegionId::new(1, 2);
+        let new_region_id_2 = RegionId::new(1, 3);
+
+        let own_expr = range_expr("x", 50, 100);
+        let ancestor_expr = range_expr("x", 0, 100);
+        let mut old_manifest = create_manifest(old_region_id, 1, Some(own_expr), 100, 200);
+        let file_id = *old_manifest.files.keys().next().unwrap();
+        old_manifest.files.insert(
+            file_id,
+            create_file_meta(old_region_id, file_id, Some(ancestor_expr)).into(),
+        );
+
+        // The split itself is accepted: both children inherit the file and each keeps its own
+        // part of it visible through its own predicate.
+        let mut remapper = RemapManifest::new(
+            HashMap::from([(old_region_id, old_manifest.clone())]),
+            HashMap::from([
+                (new_region_id_1, range_expr("x", 50, 75)),
+                (new_region_id_2, range_expr("x", 75, 100)),
+            ]),
+            HashMap::from([(old_region_id, vec![new_region_id_1, new_region_id_2])]),
+        );
+        remapper.remap_manifests().unwrap();
+
+        // The predicate a merge source is checked with reports the very same file.
+        let err = ensure_region_owns_its_files(old_region_id, &old_manifest).unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "unexpected error: {err:?}"
+        );
+        assert!(err.to_string().contains(&file_id.to_string()), "{err}");
+    }
+
+    #[test]
+    fn test_split_is_exempt_from_the_foreign_file_rule() {
+        // The source serves [50, 100) and holds the file an ancestor [0, 100) region created.
+        // The split hands that object to both targets — [50, 75) and [75, 100), which is a real
+        // partition of the source — and stays exempt: each target keeps only its own part of the
+        // object visible through its own predicate, and no target combines file sets.
+        let old_region_id = RegionId::new(1, 1);
+        let new_region_id_1 = RegionId::new(1, 2);
+        let new_region_id_2 = RegionId::new(1, 3);
+
+        let source_expr = range_expr("x", 50, 100);
+        let mut old_manifest = create_manifest(old_region_id, 1, Some(source_expr), 100, 200);
+        let file_id = *old_manifest.files.keys().next().unwrap();
+        old_manifest.files.insert(
+            file_id,
+            // The file a wider [0, 100) region created, so the target domains are inside it.
+            create_file_meta(old_region_id, file_id, Some(range_expr("x", 0, 100))).into(),
+        );
+
+        let mut old_manifests = HashMap::new();
+        old_manifests.insert(old_region_id, old_manifest);
+
+        let left_expr = range_expr("x", 50, 75);
+        let right_expr = range_expr("x", 75, 100);
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id_1, left_expr);
+        new_partition_exprs.insert(new_region_id_2, right_expr);
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id, vec![new_region_id_1, new_region_id_2]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+
+        let result = remapper.remap_manifests().unwrap();
+        // Both targets inherit the shared object, so the exemption has to be what lets the pair
+        // through: the source's own file is foreign to it (creator [0, 100)).
+        for region_id in [new_region_id_1, new_region_id_2] {
+            let manifest = &result.new_manifests[&region_id];
+            assert_eq!(
+                vec![file_id],
+                manifest.files.keys().copied().collect::<Vec<_>>()
+            );
+            // The targets' expressions are strict parts of the source interval, so their union
+            // covers it and neither is the ancestry of the other.
+            let target_expr =
+                crate::region::parse_partition_expr(manifest.metadata.partition_expr.as_deref())
+                    .unwrap()
+                    .expect("a split target serves an expression");
+            assert_ne!(target_expr, range_expr("x", 50, 100));
+        }
+        assert_eq!(2, result.stats.total_file_refs);
+        assert_eq!(1, result.stats.unique_files);
+    }
+
+    #[test]
+    fn test_legacy_files_without_a_creator_are_rejected_by_a_merge() {
+        // Files written before the expression was recorded carry no creator, which proves
+        // nothing about provenance: such a file can hold rows of both children of an earlier
+        // split. The merge is refused; the region materialises first (a compaction stamps its
+        // output) exactly like it does for a file whose creator belongs to another region. A
+        // split stays exempt, so the first repartition of an upgraded table still works.
+        let old_region_id_1 = RegionId::new(1, 1);
+        let old_region_id_2 = RegionId::new(1, 2);
+        let new_region_id = RegionId::new(1, 3);
+
+        let mut old_manifests = HashMap::new();
+        let mut file_ids = Vec::new();
+        for (old_region_id, expr) in [
+            (old_region_id_1, range_expr("x", 0, 50)),
+            (old_region_id_2, range_expr("x", 50, 100)),
+        ] {
+            let mut old_manifest = create_manifest(old_region_id, 1, Some(expr), 100, 200);
+            let file_id = *old_manifest.files.keys().next().unwrap();
+            old_manifest.files.insert(
+                file_id,
+                create_file_meta(old_region_id, file_id, None).into(),
+            );
+            file_ids.push((old_region_id, file_id));
+            old_manifests.insert(old_region_id, old_manifest);
+        }
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id, range_expr("x", 0, 100));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id_1, vec![new_region_id]);
+        region_mapping.insert(old_region_id_2, vec![new_region_id]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+        let err = remapper.remap_manifests().unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "an unstamped file must not be exempt from the rule: {err:?}"
+        );
+        let message = err.to_string();
+        for (region_id, file_id) in file_ids {
+            assert!(message.contains(&region_id.to_string()), "{message}");
+            assert!(message.contains(&file_id.to_string()), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_merge_rejects_self_stamped_sibling_and_unstamped_sibling() {
+        // The reviewer's shape: one child of an earlier split compacted, so it holds a file it
+        // stamped itself; its sibling still holds the unstamped ancestor object. Merging them
+        // would publish the compacted child's rows twice — once from its own file, once from the
+        // ancestor object the sibling inherited — so the unstamped file has to be an offender.
+        let left_region_id = RegionId::new(1, 1);
+        let right_region_id = RegionId::new(1, 2);
+        let merged_region_id = RegionId::new(1, 3);
+
+        let left_expr = range_expr("x", 0, 50);
+        let mut left_manifest =
+            create_manifest(left_region_id, 1, Some(left_expr.clone()), 100, 200);
+        let left_file = *left_manifest.files.keys().next().unwrap();
+        // The left child materialised: its compaction output is stamped with its own expression.
+        left_manifest.files.insert(
+            left_file,
+            create_file_meta(left_region_id, left_file, Some(left_expr)).into(),
+        );
+
+        let right_expr = range_expr("x", 50, 100);
+        let mut right_manifest = create_manifest(right_region_id, 1, Some(right_expr), 100, 200);
+        let right_file = *right_manifest.files.keys().next().unwrap();
+        // The right child still holds the ancestor's object, which records no creator.
+        right_manifest.files.insert(
+            right_file,
+            create_file_meta(right_region_id, right_file, None).into(),
+        );
+
+        let mut old_manifests = HashMap::new();
+        old_manifests.insert(left_region_id, left_manifest);
+        old_manifests.insert(right_region_id, right_manifest);
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(merged_region_id, range_expr("x", 0, 100));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(left_region_id, vec![merged_region_id]);
+        region_mapping.insert(right_region_id, vec![merged_region_id]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+        let err = remapper.remap_manifests().unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "unexpected error: {err:?}"
+        );
+        let message = err.to_string();
+        // Only the unstamped file is an offender: the self-stamped one belongs to its region.
+        assert!(message.contains(&right_file.to_string()), "{message}");
+        assert!(!message.contains(&left_file.to_string()), "{message}");
+    }
+
+    #[test]
+    fn test_refusal_message_lists_a_bounded_number_of_offenders() {
+        // A merge can be refused by many files; the message keeps the per-file detail for the
+        // first `MAX_LISTED_OFFENDERS` and only counts the rest, so it cannot grow without bound.
+        // The shape has to be one the guard runs on, i.e. a target fed by two sources.
+        let old_region_id = RegionId::new(1, 1);
+        let sibling_region_id = RegionId::new(1, 3);
+        let new_region_id = RegionId::new(1, 2);
+        let offender_count = MAX_LISTED_OFFENDERS + 5;
+
+        let mut old_manifest =
+            create_manifest(old_region_id, 0, Some(range_expr("x", 0, 50)), 100, 200);
+        let mut file_ids = Vec::new();
+        for _ in 0..offender_count {
+            let file_id = FileId::random();
+            old_manifest.files.insert(
+                file_id,
+                create_file_meta(old_region_id, file_id, Some(range_expr("x", 0, 100))).into(),
+            );
+            file_ids.push(file_id);
+        }
+        // The sibling holds only its own file, so every offender comes from the region above.
+        let sibling_manifest = create_manifest(
+            sibling_region_id,
+            1,
+            Some(range_expr("x", 50, 100)),
+            100,
+            200,
+        );
+
+        let mut old_manifests = HashMap::new();
+        old_manifests.insert(old_region_id, old_manifest);
+        old_manifests.insert(sibling_region_id, sibling_manifest);
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id, range_expr("x", 0, 100));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id, vec![new_region_id]);
+        region_mapping.insert(sibling_region_id, vec![new_region_id]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+        let message = remapper.remap_manifests().unwrap_err().to_string();
+        // The manifest is a map, so which files the message lists is not ordered; what matters
+        // is that it lists exactly `MAX_LISTED_OFFENDERS` of them and only counts the rest.
+        let listed = file_ids
+            .iter()
+            .filter(|file_id| message.contains(&file_id.to_string()))
+            .count();
+        assert_eq!(
+            MAX_LISTED_OFFENDERS, listed,
+            "the message has to list exactly {MAX_LISTED_OFFENDERS} offenders: {message}"
+        );
+        assert!(
+            message.contains("; and 5 more"),
+            "the message has to summarize the rest by count: {message}"
+        );
     }
 
     #[test]

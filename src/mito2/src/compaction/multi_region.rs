@@ -64,10 +64,10 @@ pub struct MultiRegionCompactionPlan {
     pub sources: Vec<FileMeta>,
     /// Metadata and routing must belong to the same physical-table snapshot.
     pub targets: BTreeMap<RegionId, MultiRegionTarget>,
-    /// Working-set admission budget, including all resident writers and their finish workspace.
-    /// This bounds managed buffers and estimates codec/index allocations, not process RSS.
-    /// It must be large enough that the per-buffer share still covers the storage
-    /// multipart minimum, otherwise the plan is rejected before any output.
+    /// Total working-set admission budget for computation and all resident uploads.
+    /// Upload chunks follow the destination backend's limits independently of the Arrow
+    /// batch limit. The executor reserves uploads before sizing the compute buffers and
+    /// checks the estimated working set before creating outputs. This is not a process RSS limit.
     pub memory_limit: usize,
     /// Soft size limit, in bytes, of one output SST. A file rolls over at the next
     /// series boundary after it is exceeded, so a single series may stay in one file.
@@ -99,7 +99,7 @@ pub struct MultiRegionCompactionStats {
     pub source_store_page_bytes: u64,
     pub output_rows: u64,
     pub output_bytes: u64,
-    /// Conservative admission estimate, including reader pages, writers, indexes and finish.
+    /// Admission estimate for reader pages, encoders, indexes, uploads, and finish workspace.
     pub estimated_memory_bytes: u64,
     /// Peak retained equal-key group storage (including shared buffer capacities).
     pub peak_group_bytes: u64,
