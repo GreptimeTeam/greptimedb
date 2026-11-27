@@ -23,6 +23,7 @@ use catalog::process_manager::ProcessManagerRef;
 use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
 use common_base::Plugins;
 use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
+use common_error::ext::BoxedError;
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
