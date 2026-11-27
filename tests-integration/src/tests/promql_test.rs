@@ -12941,6 +12941,51 @@ async fn native_promql_declines_a_tree_the_runtime_cannot_execute() {
     );
 }
 
+/// A tag column named `__name__` contradicts the metric name the table gives every series it holds,
+/// and the native route has no label to read it as: it would merge the series the column tells
+/// apart. The route declines such a table, so the statement keeps the existing plan's answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_tag_named_metric_name() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_tag_named_metric_name",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_named (
+            ts TIMESTAMP TIME INDEX,
+            "__name__" STRING,
+            host STRING,
+            val DOUBLE,
+            PRIMARY KEY ("__name__", host)
+        );
+        INSERT INTO native_named VALUES (0, 'a', 'h', 1), (0, 'b', 'h', 2);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    for query in [
+        "native_named",
+        "sum by (__name__) (native_named)",
+        "count_over_time(native_named[1m])",
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        let (_, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(legacy_rows.len(), 2, "{query}: {legacy_rows:?}");
+        observer.clear();
+        let (_, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(native_rows, legacy_rows, "{query}");
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline"
+        );
+    }
+}
+
 /// A `quantile` over one logical table, divided by a `sum` over another, answers natively and the
 /// rows are the existing plan's.
 ///
