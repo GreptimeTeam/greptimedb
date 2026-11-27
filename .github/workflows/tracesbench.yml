@@ -180,9 +180,7 @@ jobs:
           if [[ "$enabled" == true ]]; then selected="${selected:+$selected,}$target"; fi
         done
         [[ -n "$selected" ]] || { echo 'Select at least one database' >&2; exit 1; }
-        if [[ "$greptimedb" == true ]]; then
-          # Full GreptimeDB image references are validated by the shared comparison helper.
-        fi
+        # Full GreptimeDB image references are validated by the shared comparison helper.
         printf 'targets=%s\n' "$selected" >> "$GITHUB_OUTPUT"
     - name: Validate GreptimeDB storage
       run: |

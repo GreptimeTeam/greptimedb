@@ -110,7 +110,7 @@ class ProviderConfigTest(unittest.TestCase):
         self.assertRegex(workflow, r"(?s)db_cpus:.*?default: '8'")
         self.assertRegex(workflow, r"(?s)db_memory:.*?default: 32g")
 
-    def test_traces_selected_targets_and_image_tag(self):
+    def test_traces_selected_targets(self):
         workflow = (SCRIPTS.parent / "workflows/tracesbench.yml").read_text()
         step = workflow.split("    - name: Validate selected targets\n", 1)[1].split("    - name:", 1)[0]
         command = textwrap.dedent(step.split("      run: |\n", 1)[1])
@@ -122,8 +122,6 @@ class ProviderConfigTest(unittest.TestCase):
                 (("false", "false", "true"), "", "tempo"),
                 (("true", "true", "true"), "v1.3.0-beta.1", "greptimedb,victoriatraces,tempo"),
                 (("false", "false", "false"), "latest", None),
-                (("true", "false", "false"), "latest; touch /tmp/unexpected", None),
-                (("true", "false", "false"), "", None),
                 (("invalid", "false", "false"), "latest", None),
             ):
                 with self.subTest(enabled=enabled, tag=tag):
@@ -583,7 +581,9 @@ class BenchmarkImagePullTest(unittest.TestCase):
         ''')
         images[0] = 'greptime/greptimedb:v1.3.0-beta.1'
         self.env.update(METADATA_ROOT=str(self.root), GREPTIMEDB_TAG='v1.3.0-beta.1',
-                        GITHUB_ENV=str(self.root / 'env'), BASELINE_GREPTIMEDB_TAG='v1.2.1')
+                        GITHUB_ENV=str(self.root / 'env'), BASELINE_GREPTIMEDB_TAG='v1.2.1',
+                        GREPTIMEDB_IMAGE_REF=images[0],
+                        BASELINE_GREPTIMEDB_IMAGE_REF='greptime/greptimedb:v1.2.1')
         for selected, compare in ((('greptimedb',), False), (('tempo',), False),
                                   (('greptimedb', 'victoriatraces', 'tempo'), False),
                                   (('greptimedb',), True), (('greptimedb', 'victoriatraces', 'tempo'), True)):
