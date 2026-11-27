@@ -4243,8 +4243,15 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
     );
 }
 
+/// An append-mode table is refused by the raw reader's preflight, and the route reports it.
+///
+/// A raw series scan reads the series layout a region only has once it is prepared for Narthex: the
+/// preflight in `mito2`'s series scan answers `None` for every other append-mode input, and by the
+/// time the physical planner asks, the logical plan is this node. The route therefore refuses the
+/// selector where it can still say why, and the statement is answered with that cause rather than
+/// with the existing planner's plan.
 #[tokio::test]
-async fn native_fused_append_mode_table_falls_back() {
+async fn native_fused_append_mode_table_is_reported_as_unsupported() {
     let table_provider = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
@@ -4256,26 +4263,22 @@ async fn native_fused_append_mode_table_falls_back() {
         NATIVE_ENGINE,
     )
     .await;
-    let native =
-        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
-    let fallback_provider = build_test_table_provider_with_options(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![],
-        ConcreteDataType::timestamp_millisecond_datatype(),
+    let error = PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &build_eval_stmt("rate(some_metric[5m])"),
+        &build_query_engine_state(),
+        None,
         true,
-        ConcreteDataType::float64_datatype(),
-        NATIVE_ENGINE,
     )
-    .await;
-    let without_flag =
-        build_native_fused_plan_with_provider("rate(some_metric[5m])", false, fallback_provider)
-            .await;
-    assert!(!native.display_indent().to_string().contains("FusedSeries"));
-    assert_eq!(
-        native.display_indent().to_string(),
-        without_flag.display_indent().to_string()
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            crate::promql::error::Error::NativeRouteDeclined { reason, .. }
+                if reason == "unsupported_time_index_type_or_append_mode"
+        ),
+        "an append-mode table is refused for its layout: {error}"
     );
 }
 
@@ -4900,98 +4903,82 @@ fn a_deep_propagated_operand_plans_within_a_worker_stack() {
     );
 }
 
-/// A metric table without logical-table metadata declines to the legacy plan.
+/// A metric table without logical-table metadata is refused for it, and the route reports it.
+///
+/// A metric-engine selector is admitted through the logical scan its rewrite builds, and that scan is
+/// what proves the physical scan this node reads is limited to the logical table's own id. Without
+/// the metadata there is no such scan, so the route cannot prove the rows it would fuse belong to the
+/// one metric the statement names, and it refuses the selector: the statement is answered with the
+/// missing verified scanner as the cause rather than with the existing planner's plan.
 #[tokio::test]
-async fn native_fused_metric_table_without_logical_metadata_falls_back() {
-    let native = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
-        true,
-        build_test_table_provider_with_options(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            1,
-            1,
-            vec![],
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-            ConcreteDataType::float64_datatype(),
-            METRIC_ENGINE,
-        )
-        .await,
-    )
-    .await;
-    let legacy = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
+async fn native_fused_metric_table_without_logical_metadata_is_reported_as_unsupported() {
+    let table_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
         false,
-        build_test_table_provider_with_options(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            1,
-            1,
-            vec![],
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-            ConcreteDataType::float64_datatype(),
-            METRIC_ENGINE,
-        )
-        .await,
+        ConcreteDataType::float64_datatype(),
+        METRIC_ENGINE,
     )
     .await;
-    assert!(find_fused_series(&native).is_none());
-    assert_eq!(
-        native.display_indent().to_string(),
-        legacy.display_indent().to_string()
+    let error = PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &build_eval_stmt("rate(some_metric[5m])"),
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            crate::promql::error::Error::NativeRouteDeclined { reason, .. }
+                if reason == "engine_without_raw_series_scanner"
+        ),
+        "an unverified metric table is refused for its missing scanner: {error}"
     );
 }
 
-/// A table whose engine has no raw-series scanner keeps the existing plan.
+/// A table whose engine has no raw-series scanner is refused for it, and the route reports it.
 ///
 /// A file-engine table answers an ordinary read with a `SinglePartitionScanner`, whose
 /// `raw_series_schema` is the trait's default `None`. Offering the native route to such a table
 /// would build the node and then fail in physical planning, because the logical plan is fixed by
-/// then; declining here is what keeps the query answering.
+/// then; refusing the selector here is what lets the statement report the cause instead.
 #[tokio::test]
-async fn native_fused_engine_without_raw_series_falls_back() {
-    let native = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
-        true,
-        build_test_table_provider_with_options(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            1,
-            1,
-            vec![],
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-            ConcreteDataType::float64_datatype(),
-            FILE_ENGINE,
-        )
-        .await,
-    )
-    .await;
-    let without_flag = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
+async fn native_fused_engine_without_raw_series_is_reported_as_unsupported() {
+    let table_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
         false,
-        build_test_table_provider_with_options(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            1,
-            1,
-            vec![],
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-            ConcreteDataType::float64_datatype(),
-            FILE_ENGINE,
-        )
-        .await,
+        ConcreteDataType::float64_datatype(),
+        FILE_ENGINE,
     )
     .await;
+    let error = PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &build_eval_stmt("rate(some_metric[5m])"),
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap_err();
     assert!(
-        find_fused_series(&native).is_none(),
-        "a file-engine table must not reach the native route"
+        matches!(
+            &error,
+            crate::promql::error::Error::NativeRouteDeclined { reason, .. }
+                if reason == "engine_without_raw_series_scanner"
+        ),
+        "a file-engine table is refused for its missing raw-series scanner: {error}"
     );
-    assert_eq!(
-        native.display_indent().to_string(),
-        without_flag.display_indent().to_string(),
-        "a file-engine table must keep the existing plan"
-    );
-    // The refusal is reported with its cause, not a bare Ok(None).
+    // The refusal is reported with its cause, not answered silently.
     assert_eq!(
         take_reported_decline(),
         Some("engine_without_raw_series_scanner"),
@@ -4999,37 +4986,22 @@ async fn native_fused_engine_without_raw_series_falls_back() {
     );
 }
 
-/// The plan `query` gets, or `None` when the planner refuses it.
-///
-/// A field the raw series scan cannot read must not change what the statement answers, and some of
-/// these statements the existing planner refuses outright: that refusal is its answer, so a test has
-/// to be able to hold the route to it instead of unwrapping a plan.
-async fn plan_or_refusal(
-    query: &str,
-    native_fused: bool,
-    table_provider: DfTableSourceProvider,
-) -> Option<LogicalPlan> {
-    PromPlanner::stmt_to_plan_with_annotations(
-        table_provider,
-        &build_eval_stmt(query),
-        &build_query_engine_state(),
-        None,
-        native_fused,
-    )
-    .await
-    .ok()
-}
-
-/// A value field the raw-series readers cannot serve keeps the existing plan.
+/// A value field the raw-series readers cannot serve is refused, and the route reports it.
 ///
 /// The route admits two kinds: a `Float64`, which every reader serves, and the canonical native
 /// histogram struct, which the ordinary scan reads while the columnar samples - `Float64` only -
-/// are skipped for that selection. Everything else - a string, a boolean, a decimal - has no raw
-/// representation and keeps the existing plan whatever the shape of the statement, including the
-/// shapes that publish a `Float64` for a numeric field: `some_metric * 2` casts a string as readily
-/// as an integer, and the route still refuses it because no raw frame can hold the values.
+/// are skipped for that selection. Prometheus keeps no string, boolean or decimal sample, so a field
+/// of any other type has no raw representation a fused node could declare, and the route refuses the
+/// selector whatever the shape of the statement - including the shapes that publish a `Float64` for a
+/// numeric field, since `some_metric * 2` casts a string as readily as an integer and no raw frame can
+/// hold the values either way.
+///
+/// The cause reported is the refusal the statement ends on, which is the guard the field itself fails
+/// - the kinds a scan's fields may carry, one of which this field is not - except under a binary:
+/// there the operands are re-offered as frames, so the statement is answered with that composition's
+/// own cause and the field's kind is one level down from it.
 #[tokio::test]
-async fn native_fused_unsupported_field_type_falls_back() {
+async fn native_fused_unsupported_field_type_is_reported_as_unsupported() {
     for field_type in [
         ConcreteDataType::string_datatype(),
         ConcreteDataType::boolean_datatype(),
@@ -5037,44 +5009,34 @@ async fn native_fused_unsupported_field_type_falls_back() {
         // the route's own numeric set leaves the decimals out; asking Arrow would let it through.
         ConcreteDataType::decimal128_datatype(10, 2),
     ] {
-        for query in [
-            "some_metric",
-            "some_metric * 2",
-            "sum(some_metric)",
-            "min(some_metric)",
-            "rate(some_metric[5m])",
+        for (query, reason) in [
+            // The selector's own fields are what the kind guard reads, so it is the cause here.
+            ("some_metric", "mixed_field_kinds"),
+            // The composition re-offers this operand as a frame; the field's kind is the refusal
+            // below that offer, and no frame is what the statement is answered with.
+            ("some_metric * 2", "left_operand_is_not_a_frame"),
+            // A function folds one frame, so the field's kind reaches the statement unchanged.
+            ("sum(some_metric)", "mixed_field_kinds"),
+            ("min(some_metric)", "mixed_field_kinds"),
+            ("rate(some_metric[5m])", "mixed_field_kinds"),
         ] {
-            let native = plan_or_refusal(
-                query,
+            let error = PromPlanner::stmt_to_plan_with_annotations(
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+                &build_eval_stmt(query),
+                &build_query_engine_state(),
+                None,
                 true,
-                build_test_table_provider_with_field_type(field_type.clone()).await,
             )
-            .await;
-            let without_flag = plan_or_refusal(
-                query,
-                false,
-                build_test_table_provider_with_field_type(field_type.clone()).await,
-            )
-            .await;
-            match (&native, &without_flag) {
-                (Some(native_plan), Some(legacy_plan)) => {
-                    assert!(
-                        find_fused_series(native_plan).is_none(),
-                        "{field_type} must not reach the native route: {query}"
-                    );
-                    assert_eq!(
-                        native_plan.display_indent().to_string(),
-                        legacy_plan.display_indent().to_string(),
-                        "{field_type} must keep the existing plan: {query}"
-                    );
-                }
-                _ => assert_eq!(
-                    native.is_some(),
-                    without_flag.is_some(),
-                    "{field_type}: the route must answer what the existing planner answers for \
-                     {query}"
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    crate::promql::error::Error::NativeRouteDeclined { reason: recorded, .. }
+                        if recorded == reason
                 ),
-            }
+                "{field_type}: `{query}` is refused as `{reason}`: {error}"
+            );
         }
     }
 }
