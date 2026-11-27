@@ -213,14 +213,17 @@ N * (8 timestamp + 8 sequence + 1 operation + 8 * F values)
 ```
 
 Require this to be at most 262,144 bytes. A native histogram field counts as one
-8-byte value per row here; its bucket lists are bounded by its chunk instead. A
+8-byte value per row here, so the formula does not bound its decoded buffers: its
+18 struct children and bucket lists are bounded only by its chunk, and the reader
+reserves memory for them from the chunk header (see encoding 8). A
 writer also ends a block before a histogram chunk's encoded size bound would exceed
 the 1 MiB chunk limit: 1 byte plus 11 bytes per struct child and per list item for
 each row, and 16 bytes plus 64 bytes per child and the validity bytes for the
 chunk. A sample that exceeds the limit on its own is rejected when it is written
 to a Narthex region. Count all manifest fields, including omitted/all-null
 fields, and reserve validity bytes even for all-valid fields.
-This is a bound on decoded column buffers, not total allocator usage or RSS.
+Without histogram fields, this is a bound on decoded column buffers, not total
+allocator usage or RSS.
 The effective row cap is the largest integer satisfying both limits: 8,192 for
 one field and 31 for 1,024 fields. Encoded buffers and metadata have separate
 bounds below. Increasing the reader maximum requires an explicit compatibility
