@@ -445,6 +445,12 @@ impl PromPlanner {
         {
             return Ok(declined("engine_without_raw_series_scanner"));
         }
+        // A row source names its series by its tag columns and the metric name by the table, so a tag
+        // column named `__name__` has no label to be read as, and dropping it would merge the series
+        // it tells apart.
+        if reads_rows && tags.iter().any(|tag| tag == METRIC_NAME) {
+            return Ok(declined("row_source_tag_named_metric_name"));
+        }
         // The region's raw-series preflight refuses these, and the physical layer turns that
         // refusal into an error, so decline this route here instead.
         let time_index_type = table_meta

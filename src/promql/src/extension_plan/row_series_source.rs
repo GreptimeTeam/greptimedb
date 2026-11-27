@@ -76,7 +76,7 @@ const METRIC_NAME: &str = "__name__";
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct RowSeriesSource {
     metric_name: Arc<str>,
-    /// The tag columns that name a series, without `__name__`.
+    /// The tag columns that name a series; never `__name__`, which is the metric name.
     tags: Vec<String>,
     time_index: String,
     /// The field columns each frame carries, in the order the tree reading them was compiled with.
@@ -97,10 +97,12 @@ impl RowSeriesSource {
         fields: Vec<String>,
         input: LogicalPlan,
     ) -> DataFusionResult<Self> {
-        let tags = tags
-            .into_iter()
-            .filter(|tag| tag != METRIC_NAME)
-            .collect::<Vec<_>>();
+        if tags.iter().any(|tag| tag == METRIC_NAME) {
+            return Err(DataFusionError::Plan(format!(
+                "RowSeriesSource for {metric_name:?} reads a tag column named {METRIC_NAME}, which \
+                 is the metric name rather than a label"
+            )));
+        }
         let schema = Arc::new(DFSchema::try_from(
             frame_schema(&series_schema(&fields))?.as_ref().clone(),
         )?);

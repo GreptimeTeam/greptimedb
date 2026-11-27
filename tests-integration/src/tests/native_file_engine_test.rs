@@ -390,6 +390,32 @@ async fn create_tables(instance: &Arc<Instance>, dir: &std::path::Path) {
     )
     .await;
 
+    // Two series that differ only in a tag column named `__name__`.
+    let named_dir = dir.join("named");
+    std::fs::create_dir(&named_dir).unwrap();
+    let ts = chrono::DateTime::from_timestamp(BASE_SECS, 0)
+        .unwrap()
+        .format("%Y-%m-%dT%H:%M:%S%.3f");
+    std::fs::write(
+        named_dir.join("rows.csv"),
+        format!("ts,__name__,host,val\n{ts},a,h,1\n{ts},b,h,2\n"),
+    )
+    .unwrap();
+    execute(
+        instance,
+        &format!(
+            "CREATE EXTERNAL TABLE fe_named (
+                ts TIMESTAMP(3) TIME INDEX,
+                \"__name__\" STRING,
+                host STRING,
+                val DOUBLE,
+                PRIMARY KEY (\"__name__\", host)
+            ) WITH (location = '{}', format = 'csv')",
+            location(&named_dir)
+        ),
+    )
+    .await;
+
     // The fixture of `promql/delta_exponential_histogram`.
     let histogram_file = prepare_path(&format!("{}/histogram.parquet", dir.display()));
     execute(
@@ -573,6 +599,20 @@ async fn check_native_answers(instance: &Arc<Instance>, observer: &PlanObserver)
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A tag column named `__name__` has no label to be read as, so the native route keeps the existing
+/// plan rather than merging the two series it tells apart.
+async fn check_metric_name_tag_declines(instance: &Arc<Instance>, observer: &PlanObserver) {
+    let case = instant("fe_named", 0, vec![]);
+    observer.take_node_names();
+    let answer = run(instance, &case, true).await;
+    let nodes = observer.take_node_names();
+    assert!(
+        !nodes.iter().any(|node| node == "RowSeriesSourceExec"),
+        "a `__name__` tag column must not reach a row source: {nodes:?}"
+    );
+    assert!(answer.is_ok(), "{answer:?}");
+}
+
 fn observer_plugins() -> (Arc<PlanObserver>, Plugins) {
     let observer = Arc::new(PlanObserver::default());
     let plugins = Plugins::new();
@@ -600,6 +640,7 @@ async fn native_promql_over_file_engine_standalone() {
     let dir = create_local_file_test_dir("native_promql_file_engine");
     create_tables(&instance, dir.path()).await;
     check_native_answers(&instance, &observer).await;
+    check_metric_name_tag_declines(&instance, &observer).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -617,4 +658,5 @@ async fn native_promql_over_file_engine_distributed() {
     let dir = create_local_file_test_dir("native_promql_file_engine_distributed");
     create_tables(&instance, dir.path()).await;
     check_native_answers(&instance, &observer).await;
+    check_metric_name_tag_declines(&instance, &observer).await;
 }
