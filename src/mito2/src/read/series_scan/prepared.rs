@@ -18,7 +18,7 @@ mod narthex;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
