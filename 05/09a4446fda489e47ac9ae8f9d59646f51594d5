@@ -1,0 +1,19 @@
+src/common/procedure/src/store/util.rs
+  s_a0c2d0c6dc573d::t_5b538ea04422e2 42-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0509a4446fda489e47ac9ae8f9d59646f51594d5",
+  "prompts": {},
+  "sessions": {
+    "s_a0c2d0c6dc573d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20b9d-b770-7281-8e87-0cf727e380a3",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
