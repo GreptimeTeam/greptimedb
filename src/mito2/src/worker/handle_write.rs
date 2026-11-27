@@ -38,6 +38,7 @@ use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
 use crate::request::{
     SenderBulkRequest, SenderWriteRequest, WriteRequest, check_bulk_insert_batch,
 };
+use crate::sst::FormatType;
 use crate::wal::Wal;
 use crate::worker::RegionWorkerLoop;
 
@@ -457,6 +458,15 @@ impl<S> RegionWorkerLoop<S> {
                 sender_req.sender.send(Err(e));
                 continue;
             }
+            if region_ctx.version().options.sst_format == Some(FormatType::Narthex)
+                && let Err(e) = crate::series_index::samples::check_histogram_rows(
+                    &region_ctx.version().metadata,
+                    &sender_req.request.rows,
+                )
+            {
+                sender_req.sender.send(Err(e));
+                continue;
+            }
 
             // Double check the request schema
             let need_fill_missing_columns =
@@ -626,6 +636,15 @@ impl<S> RegionWorkerLoop<S> {
                     bulk_req.sender.send(Err(e));
                     continue;
                 }
+            }
+
+            // Checked after the fill, which may add histogram columns from defaults.
+            if region_ctx.version().options.sst_format == Some(FormatType::Narthex)
+                && let Err(e) =
+                    crate::series_index::samples::check_histogram_batch(&bulk_req.request.batch)
+            {
+                bulk_req.sender.send(Err(e));
+                continue;
             }
 
             // Collect requests by region.
