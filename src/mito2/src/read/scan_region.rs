@@ -717,9 +717,9 @@ impl ScanRegion {
         let mut input = input.build();
         input.row_preserving_request = request_preserves_rows(&self.request);
         if self.experimental_metadata_aggr && self.request.metadata_aggr_hint {
-            input.exact_num_rows = aggr::prepare(&input, &self.request, &self.version.ssts)
-                .boxed()
-                .await;
+            // Reuse the scan's manifest time pruning. Footer checks apply only to
+            // files in the read set, even for manifests from older offline tools.
+            input.exact_num_rows = aggr::prepare(&input, &self.request).boxed().await;
         }
         Ok(input)
     }

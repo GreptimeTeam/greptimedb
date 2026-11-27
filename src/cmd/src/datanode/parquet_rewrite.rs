@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use datatypes::arrow::record_batch::RecordBatchReader;
+use mito2::sst::parquet::metadata::DEDUPED_SST_KEY;
 use mito2::sst::parquet::{
     MAX_ROW_GROUP_VALUE_BYTES_KEY, MAX_ROW_VALUE_WIDTH_KEY, RowGroupValueBytes,
 };
@@ -166,6 +167,11 @@ impl ParquetRewriteCommand {
             kvs.retain(|kv| !is_row_group_value_bytes_key(&kv.key));
             kvs.len() != len
         });
+        if let Some(kvs) = &mut key_value_metadata {
+            // Only the folding writers can certify uniqueness. These input
+            // bytes may have been edited while retaining the original footer.
+            kvs.retain(|kv| kv.key != DEDUPED_SST_KEY);
+        }
 
         let mut reader_builder = ParquetRecordBatchReaderBuilder::try_new(open_file(&self.input)?)
             .map_err(|e| parquet_error("open source parquet", &self.input, e))?;
@@ -593,9 +599,11 @@ mod tests {
         .unwrap();
         let mut value_bytes = RowGroupValueBytes::new(4);
         value_bytes.update(&batch);
+        let mut metadata = value_bytes.into_key_values();
+        metadata.push(KeyValue::new(DEDUPED_SST_KEY.to_string(), None));
         let props = WriterProperties::builder()
             .set_max_row_group_row_count(Some(4))
-            .set_key_value_metadata(Some(value_bytes.into_key_values()))
+            .set_key_value_metadata(Some(metadata))
             .build();
         let mut writer =
             ArrowWriter::try_new(File::create(&input).unwrap(), schema, Some(props)).unwrap();
@@ -620,6 +628,7 @@ mod tests {
         let rewritten = load_local_parquet_metadata(&output).unwrap();
         assert_eq!(2, rewritten.num_row_groups());
         let key_values = rewritten.file_metadata().key_value_metadata().unwrap();
+        assert!(key_values.iter().all(|kv| kv.key != DEDUPED_SST_KEY));
         let value_of = |key: &str| {
             let values: Vec<_> = key_values
                 .iter()

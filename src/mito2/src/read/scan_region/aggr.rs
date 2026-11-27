@@ -30,7 +30,7 @@ use datatypes::value::Value;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
+use parquet::file::metadata::ParquetMetaData;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, ScanRequest};
@@ -40,23 +40,17 @@ use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
 use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::metadata::{
-    DEDUPED_SST_KEY, extract_primary_key_range, extract_time_range, has_only_puts,
+    extract_primary_key_range, extract_time_range, has_deduped_sst_marker, has_only_puts,
 };
-use crate::sst::version::SstVersion;
 
 /// Returns the exact number of rows the scan yields, or `None` if it cannot
 /// be proven. Non-append candidates use cached Parquet footers to prove
 /// file-local uniqueness and the absence of deletes.
-pub(crate) async fn prepare(
-    input: &ScanInput,
-    request: &ScanRequest,
-    ssts: &SstVersion,
-) -> Option<usize> {
+pub(crate) async fn prepare(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
     let classification = classify(input, request)?;
     if input.append_mode && request.filters.is_empty() {
         return Some(classification.exact_rows);
     }
-    verify_pruned_times(input, ssts).await?;
     let check_keys =
         classification.key_filter || (!input.append_mode && classification.exact.len() > 1);
     let check_rows = !input.append_mode;
@@ -67,23 +61,6 @@ pub(crate) async fn prepare(
         .await
         .ok()?;
     Some(classification.exact_rows)
-}
-
-/// Older offline replacements could retain stale manifest bounds. Never open an
-/// excluded SST for COUNT: a cold or inconsistent footer leaves the scan in place.
-async fn verify_pruned_times(input: &ScanInput, ssts: &SstVersion) -> Option<()> {
-    let time_id = input.region_metadata().time_index_column().column_id;
-    for id in &input.time_pruned_files {
-        let file = ssts.levels().iter().find_map(|level| level.files.get(id))?;
-        let sst = input
-            .cache_strategy
-            .get_sst_meta_data_from_mem_cache(file.file_id(), PageIndexPolicy::Skip)
-            .await?;
-        if !time_bounds_match(file, &sst, time_id) {
-            return None;
-        }
-    }
-    Some(())
 }
 
 fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
@@ -136,10 +113,7 @@ fn file_evidence(
 /// only a single physical row is independently known to be unique.
 fn footer_proves_visible_rows(metadata: &ParquetMetaData, manifest_rows: usize) -> bool {
     let footer = metadata.file_metadata();
-    let unique = manifest_rows == 1
-        || footer
-            .key_value_metadata()
-            .is_some_and(|entries| entries.iter().any(|entry| entry.key == DEDUPED_SST_KEY));
+    let unique = manifest_rows == 1 || has_deduped_sst_marker(metadata);
     unique
         && usize::try_from(footer.num_rows()) == Ok(manifest_rows)
         && metadata
@@ -586,6 +560,8 @@ mod tests {
         use parquet::file::metadata::KeyValue;
         use parquet::file::properties::{EnabledStatistics, WriterProperties};
         use store_api::storage::consts::OP_TYPE_COLUMN_NAME;
+
+        use crate::sst::parquet::metadata::DEDUPED_SST_KEY;
 
         let put = OpType::Put as u8;
         let del = OpType::Delete as u8;
