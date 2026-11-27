@@ -613,14 +613,6 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             }
 
-            if region_ctx.version().options.sst_format == Some(FormatType::Narthex)
-                && let Err(e) =
-                    crate::series_index::samples::check_histogram_batch(&bulk_req.request.batch)
-            {
-                bulk_req.sender.send(Err(e));
-                continue;
-            }
-
             // Double-check the request schema
             let need_fill_missing_columns =
                 !bulk_req.region_metadata.is_some_and(|aligned_schema| {
@@ -644,6 +636,15 @@ impl<S> RegionWorkerLoop<S> {
                     bulk_req.sender.send(Err(e));
                     continue;
                 }
+            }
+
+            // Checked after the fill, which may add histogram columns from defaults.
+            if region_ctx.version().options.sst_format == Some(FormatType::Narthex)
+                && let Err(e) =
+                    crate::series_index::samples::check_histogram_batch(&bulk_req.request.batch)
+            {
+                bulk_req.sender.send(Err(e));
+                continue;
             }
 
             // Collect requests by region.
