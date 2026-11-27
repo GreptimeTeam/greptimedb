@@ -30,7 +30,7 @@ use datatypes::value::Value;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, ScanRequest};
@@ -85,8 +85,12 @@ pub(crate) async fn prepare(
         return resolve(input, classification, allow_partial);
     }
     let mut classification = classification;
-    let check_keys = classification.key_filter
-        || (!input.append_mode && classification.exact.len() + classification.remaining.len() > 1);
+    let check_overlap =
+        !input.append_mode && classification.exact.len() + classification.remaining.len() > 1;
+    if check_overlap {
+        verify_residual_bounds(input, &classification.remaining).await?;
+    }
+    let check_keys = classification.key_filter || check_overlap;
     let check_rows = !input.append_mode;
     let proven: Vec<_> = futures::stream::iter(classification.exact.iter().copied())
         .map(|index| file_evidence(input, input.files[index].clone(), check_keys, check_rows))
@@ -120,14 +124,46 @@ fn resolve(
     }))
 }
 
-fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
+/// Reuses ordinary scan pruning for files the residual cannot read. For files
+/// it can read, a stale bound (e.g. from older offline replacement) could
+/// hide an overlap with an exact candidate. Only consult memory for these
+/// bounds and let the ordinary scan handle a cache miss.
+async fn verify_residual_bounds(input: &ScanInput, remaining: &[usize]) -> Option<()> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    for &index in remaining {
+        let file = &input.files[index];
+        if input.can_manifest_prune_file(file) {
+            continue;
+        }
+        let sst = input
+            .cache_strategy
+            .get_sst_meta_data_from_mem_cache(file.file_id(), PageIndexPolicy::Skip)
+            .await?;
+        if !bounds_match(file, &sst, time_id, true) {
+            return None;
+        }
+    }
+    Some(())
+}
+
+fn bounds_match(
+    file: &FileHandle,
+    sst: &CachedSstMeta,
+    time_id: ColumnId,
+    check_keys: bool,
+) -> bool {
     let region = sst.region_metadata();
     let time_index = region.time_index_column();
     let (start, end) = file.time_range();
+    let metadata = sst.parquet_metadata();
     time_index.column_id == time_id
-        && extract_time_range(&sst.parquet_metadata(), time_index).is_some_and(|(min, max)| {
+        && extract_time_range(&metadata, time_index).is_some_and(|(min, max)| {
             start.unit() == min.unit() && end.unit() == max.unit() && (start, end) == (min, max)
         })
+        && (!check_keys
+            || file
+                .raw_primary_key_range()
+                .is_none_or(|range| extract_primary_key_range(&metadata, &region) == Some(range)))
 }
 
 /// A bounds mismatch invalidates the classification. An unproven row count
@@ -150,17 +186,10 @@ fn file_evidence(
                 file.file_id()
             );
         })?;
-        let metadata = sst.parquet_metadata();
-        if !time_bounds_match(&file, &sst, time_id) {
+        if !bounds_match(&file, &sst, time_id, check_keys) {
             return Err(());
         }
-        if check_keys
-            && let Some(range) = file.raw_primary_key_range()
-            && extract_primary_key_range(&metadata, &sst.region_metadata()) != Some(range)
-        {
-            return Err(());
-        }
-        Ok(!check_rows || footer_proves_visible_rows(&metadata, file.num_rows()))
+        Ok(!check_rows || footer_proves_visible_rows(&sst.parquet_metadata(), file.num_rows()))
     }
     .boxed()
 }
@@ -283,9 +312,9 @@ fn classify(
 /// Returns, for each file in `files`, whether another file or a memtable range
 /// may hold a row with the same primary key and timestamp.
 ///
-/// Like ordinary scan pruning, this uses manifest bounds. Only exact candidates
-/// are checked against their footers; stale residual bounds from older offline
-/// tools are outside that check.
+/// Uses manifest bounds for the overlap check. Preparation verifies the bounds
+/// of files that can affect the count. Files pruned by the ordinary scan use
+/// the same manifest bounds without rechecking their footers.
 ///
 /// A memtable range is bounded by its container, the time range of every row
 /// it can ever yield (see [`MemRangeBuilder::container_time_range`]), not by
