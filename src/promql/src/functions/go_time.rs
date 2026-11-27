@@ -101,9 +101,9 @@ fn date_fields(value: f64) -> DateFields {
 
     // Proleptic Gregorian leap year, matching Go: every year divisible by 4,
     // except centuries not divisible by 400.
-    let y4ok = u64::from(cyear % 4 == 0);
+    let y4ok = u64::from(cyear.is_multiple_of(4));
     let y100ok = u64::from(cyear != 0);
-    let y400ok = u64::from(century % 4 == 0);
+    let y400ok = u64::from(century.is_multiple_of(4));
     let leap = y4ok & (y100ok | y400ok);
 
     // absYday.yday(): 1-based day of year.
