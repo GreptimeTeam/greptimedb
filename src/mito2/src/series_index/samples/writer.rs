@@ -14,10 +14,14 @@
 
 //! Streaming sample writing with bounded blocks and owned outputs.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use datatypes::arrow::array::{
-    Array, BinaryArray, DictionaryArray, Float64Array, UInt8Array, UInt64Array,
+    Array, ArrayRef, AsArray, BinaryArray, DictionaryArray, Float64Array, StructArray, UInt8Array,
+    UInt64Array,
 };
+use datatypes::arrow::compute::concat;
 use datatypes::arrow::datatypes::{DataType, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType as _;
@@ -28,18 +32,19 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, consts};
 
-use crate::error::{Result, SerdeJsonSnafu};
+use crate::error::{ComputeArrowSnafu, Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::artifact_writer::Outputs;
 use crate::series_index::format::FormatWriter;
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, decode_series_id};
-use crate::series_index::samples::codec;
+use crate::series_index::samples::histogram::ChunkBound;
 use crate::series_index::samples::metadata::{
     self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
 };
 use crate::series_index::samples::{
-    ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
-    TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
+    ColumnarSamplesFormat, FLOAT64_ENCODING, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part,
+    TimestampColumn, TimestampUnit, VERSION, ValueColumn, codec, histogram, invalid, require,
+    valid_rows,
 };
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -80,7 +85,32 @@ struct Row {
     time: i64,
     sequence: u64,
     operation: u8,
-    fields: Vec<Option<u64>>,
+}
+/// One field's values for the rows of the pending block, in row order.
+enum PendingField {
+    Float(Vec<Option<u64>>),
+    /// Runs of rows borrowed from input batches, concatenated once when the block is encoded.
+    Histogram {
+        runs: Vec<(ArrayRef, usize, usize)>,
+        bound: ChunkBound,
+    },
+}
+impl PendingField {
+    fn new(field: &ValueColumn) -> Self {
+        if field.is_histogram() {
+            Self::Histogram {
+                runs: Vec::new(),
+                bound: ChunkBound::default(),
+            }
+        } else {
+            Self::Float(Vec::new())
+        }
+    }
+}
+/// One input batch's column for a field.
+enum FieldInput<'a> {
+    Float(&'a Float64Array),
+    Histogram(&'a ArrayRef, &'a StructArray),
 }
 /// A block descriptor whose exact key has not been placed in the part's key area yet.
 ///
@@ -164,6 +194,8 @@ pub(crate) struct SamplesWriter {
     /// Canonical sparse key of the series that owns `rows` and `last`.
     series_key: Option<ExactSeriesKey>,
     rows: Vec<Row>,
+    /// Field values of `rows`, one entry per manifest field.
+    fields: Vec<PendingField>,
     last: Option<(MetricSeriesId, i64, u64)>,
     ordinal: u64,
     leaves: Vec<Vec<PendingBlock>>,
@@ -209,19 +241,9 @@ impl SamplesWriter {
         };
         let fields = metadata
             .field_columns()
-            .map(|column| {
-                require(
-                    column.column_schema.data_type.as_arrow_type() == DataType::Float64,
-                    "samples support only Float64 fields",
-                )?;
-                Ok(ValueColumn {
-                    column_id: column.column_id,
-                    name: column.column_schema.name.clone(),
-                    data_type: "float64".into(),
-                    nullable: true,
-                })
-            })
+            .map(ValueColumn::new)
             .collect::<Result<Vec<_>>>()?;
+        let pending_fields = fields.iter().map(PendingField::new).collect();
         let manifest = Manifest {
             prefix: Some(prefix.to_string()),
             format: ArtifactFormat::ColumnarSamples,
@@ -262,6 +284,7 @@ impl SamplesWriter {
             offsets: SparseOffsetsCache::new(),
             series_key: None,
             rows: Vec::new(),
+            fields: pending_fields,
             last: None,
             ordinal: 0,
             leaves: Vec::new(),
@@ -308,10 +331,15 @@ impl SamplesWriter {
             .fields
             .iter()
             .map(|field| {
-                column(&field.name)?
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| invalid("invalid sample field array"))
+                let array = column(&field.name)?;
+                let input = if field.is_histogram() {
+                    array
+                        .as_struct_opt()
+                        .map(|s| FieldInput::Histogram(array, s))
+                } else {
+                    array.as_any().downcast_ref().map(FieldInput::Float)
+                };
+                input.ok_or_else(|| invalid("invalid sample field array"))
             })
             .collect::<Result<Vec<_>>>()?;
         let keys = column(consts::PRIMARY_KEY_COLUMN_NAME)?;
@@ -379,41 +407,76 @@ impl SamplesWriter {
                 }
                 _ => decode_series_id(key, &mut self.offsets)?,
             };
+            let mut bounds = self.histogram_bounds(&fields, i);
             if self.rows.len() == self.options.block_rows
                 || !valid_rows(self.rows.len() + 1, fields.len())
+                || bounds.is_none()
             {
                 self.flush_block().await?;
+                bounds = self.histogram_bounds(&fields, i);
             }
+            let mut bounds = bounds
+                .ok_or_else(|| invalid("native histogram sample exceeds the chunk limit"))?
+                .into_iter();
             self.rows.push(Row {
                 id,
                 time,
                 sequence: seq,
                 operation: op,
-                fields: fields
-                    .iter()
-                    .map(|field| {
-                        if field.is_null(i) {
-                            None
-                        } else {
-                            Some(field.value(i).to_bits())
-                        }
-                    })
-                    .collect(),
             });
+            for (pending, input) in self.fields.iter_mut().zip(&fields) {
+                match (pending, input) {
+                    (PendingField::Float(values), FieldInput::Float(array)) => {
+                        values.push(array.is_valid(i).then(|| array.value(i).to_bits()));
+                    }
+                    (PendingField::Histogram { runs, bound }, FieldInput::Histogram(array, _)) => {
+                        *bound = bounds
+                            .next()
+                            .ok_or_else(|| invalid("missing native histogram bound"))?;
+                        match runs.last_mut() {
+                            Some((run, start, len))
+                                if Arc::ptr_eq(run, array) && *start + *len == i =>
+                            {
+                                *len += 1
+                            }
+                            _ => runs.push(((*array).clone(), i, 1)),
+                        }
+                    }
+                    _ => return Err(invalid("sample field kind changed between rows")),
+                }
+            }
             self.last = Some((id, time, seq));
         }
         Ok(())
+    }
+    /// Each histogram field's chunk bound with row `i` appended to the pending block, in field
+    /// order, or `None` when one of those chunks would no longer fit.
+    fn histogram_bounds(&self, fields: &[FieldInput<'_>], i: usize) -> Option<Vec<ChunkBound>> {
+        self.fields
+            .iter()
+            .zip(fields)
+            .filter_map(|(pending, input)| match (pending, input) {
+                (PendingField::Histogram { bound, .. }, FieldInput::Histogram(_, array)) => {
+                    Some(bound.with_row(array, i))
+                }
+                _ => None,
+            })
+            .collect()
     }
     async fn flush_block(&mut self) -> Result<()> {
         if self.rows.is_empty() {
             return Ok(());
         }
         let rows = std::mem::take(&mut self.rows);
+        let fields = std::mem::replace(
+            &mut self.fields,
+            self.manifest.fields.iter().map(PendingField::new).collect(),
+        );
         let key = self
             .series_key
             .as_ref()
             .ok_or_else(|| invalid("sample block has no series key"))?;
-        let (mut block, chunks) = encode_block(&rows, key, &self.manifest, self.ordinal)?;
+        let (mut block, chunks) = encode_block(&rows, fields, key, &self.manifest, self.ordinal)?;
         // Bytes one copy of this series' key costs in a part's key area: the key and its stored
         // checksum.
         let key_len = key.bytes().len() as u64 + metadata::KEY_CHECKSUM_BYTES;
@@ -645,6 +708,7 @@ impl FormatWriter for SamplesWriter {
 }
 fn encode_block(
     rows: &[Row],
+    fields: Vec<PendingField>,
     key: &ExactSeriesKey,
     manifest: &Manifest,
     ordinal: u64,
@@ -683,17 +747,46 @@ fn encode_block(
     let (encoding, bytes) =
         codec::encode_operations(&rows.iter().map(|r| r.operation).collect::<Vec<_>>());
     push(3, 0, encoding, bytes, 0)?;
-    for (index, field) in manifest.fields.iter().enumerate() {
-        let values: Vec<_> = rows.iter().map(|r| r.fields[index]).collect();
-        let nulls = values.iter().filter(|v| v.is_none()).count();
-        if nulls != rows.len() {
-            push(
-                4,
-                field.column_id,
-                5,
-                codec::encode_float(&values),
-                nulls as u32,
-            )?;
+    for (field, pending) in manifest.fields.iter().zip(fields) {
+        match pending {
+            PendingField::Float(values) => {
+                require(
+                    values.len() == rows.len(),
+                    "sample field row count mismatch",
+                )?;
+                let nulls = values.iter().filter(|v| v.is_none()).count();
+                if nulls != rows.len() {
+                    push(
+                        4,
+                        field.column_id,
+                        FLOAT64_ENCODING,
+                        codec::encode_float(&values),
+                        nulls as u32,
+                    )?;
+                }
+            }
+            PendingField::Histogram { runs, .. } => {
+                let slices = runs
+                    .iter()
+                    .map(|(array, start, len)| array.slice(*start, *len))
+                    .collect::<Vec<_>>();
+                let array = concat(&slices.iter().map(|a| a.as_ref()).collect::<Vec<_>>())
+                    .context(ComputeArrowSnafu)?;
+                let array = array
+                    .as_struct_opt()
+                    .ok_or_else(|| invalid("invalid native histogram sample array"))?;
+                require(array.len() == rows.len(), "sample field row count mismatch")?;
+                // An all-null field has no chunk, as for Float64 fields.
+                if array.null_count() != rows.len() {
+                    push(
+                        4,
+                        field.column_id,
+                        histogram::ENCODING,
+                        histogram::encode(array)?,
+                        array.null_count() as u32,
+                    )?;
+                }
+            }
         }
     }
     Ok((block, chunks))
