@@ -260,6 +260,12 @@ impl ObjectCatalog {
         self.max_entry_ids.get(&region_id).copied()
     }
 
+    /// Returns the largest entry id ever indexed for any region, or zero
+    /// without one.
+    pub(crate) fn max_entry_id(&self) -> EntryId {
+        self.max_entry_ids.values().copied().max().unwrap_or(0)
+    }
+
     /// Returns the sequence to assign to the next object written after recovery.
     ///
     /// An empty catalog starts at zero, so the first object of a prefix always
@@ -277,14 +283,7 @@ impl ObjectCatalog {
                 .checked_add(1)
                 .context(WalObjectSequenceExhaustedSnafu { last_object_seq })?,
         };
-        let floor = self
-            .max_entry_ids
-            .values()
-            .copied()
-            .map(sequence_floor)
-            .max()
-            .unwrap_or(0);
-        let next_object_seq = after_last.max(floor);
+        let next_object_seq = after_last.max(sequence_floor(self.max_entry_id()));
         ensure!(
             next_object_seq < OBJECT_SEQ_LIMIT,
             WalObjectSequenceExhaustedSnafu {
@@ -310,6 +309,12 @@ impl ObjectCatalog {
             .map(|entry| entry.region_id)
             .filter(|region_id| seen.insert(*region_id))
             .collect()
+    }
+
+    /// Returns the regions with a live segment in any indexed object, see
+    /// [`is_live`](Self::is_live).
+    pub(crate) fn live_regions(&self) -> Vec<RegionId> {
+        self.flush_candidates(0)
     }
 
     /// Iterates over the indexed objects ordered by object sequence.
