@@ -779,7 +779,11 @@ impl RegionCleanUpRequest {
 /// Close region request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegionCloseRequest {
-    /// Whether to flush the region before closing it.
+    /// Whether to flush the region before closing it. When set and, as the
+    /// engine handles the request, the region holds unflushed data it cannot
+    /// flush in its current state, the request fails with a retryable error
+    /// instead of closing the region without the flush, unless the engine
+    /// judges that a retry cannot flush it.
     pub flush_on_close: bool,
 }
 
