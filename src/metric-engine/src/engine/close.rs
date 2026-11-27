@@ -14,9 +14,9 @@
 
 //! Close a metric region
 
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use snafu::ResultExt;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -68,20 +68,39 @@ impl MetricEngineInner {
         let data_region_id = utils::to_data_region_id(region_id);
         let metadata_region_id = utils::to_metadata_region_id(region_id);
 
+        // The engine reports a physical region by its data region, so once that is closed the
+        // metadata region keeps no lease. A retry that finds the data region closed and the
+        // metadata region a follower waives the requested flush of the metadata region. The role
+        // is read before that close, so the waiver also holds for a metadata region promoted in
+        // between. The close then releases the region's WAL only up to its flushed entry id, so
+        // unflushed rows that are in a WAL are kept; a region without a WAL loses them, as on any
+        // close of a region that cannot flush.
+        let data_region_closed = !self.mito.is_region_exists(data_region_id);
         self.mito
             .handle_request(
                 data_region_id,
                 RegionRequest::Close(RegionCloseRequest { flush_on_close }),
             )
             .await
-            .with_context(|_| CloseMitoRegionSnafu { region_id })?;
+            .context(CloseMitoRegionSnafu { region_id })?;
+        let skip_metadata_flush = flush_on_close
+            && data_region_closed
+            && self.mito.role(metadata_region_id) == Some(RegionRole::Follower);
+        if skip_metadata_flush {
+            info!(
+                "Waiving the requested flush of follower metadata region {}, its data region is closed",
+                metadata_region_id
+            );
+        }
         self.mito
             .handle_request(
                 metadata_region_id,
-                RegionRequest::Close(RegionCloseRequest { flush_on_close }),
+                RegionRequest::Close(RegionCloseRequest {
+                    flush_on_close: flush_on_close && !skip_metadata_flush,
+                }),
             )
             .await
-            .with_context(|_| CloseMitoRegionSnafu { region_id })?;
+            .context(CloseMitoRegionSnafu { region_id })?;
 
         PHYSICAL_REGION_COUNT.dec();
 

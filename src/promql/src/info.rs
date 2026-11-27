@@ -16,10 +16,9 @@
 //! their identifying labels, following Prometheus `combineWithInfoSeries` and
 //! `combineWithInfoVector`.
 //!
-//! Selecting the info series is the caller's: the series whose name and data labels match the
-//! selector, evaluated at every point of the grid like an instant selector, with the value
-//! replaced by the original timestamp of the selected sample, as Prometheus' `evalSeries` records
-//! it for `info`. This kernel only combines.
+//! The caller selects the info series like an instant selector, with each value replaced by the
+//! original timestamp of the selected sample (Prometheus `evalSeries` for `info`). This kernel only
+//! combines.
 
 #[cfg(test)]
 mod tests;
@@ -42,30 +41,26 @@ use crate::vector_match::{Budget, HISTOGRAM_ROW_BYTES, owned_histogram_bytes};
 /// The labels an info series is joined on, as in Prometheus.
 const IDENTIFYING_LABELS: [&str; 2] = ["instance", "job"];
 
-/// The second argument of `info`, split the way Prometheus uses it.
+/// The second argument of `info`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct InfoSelector {
     /// The `__name__` matchers, which choose the info metrics; none means `target_info`.
     pub name_matchers: Vec<(MatchOp, Arc<str>)>,
-    /// The names of the other matchers: only these labels are copied. None copies every label
-    /// of the info series.
+    /// The labels to copy, from the other matchers; empty copies every label of the info series.
     pub data_labels: Vec<Arc<str>>,
-    /// Whether every one of those other matchers matches the empty string, in which case a series
-    /// without a matching info series is kept as it is.
+    /// Whether every other matcher matches the empty string; then a series without a matching
+    /// info series is kept unchanged.
     pub keep_unmatched: bool,
 }
 
 /// Combines `base` with the data labels of `info`.
 ///
-/// `info` holds the info series the selector chooses, one float field each, whose value at a
-/// point is the original timestamp of the sample selected there. For each info metric a base
-/// series takes the info series with the same identifying labels. Several of them at one point are
-/// compared in input order, as Prometheus compares them in the order its storage returns them: a
-/// newer one replaces the one kept so far, and one exactly as new is an error. Labels
-/// the base series already has are kept, and two info metrics giving one label different values
-/// are an error. A base series without identifying labels matches no info series, since
-/// Prometheus fetches none for it, and a base series that is itself an info metric is passed
-/// through. Results that share a label set merge; a field held twice at one point is an error.
+/// `info` holds single-float-field series whose value is the original sample timestamp. For each
+/// info metric a base series takes the info series with the same identifying labels; at one point
+/// the newest wins, and a tie where the base has a sample is an error. Labels the base series
+/// already has are kept; two info metrics setting one label to different values is an error. A
+/// base series without identifying labels matches nothing, and one that is itself an info metric
+/// passes through. Results sharing a label set merge; a field held twice at one point is an error.
 pub fn info(
     schema: &Arc<SeriesSchema>,
     base: &[Series],
@@ -75,11 +70,8 @@ pub fn info(
     info_inner(schema, base, info, selector, None)
 }
 
-/// [`info()`], handing the live workspace it holds to `reserve` before it allocates it.
-///
-/// What the index of the info series and the rows of the results keep is held until the operation
-/// returns; the merge of one label set's rows is a phase, and the builder's columns join the phase
-/// of the output they are finished as. A total `reserve` refuses ends the operation with that error.
+/// [`info()`], reserving its workspace through `reserve` before allocating it. A refused
+/// reservation fails the operation with that error.
 pub(crate) fn info_with_reservation(
     schema: &Arc<SeriesSchema>,
     base: &[Series],
@@ -91,7 +83,6 @@ pub(crate) fn info_with_reservation(
     info_inner(schema, base, info, selector, Some(&mut budget))
 }
 
-/// The one info kernel, whether or not a caller accounts for its workspace.
 fn info_inner(
     schema: &Arc<SeriesSchema>,
     base: &[Series],
@@ -147,11 +138,8 @@ fn info_inner(
     let mut error = FirstError::default();
 
     // Prometheus fetches info series per presence pattern of the identifying labels among the
-    // base series it enriches: a present label matches any value the pattern's base series have,
-    // an absent one matches only absence. An info series no pattern admits is never fetched, so
-    // it neither enriches nor conflicts.
-    // A base series without a sample is not in Prometheus' base matrix at all, so it selects no
-    // info series.
+    // sampled base series: a present label matches any value those base series have, an absent
+    // one matches only absence. An info series no pattern admits neither enriches nor conflicts.
     let mut patterns: HashMap<Vec<bool>, Vec<BTreeSet<Arc<str>>>> = HashMap::new();
     for (series, _) in base.iter().zip(&sampled).filter(|(_, sampled)| **sampled) {
         if is_info_metric(series.metric.name().unwrap_or("")) {
@@ -184,8 +172,6 @@ fn info_inner(
         if !fetched {
             continue;
         }
-        // The entry of a signature and the newest series it keeps at each point the series
-        // holds a sample, charged before they are allocated.
         if let Some(budget) = budget.as_deref_mut() {
             budget.hold(
                 series
@@ -240,8 +226,6 @@ fn info_inner(
     let mut chosen: Vec<usize> = Vec::new();
     for series in base {
         let ignored = is_info_metric(series.metric.name().unwrap_or(""));
-        // The signature of each info metric is fixed for a series, so its kept series are looked
-        // up once; a point then only reads which of them is kept there.
         let candidates: Vec<&BTreeMap<usize, (f64, usize)>> = if ignored {
             Vec::new()
         } else {
@@ -253,8 +237,6 @@ fn info_inner(
         };
         // The result of the previous point, reused while the same info series are kept.
         let mut previous: Option<Choice> = None;
-        // A row of this series is kept by the result it goes to, so every row it can have is held
-        // before the walk; a histogram is held as it is copied.
         if let Some(budget) = budget.as_deref_mut() {
             budget.hold(series.time.len().saturating_mul(row_bytes(width)))?;
         }
@@ -369,8 +351,7 @@ fn info_inner(
     }
     for (metric, rows) in results {
         builder.begin_series();
-        // This series' columns, reserved before its first row. They stay live inside the series
-        // it is finished as, so the phase keeps them.
+        // The columns stay live in the finished series, so they grow the phase.
         if let Some(budget) = budget.as_deref_mut() {
             budget.grow(column_bytes(&rows, width))?;
         }
@@ -477,10 +458,8 @@ impl FirstError {
 /// An info metric name and the identifying label values present on a series.
 type Signature = (Arc<str>, Vec<Option<Arc<str>>>);
 
-/// The value of each identifying label, `None` where the series does not have it.
-///
-/// The values share the series' own label strings, which the retained operands already hold and
-/// charge, so the patterns and signatures built from them allocate no label text of their own.
+/// The value of each identifying label, `None` where the series does not have it. The values share
+/// the series' label strings, which are already charged.
 fn identifying_values(metric: &SeriesLabels) -> Vec<Option<Arc<str>>> {
     IDENTIFYING_LABELS
         .iter()

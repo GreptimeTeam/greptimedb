@@ -1009,6 +1009,83 @@ mod test {
             .unwrap();
     }
 
+    #[rstest]
+    #[case::follower_at_retry(false)]
+    #[case::leader_at_retry(true)]
+    #[tokio::test]
+    async fn test_close_with_flush_closes_follower_metadata_region_once_data_region_is_closed(
+        #[case] leads_at_retry: bool,
+    ) {
+        let env = TestEnv::new().await;
+        // The periodic metadata flush must not persist the logical region before the test does.
+        env.metric().inner.flush_task.stop().await.unwrap();
+        env.init_metric_region().await;
+        let engine = env.metric();
+        let mito = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        // The metadata region holds the logical region in its memtable and cannot flush it.
+        mito.set_region_role(metadata_region_id, RegionRole::Follower)
+            .unwrap();
+        let close = || {
+            RegionRequest::Close(RegionCloseRequest {
+                flush_on_close: true,
+            })
+        };
+
+        let error = engine
+            .handle_request(physical_region_id, close())
+            .await
+            .unwrap_err();
+        assert_eq!(common_error::ext::RetryHint::Retryable, error.retry_hint());
+        assert!(!mito.is_region_exists(data_region_id));
+        assert!(mito.is_region_exists(metadata_region_id));
+        assert!(engine.inner.is_physical_region(physical_region_id));
+
+        // The retry finds the data region closed. It flushes a metadata region that leads and
+        // closes a follower without the flush.
+        if leads_at_retry {
+            mito.set_region_role(metadata_region_id, RegionRole::Leader)
+                .unwrap();
+        }
+        engine
+            .handle_request(physical_region_id, close())
+            .await
+            .unwrap();
+        assert!(!mito.is_region_exists(metadata_region_id));
+        assert!(!engine.inner.is_physical_region(physical_region_id));
+
+        // Without WAL replay, only a flushed metadata region still holds the logical region.
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: METRIC_ENGINE_NAME.to_string(),
+                    table_dir: TestEnv::default_table_dir(),
+                    path_type: PathType::Bare,
+                    options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+                        .into_iter()
+                        .collect(),
+                    skip_wal_replay: true,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            leads_at_retry,
+            engine
+                .inner
+                .state
+                .read()
+                .unwrap()
+                .logical_regions()
+                .contains_key(&env.default_logical_region_id())
+        );
+    }
+
     #[tokio::test]
     async fn test_offline_cleanup_physical_region() {
         let env = TestEnv::new().await;
