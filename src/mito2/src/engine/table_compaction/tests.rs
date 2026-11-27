@@ -25,7 +25,8 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AddColumn, AlterKind, RegionAlterRequest, RegionRequest, RegionTruncateRequest, SetRegionOption,
+    AddColumn, AlterKind, RegionAlterRequest, RegionRequest, RegionTruncateRequest,
+    SetRegionOption, UnsetRegionOption,
 };
 use store_api::storage::{FileId, RegionId};
 
@@ -1340,17 +1341,6 @@ async fn test_table_compaction_publication_after_nullable_tag_added() {
         )
         .await
         .unwrap();
-    let current = region.metadata();
-    assert!(!is_table_compaction_metadata_compatible(
-        &current,
-        &snapshot.metadata
-    ));
-    let mut rerouted = (*current).clone();
-    rerouted.set_partition_expr(Some("changed".into()));
-    assert!(!is_table_compaction_metadata_compatible(
-        &snapshot.metadata,
-        &rerouted
-    ));
     // The second publication models a lost acknowledgement after installing the output.
     for _ in 0..2 {
         assert_eq!(
@@ -1377,5 +1367,76 @@ async fn test_table_compaction_publication_after_nullable_tag_added() {
         let tag = batch.column_by_name("new_tag").unwrap();
         assert_eq!(tag.len(), tag.null_count());
     }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_publication_after_drop_field_and_option_changes() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, output) = seed(&engine, region_id).await;
+    let alter =
+        |kind| engine.handle_request(region_id, RegionRequest::Alter(RegionAlterRequest { kind }));
+    alter(AlterKind::DropColumns {
+        names: vec!["field_0".into()],
+    })
+    .await
+    .unwrap();
+    alter(AlterKind::SetRegionOptions {
+        options: vec![SetRegionOption::CompactionOutputParallelism(Some(2))],
+    })
+    .await
+    .unwrap();
+
+    let scan = || async {
+        RecordBatches::try_collect(
+            engine
+                .scan_to_stream(region_id, Default::default())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+    let before = scan().await;
+    assert_eq!(
+        3,
+        before.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    assert!(
+        before
+            .iter()
+            .all(|batch| batch.column_by_name("field_0").is_none())
+    );
+    let publish =
+        || engine.publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()]);
+    assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    alter(AlterKind::UnsetRegionOptions {
+        keys: vec![UnsetRegionOption::CompactionOutputParallelism],
+    })
+    .await
+    .unwrap();
+    assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    assert_eq!(
+        before.pretty_print().unwrap(),
+        scan().await.pretty_print().unwrap()
+    );
+
+    let mut changed = (*snapshot.metadata).clone();
+    changed.set_partition_expr(Some("changed".into()));
+    assert!(!is_table_compaction_metadata_compatible(
+        &snapshot.metadata,
+        &changed
+    ));
+    let mut stale = snapshot;
+    stale.metadata = Arc::new(changed);
+    assert_eq!(
+        PublicationOutcome::StaleInputs,
+        engine
+            .publish_table_compaction(region_id, stale, vec![output])
+            .await
+            .unwrap()
+    );
     engine.stop().await.unwrap();
 }

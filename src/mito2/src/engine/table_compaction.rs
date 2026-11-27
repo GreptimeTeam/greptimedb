@@ -15,10 +15,8 @@ pub(crate) mod output;
 #[cfg(test)]
 mod tests;
 
-use api::v1::SemanticType;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
@@ -59,47 +57,16 @@ pub enum PublicationOutcome {
     StaleInputs,
 }
 
-/// Returns whether outputs built under `captured` can be read under `current`.
-/// Sparse keys address tags by column ID, so a newly added nullable tag reads as NULL.
+/// Returns whether both snapshots describe the same table-compaction target range.
+/// ALTER may change the schema while compaction runs. Publication verifies the
+/// output footer against the captured schema and checks the input files separately.
 pub fn is_table_compaction_metadata_compatible(
     captured: &RegionMetadata,
     current: &RegionMetadata,
 ) -> bool {
-    if captured == current {
-        return true;
-    }
-    if captured.region_id != current.region_id
-        || captured.primary_key_encoding != PrimaryKeyEncoding::Sparse
-        || current.primary_key_encoding != captured.primary_key_encoding
-        || captured.partition_expr != current.partition_expr
-        || captured.partition_expr_version != current.partition_expr_version
-        || current.schema_version <= captured.schema_version
-        || current.column_metadatas.len() <= captured.column_metadatas.len()
-    {
-        return false;
-    }
-    let Some(added_keys) = current
-        .primary_key
-        .strip_prefix(captured.primary_key.as_slice())
-    else {
-        return false;
-    };
-    // Every added column must be a new tag in the primary key suffix. Preserve
-    // the definitions and relative order of all captured columns.
-    added_keys.len() == current.column_metadatas.len() - captured.column_metadatas.len()
-        && added_keys.iter().all(|id| {
-            captured.column_by_id(*id).is_none()
-                && current.column_by_id(*id).is_some_and(|column| {
-                    column.semantic_type == SemanticType::Tag
-                        && column.column_schema.is_nullable()
-                        && column.column_schema.default_constraint().is_none()
-                })
-        })
-        && current
-            .column_metadatas
-            .iter()
-            .filter(|column| captured.column_by_id(column.column_id).is_some())
-            .eq(&captured.column_metadatas)
+    captured.region_id == current.region_id
+        && captured.partition_expr_version == current.partition_expr_version
+        && captured.partition_expr == current.partition_expr
 }
 
 impl MitoEngine {
