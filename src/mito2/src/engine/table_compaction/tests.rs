@@ -13,20 +13,23 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use api::v1::Rows;
+use api::v1::{Rows, SemanticType};
 use bytes::Bytes;
 use common_base::Plugins;
 use common_recordbatch::RecordBatches;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use parquet::file::metadata::ParquetMetaData;
+use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionRequest, RegionTruncateRequest, SetRegionOption,
+    AddColumn, AlterKind, RegionAlterRequest, RegionRequest, RegionTruncateRequest, SetRegionOption,
 };
 use store_api::storage::{FileId, RegionId};
 
-use super::{PublicationOutcome, TableCompactionSnapshot};
+use super::{PublicationOutcome, TableCompactionSnapshot, is_table_compaction_metadata_compatible};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::lease_test::promote_to_await_leader_lease;
@@ -36,8 +39,10 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::region::MitoRegionRef;
 use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::sst::location;
+use crate::test_util::sst_util::new_sparse_primary_key;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
+    sparse_metric_create_request, sparse_metric_put,
 };
 
 fn config() -> MitoConfig {
@@ -105,12 +110,20 @@ async fn seed_shared_inputs(
         .await;
         flush_region(engine, region_id, None).await;
     }
+    promote_flushed_files(engine, region_id, row_ranges.len()).await
+}
+
+async fn promote_flushed_files(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    file_count: usize,
+) -> (TableCompactionSnapshot, Vec<FileMeta>) {
     let region = engine.get_region(region_id).unwrap();
     let originals = region.version().ssts.levels()[0]
         .files()
         .map(|file| file.meta_ref().clone())
         .collect::<Vec<_>>();
-    assert_eq!(row_ranges.len(), originals.len());
+    assert_eq!(file_count, originals.len());
     let mut shared = Vec::with_capacity(originals.len());
     for original in &originals {
         shared.push(copy_sst(&region, original, LEVEL_SHARED).await);
@@ -127,7 +140,7 @@ async fn seed_shared_inputs(
         .await
         .unwrap();
     let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
-    assert_eq!(row_ranges.len(), snapshot.inputs.len());
+    assert_eq!(file_count, snapshot.inputs.len());
     let mut outputs = Vec::with_capacity(snapshot.inputs.len());
     for input in &snapshot.inputs {
         outputs.push(copy_sst(&region, input, 0).await);
@@ -1283,4 +1296,86 @@ async fn test_failed_verification_does_not_notify_hook() {
         engine.table_compaction_snapshot(region_id).unwrap().inputs
     );
     assert_eq!(6, row_count(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_table_compaction_publication_after_nullable_tag_added() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(sparse_metric_create_request("flat")),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let key = new_sparse_primary_key(&["old"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(region_id, sparse_metric_put(key, 1000, Some(1.0)))
+        .await
+        .unwrap();
+    flush_region(&engine, region_id, None).await;
+    let (snapshot, outputs) = promote_flushed_files(&engine, region_id, 1).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "new_tag",
+                                ConcreteDataType::string_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let current = region.metadata();
+    assert!(!is_table_compaction_metadata_compatible(
+        &current,
+        &snapshot.metadata
+    ));
+    let mut rerouted = (*current).clone();
+    rerouted.set_partition_expr(Some("changed".into()));
+    assert!(!is_table_compaction_metadata_compatible(
+        &snapshot.metadata,
+        &rerouted
+    ));
+    // The second publication models a lost acknowledgement after installing the output.
+    for _ in 0..2 {
+        assert_eq!(
+            PublicationOutcome::Applied,
+            engine
+                .publish_table_compaction(region_id, snapshot.clone(), outputs.clone())
+                .await
+                .unwrap()
+        );
+    }
+    let batches = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, Default::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        1,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    for batch in batches.iter() {
+        let tag = batch.column_by_name("new_tag").unwrap();
+        assert_eq!(tag.len(), tag.null_count());
+    }
+    engine.stop().await.unwrap();
 }
