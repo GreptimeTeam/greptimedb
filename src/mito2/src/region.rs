@@ -1499,6 +1499,9 @@ pub(crate) struct ManifestContext {
     /// commits through [`commit_staged_locked`](Self::commit_staged_locked)) so they produce a
     /// [`PendingManifestHook`].
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
+    /// Whether [`Self::manifest_manager`] publishes the manifest by conditional create, which is
+    /// fixed when the manager is opened.
+    conditional_publication: bool,
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
@@ -1542,6 +1545,7 @@ impl ManifestContext {
         node_lease: Arc<NodeLease>,
     ) -> Self {
         ManifestContext {
+            conditional_publication: manager.is_conditional_publication(),
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
             promotion_fence: Mutex::new(PromotionFence {
@@ -2047,6 +2051,19 @@ impl ManifestContext {
         if !manager.is_conditional_publication() {
             return Ok(None);
         }
+        self.commit_catchup_locked(&mut manager, RegionEdit::default())
+            .await
+            .map(Some)
+    }
+
+    /// Commits the catchup of a region whose manifest is published conditionally as
+    /// [Self::commit_catchup] does, with `edit` and under the caller's manifest write lock. The
+    /// caller decides whether the region's worker applies `edit` to the region's version.
+    pub(crate) async fn commit_catchup_locked(
+        &self,
+        manager: &mut RegionManifestManager,
+        edit: RegionEdit,
+    ) -> Result<PendingManifestHook> {
         let region_id = manager.manifest().metadata.region_id;
         let state = self.state.load();
         ensure!(
@@ -2060,8 +2077,7 @@ impl ManifestContext {
         ensure!(!self.is_reload_pending(), RegionBusySnafu { region_id });
         // A stop marks the region before it waits for this lock to stop the manager.
         ensure!(!self.is_stopped(), RegionStoppedSnafu { region_id });
-        let action_list =
-            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default()));
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
         let version = manager
             .update_with_verification(action_list, false, false, || true)
@@ -2073,7 +2089,7 @@ impl ManifestContext {
             self.hook.clone(),
             false,
         );
-        Ok(Some(pending))
+        Ok(pending)
     }
 
     /// Performs a manifest write under a caller-held write lock and returns a
@@ -2227,6 +2243,12 @@ impl ManifestContext {
     /// Returns whether the region waits for a reload, see [Self::fence_for_reload].
     pub(crate) fn is_reload_pending(&self) -> bool {
         self.promotion_fence.lock().unwrap().reload_pending
+    }
+
+    /// Returns whether a catchup runs on this instance, see [Self::begin_catchup]. An instance a
+    /// catchup replaced keeps the flag set, so it is read on the registered instance.
+    pub(crate) fn is_catching_up(&self) -> bool {
+        self.promotion_fence.lock().unwrap().catching_up
     }
 
     /// Ignores the promotions issued before now. The worker calls it on a reloaded instance, and
@@ -2784,6 +2806,11 @@ impl ManifestContext {
                 }
             }
         }
+    }
+
+    /// Returns whether the region publishes its manifest by conditional create.
+    pub(crate) fn is_conditional_publication(&self) -> bool {
+        self.conditional_publication
     }
 
     /// Returns the normal manifest of the region.
