@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::promql::planner::native::{
-    take_native_attempts, take_reported_decline, take_reported_unproved_labelset_check,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1176,7 +1173,7 @@ async fn build_test_table_provider_with_tsid_tag_fields_and_ctx(
                 .is_ok()
         );
     }
-    // The scope is what discovery consults before it reads anything, and its default declines, so
+    // The scope is what discovery consults before it reads anything, and its default refuses, so
     // a fixture that wants discovery to run has to say so.
     let query_ctx = {
         let base = base_ctx;
@@ -2448,7 +2445,7 @@ fn batch_rows(batches: &[RecordBatch]) -> usize {
 /// A nameless selector that matches no metric table answers with the empty vector, not with an
 /// error.
 ///
-/// Every case checks the plan is the native one, so an operator this route declined would fail
+/// Every case checks the plan is the native one, so an operator this route refused would fail
 /// here instead of quietly passing as a plan the existing planner built. What the empty input owes
 /// is that the operators above it keep their own answer for zero series: an ungrouped fold has no
 /// group to report - `sum` does not answer 0 - and a step or a reordering has nothing to read.
@@ -2820,7 +2817,7 @@ async fn native_named_selector_over_a_missing_table_plans_as_an_empty_input() {
         }
     }
 
-    // A `__field__` matcher still declines over a table this route can read: the matcher narrows the
+    // A `__field__` matcher still refuses over a table this route can read: the matcher narrows the
     // field set of the scan below the node, and the raw series scan reports every field the scan
     // carries. That refusal is about the scan, not about the table existing - a missing table has no
     // field set to narrow and is admitted as the empty input, which
@@ -3184,7 +3181,7 @@ async fn native_missing_table_with_a_field_matcher_answers_the_empty_vector() {
 /// `wide_total` carries two fields and `narrow_total` one, and the empty branch is the left operand
 /// of an `or` whose right operand is `narrow_total`. A layout taken from the statement's first real
 /// input - `wide_total` - gives the empty side two fields, and the compiler refuses a set operator
-/// whose sides pair a different number of fields, which declines the whole statement.
+/// whose sides pair a different number of fields, which refuses the whole statement.
 #[tokio::test]
 async fn native_zero_match_takes_the_layout_of_its_set_operand() {
     let table_provider = build_test_table_provider_with_tsid_tag_names(
@@ -4075,6 +4072,7 @@ async fn native_fused_multi_metric_rate_keeps_its_canonical_merge() {
 /// A window that keeps the name drops nothing, so it relies on nothing and counts nothing.
 #[tokio::test]
 async fn a_nullable_key_statement_records_the_pair_it_leaves_unproved() {
+    let before = unproved_pair_count();
     let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
     let plan =
         build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
@@ -4088,12 +4086,13 @@ async fn a_nullable_key_statement_records_the_pair_it_leaves_unproved() {
         "the nullable key is not what the drop is proved by, so nothing is collected: {trees:?}"
     );
     assert_eq!(
-        Some("nullable_key"),
-        take_reported_unproved_labelset_check(),
+        1,
+        unproved_pair_count() - before,
         "the pair the labels cannot state went uncounted: {}",
         plan.display_indent_schema()
     );
 
+    let after_one = unproved_pair_count();
     let table_provider = build_test_table_provider_with_nullable_tag("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
         "last_over_time(some_metric[5m])",
@@ -4107,11 +4106,18 @@ async fn a_nullable_key_statement_records_the_pair_it_leaves_unproved() {
         plan.display_indent_schema()
     );
     assert_eq!(
-        None,
-        take_reported_unproved_labelset_check(),
+        0,
+        unproved_pair_count() - after_one,
         "a window that keeps the name collects nothing for the keys: {}",
         plan.display_indent_schema()
     );
+}
+
+/// The count the route reports for the nullable-key pair it leaves unproved.
+fn unproved_pair_count() -> u64 {
+    crate::metrics::DUPLICATE_LABELSET_CHECK_UNPROVED_TOTAL
+        .with_label_values(&["nullable_key"])
+        .get()
 }
 
 /// A fold already answers one series per group, so a drop above it has nothing left to collect.
@@ -4188,7 +4194,7 @@ async fn native_fused_time_partitioned_table_reads_through_a_raw_source() {
             .await;
     // A table partitioned on its time index splits one series across regions, so the selector reads
     // it through a raw source and the window is evaluated above the reconciliation. Previously the
-    // route declined here, which meant the existing plan did that work instead.
+    // route refused here, which meant the existing plan did that work instead.
     let fused = find_fused_series(&native).expect("a split-series table is read natively");
     assert!(
         matches!(
@@ -4243,15 +4249,8 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
     );
 }
 
-/// An append-mode table is refused by the raw reader's preflight, and the route reports it.
-///
-/// A raw series scan reads the series layout a region only has once it is prepared for Narthex: the
-/// preflight in `mito2`'s series scan answers `None` for every other append-mode input, and by the
-/// time the physical planner asks, the logical plan is this node. The route therefore refuses the
-/// selector where it can still say why, and the statement is answered with that cause rather than
-/// with the existing planner's plan.
 #[tokio::test]
-async fn native_fused_append_mode_table_is_reported_as_unsupported() {
+async fn native_fused_append_mode_table_falls_back() {
     let table_provider = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
@@ -4263,22 +4262,26 @@ async fn native_fused_append_mode_table_is_reported_as_unsupported() {
         NATIVE_ENGINE,
     )
     .await;
-    let error = PromPlanner::stmt_to_plan_with_annotations(
-        table_provider,
-        &build_eval_stmt("rate(some_metric[5m])"),
-        &build_query_engine_state(),
-        None,
+    let native =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
+    let fallback_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
         true,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
     )
-    .await
-    .unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            crate::promql::error::Error::NativeRouteDeclined { reason, .. }
-                if reason == "unsupported_time_index_type_or_append_mode"
-        ),
-        "an append-mode table is refused for its layout: {error}"
+    .await;
+    let without_flag =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", false, fallback_provider)
+            .await;
+    assert!(!native.display_indent().to_string().contains("FusedSeries"));
+    assert_eq!(
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string()
     );
 }
 
@@ -4409,7 +4412,7 @@ async fn native_fused_partitioned_table_label_rewrite_plans_a_canonical_boundary
 /// and start are that far apart is refused by the planner's own at-modifier rewrite first.)
 ///
 /// A platform whose `SystemTime` cannot represent the `5e18 ms` start skips the high-level
-/// shape; the platform-independent `native_tree_supported_declines_the_instants_that_overflow`
+/// shape; the platform-independent `native_tree_supported_refuses_the_instants_that_overflow`
 /// still covers the admission predicate there.
 #[tokio::test]
 async fn native_fused_windows_whose_instants_overflow_fall_back() {
@@ -4779,72 +4782,6 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
     }
 }
 
-/// Every statement is offered to the native route once, and a statement the flag leaves alone is
-/// offered none.
-///
-/// The count is what bounds planning: one offer compiles the whole tree below it, so a route that
-/// re-offered a subtree for every operator below it would cost the square of the expression's size.
-#[tokio::test]
-async fn native_offer_is_counted_once_per_statement() {
-    let _ = take_native_attempts();
-    let plan = build_native_fused_plan("rate(some_metric[5m])", true).await;
-    assert!(find_fused_series(&plan).is_some(), "{plan}");
-    assert_eq!(
-        1,
-        take_native_attempts(),
-        "the statement is offered exactly once"
-    );
-
-    let plan = build_native_fused_plan("rate(some_metric[5m])", false).await;
-    assert!(find_fused_series(&plan).is_none(), "{plan}");
-    assert_eq!(
-        0,
-        take_native_attempts(),
-        "the flag off offers nothing to the native route"
-    );
-}
-
-/// A propagated matcher is offered once for the operand it rewrote, and nothing below it.
-///
-/// `matching_filters::propagate` writes a matcher into an operand's scan, which makes that operand
-/// an expression the offer spent at its parent never compiled: that offer read the statement as it
-/// was written, and the matcher reached the scan afterwards. The rewrite is therefore offered of
-/// its own, and the offer it is handed is spent again by the rewritten operand's own subtree,
-/// exactly as this one was. So `N` operators below the rewrite buy one offer - not `N`, and not the
-/// `N` positions times `N` subtrees an unconditional re-offer would compile.
-#[tokio::test]
-async fn native_offer_counts_a_propagated_operand_once() {
-    // The same match with the rewritten operand two operators deep and six deep: the matcher
-    // crosses in both, and the four extra operators are the operand's subtree rather than more
-    // expressions to offer.
-    let shallow = "((some_metric * 2) * 2) / on(tag_0) \
-                   some_metric{tag_0=\"x\",__field__=\"field_0\"}";
-    let deep = "((((((some_metric * 2) * 2) * 2) * 2) * 2) * 2) / on(tag_0) \
-                some_metric{tag_0=\"x\",__field__=\"field_0\"}";
-    let mut counts = Vec::new();
-    for query in [shallow, deep] {
-        let _ = take_native_attempts();
-        let plan = build_native_fused_plan(query, true).await;
-        let display = plan.display_indent().to_string();
-        // The count below is only a bound if the matcher really crossed to the other operand.
-        assert!(
-            display.contains("some_metric.tag_0 = Utf8(\"x\")"),
-            "{query}: the matcher reached the other operand's scan: {display}"
-        );
-        counts.push(take_native_attempts());
-    }
-    // Seven offers either way: the statement, its root's own retry under the legacy-only
-    // `__field__` matcher, the frame operands the composed attempts beside those two read, and the
-    // propagated operand itself. The four operators that make the deep statement deeper are inside
-    // that operand's subtree, so they buy no offer of their own - an offer that was not spent again
-    // by the rewrite would compile each of them, and the deep statement would cost four more.
-    assert_eq!(
-        (7, 7),
-        (counts[0], counts[1]),
-        "a propagated operand is offered once whatever its depth: seven offers at both depths"
-    );
-}
-
 /// The same matcher-propagating match, with its rewritten operand `depth` operators deep.
 fn propagation_query(depth: usize) -> String {
     let operand = (0..depth).fold("some_metric".to_string(), |inner, _| {
@@ -4903,54 +4840,124 @@ fn a_deep_propagated_operand_plans_within_a_worker_stack() {
     );
 }
 
-/// A metric table without logical-table metadata is refused for it, and the route reports it.
-///
-/// A metric-engine selector is admitted through the logical scan its rewrite builds, and that scan is
-/// what proves the physical scan this node reads is limited to the logical table's own id. Without
-/// the metadata there is no such scan, so the route cannot prove the rows it would fuse belong to the
-/// one metric the statement names, and it refuses the selector: the statement is answered with the
-/// missing verified scanner as the cause rather than with the existing planner's plan.
+/// A metric table without logical-table metadata refuses to the legacy plan.
 #[tokio::test]
-async fn native_fused_metric_table_without_logical_metadata_is_reported_as_unsupported() {
-    let table_provider = build_test_table_provider_with_options(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![],
-        ConcreteDataType::timestamp_millisecond_datatype(),
-        false,
-        ConcreteDataType::float64_datatype(),
-        METRIC_ENGINE,
+async fn native_fused_metric_table_without_logical_metadata_falls_back() {
+    let native = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        true,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            METRIC_ENGINE,
+        )
+        .await,
     )
     .await;
-    let error = PromPlanner::stmt_to_plan_with_annotations(
-        table_provider,
-        &build_eval_stmt("rate(some_metric[5m])"),
-        &build_query_engine_state(),
-        None,
-        true,
+    let legacy = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        false,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            METRIC_ENGINE,
+        )
+        .await,
     )
-    .await
-    .unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            crate::promql::error::Error::NativeRouteDeclined { reason, .. }
-                if reason == "engine_without_raw_series_scanner"
-        ),
-        "an unverified metric table is refused for its missing scanner: {error}"
+    .await;
+    assert!(find_fused_series(&native).is_none());
+    assert_eq!(
+        native.display_indent().to_string(),
+        legacy.display_indent().to_string()
     );
 }
 
-/// A table whose engine has no raw-series scanner is refused for it, and the route reports it.
+/// A table whose engine has no raw-series scanner keeps the existing plan.
 ///
 /// A file-engine table answers an ordinary read with a `SinglePartitionScanner`, whose
 /// `raw_series_schema` is the trait's default `None`. Offering the native route to such a table
 /// would build the node and then fail in physical planning, because the logical plan is fixed by
-/// then; refusing the selector here is what lets the statement report the cause instead.
+/// then; refusing here is what keeps the query answering.
 #[tokio::test]
-async fn native_fused_engine_without_raw_series_is_reported_as_unsupported() {
-    let table_provider = build_test_table_provider_with_options(
+async fn native_fused_engine_without_raw_series_falls_back() {
+    let native = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        true,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            FILE_ENGINE,
+        )
+        .await,
+    )
+    .await;
+    let without_flag = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        false,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            FILE_ENGINE,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "a file-engine table must not reach the native route"
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string(),
+        "a file-engine table must keep the existing plan"
+    );
+}
+
+/// The plan `query` gets, or `None` when the planner refuses it.
+///
+/// A field the raw series scan cannot read must not change what the statement answers, and some of
+/// these statements the existing planner refuses outright: that refusal is its answer, so a test has
+/// to be able to hold the route to it instead of unwrapping a plan.
+async fn plan_or_refusal(
+    query: &str,
+    native_fused: bool,
+    table_provider: DfTableSourceProvider,
+) -> Option<LogicalPlan> {
+    PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+        None,
+        native_fused,
+    )
+    .await
+    .ok()
+}
+
+/// A shape the native route does not answer is that error, naming the cause the walk recorded.
+#[tokio::test]
+async fn a_shape_the_route_does_not_answer_names_its_cause() {
+    let file_engine = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
         1,
@@ -4962,7 +4969,7 @@ async fn native_fused_engine_without_raw_series_is_reported_as_unsupported() {
     )
     .await;
     let error = PromPlanner::stmt_to_plan_with_annotations(
-        table_provider,
+        file_engine,
         &build_eval_stmt("rate(some_metric[5m])"),
         &build_query_engine_state(),
         None,
@@ -4973,35 +4980,41 @@ async fn native_fused_engine_without_raw_series_is_reported_as_unsupported() {
     assert!(
         matches!(
             &error,
-            crate::promql::error::Error::NativeRouteDeclined { reason, .. }
-                if reason == "engine_without_raw_series_scanner"
+            crate::promql::error::Error::UnsupportedNativeShape { reason, .. }
+                if reason.as_str() == "engine_without_raw_series_scanner"
         ),
-        "a file-engine table is refused for its missing raw-series scanner: {error}"
+        "the file engine has no raw-series scanner: {error}"
     );
-    // The refusal is reported with its cause, not answered silently.
-    assert_eq!(
-        take_reported_decline(),
-        Some("engine_without_raw_series_scanner"),
-        "the refusal names the engine's missing raw-series scanner"
+
+    let error = PromPlanner::stmt_to_plan_with_annotations(
+        build_test_native_histogram_table_provider("some_metric").await,
+        &build_eval_stmt("count(sum(some_metric))"),
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            crate::promql::error::Error::UnsupportedNativeShape { reason, .. }
+                if reason.as_str() == "histogram_state_above_a_segment_boundary"
+        ),
+        "the two-aggregate cut has no segment execution: {error}"
     );
 }
 
-/// A value field the raw-series readers cannot serve is refused, and the route reports it.
+/// A value field the raw-series readers cannot serve keeps the existing plan.
 ///
 /// The route admits two kinds: a `Float64`, which every reader serves, and the canonical native
 /// histogram struct, which the ordinary scan reads while the columnar samples - `Float64` only -
-/// are skipped for that selection. Prometheus keeps no string, boolean or decimal sample, so a field
-/// of any other type has no raw representation a fused node could declare, and the route refuses the
-/// selector whatever the shape of the statement - including the shapes that publish a `Float64` for a
-/// numeric field, since `some_metric * 2` casts a string as readily as an integer and no raw frame can
-/// hold the values either way.
-///
-/// The cause reported is the refusal the statement ends on, which is the guard the field itself fails
-/// - the kinds a scan's fields may carry, one of which this field is not - except under a binary:
-/// there the operands are re-offered as frames, so the statement is answered with that composition's
-/// own cause and the field's kind is one level down from it.
+/// are skipped for that selection. Everything else - a string, a boolean, a decimal - has no raw
+/// representation and keeps the existing plan whatever the shape of the statement, including the
+/// shapes that publish a `Float64` for a numeric field: `some_metric * 2` casts a string as readily
+/// as an integer, and the route still refuses it because no raw frame can hold the values.
 #[tokio::test]
-async fn native_fused_unsupported_field_type_is_reported_as_unsupported() {
+async fn native_fused_unsupported_field_type_falls_back() {
     for field_type in [
         ConcreteDataType::string_datatype(),
         ConcreteDataType::boolean_datatype(),
@@ -5009,34 +5022,44 @@ async fn native_fused_unsupported_field_type_is_reported_as_unsupported() {
         // the route's own numeric set leaves the decimals out; asking Arrow would let it through.
         ConcreteDataType::decimal128_datatype(10, 2),
     ] {
-        for (query, reason) in [
-            // The selector's own fields are what the kind guard reads, so it is the cause here.
-            ("some_metric", "mixed_field_kinds"),
-            // The composition re-offers this operand as a frame; the field's kind is the refusal
-            // below that offer, and no frame is what the statement is answered with.
-            ("some_metric * 2", "left_operand_is_not_a_frame"),
-            // A function folds one frame, so the field's kind reaches the statement unchanged.
-            ("sum(some_metric)", "mixed_field_kinds"),
-            ("min(some_metric)", "mixed_field_kinds"),
-            ("rate(some_metric[5m])", "mixed_field_kinds"),
+        for query in [
+            "some_metric",
+            "some_metric * 2",
+            "sum(some_metric)",
+            "min(some_metric)",
+            "rate(some_metric[5m])",
         ] {
-            let error = PromPlanner::stmt_to_plan_with_annotations(
-                build_test_table_provider_with_field_type(field_type.clone()).await,
-                &build_eval_stmt(query),
-                &build_query_engine_state(),
-                None,
+            let native = plan_or_refusal(
+                query,
                 true,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
             )
-            .await
-            .unwrap_err();
-            assert!(
-                matches!(
-                    &error,
-                    crate::promql::error::Error::NativeRouteDeclined { reason: recorded, .. }
-                        if recorded == reason
+            .await;
+            let without_flag = plan_or_refusal(
+                query,
+                false,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+            )
+            .await;
+            match (&native, &without_flag) {
+                (Some(native_plan), Some(legacy_plan)) => {
+                    assert!(
+                        find_fused_series(native_plan).is_none(),
+                        "{field_type} must not reach the native route: {query}"
+                    );
+                    assert_eq!(
+                        native_plan.display_indent().to_string(),
+                        legacy_plan.display_indent().to_string(),
+                        "{field_type} must keep the existing plan: {query}"
+                    );
+                }
+                _ => assert_eq!(
+                    native.is_some(),
+                    without_flag.is_some(),
+                    "{field_type}: the route must answer what the existing planner answers for \
+                     {query}"
                 ),
-                "{field_type}: `{query}` is refused as `{reason}`: {error}"
-            );
+            }
         }
     }
 }
@@ -5140,7 +5163,7 @@ async fn native_fused_numeric_field_admission_follows_the_shape() {
     }
 }
 
-/// The `Float64` field every raw reader serves controls the field-type decline above.
+/// The `Float64` field every raw reader serves controls the field-type refusal above.
 #[tokio::test]
 async fn native_fused_float64_field_is_accepted() {
     let plan = build_native_fused_plan_with_provider(
@@ -5190,13 +5213,13 @@ async fn native_fused_or_matchers_fall_back() {
 /// window for `increase` and divides by the range for `rate`, while a cumulative series is rated
 /// from its counter; it picks that per series. A compiled tree rates every series the same way, so
 /// these queries fall back. The same queries over a table without the marker still fold, which is
-/// what makes the decline the marker's doing rather than the shape's.
+/// what makes the refusal the marker's doing rather than the shape's.
 #[tokio::test]
 async fn native_fused_delta_temporality_rates_fall_back() {
     for query in [
         "rate(some_metric[5m])",
         "increase(some_metric[5m])",
-        // Below another call and inside parentheses, which are the same decline one level down.
+        // Below another call and inside parentheses, which are the same refusal one level down.
         "abs(rate(some_metric[5m]))",
         "abs(increase(some_metric[5m]))",
         "(rate(some_metric[5m]))",
@@ -5266,7 +5289,7 @@ async fn native_fused_delta_temporality_is_selector_scoped() {
     }
 }
 
-/// The marker alone does not decline a query: only `rate`/`increase` are refused.
+/// The marker alone does not refuse a query: only `rate`/`increase` are refused.
 #[tokio::test]
 async fn native_fused_delta_temporality_non_counter_math_still_folds() {
     for query in ["some_metric", "abs(some_metric)"] {
@@ -6033,9 +6056,9 @@ async fn native_composed_binary_admits_complex_operands() {
     );
 
     // A fold above a fold is still refused, and not because the inner one has no histogram state:
-    // `sum(sum(hist))` is an aggregate over a split aggregate, which the split declines
+    // `sum(sum(hist))` is an aggregate over a split aggregate, which the split refuses
     // ("an aggregate above a split aggregate"), so the state that inner fold exports cannot cross
-    // the boundary. A tree that binds histogram state anywhere and whose split declined keeps the
+    // the boundary. A tree that binds histogram state anywhere and whose split refused keeps the
     // existing plan, so the whole statement is answered there rather than segmented.
     let refused_query = "hist * on(tag_0) sum by (tag_0) (sum(hist))";
     let plan = build_native_fused_plan_with_provider(
@@ -6068,11 +6091,11 @@ async fn native_composed_binary_admits_complex_operands() {
 /// A composed binary that meets a shape its kernels refuse keeps the existing plan.
 ///
 /// Admission is the composition's own: an operand the native compiler cannot bind, a value that is
-/// not a frame, or a pair whose output column cannot carry both operands' kinds declines here
+/// not a frame, or a pair whose output column cannot carry both operands' kinds refuses here
 /// exactly as it would on the whole statement. None of these may turn into a planning error,
 /// because the existing route answers them.
 #[tokio::test]
-async fn native_composed_binary_declines_to_the_existing_plan() {
+async fn native_composed_binary_refuses_what_it_cannot_compose() {
     // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
     // refused, so the existing plan answers the statement. The offer is the statement's, and the
     // binary that makes it spends it for the whole subtree below: the operand is planned by the
@@ -7582,7 +7605,7 @@ async fn native_fused_whole_vector_nodes_over_a_bare_scan_stay_native() {
 /// `topk` over a split aggregate needs a whole-vector boundary whether its `k` is bound or answered
 /// per point, so the two forms take the same route: native, and not split.
 #[tokio::test]
-async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
+async fn native_fused_topk_above_aggregate_refuses_the_split_in_every_form() {
     for query in [
         // The literal `k` binds a constant `TopK` op, which `split` refuses above the cut.
         "topk(3, sum(some_metric))",
@@ -8096,7 +8119,7 @@ async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
 }
 
 /// Nested aggregates and their wrappers publish expression names, including segmented trees that
-/// the aggregate split declines.
+/// the aggregate split refuses.
 #[tokio::test]
 async fn native_fused_nested_rate_abs_aggregates_use_native_schema_names() {
     for query in [
@@ -8131,9 +8154,9 @@ async fn native_fused_nested_rate_abs_aggregates_use_native_schema_names() {
     }
 }
 
-/// A nested aggregate declines the split but its segmented output still uses the expression name.
+/// A nested aggregate refuses the split but its segmented output still uses the expression name.
 #[tokio::test]
-async fn native_fused_declined_nested_aggregate_uses_native_name() {
+async fn native_fused_refused_nested_aggregate_uses_native_name() {
     let query = "sum(avg(some_metric) by (tag_0))";
     let plan = build_native_fused_plan(query, true).await;
 
@@ -8745,7 +8768,7 @@ async fn native_fused_quantile_parameter_over_a_second_table() {
 /// `Invalid function argument for quantile`, so a tree this gate refuses has no other route - the
 /// statement is answered natively or not at all.
 #[tokio::test]
-async fn native_fused_declines_an_order_dependent_quantile_argument() {
+async fn native_fused_refuses_an_order_dependent_quantile_argument() {
     let state = build_query_engine_state();
     for (query, native) in [
         // The argument keeps the first series `limitk` is handed, so which one survives two gathered
@@ -8773,10 +8796,7 @@ async fn native_fused_declines_an_order_dependent_quantile_argument() {
             native_fused: true,
             native_binary_offer: true,
         };
-        let planned = planner
-            .try_plan_native_fused(&stmt.expr, &state)
-            .await
-            .unwrap();
+        let planned = planner.try_plan_native_fused(&stmt.expr, &state).await.ok();
         assert_eq!(
             native,
             planned.is_some(),
@@ -8892,7 +8912,7 @@ async fn native_fused_quantile_over_a_histogram_folds_it_like_min() {
 ///
 /// The split is the route that answers an aggregate per partition and merges the state, so a
 /// `quantile` - whose state is its group's sample set - has no split half anywhere: `check_cut`
-/// declines the kind, and the tree itself refuses a `Partial` or `Final` one. What runs instead is a
+/// refuses the kind, and the tree itself refuses a `Partial` or `Final` one. What runs instead is a
 /// single `Complete` fold above the per-series prefixes. A table partitioned on a tag keeps every
 /// series whole in one region; a table that splits one series across regions is read through a raw
 /// source that reconciles its fragments, so the fold still sees whole series. Both shapes are
@@ -8974,15 +8994,15 @@ async fn native_fused_aggregate_above_an_independent_selector_is_admitted() {
 }
 
 /// Suffixes whose answers need the whole vector cannot fuse into a partition-local `Final`, so
-/// the split declines them: it neither exports aggregate state nor runs a `Final` aggregate.
+/// the split refuses them: it neither exports aggregate state nor runs a `Final` aggregate.
 /// Ranking (`topk`) and a second aggregate cannot be answered from a partition's groups alone.
 /// Classic histogram functions, by contrast, route all buckets of a histogram to the same owner.
 ///
 /// What they fall back to is not asserted: the segmentation route answers some of them, and the
 /// point is only that none of them becomes a split.
 #[tokio::test]
-async fn native_fused_split_declines_a_whole_vector_suffix() {
-    for (suffix, declined, splits) in [
+async fn native_fused_split_refuses_a_whole_vector_suffix() {
+    for (suffix, refused, splits) in [
         // Ranks the whole vector: the winner may be in a group this partition does not own.
         (
             "topk",
@@ -9005,11 +9025,11 @@ async fn native_fused_split_declines_a_whole_vector_suffix() {
             control.display_indent()
         );
 
-        let declined_plan = build_native_fused_plan(declined, true).await;
+        let refused_plan = build_native_fused_plan(refused, true).await;
         assert!(
-            find_final_split(&declined_plan).is_none(),
-            "{suffix}: `{declined}` must not split: {}",
-            declined_plan.display_indent()
+            find_final_split(&refused_plan).is_none(),
+            "{suffix}: `{refused}` must not split: {}",
+            refused_plan.display_indent()
         );
     }
 }
@@ -9293,7 +9313,7 @@ async fn native_fused_rewritten_scalar_operand_uses_rewritten_field_columns() {
 }
 
 #[tokio::test]
-async fn native_fused_preparation_decline_preserves_legacy_plan() {
+async fn native_fused_preparation_refusal_preserves_legacy_plan() {
     let query = "absent(vector(1)) + on(tag_0) some_metric{tag_0=\"x\",__field__=\"field_0\"}";
     let native = build_native_fused_plan(query, true).await;
     let legacy = build_native_fused_plan(query, false).await;
@@ -9302,7 +9322,7 @@ async fn native_fused_preparation_decline_preserves_legacy_plan() {
     assert_eq!(
         native.display_indent_schema().to_string(),
         legacy.display_indent_schema().to_string(),
-        "a native preparation decline must leave legacy planning context unchanged"
+        "a native preparation refusal must leave legacy planning context unchanged"
     );
 }
 
@@ -12662,7 +12682,7 @@ async fn a_segmented_histogram_answer_crosses_its_collected_boundary() {
 /// it, so the value entering each aggregate is what decides. A scalar multiple of a histogram - a
 /// negation included - is a histogram, which this route's binary kernel answers, so those
 /// statements run and publish the histogram column. The shapes whose state cannot cross keep the
-/// existing plan instead, which `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`
+/// existing plan instead, which `a_histogram_aggregate_the_split_refuses_keeps_the_existing_plan`
 /// pins.
 #[tokio::test]
 async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
@@ -12770,14 +12790,6 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
             "{query} ran a native fold over histograms: {}",
             plan.display_indent_schema()
         );
-        // The two-aggregate cut declines the split, and a tree that folds histogram state has no
-        // segment execution here, so this is the refusal that answers it - recorded, not silent.
-        assert_eq!(
-            Some("histogram_state_above_a_segment_boundary"),
-            take_reported_decline(),
-            "{query}: {}",
-            plan.display_indent_schema()
-        );
     }
 }
 
@@ -12798,11 +12810,6 @@ async fn a_histogram_sum_over_stable_keys_keeps_its_split() {
         assert!(
             partial_below(final_node).is_some(),
             "{query} lost the partial half of its split: {display}"
-        );
-        assert_eq!(
-            None,
-            take_reported_decline(),
-            "{query} declined although its split is planned: {display}"
         );
     }
 }
@@ -12845,8 +12852,8 @@ async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
     }
     // An aggregate over a histogram now folds it natively - `sum(some_metric)` and
     // `sum(rate(some_metric[5m]))` - which is what `a_histogram_sum_or_avg_folds_natively`
-    // covers; the histogram shapes the split still declines are pinned by
-    // `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`.
+    // covers; the histogram shapes the split still refuses are pinned by
+    // `a_histogram_aggregate_the_split_refuses_keeps_the_existing_plan`.
 }
 
 /// An instant selection over a native histogram keeps the histogram, so its output column stays the
@@ -17957,7 +17964,7 @@ async fn a_histogram_sum_or_avg_folds_natively() {
     ] {
         // The metric-engine table every drop over it collects for: its `le` tag is nullable, so
         // the canonical pass inserts a `Merge` above the window and the split has to carry one.
-        // This is the fixture the regression this test guards appeared on: a split that declined
+        // This is the fixture the regression this test guards appeared on: a split that refused
         // across that merge sent `sum(rate(h[5m]))` back to the existing plan.
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
@@ -18022,7 +18029,7 @@ async fn native_composed_binary_admits_a_source_free_frame_operand() {
 ///
 /// Every operand offered below is a strict part of the expression it came from, which is what bounds
 /// the descent. A left-deep chain of matches over two field kinds plans as a nested tree here, and a
-/// shape that did not would decline to the existing plan; neither may re-offer the same expression.
+/// shape that did not would keep the existing plan; neither may re-offer the same expression.
 #[tokio::test]
 async fn native_composed_binary_recursion_terminates_on_a_deep_expression() {
     let depth = 32;
@@ -18070,7 +18077,7 @@ fn count_fused_nodes(plan: &LogicalPlan) -> usize {
 /// `try_plan_native` and `try_plan_native_composed_binary` call each other once per binary operator,
 /// and every level's frames are charged to the stack of the level above it. A left-deep chain of
 /// matches over two field kinds 64 operators deep aborted the process - a stack overflow, not a
-/// declined plan - on the two megabytes a query worker has, before `try_plan_native` grew its stack
+/// refused plan - on the two megabytes a query worker has, before `try_plan_native` grew its stack
 /// for the poll of its future; 56 operators deep still planned. nextest's own test thread is not a
 /// worker's, so the depths here are planned on a thread this test sizes like one, and the deepest of
 /// them is twice the depth that aborted.
@@ -18135,13 +18142,10 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
         native_binary_offer: true,
     };
     let before = format!("{:?}", planner.ctx);
-    let refused = planner
-        .try_plan_native_fused(&stmt.expr, &state)
-        .await
-        .unwrap();
+    let refused = planner.try_plan_native_fused(&stmt.expr, &state).await;
     assert!(
-        refused.is_none(),
-        "a scalar operand is no frame, so the pair declines"
+        refused.is_err(),
+        "a scalar operand is no frame, so the pair refuses"
     );
     assert_eq!(
         before,
@@ -18154,8 +18158,7 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
         planner
             .try_plan_native_fused(&next.expr, &state)
             .await
-            .unwrap()
-            .is_some(),
+            .is_ok(),
         "a refused operand must not stop the next query"
     );
 }
@@ -18168,7 +18171,7 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
 /// aggregate above another aggregate nor a whole-vector ranking is a shape the split can move across
 /// the boundary, so the whole statement falls back rather than being cut.
 #[tokio::test]
-async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
+async fn a_histogram_aggregate_the_split_refuses_keeps_the_existing_plan() {
     for query in [
         "sum(sum(some_metric))",
         "count(sum(some_metric))",

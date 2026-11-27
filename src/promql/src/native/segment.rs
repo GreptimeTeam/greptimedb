@@ -173,7 +173,7 @@ fn evaluated_input_window(node: &NativeNode) -> bool {
 /// `Partial` half of a split fold. A segment it refuses stays above the merge, where the physical
 /// planner finds neither a region scan nor an explicit-label frame below it, so the statement fails
 /// while being planned instead of keeping the plan it had. Segmentation therefore asks that question
-/// before it cuts, and `cut_as_segment` declines the nodes this refuses.
+/// before it cuts, and `cut_as_segment` refuses the nodes this refuses.
 pub fn region_local_segment(node: &NativeNode) -> bool {
     !reads_across_series(node) || pointwise_operand(node) || independent_scan_pair(node)
 }
@@ -594,8 +594,8 @@ pub fn canonical_boundary_stages(
     // labels the frames carry, and the binding below is built from them.
     let row_tags = with_row_name_column(tree.root(), output_tags.clone());
     // The values are named after the expression, as in every other rows layout of this statement.
-    // A schema this boundary cannot declare declines here: the caller's error type is not one this
-    // crate can build, so a name collision is reported by declining rather than as an internal
+    // A schema this boundary cannot declare refuses here: the caller's error type is not one this
+    // crate can build, so a name collision is reported by refusing rather than as an internal
     // error, and the caller keeps the plan it would have chosen.
     let value_names = field_names(&promql, &fields);
     let output_schema = fused_output_schema(&value_names, &row_tags, time_index, root_kind).ok()?;
@@ -1060,7 +1060,7 @@ pub fn segment_tree(
             // loop has already published: the canonical pass inserts a merge under a label rewrite,
             // and that boundary - rebuilt here as a producer, a frame and a router - is what answers
             // one series per label set across partitions. Which cuts are taken is
-            // `cut_as_segment`'s decision, and it declines the evaluated-input window the analyzer
+            // `cut_as_segment`'s decision, and it refuses the evaluated-input window the analyzer
             // will not place region-locally, so this fallback only ever sees the cuts it admitted.
             let built = built.or_else(|| {
                 build_evaluated_segment(
@@ -1284,7 +1284,7 @@ mod tests {
     /// A `quantile` answers from its group's whole sample set wherever its `φ` comes from, so a
     /// fold that reads that `φ` per point needs every series of the vector in one place exactly as
     /// the fold that binds the number does. [`segment_tree`] asks [`contains_global_consumer`]
-    /// where a tree may be cut and whether a cut it cannot build has to be declined, and a parent
+    /// where a tree may be cut and whether a cut it cannot build has to be refused, and a parent
     /// that answers one series at a time -- the `abs` below, as a canonical label rewrite would be
     /// -- must not hide the gather under it: read as a per-partition node, the cut beneath would be
     /// chosen for a parent that cannot run there.

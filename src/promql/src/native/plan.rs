@@ -2371,7 +2371,7 @@ fn kernel_grouping<'a>(group: &Grouping, names: &'a [&'a str]) -> crate::aggrega
 /// which only a raw sample stream can offer and only a kernel that corrects its boundaries reads.
 /// That is one rule, not two: [`check_modifier`](crate::range_eval::check_modifier) states it for
 /// [`RangeEvaluator::try_new`](crate::range_eval::RangeEvaluator::try_new), and it is asked here
-/// over the schema the tree binds, so a modifier a runtime refuses is one admission declines.
+/// over the schema the tree binds, so a modifier a runtime refuses is one admission refuses.
 fn window_modifier_supported(input: &NativeNode, op: &BoundWindow) -> bool {
     // Without a modifier there is nothing for the rule to decide.
     let Some(modifier) = op.window.modifier else {

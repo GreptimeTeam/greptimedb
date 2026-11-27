@@ -19,9 +19,10 @@
 //! [`FusedSeries`] node over the selector's own table scan. A tree that folds across series, such as an
 //! aggregate, is split instead: its per-series prefix and a `Partial` aggregate run in a `FusedSeries`
 //! producer, a `SeriesRepartitionExec` routes that state, and a second `FusedSeries` runs the `Final`
-//! aggregate over it, because a region holds only part of a group. Declining is the normal answer: every
-//! shape the compiler does not accept, and every query this route cannot bind to a scan faithfully, records
-//! the cause of its refusal, which the offer's caller reports.
+//! aggregate over it, because a region holds only part of a group. Refusing is the normal answer: every
+//! shape the compiler does not accept, and every query this route cannot bind to a scan faithfully,
+//! records the cause of its refusal, which the offer's caller reports - a query that asked for this route
+//! is answered with that error, and a query that did not keeps the plan the existing planner builds.
 //!
 //! The node is built from the raw series schema the tree's input was compiled against, the statement's
 //! evaluation grid, and output tag names derived from the native tree. The output schema has the shape the
@@ -84,7 +85,10 @@ use snafu::{ResultExt, ensure};
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::region_engine::RawLabelSource;
 
-use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
+use crate::promql::error::{
+    DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Error, Result, UnsupportedExprSnafu,
+    UnsupportedNativeShapeSnafu,
+};
 use crate::promql::native_compile::{
     InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
     info_input, statement_grid, subquery_child_grid,
@@ -206,7 +210,12 @@ struct NativeFramePlan {
     grid: Arc<EvalGrid>,
 }
 
-enum NativePlanned {
+struct NativePlanned {
+    kind: NativePlannedKind,
+    unproved_keys: Option<&'static str>,
+}
+
+enum NativePlannedKind {
     Rows(LogicalPlan),
     Frame(NativeFramePlan),
 }
@@ -217,9 +226,10 @@ fn native_planned(
     kind: FieldKind,
     time: String,
     grid: Arc<EvalGrid>,
+    unproved_keys: Option<&'static str>,
 ) -> NativePlanned {
-    match metadata {
-        Some((output, tags)) => NativePlanned::Frame(NativeFramePlan {
+    let kind = match metadata {
+        Some((output, tags)) => NativePlannedKind::Frame(NativeFramePlan {
             plan,
             output,
             tags,
@@ -227,55 +237,16 @@ fn native_planned(
             time,
             grid,
         }),
-        None => NativePlanned::Rows(plan),
+        None => NativePlannedKind::Rows(plan),
+    };
+    NativePlanned {
+        kind,
+        unproved_keys,
     }
 }
 
-thread_local! {
-    /// The cause the native route recorded for the expression it is about to refuse.
-    ///
-    /// A refusal is answered by four different walks - the compiler binding, the scan preparation,
-    /// the output-schema derivation and the segmentation - and most of those sites are plain
-    /// functions that can only answer `None`. The cause therefore travels beside the `None` rather
-    /// than through it: a refusal records itself here, and the offer that receives the `None`
-    /// reports it. One statement is planned on one thread, and taking the record clears it.
-    static NATIVE_DECLINE: std::cell::Cell<Option<&'static str>> =
-        const { std::cell::Cell::new(None) };
-    /// How many native attempts this thread made, one per whole-expression offer.
-    ///
-    /// An attempt compiles the whole tree below it, so this count times the statement's size bounds
-    /// the work planning it costs. A test uses it to hold a refused chain to one attempt per
-    /// position instead of one per position and per operator below it, which is O(n^2).
-    #[cfg(test)]
-    static NATIVE_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// The cause the route last reported for a refused offer.
-    ///
-    /// The report is a log line and a counter, neither of which a test can read back; this holds
-    /// the same cause the two of them carry.
-    #[cfg(test)]
-    static REPORTED_DECLINE: std::cell::Cell<Option<&'static str>> =
-        const { std::cell::Cell::new(None) };
-    /// The reason this thread's statement named the key columns its metadata drop cannot be proved
-    /// against.
-    ///
-    /// The canonical pass decides that while it rewrites a tree, and the counter that reports it is
-    /// taken once per statement by the offer that answers the plan - so the reason travels beside
-    /// the tree the way a refusal travels beside the `None` it answers.
-    static UNPROVED_LABELSET_CHECK: std::cell::Cell<Option<&'static str>> =
-        const { std::cell::Cell::new(None) };
-    /// The reason the counter last reported for a drop over a nullable key.
-    ///
-    /// The counter is not something a test can read back; this holds the same reason it carries.
-    #[cfg(test)]
-    static REPORTED_UNPROVED_LABELSET_CHECK: std::cell::Cell<Option<&'static str>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// The cause reported when a refusal was answered without recording one.
-const NATIVE_DECLINE_UNRECORDED: &str = "cause_not_recorded";
-
-/// The cause reported when a caller asks for the refusal behind an offer that recorded none.
-const NATIVE_DECLINE_UNSPECIFIED: &str = "unspecified";
+/// The cause reported for a shape the route refuses without naming one.
+const UNSUPPORTED_SHAPE_UNNAMED: &str = "cause_not_recorded";
 
 /// The reason a statement's metadata drop is not proved: the scan that answers it keys its series by
 /// a column that can hold `NULL` in one series and `''` in another, so the labels alone cannot prove
@@ -283,42 +254,23 @@ const NATIVE_DECLINE_UNSPECIFIED: &str = "unspecified";
 /// this reports.
 const UNPROVED_LABELSET_CHECK_NULLABLE_KEY: &str = "nullable_key";
 
-/// Answers the `None` that hands this expression to the existing planner, recording why.
-///
-/// Declining is the normal answer to a shape this route does not answer: the existing planner
-/// computes the same rows, so the site itself stays quiet. What it contributes is the cause, which
-/// the offer that receives the `None` reports once.
-fn declined<T>(reason: &'static str) -> Option<T> {
-    NATIVE_DECLINE.with(|record| record.set(Some(reason)));
-    None
+/// The native route does not answer this shape, and the reason is the answer.
+fn unsupported<T>(reason: &'static str) -> Result<T> {
+    UnsupportedNativeShapeSnafu { reason }.fail()
 }
 
-/// Takes the cause the last refusal recorded, if it recorded one.
-fn take_native_decline() -> Option<&'static str> {
-    NATIVE_DECLINE.with(|record| record.replace(None))
-}
-
-/// Takes the cause the refusal behind the offer that just returned `None` recorded.
-pub(crate) fn take_decline_reason() -> &'static str {
-    take_native_decline().unwrap_or(NATIVE_DECLINE_UNSPECIFIED)
-}
-
-/// Clears the attempt count and answers how many attempts this thread made since the last call.
-#[cfg(test)]
-pub(crate) fn take_native_attempts() -> usize {
-    NATIVE_ATTEMPTS.with(|attempts| attempts.replace(0))
-}
-
-/// Takes the cause the route last reported for a refused offer.
-#[cfg(test)]
-pub(crate) fn take_reported_decline() -> Option<&'static str> {
-    REPORTED_DECLINE.with(|reported| reported.replace(None))
-}
-
-/// Takes the reason the route last reported for a drop over a nullable key.
-#[cfg(test)]
-pub(crate) fn take_reported_unproved_labelset_check() -> Option<&'static str> {
-    REPORTED_UNPROVED_LABELSET_CHECK.with(|reported| reported.replace(None))
+/// Reports the shape the route does not answer, once, with the cause it named.
+fn report_unsupported(error: &Error) {
+    let Error::UnsupportedNativeShape { reason, .. } = error else {
+        return;
+    };
+    debug!(
+        "Native PromQL route does not answer this expression ({reason}); \
+         the existing planner answers it"
+    );
+    crate::metrics::NATIVE_PROMQL_UNSUPPORTED_TOTAL
+        .with_label_values(&[reason.as_str()])
+        .inc();
 }
 
 impl PromPlanner {
@@ -335,29 +287,29 @@ impl PromPlanner {
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
-    ) -> Result<Option<PreparedInput>> {
+    ) -> Result<PreparedInput> {
         let (Some(metric), Some(time)) = (
             self.ctx.table_name.clone(),
             self.ctx.time_index_column.clone(),
         ) else {
-            return Ok(declined("selector_without_table_or_time_index"));
+            return unsupported("selector_without_table_or_time_index");
         };
         let tags = self.ctx.tag_columns.clone();
         let fields = self.ctx.field_columns.clone();
         // A `__field__` matcher narrows the field set in a projection the existing planner builds, and the
         // raw series scan below this node has no equivalent: it reports every field the scan carries.
         if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
-            return Ok(declined("field_selector_without_raw_series_equivalent"));
+            return unsupported("field_selector_without_raw_series_equivalent");
         }
         // Delta samples are increments: the existing planner sums them for `increase` and
         // divides by the range for `rate`, while the native tree assumes cumulative samples.
-        // Decline only when this selector is read by one of those calls.
+        // Refuse only when this selector is read by one of those calls.
         if tags
             .iter()
             .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
             && under_rate_or_increase
         {
-            return Ok(declined("delta_temporality_under_rate_or_increase"));
+            return unsupported("delta_temporality_under_rate_or_increase");
         }
         // The selector's own table scan, built by the same method the existing path uses:
         // the physical planner turns it into the region scan the node reads, and building a
@@ -386,7 +338,7 @@ impl PromPlanner {
                     .map(|field| source_schema.index_of(field).ok())
                     .collect::<Option<Vec<_>>>()
                 else {
-                    return Ok(declined("field_missing_from_source_schema"));
+                    return unsupported("field_missing_from_source_schema");
                 };
                 let original_projection = scan.projection.as_ref();
                 let selected_indices = original_projection
@@ -410,7 +362,7 @@ impl PromPlanner {
             }
             None => match &input {
                 LogicalPlan::TableScan(scan) => scan.clone(),
-                _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
+                _ => return unsupported("selector_plan_is_not_a_table_scan"),
             },
         };
         let table = self.table_from_source(&scan.source)?;
@@ -439,10 +391,10 @@ impl PromPlanner {
         if !supports_native_raw_series(&table_meta.engine)
             || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
         {
-            return Ok(declined("engine_without_raw_series_scanner"));
+            return unsupported("engine_without_raw_series_scanner");
         }
         // The region's raw-series preflight refuses these, and the physical layer turns that
-        // refusal into an error, so decline this route here instead.
+        // refusal into an error, so refuse this route here instead.
         let time_index_type = table_meta
             .schema
             .timestamp_column()
@@ -455,7 +407,7 @@ impl PromPlanner {
                 .get(store_api::mito_engine_options::APPEND_MODE_KEY)
                 .is_some_and(|value| value.eq_ignore_ascii_case("true"))
         {
-            return Ok(declined("unsupported_time_index_type_or_append_mode"));
+            return unsupported("unsupported_time_index_type_or_append_mode");
         }
         // A partition column that is not a tag splits one series across regions, and a bare scan cannot
         // reconcile the fragments; a raw source can, so such a selector is admitted and its input is bound per
@@ -492,15 +444,15 @@ impl PromPlanner {
             // The existing plan publishes the field's own type for this shape - a bare selector copies the
             // column, `sum` keeps an integer's type, `count` builds an `Int64` - while a fused node
             // publishes `Float64` alone, so admitting it would change the answer's column type.
-            return Ok(declined("field_keeps_its_own_type"));
+            return unsupported("field_keeps_its_own_type");
         }
         let Some(field_kind) =
             uniform_field_kind(read_types.iter().map(|data_type| data_type.as_ref()))
         else {
-            return Ok(declined("mixed_field_kinds"));
+            return unsupported("mixed_field_kinds");
         };
         if statement_kind.is_some_and(|kind| kind != field_kind) {
-            return Ok(declined("selectors_disagree_on_field_kind"));
+            return unsupported("selectors_disagree_on_field_kind");
         }
         *statement_kind = Some(field_kind);
         let series_schema = Arc::new(SeriesSchema {
@@ -520,9 +472,9 @@ impl PromPlanner {
         if let LogicalPlan::TableScan(table_scan) = &mut input {
             table_scan.filters.append(&mut filters);
         } else {
-            return Ok(declined("selector_plan_is_not_a_table_scan"));
+            return unsupported("selector_plan_is_not_a_table_scan");
         }
-        Ok(Some((
+        Ok((
             input,
             series_schema,
             Some(Arc::from(metric)),
@@ -531,58 +483,43 @@ impl PromPlanner {
             partitioned,
             split_series,
             keys_survive,
-        )))
+        ))
     }
 
-    /// Offers `prom_expr` to the native route, or answers `None` with the cause of its refusal.
+    /// Offers `prom_expr` to the native route: the plan it answers, or the shape it does not answer.
+    ///
+    /// The caller offers only when the query asked for this route (see [`Self::native_fused`]). A
+    /// shape the route does not answer is that error, and it is reported once (a log line and a
+    /// counter).
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
         query_engine_state: &QueryEngineState,
-    ) -> Result<Option<LogicalPlan>> {
-        // With the route off nothing below runs, so reporting the answer as a fallback would
-        // describe a route the query never asked for.
-        if !self.native_fused {
-            return Ok(None);
-        }
-        let planned = self
+    ) -> Result<LogicalPlan> {
+        let planned = match self
             .try_plan_native(prom_expr, query_engine_state, FusedOutputFormat::PlainRows)
-            .await?;
-        // Whether this statement is one whose metadata drop its key columns cannot prove - the plan
-        // time risk hint, not a collection: nothing is inserted for that pair. The attempts below
-        // record it where they decide it; taking it here keeps the count one per statement and
-        // leaves nothing behind for the next one.
-        let unproved = UNPROVED_LABELSET_CHECK.with(|unproved| unproved.replace(None));
-        match planned {
-            // A whole statement answers a row table. A frame is what a composition reads from its
-            // operands, so the statement root is never one.
-            Some(NativePlanned::Rows(plan)) => {
-                if let Some(reason) = unproved {
-                    crate::metrics::DUPLICATE_LABELSET_CHECK_UNPROVED_TOTAL
-                        .with_label_values(&[reason])
-                        .inc();
-                    #[cfg(test)]
-                    REPORTED_UNPROVED_LABELSET_CHECK.with(|reported| reported.set(Some(reason)));
-                }
-                Ok(Some(plan))
+            .await
+        {
+            Ok(planned) => planned,
+            Err(error @ Error::UnsupportedNativeShape { .. }) => {
+                report_unsupported(&error);
+                return Err(error);
             }
-            _ => {
-                // Without this record a route that never ran would only be visible in the caller's
-                // answer.
-                let reason = take_native_decline().unwrap_or(NATIVE_DECLINE_UNRECORDED);
-                debug!(
-                    "Native PromQL route declined this expression ({reason}); \
-                     the existing planner answers it"
-                );
-                crate::metrics::NATIVE_PROMQL_DECLINED_TOTAL
-                    .with_label_values(&[reason])
-                    .inc();
-                #[cfg(test)]
-                REPORTED_DECLINE.with(|reported| reported.set(Some(reason)));
-                NATIVE_DECLINE.with(|record| record.set(Some(reason)));
-                Ok(None)
-            }
+            Err(error) => return Err(error),
+        };
+        let Some(NativePlanned {
+            kind: NativePlannedKind::Rows(plan),
+            unproved_keys,
+        }) = planned
+        else {
+            return unsupported(UNSUPPORTED_SHAPE_UNNAMED);
+        };
+        if let Some(reason) = unproved_keys {
+            crate::metrics::DUPLICATE_LABELSET_CHECK_UNPROVED_TOTAL
+                .with_label_values(&[reason])
+                .inc();
         }
+        Ok(plan)
     }
 
     /// The one native attempt at `prom_expr`, in the representation the caller needs from it.
@@ -607,10 +544,6 @@ impl PromPlanner {
         query_engine_state: &'a QueryEngineState,
         format: FusedOutputFormat,
     ) -> BoxFuture<'a, Result<Option<NativePlanned>>> {
-        // One attempt is one whole-expression offer: a test counts them to hold the cost of a
-        // refused chain to its own positions, and the report below counts what a query paid for.
-        #[cfg(test)]
-        NATIVE_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         // An attempt descends the tree it was offered once per operator, and the composition below
         // offers each operand in turn, so the recursion grows its stack here as well as at the
         // planner's own descent: `GrownStack` grows it for the whole poll of this future, which
@@ -624,16 +557,22 @@ impl PromPlanner {
             ))
             .await;
             self.ctx = saved.clone();
-            match whole {
-                Ok(Some(planned)) => return Ok(Some(planned)),
-                Ok(None) => {}
+            let whole_unsupported = match whole {
+                Ok(planned) => return Ok(Some(planned)),
+                Err(error @ Error::UnsupportedNativeShape { .. }) => Some(error),
                 Err(error) => return Err(error),
-            }
+            };
             let composed = self
                 .try_plan_native_composed_binary(prom_expr, query_engine_state, format)
                 .await;
             self.ctx = saved;
-            composed
+            match composed {
+                Ok(None) => match whole_unsupported {
+                    Some(error) => Err(error),
+                    None => Ok(None),
+                },
+                answer => answer,
+            }
         }))
     }
 
@@ -642,7 +581,7 @@ impl PromPlanner {
     /// Each operand is planned the way the whole expression is and bound as one evaluated series frame.
     /// What admits the pair is the composition itself: the two grids must agree, and the matching, its
     /// cardinality, its fill values and the output column's kind must all be ones the kernels answer. A
-    /// shape they refuse declines with the cause it records, which the offer's caller reports.
+    /// shape they refuse refuses with the cause it records, which the offer's caller reports.
     ///
     /// Only a binary expression composes, and only its own two operands are offered below.
     async fn try_plan_native_composed_binary(
@@ -680,8 +619,15 @@ impl PromPlanner {
             )
             .await;
         self.ctx = saved.clone();
-        let Some(NativePlanned::Frame(left)) = left? else {
-            return Ok(declined("left_operand_is_not_a_frame"));
+        let (left, left_unproved) = match left {
+            Ok(Some(planned)) => match planned.kind {
+                NativePlannedKind::Frame(frame) => (frame, planned.unproved_keys),
+                _ => return unsupported("left_operand_is_not_a_frame"),
+            },
+            Ok(None) | Err(Error::UnsupportedNativeShape { .. }) => {
+                return unsupported("left_operand_is_not_a_frame");
+            }
+            Err(error) => return Err(error),
         };
         let right = self
             .try_plan_native(
@@ -691,11 +637,18 @@ impl PromPlanner {
             )
             .await;
         self.ctx = saved;
-        let Some(NativePlanned::Frame(right)) = right? else {
-            return Ok(declined("right_operand_is_not_a_frame"));
+        let (right, right_unproved) = match right {
+            Ok(Some(planned)) => match planned.kind {
+                NativePlannedKind::Frame(frame) => (frame, planned.unproved_keys),
+                _ => return unsupported("right_operand_is_not_a_frame"),
+            },
+            Ok(None) | Err(Error::UnsupportedNativeShape { .. }) => {
+                return unsupported("right_operand_is_not_a_frame");
+            }
+            Err(error) => return Err(error),
         };
         if left.grid.spec() != right.grid.spec() {
-            return Ok(declined("operand_grids_differ"));
+            return unsupported("operand_grids_differ");
         }
         let NativeFramePlan {
             plan: left_plan,
@@ -728,12 +681,12 @@ impl PromPlanner {
         ) {
             Ok(tree) => tree,
             Err(DataFusionError::NotImplemented(_)) => {
-                return Ok(declined("no_kernel_for_the_operator_pair"));
+                return unsupported("no_kernel_for_the_operator_pair");
             }
             Err(error) => return Err(error).context(DataFusionPlanningSnafu),
         };
         let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
-            return Ok(declined("bound_root_is_not_the_binary"));
+            return unsupported("bound_root_is_not_the_binary");
         };
         let Some(root_kind) = binary_output_field_kind(
             left_kind,
@@ -742,10 +695,13 @@ impl PromPlanner {
             matching.return_bool,
             matching.fill,
         ) else {
-            return Ok(declined("no_output_kind_for_the_pair"));
+            return UnsupportedExprSnafu {
+                name: "PromQL fill modifiers",
+            }
+            .fail();
         };
         if !native_tree_supported(&tree) {
-            return Ok(declined("runtime_refuses_the_composed_tree"));
+            return unsupported("runtime_refuses_the_composed_tree");
         }
         // The expression names the value columns, and it is the label the node reports.
         let expression = expr.to_string();
@@ -756,7 +712,7 @@ impl PromPlanner {
             FusedOutputFormat::PlainRows => None,
             FusedOutputFormat::SeriesFrame => {
                 let Some(tags) = fused_output_tags(tree.root(), &source_tags) else {
-                    return Ok(declined("composition_has_no_output_labels"));
+                    return unsupported("composition_has_no_output_labels");
                 };
                 Some((tree.root().output.clone(), tags))
             }
@@ -771,7 +727,7 @@ impl PromPlanner {
                     root_kind,
                 )?
                 else {
-                    return Ok(declined("composition_has_no_value_columns"));
+                    return unsupported("composition_has_no_value_columns");
                 };
                 schema
             }
@@ -780,7 +736,7 @@ impl PromPlanner {
                     Ok(frame) => frame,
                     // A frame this composition cannot declare is a shape it does not answer.
                     Err(DataFusionError::Plan(_)) => {
-                        return Ok(declined("composition_cannot_declare_a_frame"));
+                        return unsupported("composition_cannot_declare_a_frame");
                     }
                     Err(error) => return Err(error).context(DataFusionPlanningSnafu),
                 };
@@ -802,17 +758,22 @@ impl PromPlanner {
             output_schema,
             format,
         ) else {
-            return Ok(declined("fused_node_refuses_the_composition"));
+            return unsupported("fused_node_refuses_the_composition");
         };
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         });
         Ok(Some(native_planned(
-            plan, metadata, root_kind, left_time, left_grid,
+            plan,
+            metadata,
+            root_kind,
+            left_time,
+            left_grid,
+            left_unproved.or(right_unproved),
         )))
     }
 
-    /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
+    /// Plans `prom_expr` as one native node, or answers why this shape is not one.
     ///
     /// The expression names the value columns; the compiler's bound tree and selector schemas
     /// determine their values. The existing planner is not consulted for capability or schema approval.
@@ -823,15 +784,16 @@ impl PromPlanner {
     /// the planner's resolved selector context, which is the raw series schema the tree's input is
     /// compiled against. Selectors with a `__field__` matcher keep legacy planning.
     ///
-    /// `None` records the cause of the refusal, which the offer's caller reports.
+    /// A shape this route does not answer is that error; the offer's caller reports it rather than
+    /// planning the query some other way (see [`PromPlanner::try_plan_native_fused`]).
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,
         query_engine_state: &QueryEngineState,
         format: FusedOutputFormat,
-    ) -> Result<Option<NativePlanned>> {
+    ) -> Result<NativePlanned> {
         if !self.native_fused {
-            return Ok(declined("native_route_not_requested"));
+            return unsupported("native_route_not_requested");
         }
         // The expression names the value columns of every rows layout this attempt publishes, and the
         // node's own label follows the same text. It is the whole statement's expression even when a
@@ -844,23 +806,23 @@ impl PromPlanner {
         if prom_expr.value_type() == ValueType::Matrix
             && (subquery_root.is_none() || self.ctx.start != self.ctx.end)
         {
-            return Ok(declined("matrix_root_without_a_grid"));
+            return unsupported("matrix_root_without_a_grid");
         }
 
         let Some(stmt) = self.native_statement(prom_expr) else {
-            return Ok(declined("statement_has_no_evaluation_grid"));
+            return unsupported("statement_has_no_evaluation_grid");
         };
         // The subquery root's inner expression is compiled on the child grid, with the statement left
         // untouched: `@ start()` and `@ end()` inside it resolve against the statement's bounds. A statement
         // whose grid cannot be built keeps the existing plan.
         let child_grid = if let Some(subquery) = subquery_root {
             let Ok(outer) = statement_grid(&stmt) else {
-                return Ok(declined("subquery_outer_grid_unavailable"));
+                return unsupported("subquery_outer_grid_unavailable");
             };
             let Some(child) =
                 subquery_child_grid(&stmt, &outer, subquery).context(DataFusionPlanningSnafu)?
             else {
-                return Ok(declined("subquery_has_no_child_grid"));
+                return unsupported("subquery_has_no_child_grid");
             };
             Some(child.grid)
         } else {
@@ -882,12 +844,12 @@ impl PromPlanner {
             &mut selectors,
             &mut set_operations,
         ) {
-            return Ok(declined("selector_walk_refuses_the_statement"));
+            return unsupported("selector_walk_refuses_the_statement");
         }
         // The compiler decides which calls and shapes this route answers: a name it has no kernel for comes
-        // back as `NotImplemented`, which is a decline below.
+        // back as `NotImplemented`, which is a refusal below.
         let Ok(statement) = statement_grid(&stmt) else {
-            return Ok(declined("statement_grid_unavailable"));
+            return unsupported("statement_grid_unavailable");
         };
         // The one grid every lowering path below binds: a subquery root is compiled on its child
         // grid, and the rows it publishes carry that grid, so the split, the boundary and the
@@ -899,7 +861,7 @@ impl PromPlanner {
             let tree = match compile_statement_with_grid(&compile_stmt, Arc::clone(&grid)) {
                 Ok(tree) => tree,
                 Err(DataFusionError::NotImplemented(_)) => {
-                    return Ok(declined("no_kernel_for_the_statement_shape"));
+                    return unsupported("no_kernel_for_the_statement_shape");
                 }
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
@@ -911,16 +873,16 @@ impl PromPlanner {
                 NativeType::Samples(schema) if schema.eval_grid.is_some()
             );
             if format == FusedOutputFormat::SeriesFrame && !evaluated {
-                return Ok(declined("frame_operand_is_not_evaluated"));
+                return unsupported("frame_operand_is_not_evaluated");
             }
             // Bind only input tags: this data-free tree has no input, and its tags belong to its
             // output schema.
             let Some(output_tags) = fused_output_tags(tree.root(), &[]) else {
-                return Ok(declined("data_free_root_has_no_labels"));
+                return unsupported("data_free_root_has_no_labels");
             };
 
             let Some(values) = native_root_fields(tree.root()) else {
-                return Ok(declined("data_free_root_has_no_value_columns"));
+                return unsupported("data_free_root_has_no_value_columns");
             };
             let value_names = expression_field_names(&expression, &values);
             let time_index = free_time_index(DEFAULT_TIME_INDEX_COLUMN, &value_names, &output_tags);
@@ -967,13 +929,14 @@ impl PromPlanner {
             let plan = LogicalPlan::Extension(Extension {
                 node: Arc::new(node),
             });
-            return Ok(Some(native_planned(
+            return Ok(native_planned(
                 plan,
                 metadata,
                 FieldKind::Float,
                 time_index,
                 grid,
-            )));
+                None,
+            ));
         }
         let original_context = self.ctx.clone();
         let preparation = async {
@@ -990,7 +953,7 @@ impl PromPlanner {
                 // These matchers are alternatives the one scan below the node cannot represent, so the
                 // query keeps the plan the existing path builds for it.
                 if !selector.matchers.or_matchers.is_empty() {
-                    return Ok(declined("or_matchers_have_no_single_raw_scan"));
+                    return unsupported("or_matchers_have_no_single_raw_scan");
                 }
                 // A selector that names no metric is answered by enumerating the schema's logical metric
                 // tables: one input per metric, each reading its own region, so every series keeps the
@@ -1008,7 +971,7 @@ impl PromPlanner {
                         .preprocess_label_matchers(&ordinary_matchers, &Some(String::new()))
                     {
                         Ok(m) => m,
-                        Err(_) => return Ok(declined("discovery_matchers_cannot_be_preprocessed")),
+                        Err(_) => return unsupported("discovery_matchers_cannot_be_preprocessed"),
                     };
                     let effective_schema = self
                         .ctx
@@ -1019,7 +982,7 @@ impl PromPlanner {
                     // see never becomes a source, so its name reaches neither the plan nor an error.
                     let scope = self.table_provider.query_ctx().metric_discovery_scope();
                     if matches!(scope, MetricDiscoveryScope::Unavailable) {
-                        return Ok(declined("metric_discovery_unavailable"));
+                        return unsupported("metric_discovery_unavailable");
                     }
                     let mut metrics = self
                         .table_provider
@@ -1089,7 +1052,7 @@ impl PromPlanner {
                         let Some(fields) =
                             empty_discovered_fields(self.ctx.field_column_matcher.as_deref())
                         else {
-                            return Ok(declined("field_matcher_has_no_empty_layout"));
+                            return unsupported("field_matcher_has_no_empty_layout");
                         };
                         prepared.push(empty_discovered_input(
                             self.ctx
@@ -1115,9 +1078,9 @@ impl PromPlanner {
                     for table in metrics {
                         self.ctx.table_name = Some(table.table_info().name.clone());
                         if self.setup_context().await?.is_some() {
-                            return Ok(declined("discovered_table_has_no_data"));
+                            return unsupported("discovered_table_has_no_data");
                         }
-                        let Some((
+                        let (
                             scan,
                             schema,
                             metric,
@@ -1126,7 +1089,7 @@ impl PromPlanner {
                             partitioned,
                             split_series,
                             keys_survive,
-                        )) = self
+                        ) = self
                             .prepare_one_scan(
                                 matchers.clone(),
                                 *under_rate_or_increase,
@@ -1135,19 +1098,14 @@ impl PromPlanner {
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
                             )
-                            .await?
-                        else {
-                            // A refusal here is the selector's own: `prepare_one_scan` recorded
-                            // its cause, and naming this pass again would overwrite it.
-                            return Ok(None);
-                        };
+                            .await?;
                         discovered_partitioned |= partitioned;
                         discovered_split_series |= split_series;
                         discovered_keys_survive &= keys_survive;
                         // The union reads every discovered metric, so it is region-local only when
                         // every metric it reads is.
                         let Some(metric) = metric else {
-                            return Ok(declined("discovered_selector_names_no_metric"));
+                            return unsupported("discovered_selector_names_no_metric");
                         };
                         // The expression names no metric, so each source reports its own: the tag is
                         // what tells two metrics with equal ordinary labels apart, and it is what a
@@ -1200,7 +1158,7 @@ impl PromPlanner {
                         }
                     }
                     let Some((schema, time, mut tags, single_metric)) = selector_metadata else {
-                        return Ok(declined("discovered_selectors_disagree_on_their_layout"));
+                        return unsupported("discovered_selectors_disagree_on_their_layout");
                     };
                     tags.sort();
                     tags.dedup();
@@ -1232,7 +1190,7 @@ impl PromPlanner {
                 let matchers =
                     match self.preprocess_label_matchers(&selector.matchers, &selector.name) {
                         Ok(m) => m,
-                        Err(_) => return Ok(declined("selector_matchers_cannot_be_preprocessed")),
+                        Err(_) => return unsupported("selector_matchers_cannot_be_preprocessed"),
                     };
                 if self.setup_context().await?.is_some() {
                     // The selector names a metric whose table does not exist, so the query still has an
@@ -1240,7 +1198,7 @@ impl PromPlanner {
                     // that matched no table is. Planning it here keeps `TableNameNotFound` out of the
                     // existing planner, which has no table to bind.
                     //
-                    // A `__field__` matcher does not decline here, though one over a scan this route can
+                    // A `__field__` matcher does not refuse here, though one over a scan this route can
                     // read does: it narrows the field set of the table its selector reads, and this table has
                     // no field set to narrow, so every field selection over it is empty. The existing planner
                     // answers the same way, because a missing table is planned as `EmptyMetric` before the
@@ -1256,7 +1214,7 @@ impl PromPlanner {
                     )?);
                     continue;
                 }
-                let Some(one) = self
+                let one = self
                     .prepare_one_scan(
                         matchers,
                         *under_rate_or_increase,
@@ -1265,28 +1223,21 @@ impl PromPlanner {
                         &mut logical_ids_differ,
                         &mut statement_kind,
                     )
-                    .await?
-                else {
-                    // `prepare_one_scan` recorded why, above.
-                    return Ok(None);
-                };
+                    .await?;
                 prepared.push(one);
             }
-            Ok(Some((prepared, logical_ids_differ, statement_kind)))
+            Ok((prepared, logical_ids_differ, statement_kind))
         }
         .await;
         self.ctx = original_context;
-        let Some((mut prepared, logical_ids_differ, statement_kind)) = preparation? else {
-            // The selector that refused recorded its own cause; this pass only carries it up.
-            return Ok(None);
-        };
+        let (mut prepared, logical_ids_differ, statement_kind) = preparation?;
         // `absent_over_time` reads its window through a fold that keeps the metric name, which the fused
         // node hands over in a frame's labels. Only the bare-scan arm of that node needs the binding's own
         // name: it asks a region scan for the series of one metric, and that is exactly the shape with a
         // name to ask for. A nameless selector that discovery expands into several metric tables never
         // reaches that arm, because its prepared input is the `Union` of one `RawSeriesSource` per
         // discovered metric, and each source names its own metric, so the node is handed explicit-label
-        // frames instead. So the case declined here is a nameless input that is *not* sourced, which is the
+        // frames instead. So the case refused here is a nameless input that is *not* sourced, which is the
         // one shape where a tree keeping `__name__` would meet a scan that has no name to bind.
         //
         // A selector that matched no table is not that shape either: its typed empty input holds no series.
@@ -1295,7 +1246,7 @@ impl PromPlanner {
                 !is_empty_discovered_input(scan) && metric.is_none() && !is_sourced_plan(scan)
             })
         {
-            return Ok(declined("presence_over_a_nameless_selector"));
+            return unsupported("presence_over_a_nameless_selector");
         }
         // Selectors over one table share one region, so the node runs there over every scan. When they read
         // more than one table, each scan answers from its own region and the node runs above them; see
@@ -1348,7 +1299,7 @@ impl PromPlanner {
             .find(|(scan, ..)| !is_empty_discovered_input(scan))
             .or_else(|| prepared.first())
         else {
-            return Ok(declined("statement_prepared_no_readable_input"));
+            return unsupported("statement_prepared_no_readable_input");
         };
         let (metric, time, tags) = (metric.clone(), time.clone(), tags.clone());
         // The compiler binds one input per selector in the same pre-order `collect_selectors`
@@ -1412,9 +1363,9 @@ impl PromPlanner {
             statement_kind,
         ) {
             Ok(v) => v,
-            // The compiler refusing a shape is this route declining it.
+            // The compiler refusing a shape is this route refusing it.
             Err(DataFusionError::NotImplemented(_)) => {
-                return Ok(declined("no_kernel_for_the_statement_shape"));
+                return unsupported("no_kernel_for_the_statement_shape");
             }
             Err(e) => return Err(e).context(DataFusionPlanningSnafu),
         };
@@ -1429,7 +1380,7 @@ impl PromPlanner {
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             if compiled_input.source_index != index {
-                return Ok(declined("compiled_sources_out_of_order"));
+                return unsupported("compiled_sources_out_of_order");
             }
             // The range this selector reads is the compiler's own: a window and an instant differ in which
             // side of the lookback or range their scan starts on, and an anchor can move the whole range
@@ -1594,21 +1545,19 @@ impl PromPlanner {
             &runtime_source_metrics,
         ) {
             Ok(tree) => tree,
-            Err(_) => return Ok(declined("label_rewrites_do_not_merge")),
+            Err(_) => return unsupported("label_rewrites_do_not_merge"),
         };
         // What the pair those collections used to be paid for can still hide: a node that drops the
         // metadata labels is proved by its labels, and the scan's key columns are the one fact they
         // cannot state - a primary-key column that can spell `NULL` in one series and `''` in
         // another. Counting the statements that fact leaves unproved is what keeps it observable.
-        if promql::native::plan::leaves_a_drop_to_the_storage_keys(
+        let unproved_keys = promql::native::plan::leaves_a_drop_to_the_storage_keys(
             &tree,
             &runtime_source_tags,
             &runtime_source_metrics,
             keys_survive,
-        ) {
-            UNPROVED_LABELSET_CHECK
-                .with(|unproved| unproved.set(Some(UNPROVED_LABELSET_CHECK_NULLABLE_KEY)));
-        }
+        )
+        .then_some(UNPROVED_LABELSET_CHECK_NULLABLE_KEY);
         let root = tree.root();
         // The placement facts the split and the segmentation below are chosen from, and the same
         // facts that say whether one node can run over the scans at all.
@@ -1719,21 +1668,21 @@ impl PromPlanner {
             Some(FieldKind::Histogram) => {
                 match root.output_field_kind(Some(FieldKind::Histogram)) {
                     Some(root_kind) => root_kind,
-                    None => return Ok(declined("root_declares_no_field_kind")),
+                    None => return unsupported("root_declares_no_field_kind"),
                 }
             }
             Some(FieldKind::Float) | None => FieldKind::Float,
         };
         let frame_metadata = if format == FusedOutputFormat::SeriesFrame {
             let NativeType::Samples(schema) = &root.output else {
-                return Ok(declined("frame_operand_is_not_samples"));
+                return unsupported("frame_operand_is_not_samples");
             };
             if schema.eval_grid.is_none() {
-                return Ok(declined("frame_operand_has_no_grid"));
+                return unsupported("frame_operand_has_no_grid");
             }
             // A segment publishes frames, so it reports no name column of its own.
             let Some(output_tags) = fused_output_tags(root, &source_tags) else {
-                return Ok(declined("root_has_no_output_labels"));
+                return unsupported("root_has_no_output_labels");
             };
             Some((root.output.clone(), output_tags))
         } else {
@@ -1747,13 +1696,13 @@ impl PromPlanner {
         if let Some(kind @ FieldKind::Histogram) = statement_kind
             && ((multi_input && per_source_inputs) || aggregate_reads_histogram(root, kind))
         {
-            return Ok(declined("histogram_aggregate_needs_state_this_route_lacks"));
+            return unsupported("histogram_aggregate_needs_state_this_route_lacks");
         }
-        // The split keeps its prefix per-series, which is why it declines an operation whose
+        // The split keeps its prefix per-series, which is why it refuses an operation whose
         // answer depends on the order its input arrives in. A node over more than one input reads
         // its inputs' partitions in the order they became ready, so that refusal holds there too.
         if multi_input && depends_on_input_order(root) {
-            return Ok(declined("answer_depends_on_input_order"));
+            return unsupported("answer_depends_on_input_order");
         }
         // The native output schema can name only compiled value fields, the time index and the tag
         // columns a source declares, and `source_tags` declares the metric name of every occurrence of
@@ -1770,7 +1719,7 @@ impl PromPlanner {
         // tree. A plan split over regions commits to the fused node without the split or a segment
         // above it, so it checks itself the same way before that choice.
         if (multi_input || per_source_inputs) && !native_tree_supported(&tree) {
-            return Ok(declined("runtime_refuses_the_tree"));
+            return unsupported("runtime_refuses_the_tree");
         }
         // A tree that ends in a canonical merge answers one series per label set, and the pieces of one
         // set were spread over the scan's partitions by the rewrite that created them. Lowering that
@@ -1793,17 +1742,18 @@ impl PromPlanner {
                 expression_field_names,
             )
         {
-            return Ok(Some(native_planned(
+            return Ok(native_planned(
                 plan,
                 frame_metadata,
                 root_kind,
                 time,
                 grid,
-            )));
+                unproved_keys,
+            ));
         }
         if required_placement {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather than
-            // whole samples. The general segmentation below is the fallback for the trees it declines,
+            // whole samples. The general segmentation below is the fallback for the trees it refuses,
             // and the split is decided before anything consumes a child. Its producer reads whatever
             // input the statement prepared.
             let split = if selectors.len() == 1 {
@@ -1823,7 +1773,7 @@ impl PromPlanner {
                 if root_kind != FieldKind::Float
                     && !(root_kind == FieldKind::Histogram && histogram_state)
                 {
-                    return Ok(declined("split_aggregate_folds_float_state_only"));
+                    return unsupported("split_aggregate_folds_float_state_only");
                 }
                 // The row-value layout is what the split is validated against whichever format the
                 // caller asked for: it names one column per value the partial state accumulates,
@@ -1831,16 +1781,16 @@ impl PromPlanner {
                 let Some(value_schema) =
                     Self::fused_root_schema(&expression, &tree, &source_tags, &time, root_kind)?
                 else {
-                    return Ok(declined("root_has_no_value_columns"));
+                    return unsupported("root_has_no_value_columns");
                 };
                 // A frame operand also needs the evaluated layout its consumers decode, which is
                 // the metadata derived above: a request that could not name one keeps the existing
                 // plan rather than publishing rows to a frame consumer.
                 if format == FusedOutputFormat::SeriesFrame && frame_metadata.is_none() {
-                    return Ok(declined("frame_operand_needs_an_evaluated_layout"));
+                    return unsupported("frame_operand_needs_an_evaluated_layout");
                 }
                 let Some(rawinput) = children.into_iter().next() else {
-                    return Ok(declined("split_aggregate_has_no_input"));
+                    return unsupported("split_aggregate_has_no_input");
                 };
                 let publish_grid = Arc::clone(&grid);
                 let node = plan_split_aggregate(
@@ -1860,15 +1810,16 @@ impl PromPlanner {
                 let plan = LogicalPlan::Extension(Extension {
                     node: Arc::new(node),
                 });
-                return Ok(Some(native_planned(
+                return Ok(native_planned(
                     plan,
                     frame_metadata,
                     root_kind,
                     time,
                     grid,
-                )));
+                    unproved_keys,
+                ));
             }
-            // A tree that folds native histograms anywhere and whose split declined keeps the
+            // A tree that folds native histograms anywhere and whose split refused keeps the
             // existing plan instead of being segmented. A segment reads the frames a boundary above
             // it assembles - the canonical merge's collected pieces, or a region-local producer's
             // frames - and this route has no execution that folds a histogram state out of those:
@@ -1876,25 +1827,25 @@ impl PromPlanner {
             // statement keeps the plan that already answers it rather than publishing a column
             // nothing here can fill.
             if binds_histogram_state_anywhere(root) {
-                return Ok(declined("histogram_state_above_a_segment_boundary"));
+                return unsupported("histogram_state_above_a_segment_boundary");
             }
         }
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
-        // the walk derives. If it cannot derive them, this route declines.
+        // the walk derives. If it cannot derive them, this route refuses.
         let output_tags = match &tree.root().output {
             // A scalar has no labels, and its value is named as a bare literal's is.
             NativeType::Scalar(_) => Vec::new(),
             NativeType::Samples(_) => match fused_output_tags(tree.root(), &source_tags) {
                 Some(output_tags) => with_row_name_column(tree.root(), output_tags),
-                None => return Ok(declined("root_has_no_output_labels")),
+                None => return unsupported("root_has_no_output_labels"),
             },
             NativeType::AggregateState(_) => {
-                return Ok(declined("aggregate_state_is_not_a_statement_answer"));
+                return unsupported("aggregate_state_is_not_a_statement_answer");
             }
         };
         let Some(root_fields) = native_root_fields(tree.root()) else {
-            return Ok(declined("root_has_no_value_columns"));
+            return unsupported("root_has_no_value_columns");
         };
         // A statement whose every input matched no table has no column of its own to name its grid
         // after: the empty input carries the synthetic `time` column the existing planner names an
@@ -1913,7 +1864,7 @@ impl PromPlanner {
                 .iter()
                 .any(|name| output_tags.iter().any(|tag| tag == name))
             {
-                return Ok(None);
+                return unsupported(UNSUPPORTED_SHAPE_UNNAMED);
             }
             free_time_index(&time, &value_names, &output_tags)
         };
@@ -1947,20 +1898,21 @@ impl PromPlanner {
                 PromPlanner::segmented_root_schema,
             );
             if let Some(plan) = plan {
-                return Ok(Some(native_planned(
+                return Ok(native_planned(
                     plan,
                     frame_metadata,
                     root_kind,
                     time,
                     grid,
-                )));
+                    unproved_keys,
+                ));
             }
             // One input with no split or segment above it leaves a raw scan doing the work of a
             // cross-series consumer, and a single scan does not prove its region holds every
             // contribution the consumer needs. Keep that consumer on the existing plan; a tree over more
             // than one input is not this shape.
             if required_placement && !multi_input {
-                return Ok(declined("cross_series_consumer_over_one_scan"));
+                return unsupported("cross_series_consumer_over_one_scan");
             }
         }
         let output_schema = match format {
@@ -2005,23 +1957,24 @@ impl PromPlanner {
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         });
-        Ok(Some(native_planned(
+        Ok(native_planned(
             plan,
             frame_metadata,
             root_kind,
             time,
             grid,
-        )))
+            unproved_keys,
+        ))
     }
 
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
     /// Fields and tags are derived from the native tree; the expression names the output fields.
-    /// If this walk cannot derive a tag set, the native route declines rather than consulting the
+    /// If this walk cannot derive a tag set, the native route refuses rather than consulting the
     /// legacy planner.
     ///
     /// `Ok(None)` when the root is not a value the node can publish. A schema the output cannot
-    /// declare is an error rather than a decline: duplicate names violate the expression-named
+    /// declare is an error rather than a refusal: duplicate names violate the expression-named
     /// native output contract, so construction reports the collision instead of publishing a
     /// layout the reader cannot address.
     fn fused_root_schema(
@@ -2054,7 +2007,7 @@ impl PromPlanner {
 
     /// The rows layout a segmented statement root publishes, under the segment builders' callback.
     ///
-    /// A segment cannot carry this crate's error type, so a layout it cannot declare is a decline
+    /// A segment cannot carry this crate's error type, so a layout it cannot declare is a refusal
     /// here: the route keeps the plan the existing planner would have built for the same statement.
     fn segmented_root_schema(
         expression: &str,
@@ -2934,8 +2887,8 @@ enum PublishedValues {
 
 /// Whether the existing planner publishes a `Float64` for `field_type` under `statement`.
 ///
-/// Declining is what keeps the two routes' columns identical, so a shape this rule does not prove is a
-/// decline rather than a guess. The shapes it proves, and the existing planner's site that decides each:
+/// Refusing is what keeps the two routes' columns identical, so a shape this rule does not prove is a
+/// refusal rather than a guess. The shapes it proves, and the existing planner's site that decides each:
 ///
 /// - parentheses and subqueries are not shapes of their own: they publish what their inner expression
 ///   publishes,

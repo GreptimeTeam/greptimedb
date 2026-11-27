@@ -1171,7 +1171,7 @@ impl Pairs<'_> {
         // Prometheus runs the operation on the float a fill value puts in place of a missing sample,
         // so a filled pair reports the legacy dropped-sample Info too. What stays out is not the
         // fill but the pair: one missing a side never reaches here, and a supported operation that
-        // declines for another reason -- incompatible bucket layouts -- is already outside what
+        // refuses for another reason -- incompatible bucket layouts -- is already outside what
         // [`unsupported_histogram_arithmetic`] reports.
         let dropped_op = if self.annotations.is_some() {
             unsupported_histogram_arithmetic(self.matching.op, &lhs_value, &rhs_value)
@@ -2288,7 +2288,7 @@ impl<'a> Operand<'a> {
 }
 
 /// The legacy Info applies only to unsupported histogram arithmetic, not to other reasons a
-/// supported histogram operation can decline a pair (such as incompatible bucket layouts).
+/// supported histogram operation can refuse a pair (such as incompatible bucket layouts).
 fn unsupported_histogram_arithmetic(
     op: BinaryOp,
     lhs: &SampleRef<'_>,

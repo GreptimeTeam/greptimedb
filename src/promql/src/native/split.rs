@@ -101,7 +101,7 @@ pub(crate) fn split(
                     }
             });
             if changes_key && inner.histogram && !histogram_group_is_single(&inner.op.group) {
-                return Err(declined(
+                return Err(refused(
                     "a routing-label rewrite around a partitioned histogram",
                 ));
             }
@@ -121,14 +121,14 @@ pub(crate) fn split(
                 // A second aggregate above the cut folds the merged values of every group, which
                 // no partition owns on its own: it would have to be replanned as its own
                 // `Partial`/`Final` pair above the first one's result.
-                Some(_) => Err(declined("an aggregate above a split aggregate")),
+                Some(_) => Err(refused("an aggregate above a split aggregate")),
                 None => {
                     admit_prefix(input)?;
                     let NativeType::Samples(schema) = &node.output else {
-                        return Err(declined("an aggregate that produces no values"));
+                        return Err(refused("an aggregate that produces no values"));
                     };
                     if schema.eval_grid.is_none() {
-                        return Err(declined("an aggregate that produces no values"));
+                        return Err(refused("an aggregate that produces no values"));
                     }
                     Ok(Some(Split {
                         prefix: (**input).clone(),
@@ -163,10 +163,10 @@ pub(crate) fn split(
             // Two histogram calls may drop different labels at successive levels (in particular,
             // a native histogram retains `le`), so the first call's partition key is not enough.
             if inner.histogram {
-                return Err(declined("nested histograms above a split aggregate"));
+                return Err(refused("nested histograms above a split aggregate"));
             }
             if inner.label_rewrite && !histogram_group_is_single(&inner.op.group) {
-                return Err(declined(
+                return Err(refused(
                     "a routing-label rewrite around a partitioned histogram",
                 ));
             }
@@ -195,10 +195,10 @@ pub(crate) fn split(
             // The same two refusals as the literal form: successive calls may drop different labels,
             // so only the first call's partition key is known, and a rewrite may change that key.
             if inner.histogram {
-                return Err(declined("nested histograms above a split aggregate"));
+                return Err(refused("nested histograms above a split aggregate"));
             }
             if inner.label_rewrite && !histogram_group_is_single(&inner.op.group) {
-                return Err(declined(
+                return Err(refused(
                     "a routing-label rewrite around a partitioned histogram",
                 ));
             }
@@ -209,7 +209,7 @@ pub(crate) fn split(
                 .iter()
                 .any(|parameter| !suffix_carries(parameter))
             {
-                return Err(declined(
+                return Err(refused(
                     "a histogram parameter that reads the series the split reads",
                 ));
             }
@@ -228,11 +228,11 @@ pub(crate) fn split(
         NativeExpr::Vector {
             op: BoundVectorOp::TopK { .. },
             ..
-        } => Err(declined("a whole-vector operation above a split aggregate")),
-        // A per-point `φ` does not make the fold splittable: `check_cut` declines every `quantile`,
+        } => Err(refused("a whole-vector operation above a split aggregate")),
+        // A per-point `φ` does not make the fold splittable: `check_cut` refuses every `quantile`,
         // whose state is its group's samples however its argument is read. A `ParameterizedAggregate`
         // is only ever that fold, so there is nothing here to admit.
-        NativeExpr::ParameterizedAggregate { .. } => Err(declined("a `quantile` aggregate")),
+        NativeExpr::ParameterizedAggregate { .. } => Err(refused("a `quantile` aggregate")),
         // A canonical merge answers one series per canonical label set from every piece of that set,
         // and the pieces of one set are not in one partition: a label rewrite created them after the
         // scan split the rows. A split keeps that merge in the prefix, where it sees one partition's
@@ -245,7 +245,7 @@ pub(crate) fn split(
         // builds its producer and the canonical router collects one label set from every partition),
         // and the fold above it reads the whole series that boundary assembled. Refusing the split
         // here is what sends the statement there instead of answering it per partition.
-        NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
+        NativeExpr::Merge { .. } => Err(refused("an aggregate split across a canonical merge")),
         // A window whose input is already evaluated - a subquery - applies to the merged values the
         // suffix reads, provided it evaluates on a grid. The declared grid and the input's grid are
         // already required to be the same one when the window is bound, so the cut's grid need not be
@@ -260,7 +260,7 @@ pub(crate) fn split(
                 .samples()
                 .and_then(|schema| schema.eval_grid.as_ref());
             if input_grid.is_none() {
-                return Err(declined("a window over raw samples above an aggregate"));
+                return Err(refused("a window over raw samples above an aggregate"));
             }
             inner.suffix = NativeNode {
                 expr: NativeExpr::Window {
@@ -273,7 +273,7 @@ pub(crate) fn split(
         }
         // These read values the merged state does not answer: an instant selection or window reads
         // raw samples, `scalar`/`vector` answers one value or one series instead of the vector, and a
-        // parameterized map reads the whole vector at a point. `ParameterizedTopK` declines here
+        // parameterized map reads the whole vector at a point. `ParameterizedTopK` refuses here
         // exactly like the literal `topk` above does: a per-point `k` ranks the whole vector just as
         // a bound one does, so it needs the same whole-vector boundary. Admitting the one and
         // refusing the other would be an inconsistency rather than a capability.
@@ -284,7 +284,7 @@ pub(crate) fn split(
         | NativeExpr::ScalarOf { input }
         | NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::ParameterizedTopK { input, .. } => match split(input, fields, time_index)? {
-            Some(_) => Err(declined(
+            Some(_) => Err(refused(
                 "an aggregate under an operation that reads evaluated values",
             )),
             None => Ok(None),
@@ -311,7 +311,7 @@ pub(crate) fn split(
                 }
                 (None, Some(inner)) if matches!(left.expr, NativeExpr::Scalar(_)) => (inner, true),
                 _ => {
-                    return Err(declined(
+                    return Err(refused(
                         "an aggregate under a binary operation without a constant on the other side",
                     ));
                 }
@@ -342,7 +342,7 @@ pub(crate) fn split(
                 split(right, fields, time_index)?,
             ) {
                 (None, None) => Ok(None),
-                _ => Err(declined("an aggregate under a set operation")),
+                _ => Err(refused("an aggregate under a set operation")),
             }
         }
         // The suffix above a split aggregate reads the merged state alone, so it has no source for
@@ -353,7 +353,7 @@ pub(crate) fn split(
                 split(info, fields, time_index)?,
             ) {
                 (None, None) => Ok(None),
-                _ => Err(declined("an aggregate under info")),
+                _ => Err(refused("an aggregate under info")),
             }
         }
     }
@@ -377,7 +377,7 @@ pub(crate) fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
                 .filter(|schema| schema.eval_grid.is_none())
                 .map(|schema| schema.fields.to_vec())
         })
-        .ok_or_else(|| declined("a tree that reads no raw series"))
+        .ok_or_else(|| refused("a tree that reads no raw series"))
 }
 
 /// Refuses an aggregate whose state the split cannot carry, and one grouped by a value field.
@@ -393,10 +393,10 @@ pub(crate) fn check_cut(
     time_index: &str,
 ) -> DfResult<()> {
     if op.stage != AggregateStage::Complete {
-        return Err(declined("an aggregate that is not `Complete`"));
+        return Err(refused("an aggregate that is not `Complete`"));
     }
     if matches!(op.kind, AggregateKind::Quantile { .. }) {
-        return Err(declined("a `quantile` aggregate"));
+        return Err(refused("a `quantile` aggregate"));
     }
     if let Grouping::By(labels) = &op.group
         && labels.iter().any(|label| {
@@ -406,7 +406,7 @@ pub(crate) fn check_cut(
                     .any(|field| field.name.as_ref() == label.as_ref())
         })
     {
-        return Err(declined("an aggregate grouped by a value field"));
+        return Err(refused("an aggregate grouped by a value field"));
     }
     Ok(())
 }
@@ -430,7 +430,7 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
                     if let MapOp::Math(MathOp::Clamp { min, max }) = map_op
                         && max < min
                     {
-                        return Err(declined("a `clamp` whose maximum is below its minimum"));
+                        return Err(refused("a `clamp` whose maximum is below its minimum"));
                     }
                 }
                 node = input;
@@ -442,12 +442,12 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
             NativeExpr::Binary { left, right, .. } => {
                 node = match (&left.expr, &right.expr) {
                     (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => {
-                        return Err(declined("a per-series prefix of two constants"));
+                        return Err(refused("a per-series prefix of two constants"));
                     }
                     (NativeExpr::Scalar(_), _) => &**right,
                     (_, NativeExpr::Scalar(_)) => &**left,
                     (_, _) => {
-                        return Err(declined(
+                        return Err(refused(
                             "a per-series prefix that matches two vectors by label",
                         ));
                     }
@@ -457,7 +457,7 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
             // reads across series even inside one partition: a prefix holding one cannot promise
             // one series per label set, which is why the split refuses it above as well.
             NativeExpr::Merge { .. } => {
-                return Err(declined("a per-series prefix that collects a label set"));
+                return Err(refused("a per-series prefix that collects a label set"));
             }
             _ => break,
         }
@@ -473,13 +473,13 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
         NativeExpr::Instant { input, .. } | NativeExpr::Window { input, .. } if raw(input) => {
             Ok(())
         }
-        _ => Err(declined(
+        _ => Err(refused(
             "a per-series prefix that is not one series at a time",
         )),
     }
 }
 
-pub(crate) fn declined(reason: &str) -> DataFusionError {
+pub(crate) fn refused(reason: &str) -> DataFusionError {
     DataFusionError::NotImplemented(format!(
         "the native aggregate split does not carry {reason}"
     ))
@@ -626,7 +626,7 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
 /// This is the question the histogram arm of [`split`] asks of every parameter before it is carried
 /// above the cut: a parameter that `enter_suffix` rebuilds from constants alone means the same thing
 /// there, and one that reads the series has no source above the cut. Keeping the answer exactly the
-/// set of shapes `enter_suffix` builds is what keeps a misplaced tree a decline rather than an
+/// set of shapes `enter_suffix` builds is what keeps a misplaced tree a refusal rather than an
 /// `Internal` error: a subtree that claims to carry but does not would reach `rejected()`.
 fn suffix_carries(node: &NativeNode) -> bool {
     match &node.expr {

@@ -279,7 +279,7 @@ fn canonical_rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
 /// apart and the final half adds their states - a value where Prometheus reports
 /// `vector cannot contain metrics with the same labelset`.
 ///
-/// So the split declines and the statement keeps the plan a collected subtree gets: the merge is the
+/// So the split refuses and the statement keeps the plan a collected subtree gets: the merge is the
 /// boundary, its producer collects each partition's pieces, and the canonical router collects one
 /// label set from every partition before anything folds it. That is the shape an overlap is reported
 /// in, whether the aggregate is the statement root or sits under the merge.
@@ -300,7 +300,7 @@ fn a_canonical_merge_below_the_aggregate_refuses_the_split() {
         output: output.clone(),
     })
     .expect("an aggregate over a collected window on a grid is a legal tree");
-    // `split_aggregate` reads a decline as "no split here", which is what leaves the merge above the
+    // `split_aggregate` reads a refusal as "no split here", which is what leaves the merge above the
     // partitions instead of inside them.
     assert!(
         FusedSeries::split_aggregate(&tree, TIME)
@@ -6453,7 +6453,7 @@ fn exchanges_between(plan: &Arc<dyn ExecutionPlan>, stop: &Arc<dyn ExecutionPlan
 /// partition - even where the child already satisfies it, and even when the partition counts match.
 /// A hash exchange does not preserve order, so it would interleave one series' chunks across
 /// partitions and the decoder would close a series it has not finished. Asking for
-/// [`Distribution::UnspecifiedDistribution`] is what leaves the child alone, and declining extra
+/// [`Distribution::UnspecifiedDistribution`] is what leaves the child alone, and refusing extra
 /// partitioning is the second half of the same thing: no round-robin is added to raise parallelism
 /// either. The node is not pinned to one partition — it runs one tree per input partition and keeps
 /// the input's count.
@@ -8878,7 +8878,7 @@ fn histogram_over_sum_splits_and_declares_complete_bucket_routing() {
 }
 
 #[test]
-fn histogram_split_declines_only_rewrites_that_change_the_routing_key() {
+fn histogram_split_refuses_only_rewrites_that_change_the_routing_key() {
     let group = Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)]));
     let base = histogram_over_sum_tree(group, HistogramFunction::Quantile(0.99));
     for (dst, accepted) in [
@@ -9030,7 +9030,7 @@ fn histogram_split_carries_a_per_point_parameter() {
     assert_eq!(vec![parameter], *parameters);
 
     // A parameter that reads the series the split reads has no source above the cut, so it must
-    // decline rather than be answered from the merged values: `histogram_quantile(scalar(sum(
+    // refuse rather than be answered from the merged values: `histogram_quantile(scalar(sum(
     // rate(x[5m]))), sum by (le) (rate(x[5m])))`, whose parameter holds the window the prefix reads.
     let NativeExpr::Vector {
         input: aggregate, ..
@@ -9052,16 +9052,16 @@ fn histogram_split_carries_a_per_point_parameter() {
         FusedSeries::split_aggregate(&reading, TIME)
             .unwrap()
             .is_none(),
-        "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must decline: {reading}"
+        "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must refuse: {reading}"
     );
 }
 
-/// A `quantile` exports no state, with a per-point `φ` or without: the split declines both.
+/// A `quantile` exports no state, with a per-point `φ` or without: the split refuses both.
 ///
 /// Its answer is the quantile of a group's whole sample set, and the quantile of two partitions'
 /// quantiles is not the quantile of their union. Reading the `φ` per point changes where the number
 /// comes from and nothing about that, so the fold that binds a number and the one that reads the
-/// statement's are declined by the same rule.
+/// statement's are refused by the same rule.
 #[test]
 fn a_per_point_quantile_is_not_split() {
     let window = rate_tree().root().clone();

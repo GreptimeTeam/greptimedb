@@ -109,14 +109,13 @@ use crate::parser::{
     EXPLAIN_VERBOSE_NODE_NAME,
 };
 use crate::promql::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, Error, ExpectRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NativeRouteDeclinedSnafu, NoMetricMatcherSnafu,
-    RangeVectorInRangeQuerySnafu, Result, SubqueryTimestampOutOfRangeSnafu, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
-    ZeroSubqueryStepSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, RangeVectorInRangeQuerySnafu, Result,
+    SubqueryTimestampOutOfRangeSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu, ZeroSubqueryStepSnafu,
 };
 use crate::promql::label_values::signed_millis_since_epoch;
 use crate::query_engine::QueryEngineState;
@@ -352,19 +351,12 @@ pub struct PromPlanner {
     /// An offer compiles a whole tree, so it is made where it covers the most: the statement root,
     /// and the topmost binary below a node this route does not answer. Once a binary node has spent
     /// the offer, the operands below it are planned by the existing path without offering
-    /// themselves again, which would cost O(n^2) passes over a chain of n operators.
+    /// themselves again: a refused offer is reported, so a chain of n operators never reaches the
+    /// O(n^2) passes that re-offering every operand would cost.
     native_binary_offer: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
-
-/// The answer to a statement the native route was asked to plan and does not answer.
-fn native_declined() -> Error {
-    NativeRouteDeclinedSnafu {
-        reason: native::take_decline_reason().to_string(),
-    }
-    .build()
-}
 
 impl PromPlanner {
     pub async fn stmt_to_plan(
@@ -380,8 +372,8 @@ impl PromPlanner {
     ///
     /// `native_fused` enables the native fused-series route: the statement is offered to
     /// [`compile`](crate::promql::native_compile::compile) first, and a shape that compiler does not
-    /// accept is reported as [`Error::NativeRouteDeclined`] naming the refusal's cause. With it off
-    /// the statement is planned by the existing path unchanged. See
+    /// accept is reported as `Error::UnsupportedNativeShape` naming the cause of the refusal. With
+    /// it off the statement is planned by the existing path unchanged. See
     /// [`Self::try_plan_native_fused`].
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
@@ -403,16 +395,16 @@ impl PromPlanner {
         // The whole statement is offered to the native compiler first, because that compiler folds
         // a range function and the math functions over it into one tree: offered any later, the
         // expression has already been split into the nodes those functions would have shared.
-        if !matches!(stmt.expr, PromExpr::Extension(_)) {
-            if let Some(plan) = planner
+        //
+        // A root wrapper - `EXPLAIN`, `ANALYZE`, an alias - is not a shape of its own: what it wraps
+        // is the expression this route answers, and `prom_ext_expr_to_plan` offers that one instead
+        // of the wrapper. Offering the wrapper here would refuse the statement for a cause that is
+        // not the query's, so those roots go straight to the walk that dispatches them.
+        if planner.native_fused && !matches!(stmt.expr, PromExpr::Extension(_)) {
+            let plan = planner
                 .try_plan_native_fused(&stmt.expr, query_engine_state)
-                .await?
-            {
-                return planner.strip_tsid_column(plan);
-            }
-            if planner.native_fused {
-                return Err(native_declined());
-            }
+                .await?;
+            return planner.strip_tsid_column(plan);
         }
         let plan = planner
             .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
@@ -1321,9 +1313,7 @@ impl PromPlanner {
                 .try_plan_native_fused(&PromExpr::Binary(binary_expr.clone()), query_engine_state)
                 .await;
             self.ctx = saved;
-            let Some(plan) = native? else {
-                return Err(native_declined());
-            };
+            let plan = native?;
             let mut fields = plan.schema().fields().iter();
             if let Some(time) = fields.next().map(|field| field.name().clone()) {
                 let values = fields
@@ -1535,7 +1525,7 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                // A declined binary uses the existing planner for its operands.
+                // A refused binary uses the existing planner for its operands.
                 let (mut left_input, mut left_context, mut right_input, mut right_context) = {
                     let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                     let left_ctx = self.ctx.clone();
@@ -2613,6 +2603,8 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
+        // `EXPLAIN` and `ANALYZE` publish a plan of the expression they wrap, so the expression is
+        // what this route is offered: every other wrapper is the existing planner's to answer.
         let publishes_a_plan = matches!(
             expr.name(),
             ANALYZE_NODE_NAME
@@ -2620,18 +2612,17 @@ impl PromPlanner {
                 | EXPLAIN_NODE_NAME
                 | EXPLAIN_VERBOSE_NODE_NAME
         );
-        let native_plan = if publishes_a_plan {
-            self.try_plan_native_fused(&children[0], query_engine_state)
-                .await?
+        let native_plan = if publishes_a_plan && self.native_fused {
+            Some(
+                self.try_plan_native_fused(&children[0], query_engine_state)
+                    .await?,
+            )
         } else {
             None
         };
         let plan = match native_plan {
             Some(plan) => plan,
             None => {
-                if publishes_a_plan && self.native_fused {
-                    return Err(native_declined());
-                }
                 self.prom_root_expr_to_plan(&children[0], query_engine_state)
                     .await?
             }
@@ -4519,7 +4510,7 @@ impl PromPlanner {
         Self::validate_label_name(&dst_label)?;
         // A destination label is a tag, and a tag is published under its own name. A value field
         // of that name would have to be dropped or renamed to make room, so report the collision
-        // before any no-op path below can silently decline the rewrite.
+        // before any no-op path below can silently refuse the rewrite.
         if self
             .ctx
             .field_columns

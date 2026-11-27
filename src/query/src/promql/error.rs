@@ -59,7 +59,7 @@ pub enum Error {
     },
 
     #[snafu(display("the native PromQL route does not answer this shape ({reason})"))]
-    NativeRouteDeclined {
+    UnsupportedNativeShape {
         reason: String,
         #[snafu(implicit)]
         location: Location,
@@ -304,7 +304,7 @@ impl ErrorExt for Error {
 
             PromqlPlanNode { source, .. } => source.status_code(),
 
-            DataFusionPlanning { .. } | NativeRouteDeclined { .. } => StatusCode::PlanQuery,
+            DataFusionPlanning { .. } | UnsupportedNativeShape { .. } => StatusCode::PlanQuery,
 
             TableNameNotFound { .. } => StatusCode::TableNotFound,
 

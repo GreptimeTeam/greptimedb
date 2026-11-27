@@ -484,7 +484,7 @@ fn binary_histogram_float_kind_matches_supported_operations() {
     }
 }
 
-/// Arithmetic kinds cover both histogram/float directions without declining empty results.
+/// Arithmetic kinds cover both histogram/float directions without refusing empty results.
 #[test]
 fn binary_arithmetic_field_kind_matrix() {
     use super::binary_output_field_kind;
@@ -2365,7 +2365,7 @@ fn a_vector_operation_cannot_consume_raw_samples() {
 /// A root that reports samples while its expression is a constant breaks its own contract.
 ///
 /// The tree is constructed directly here — a child module of `native::plan` may — because the node
-/// is one the public constructors decline: a constant does not produce samples, and a zero-input
+/// is one the public constructors refuse: a constant does not produce samples, and a zero-input
 /// tree has no scan that would refuse it later. Every public constructor therefore stays a checked
 /// one.
 #[test]
@@ -3075,7 +3075,7 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
             &source_tags
         )
     );
-    // An empty destination cannot be a label, so the walk declines rather than name a column.
+    // An empty destination cannot be a label, so the walk refuses rather than name a column.
     assert_eq!(
         None,
         fused_output_tags(&counted("", Grouping::By(Arc::new([]))), &source_tags)
@@ -3559,7 +3559,7 @@ fn independently_allocated_binding_mismatch_is_rejected() {
 
 /// Asserts the admission verdict for `node`, and that the runtime's own construction answers the
 /// same: a predicate that stopped agreeing with it would either admit a tree the executor cannot
-/// build, or decline a shape the executor can run.
+/// build, or refuse a shape the executor can run.
 fn assert_admission(node: NativeNode, admitted: bool, shape: &str) {
     use datafusion::execution::memory_pool::UnboundedMemoryPool;
 
@@ -3605,7 +3605,7 @@ fn window_with(
 
 /// Every shape the runtime refuses is refused here, and each one is a shape a tree can hold.
 #[test]
-fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
+fn native_tree_supported_excludes_the_shapes_the_runtime_refuses() {
     use crate::select::SortOrder;
 
     let out = grid(0, 60_000, 4);
@@ -3833,10 +3833,10 @@ fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
 /// admit a tree the runtime then refuses, and a refusal raised while the runtime is built cannot
 /// fall back: the statement loses the plan it had instead of keeping it.
 #[test]
-fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
+fn native_tree_supported_excludes_a_refused_shape_nested_under_another() {
     let out = grid(0, 60_000, 4);
     let one_field = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
-    // The declined shape every case nests, one level down from a node the runtime builds.
+    // The refused shape every case nests, one level down from a node the runtime builds.
     let refused = || {
         aggregate_with(
             one_field(),
@@ -3944,7 +3944,7 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
 /// existing plan answered fail while its runtime was built instead of keeping that plan, because a
 /// refusal raised during physical planning cannot fall back.
 #[test]
-fn native_tree_supported_declines_the_instants_that_overflow() {
+fn native_tree_supported_refuses_the_instants_that_overflow() {
     // The first point of a statement reaching far into the future, a step apart: this is the grid
     // `predict_linear(some_metric[1m] @ 0, 60)` is planned over, whose anchor makes the fold offset
     // the grid's own start and whose horizon then adds the two.

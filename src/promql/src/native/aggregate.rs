@@ -340,7 +340,7 @@ impl AggregateRuntime {
     /// either. That is a property of the operation and not of this runtime, so what refuses a
     /// `Partial` or a `Final` one is the tree's own check -- [`aggregate_state_binding`] has no
     /// binding for a `quantile`, which [`crate::native::plan::NativeNode::validate`] reports, and
-    /// [`crate::native::split`] declines a `quantile` for the same reason -- and this starts the one
+    /// [`crate::native::split`] refuses a `quantile` for the same reason -- and this starts the one
     /// stage that is left.
     ///
     /// The same check is what puts the input on a grid: a `Complete` aggregate is validated to

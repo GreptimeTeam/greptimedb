@@ -1032,7 +1032,7 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
     // With float sources - or with no source at all - an unnameable input is still a float, and the
     // aggregate binds the numeric state it always did. What makes that a proof rather than a default
     // is that a native histogram sample can only enter a tree from a source that carries one: every
-    // operator here passes a histogram through, reduces it to a float, or declines the shape. A
+    // operator here passes a histogram through, reduces it to a float, or refuses the shape. A
     // shape whose samples this walk does not describe (`clamp`, `topk`, `vector()` of a scalar) can
     // therefore not be holding one.
     let field_kind = match input.output_field_kind(context.source_kind) {
@@ -2142,7 +2142,7 @@ pub(crate) struct SubqueryGrid {
 /// itself rather than wrapped into a different interval.
 ///
 /// `None` when the anchored interval contains no step boundary, which names no evaluation point at
-/// all. Declining is the caller's decision: the compiler reports the shape it cannot fold, while the
+/// all. Refusing is the caller's decision: the compiler reports the shape it cannot fold, while the
 /// planner keeps the plan the existing path builds.
 pub(crate) fn subquery_child_grid(
     stmt: &EvalStmt,

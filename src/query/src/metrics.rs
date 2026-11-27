@@ -127,14 +127,13 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Statements the native PromQL route handed to the existing planner, by the cause it recorded.
+    /// Statements the native PromQL route does not answer, by the cause it named.
     ///
-    /// A declined statement is not an error and not a different answer: the existing planner
-    /// computes the same rows, so a fallback is only visible as a slower query. This counter and
-    /// the log line beside it are what make its rate observable per cause.
-    pub static ref NATIVE_PROMQL_DECLINED_TOTAL: IntCounterVec = register_int_counter_vec!(
-        "greptime_query_native_promql_declined_total",
-        "native PromQL expressions planned by the existing planner, by cause",
+    /// The route answers the shape it was asked for or reports the shape it does not answer, so this
+    /// counter and the log line beside it make the rate of each cause observable.
+    pub static ref NATIVE_PROMQL_UNSUPPORTED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_native_promql_unsupported_total",
+        "native PromQL statements the route does not answer, by cause",
         &["reason"]
     )
     .unwrap();

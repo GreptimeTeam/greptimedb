@@ -4746,7 +4746,7 @@ fn absent_over_time_answers_only_the_points_no_series_has_a_sample_at() {
         "a metric with no sample in any window answers the empty label set"
     );
 
-    // A matcher that no row satisfies is the shape the existing plan declines: the labels still
+    // A matcher that no row satisfies is the shape the existing plan refuses: the labels still
     // have to reach the answer, at every point of the grid.
     assert_eq!(
         aggregate_results(&execute_compiled(
@@ -5453,7 +5453,7 @@ fn an_invalid_label_replace_expression_fails_the_statement() {
 
 /// `timestamp` reports one value per input field, and the native node reports the time of the sample
 /// each field was selected from. A table with several data fields would need that node to say which
-/// field's sample it means, so the compiler declines the shape instead of answering with one
+/// field's sample it means, so the compiler refuses the shape instead of answering with one
 /// field's timestamps under every field's name.
 #[test]
 fn timestamp_multi_field_input_is_not_supported_natively() {
@@ -5466,7 +5466,7 @@ fn timestamp_multi_field_input_is_not_supported_natively() {
         .unwrap_err();
         assert!(
             matches!(&error, DataFusionError::NotImplemented(_)),
-            "`{query}` is a shape this compiler declines: {error}"
+            "`{query}` is a shape this compiler refuses: {error}"
         );
         assert!(
             error
