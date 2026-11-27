@@ -16,15 +16,16 @@
 //!
 //! Such an engine returns rows in storage order, with no per-series grouping and no deduplication.
 //! [`RowSeriesSourceExec`] requires its input hash-partitioned by the tags and sorted by
-//! `(tags, time index, fields)`, which the physical optimizer provides with a `RepartitionExec`
+//! `(tags, time index)`, which the physical optimizer provides with a `RepartitionExec`
 //! and a `SortExec` that spills under memory pressure, and cuts the sorted rows into series chunks
 //! that carry their complete labels. Numeric fields are read as `Float64` and native histogram
 //! fields as histogram samples.
 //!
-//! A raw series holds one sample per timestamp, as Prometheus storage does. Rows that share
-//! labels and a timestamp are reduced to the first one in that order: the row whose field values,
-//! read in field order, sort lowest, with nulls last and NaN above every number. The rule only
-//! depends on the rows, not on the files or the order they were read in.
+//! A raw series holds one sample per timestamp, as Prometheus storage does. Each field is its own
+//! value series, so rows that share labels and a timestamp are reduced field by field: each field
+//! keeps its lowest non-null value among those rows, with NaN above every number and a native
+//! histogram ordered as its struct. A field that is null on every such row stays null. The rule
+//! only depends on the rows, not on the files or the order they were read in.
 
 use std::collections::VecDeque;
 use std::fmt::{self, Formatter};
@@ -37,9 +38,11 @@ use common_query::native_histogram::{histogram_samples_from_arrow, native_histog
 use common_query::series_frame::{
     PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
 };
-use datafusion::arrow::array::{Array, ArrayRef, AsArray, StringArray, UInt32Array};
+use datafusion::arrow::array::{
+    Array, ArrayRef, AsArray, StringArray, UInt32Array, make_comparator,
+};
 use datafusion::arrow::buffer::Buffer;
-use datafusion::arrow::compute::{cast, take};
+use datafusion::arrow::compute::{cast, concat_batches, take};
 use datafusion::arrow::datatypes::{
     DataType, Float64Type, SchemaRef, TimeUnit, TimestampMillisecondType,
 };
@@ -290,8 +293,8 @@ impl RowColumns {
             .collect()
     }
 
-    /// `(tags ASC NULLS FIRST, time ASC, fields ASC NULLS LAST)`: series are contiguous, time is
-    /// ascending within each, and the first row of a duplicated timestamp is the one kept.
+    /// `(tags ASC, time ASC)`: series are contiguous and time is ascending within each, so the rows
+    /// of a duplicated timestamp are adjacent.
     fn ordering(&self, schema: &SchemaRef) -> DataFusionResult<LexOrdering> {
         let key = |index: usize, nulls_first: bool| {
             PhysicalSortExpr::new(
@@ -307,7 +310,6 @@ impl RowColumns {
             .iter()
             .map(|index| key(*index, true))
             .chain(std::iter::once(key(self.time, true)))
-            .chain(self.fields.iter().map(|index| key(*index, false)))
             .collect::<Vec<_>>();
         LexOrdering::new(exprs)
             .ok_or_else(|| DataFusionError::Internal("empty RowSeriesSource ordering".into()))
@@ -452,6 +454,7 @@ impl ExecutionPlan for RowSeriesSourceExec {
                 schema: Arc::clone(&self.series_schema),
                 open: None,
                 ready: VecDeque::new(),
+                tail: None,
             }),
             PendingBatching::Immediate,
         )
@@ -524,11 +527,21 @@ struct RowSeriesStream {
     schema: Arc<SeriesSchema>,
     open: Option<OpenSeries>,
     ready: VecDeque<RawSeriesChunk>,
+    /// The rows of the last `(labels, timestamp)` of the previous batch, held back because the next
+    /// batch may hold more rows of that timestamp.
+    tail: Option<RecordBatch>,
 }
 
 impl RowSeriesStream {
-    fn cut(&mut self, batch: &RecordBatch) -> DataFusionResult<()> {
-        if batch.num_rows() == 0 {
+    /// Cuts `batch`, after the rows held back from the previous one. Unless `finished`, the rows of
+    /// its last `(labels, timestamp)` are held back in turn.
+    fn cut(&mut self, batch: RecordBatch, finished: bool) -> DataFusionResult<()> {
+        let batch = match self.tail.take() {
+            Some(tail) => concat_batches(&batch.schema(), [&tail, &batch])?,
+            None => batch,
+        };
+        let rows = batch.num_rows();
+        if rows == 0 {
             return Ok(());
         }
         let tags = self
@@ -572,17 +585,38 @@ impl RowSeriesStream {
                 }
             })
             .collect::<DataFusionResult<Vec<ArrayRef>>>()?;
+        let order = SortOptions {
+            descending: false,
+            nulls_first: false,
+        };
+        let comparators = fields
+            .iter()
+            .map(|field| make_comparator(field.as_ref(), field.as_ref(), order))
+            .collect::<Result<Vec<_>, _>>()?;
+        let same_sample = |left: usize, right: usize| {
+            time.value(left) == time.value(right)
+                && tags.iter().all(|tag| tag.value(left) == tag.value(right))
+        };
+        let mut end = rows;
+        if !finished {
+            while end > 0 && same_sample(end - 1, rows - 1) {
+                end -= 1;
+            }
+        }
 
         let mut kept = Vec::new();
-        for row in 0..batch.num_rows() {
+        let mut field_rows = vec![Vec::new(); fields.len()];
+        let mut row = 0;
+        while row < end {
             let time_value = time.value(row);
             if !self
                 .open
                 .as_ref()
                 .is_some_and(|open| open.holds(&tags, row))
             {
-                self.publish(&kept, time, &fields)?;
+                self.publish(&kept, &field_rows, time, &fields)?;
                 kept.clear();
+                field_rows.iter_mut().for_each(Vec::clear);
                 self.close();
                 self.open = Some(OpenSeries::try_new(
                     &self.metric_name,
@@ -592,26 +626,43 @@ impl RowSeriesStream {
                 )?);
             }
             if let Some(open) = &mut self.open {
-                match open.last_time {
-                    // A later row of a timestamp already kept: the sort put the kept one first.
-                    Some(last) if last == time_value => continue,
-                    Some(last) if last > time_value => {
-                        return Err(DataFusionError::Execution(
-                            "RowSeriesSource input is not sorted by time within a series".into(),
-                        ));
-                    }
-                    _ => open.last_time = Some(time_value),
+                if open.last_time.is_some_and(|last| last >= time_value) {
+                    return Err(DataFusionError::Execution(
+                        "RowSeriesSource input is not sorted by time within a series".into(),
+                    ));
                 }
+                open.last_time = Some(time_value);
+            }
+            let mut run_end = row + 1;
+            while run_end < end && same_sample(row, run_end) {
+                run_end += 1;
             }
             kept.push(row as u32);
+            for (compare, picked) in comparators.iter().zip(field_rows.iter_mut()) {
+                // Nulls sort last, so the lowest row is a null only when every row is.
+                let lowest = (row + 1..run_end).fold(row, |lowest, candidate| {
+                    if compare(candidate, lowest).is_lt() {
+                        candidate
+                    } else {
+                        lowest
+                    }
+                });
+                picked.push(lowest as u32);
+            }
+            row = run_end;
         }
-        self.publish(&kept, time, &fields)
+        if end < rows {
+            self.tail = Some(batch.slice(end, rows - end));
+        }
+        self.publish(&kept, &field_rows, time, &fields)
     }
 
-    /// Makes the rows `kept` of the current batch the open series' latest chunk.
+    /// Makes the samples at the rows `kept` of the current batch the open series' latest chunk;
+    /// `field_rows` names the row each field's value of those samples is read from.
     fn publish(
         &mut self,
         kept: &[u32],
+        field_rows: &[Vec<u32>],
         time: &datafusion::arrow::array::TimestampMillisecondArray,
         fields: &[ArrayRef],
     ) -> DataFusionResult<()> {
@@ -631,8 +682,9 @@ impl RowSeriesStream {
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let samples = fields
             .iter()
-            .map(|field| {
-                let taken = take(field, &indices, None)?;
+            .zip(field_rows)
+            .map(|(field, rows)| {
+                let taken = take(field, &UInt32Array::from(rows.clone()), None)?;
                 if is_histogram(taken.data_type()) {
                     histogram_samples_from_arrow(taken.as_struct())
                 } else {
@@ -686,7 +738,7 @@ impl Stream for RowSeriesStream {
             };
             match input.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
-                    if let Err(error) = this.cut(&batch) {
+                    if let Err(error) = this.cut(batch, false) {
                         this.input = None;
                         return Poll::Ready(Some(Err(boxed(error))));
                     }
@@ -697,6 +749,11 @@ impl Stream for RowSeriesStream {
                 }
                 Poll::Ready(None) => {
                     this.input = None;
+                    if let Some(tail) = this.tail.take()
+                        && let Err(error) = this.cut(tail, true)
+                    {
+                        return Poll::Ready(Some(Err(boxed(error))));
+                    }
                     this.close();
                 }
                 Poll::Pending => return Poll::Pending,
@@ -735,40 +792,52 @@ mod tests {
 
     use super::*;
 
-    fn batch(schema: &SchemaRef, rows: &[(Option<&str>, i64, f64)]) -> RecordBatch {
-        RecordBatch::try_new(
-            Arc::clone(schema),
-            vec![
-                Arc::new(StringArray::from(
-                    rows.iter().map(|row| row.0).collect::<Vec<_>>(),
-                )),
-                Arc::new(TimestampMillisecondArray::from(
-                    rows.iter().map(|row| row.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(Float64Array::from(
-                    rows.iter().map(|row| row.2).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .unwrap()
-    }
+    /// `(host, timestamp, field values)`.
+    type Row<'a> = (&'a str, i64, Vec<Option<f64>>);
 
-    /// `(labels, timestamps, values, is_last)` per chunk.
-    type Chunk = (Vec<(String, String)>, Vec<i64>, Vec<f64>, bool);
+    /// `(labels, timestamps, values per field, is_last)` per chunk.
+    type Chunk = (Vec<(String, String)>, Vec<i64>, Vec<Vec<Option<f64>>>, bool);
 
-    async fn cut(batches: Vec<Vec<(Option<&str>, i64, f64)>>) -> Vec<Chunk> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("host", DataType::Utf8, true),
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("val", DataType::Float64, true),
-        ]));
+    /// Cuts `batches`, already sorted by `(host, ts)`, with one `Float64` field per value column.
+    async fn cut(fields: usize, batches: Vec<Vec<Row<'_>>>) -> Vec<Chunk> {
+        let field_names = (0..fields)
+            .map(|index| format!("f{index}"))
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(
+            [
+                Field::new("host", DataType::Utf8, false),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ]
+            .into_iter()
+            .chain(
+                field_names
+                    .iter()
+                    .map(|name| Field::new(name, DataType::Float64, true)),
+            )
+            .collect::<Vec<_>>(),
+        ));
         let batches = batches
             .iter()
-            .map(|rows| batch(&schema, rows))
+            .map(|rows| {
+                let mut columns: Vec<ArrayRef> = vec![
+                    Arc::new(StringArray::from(
+                        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+                    )),
+                    Arc::new(TimestampMillisecondArray::from(
+                        rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+                    )),
+                ];
+                for field in 0..fields {
+                    columns.push(Arc::new(Float64Array::from(
+                        rows.iter().map(|row| row.2[field]).collect::<Vec<_>>(),
+                    )));
+                }
+                RecordBatch::try_new(Arc::clone(&schema), columns).unwrap()
+            })
             .collect::<Vec<_>>();
         let input = MemorySourceConfig::try_new_exec(&[batches], schema, None).unwrap();
         let exec = RowSeriesSourceExec::try_new(
@@ -776,7 +845,7 @@ mod tests {
             Arc::from("cpu"),
             vec!["host".to_string()],
             "ts".to_string(),
-            vec!["val".to_string()],
+            field_names,
         )
         .unwrap();
         let frames = exec.execute(0, SessionContext::new().task_ctx()).unwrap();
@@ -787,13 +856,18 @@ mod tests {
                 assert_eq!(labels.name(), Some("cpu"));
                 let values = chunk
                     .fields
-                    .get(0)
-                    .unwrap()
                     .iter()
-                    .map(|sample| match sample {
-                        SampleRef::Float(value) => value,
-                        _ => panic!("expected a float sample"),
-                    });
+                    .map(|field| {
+                        field
+                            .iter()
+                            .map(|sample| match sample {
+                                SampleRef::Float(value) => Some(value),
+                                SampleRef::Missing => None,
+                                SampleRef::Histogram(_) => panic!("expected a float sample"),
+                            })
+                            .collect()
+                    })
+                    .collect();
                 (
                     labels
                         .tags()
@@ -801,7 +875,7 @@ mod tests {
                         .map(|label| (label.name.to_string(), label.value.to_string()))
                         .collect(),
                     chunk.time.as_buffer().to_vec(),
-                    values.collect(),
+                    values,
                     chunk.is_last,
                 )
             })
@@ -815,26 +889,70 @@ mod tests {
     }
 
     /// A series that continues into the next batch closes only on its last chunk, and a duplicated
-    /// timestamp split across two batches keeps the row that sorted first.
+    /// timestamp split across two batches keeps one sample.
     #[tokio::test]
     async fn series_close_once_across_batches_and_keep_one_sample_per_timestamp() {
-        let chunks = cut(vec![
-            vec![(Some("a"), 1, 10.0), (Some("a"), 2, 20.0)],
+        let chunks = cut(
+            1,
             vec![
-                (Some("a"), 2, 21.0),
-                (Some("a"), 3, 30.0),
-                (Some("b"), 1, 5.0),
+                vec![("a", 1, vec![Some(10.0)]), ("a", 2, vec![Some(21.0)])],
+                vec![
+                    ("a", 2, vec![Some(20.0)]),
+                    ("a", 3, vec![Some(30.0)]),
+                    ("b", 1, vec![Some(5.0)]),
+                ],
+                vec![("b", 2, vec![Some(6.0)])],
             ],
-            vec![(Some("b"), 2, 6.0)],
-        ])
+        )
         .await;
         assert_eq!(
             chunks,
             vec![
-                (host("a"), vec![1, 2], vec![10.0, 20.0], false),
-                (host("a"), vec![3], vec![30.0], true),
-                (host("b"), vec![1], vec![5.0], false),
-                (host("b"), vec![2], vec![6.0], true),
+                (host("a"), vec![1], vec![vec![Some(10.0)]], false),
+                (
+                    host("a"),
+                    vec![2, 3],
+                    vec![vec![Some(20.0), Some(30.0)]],
+                    true
+                ),
+                (host("b"), vec![1], vec![vec![Some(5.0)]], false),
+                (host("b"), vec![2], vec![vec![Some(6.0)]], true),
+            ]
+        );
+    }
+
+    /// Each field of a duplicated timestamp keeps its own lowest non-null value: the row the first
+    /// field keeps can be null in the second, whose value then comes from another row. NaN sorts
+    /// above every number, and the rows span batches.
+    #[tokio::test]
+    async fn duplicated_timestamps_keep_one_value_per_field() {
+        let chunks = cut(
+            2,
+            vec![
+                vec![("a", 1, vec![Some(1.0), None])],
+                vec![
+                    ("a", 1, vec![Some(2.0), Some(7.0)]),
+                    ("a", 2, vec![Some(f64::NAN), Some(1.0)]),
+                ],
+                vec![("a", 2, vec![Some(3.0), None])],
+            ],
+        )
+        .await;
+        assert_eq!(
+            chunks,
+            vec![
+                (
+                    host("a"),
+                    vec![1],
+                    vec![vec![Some(1.0)], vec![Some(7.0)]],
+                    false
+                ),
+                (
+                    host("a"),
+                    vec![2],
+                    vec![vec![Some(3.0)], vec![Some(1.0)]],
+                    true
+                ),
             ]
         );
     }
