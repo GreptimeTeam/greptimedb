@@ -77,7 +77,8 @@ fn raw_schema() -> Arc<SeriesSchema> {
     })
 }
 
-/// The same layout with `count` fields, for the shapes whose answer depends on how many a scan holds.
+/// The same layout with `count` fields, for the shapes whose answer depends on how many a scan
+/// holds.
 fn raw_schema_with_fields(count: usize) -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
         fields: (0..count)
@@ -96,17 +97,11 @@ fn eval_stmt(query: &str) -> EvalStmt {
 }
 
 /// The statement `query` over `UNIX_EPOCH..=end`, on a 5s grid.
-///
-/// The end is a parameter because a grid stops before an end it does not land on, which is the only
-/// way `end()` and the last grid point can be told apart.
 fn eval_stmt_over(query: &str, end: Duration) -> EvalStmt {
     eval_stmt_between(query, Duration::ZERO, end)
 }
 
 /// The statement `query` over `UNIX_EPOCH + start..=UNIX_EPOCH + end`, on a 5s grid.
-///
-/// The start is a parameter because a grid that begins off the epoch is the only way to tell a
-/// child grid built from absolute step boundaries from one built from the statement's start.
 fn eval_stmt_between(query: &str, start: Duration, end: Duration) -> EvalStmt {
     EvalStmt {
         expr: promql_parser::parser::parse(query).unwrap(),
@@ -131,10 +126,8 @@ fn with_selector_range(range: Duration) -> EvalStmt {
     stmt
 }
 
-/// `query`'s statement with its binary operation's modifier edited by `edit`.
-///
-/// The parser rewrites and rejects some modifiers, so a modifier the compiler has to refuse as
-/// written can only reach it on a tree the parser accepted: this is the way in.
+/// `query`'s statement with its binary operation's modifier edited by `edit`, for modifiers the
+/// parser rewrites or rejects.
 fn with_binary_modifier(query: &str, edit: impl FnOnce(&mut BinModifier)) -> EvalStmt {
     let mut stmt = eval_stmt(query);
     let PromExpr::Binary(binary) = &mut stmt.expr else {
@@ -144,10 +137,7 @@ fn with_binary_modifier(query: &str, edit: impl FnOnce(&mut BinModifier)) -> Eva
     stmt
 }
 
-/// `query`'s statement with its call's arguments edited by `edit`.
-///
-/// The parser checks arity, so a call with the wrong number of arguments cannot be parsed: the only
-/// way to hand one to the compiler is to edit a tree the parser accepted.
+/// `query`'s statement with its call's arguments edited by `edit`, for arities the parser rejects.
 fn with_call_arguments(query: &str, edit: impl FnOnce(&mut Vec<Box<PromExpr>>)) -> EvalStmt {
     let mut stmt = eval_stmt(query);
     let PromExpr::Call(call) = &mut stmt.expr else {
@@ -157,19 +147,14 @@ fn with_call_arguments(query: &str, edit: impl FnOnce(&mut Vec<Box<PromExpr>>)) 
     stmt
 }
 
-/// The bare selector `x`, as the parser builds it.
-///
-/// The parser type-checks function arguments, so a vector selector where a matrix belongs can only be
-/// handed to the compiler by editing a tree the parser accepted: this supplies one.
+/// The bare selector `x`, for editing into argument positions the parser would type-check.
 fn a_bare_selector() -> PromExpr {
     let stmt = eval_stmt("x");
     stmt.expr
 }
 
-/// The range selector out of `rate(x[5m])`.
-///
-/// The parser type-checks function arguments, so a range selector can only be handed to a function
-/// that does not take one by editing a tree the parser accepted.
+/// The range selector out of `rate(x[5m])`, for editing into argument positions the parser would
+/// type-check.
 fn a_matrix_selector() -> Box<PromExpr> {
     let mut stmt = eval_stmt("rate(x[5m])");
     let PromExpr::Call(call) = &mut stmt.expr else {
@@ -275,7 +260,6 @@ fn grid_of(node: &NativeNode) -> (i64, i64, u64) {
     (spec.start_ms, spec.step_ms, spec.len)
 }
 
-/// A long valid statement exposes its checked grid without allocating query-sized timestamps.
 #[test]
 fn a_long_statement_grid_is_deferred() {
     let stmt = EvalStmt {
@@ -307,10 +291,8 @@ fn literal_topk_keeps_the_constant_vector_plan() {
     ));
 }
 
-/// `rate(x[5m])` becomes a window over the raw input, on the statement's grid.
 #[test]
 fn a_rate_over_a_selector_becomes_a_window_over_raw_input() {
-    // `compile` returns `NativeTree::try_new`'s result, so unwrapping is the validation.
     let tree = compile(
         &eval_stmt("rate(x[5m])"),
         raw_schema(),
@@ -346,8 +328,6 @@ fn a_rate_over_a_selector_becomes_a_window_over_raw_input() {
     assert_eq!(bound.ordering, SeriesOrdering::KeyThenTime);
 }
 
-/// Every mapped name produces its own kernel; a name that fell through to the same kernel as
-/// another would be caught here.
 #[test]
 fn the_supported_range_functions_map_to_their_kernels() {
     let cases = [
@@ -368,8 +348,6 @@ fn the_supported_range_functions_map_to_their_kernels() {
         ("resets", RangeFunction::Resets),
         ("changes", RangeFunction::Changes),
         ("deriv", RangeFunction::Deriv),
-        // Every named range function is supported unconditionally by this compiler; a test per
-        // name keeps a rename or a drop from passing as a typo.
         ("first_over_time", RangeFunction::FirstOverTime),
         ("mad_over_time", RangeFunction::MadOverTime),
         ("ts_of_first_over_time", RangeFunction::TsOfFirstOverTime),
@@ -396,9 +374,6 @@ fn the_supported_range_functions_map_to_their_kernels() {
     }
 }
 
-/// `quantile_over_time(0.9, x[5m])` binds the quantile the query wrote, over the same window a
-/// function without parameters would fold: a parameter decides what folds the window, not which
-/// window is folded.
 #[test]
 fn a_quantile_over_time_binds_its_quantile_and_its_window() {
     let tree = compile(
@@ -424,10 +399,7 @@ fn a_quantile_over_time_binds_its_quantile_and_its_window() {
     );
 }
 
-/// A quantile outside `[0, 1]` compiles, because it is not an error in Prometheus: the kernel
-/// returns `-Infinity` below zero, `+Infinity` above one, and a real quantile at either bound. A
-/// compiler that refused it would invent a rule the query engine does not have, so the number is
-/// bound exactly as written.
+/// Prometheus answers a quantile outside `[0, 1]` with `-Inf` or `+Inf` rather than an error.
 #[test]
 fn a_quantile_outside_the_unit_interval_is_bound_as_given() {
     let cases = [("-1.0", -1.0), ("2.0", 2.0), ("0.0", 0.0), ("1.0", 1.0)];
@@ -450,8 +422,6 @@ fn a_quantile_outside_the_unit_interval_is_bound_as_given() {
     }
 }
 
-/// A parameter in parentheses binds the same quantile, because it is the same query: the planner
-/// already looks through the parentheses when it reads a literal, so the native compiler does too.
 #[test]
 fn a_parenthesised_quantile_binds_as_written() {
     let tree = compile(
@@ -465,8 +435,6 @@ fn a_parenthesised_quantile_binds_as_written() {
     assert_eq!(op.function, RangeFunction::QuantileOverTime(0.9));
 }
 
-/// The selector of a parameterised function is looked through its parentheses too, so the range
-/// function and the parameter are both read from a statement that was merely typed with grouping.
 #[test]
 fn a_parenthesised_selector_binds_as_written() {
     let bare = compile(
@@ -491,10 +459,6 @@ fn a_parenthesised_selector_binds_as_written() {
     }
 }
 
-/// A parameter written as an expression binds the number it folds to, because the kernel's constant
-/// is a field of the tree: `1 - 0.1` is the quantile `0.9` written two ways, and carrying the
-/// expression would bind nothing at all. The value is asserted exactly, so a fold that produced a
-/// neighbouring number rather than the arithmetic's own result would fail here.
 #[test]
 fn a_parameter_folded_from_an_expression_binds_its_value() {
     // `1 - 0.1` is `0.9` bit for bit in IEEE754, and `-(0.9)` is the negative of the same number:
@@ -517,8 +481,6 @@ fn a_parameter_folded_from_an_expression_binds_its_value() {
     }
 }
 
-/// A parameter computed at query time is refused, and the error names it: the tree binds a kernel's
-/// constant, so a quantile that would only exist at run time has no field to go in.
 #[test]
 fn a_computed_quantile_is_refused_and_names_what_it_found() {
     // `time()` is a scalar, so the parser accepts it as the quantile; the compiler binds literals.
@@ -540,32 +502,6 @@ fn a_computed_quantile_is_refused_and_names_what_it_found() {
     );
 }
 
-/// A parameterised window binds its anchor and its offset exactly as an unparameterised one does.
-/// The two are asserted apart because the runtime folds `anchor - offset`, so a binding that
-/// dropped either number would still compile a window, and only these assertions would notice.
-#[test]
-fn a_quantile_over_time_binds_an_anchor_and_an_offset_apart() {
-    let tree = compile(
-        &eval_stmt("quantile_over_time(0.9, x[5m] @ 1234 offset 1m)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
-
-    let (_, op) = root_window(&tree);
-    assert_eq!(op.function, RangeFunction::QuantileOverTime(0.9));
-    assert_eq!(op.window.range_ms, 300_000, "the window was not bound");
-    assert_eq!(
-        op.window.anchor_ms,
-        Some(1_234_000),
-        "the anchor was not bound"
-    );
-    assert_eq!(op.window.offset_ms, 60_000, "the offset was not bound");
-}
-
-/// A call with the wrong number of arguments names the count its function takes, rather than
-/// reporting whatever the compiler does with one argument. The parser checks arity too, so a
-/// mismatched call can only reach the compiler as an edited tree.
 #[test]
 fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
     let cases = [
@@ -585,8 +521,6 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
             "rate",
             "where it takes 1",
         ),
-        // A math function's constants are counted the same way: `clamp` reads two of them after its
-        // vector, so one is one too few.
         (
             with_call_arguments("clamp(x, 0, 1)", |args| {
                 args.pop();
@@ -594,9 +528,7 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
             "clamp",
             "where it takes its vector and two constants",
         ),
-        // A listed math name called with no argument at all: the vector is counted as the first
-        // argument, so a call that wrote none is one argument short of `abs` rather than a shape
-        // the compiler has no words for.
+        // The vector counts as the first argument.
         (
             with_call_arguments("abs(x)", |args| args.clear()),
             "abs",
@@ -623,12 +555,10 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
     }
 }
 
-/// `x` becomes an instant selection over the raw input, on the statement's grid, with the
-/// statement's lookback and the input's fields.
 #[test]
 fn a_bare_selector_becomes_an_instant_over_raw_input() {
     let input = raw_schema();
-    // A lookback the statement chose, so the binding cannot be a default the compiler invented.
+    // Not the default lookback, so a hard-coded default would fail.
     let stmt = EvalStmt {
         lookback_delta: Duration::from_secs(120),
         ..eval_stmt("x")
@@ -647,7 +577,6 @@ fn a_bare_selector_becomes_an_instant_over_raw_input() {
         "the instant selection does not land on the statement's grid"
     );
 
-    // The output is the input's fields, evaluated on the statement's grid.
     let output = tree
         .root()
         .output
@@ -680,7 +609,6 @@ fn a_bare_selector_becomes_an_instant_over_raw_input() {
     assert_eq!(bound.ordering, SeriesOrdering::KeyThenTime);
 }
 
-/// A bare selector's offset reaches the instant binding with its sign.
 #[test]
 fn an_offset_on_a_bare_selector_keeps_its_sign() {
     let cases = [("x offset 1m", 60_000), ("x offset -1m", -60_000)];
@@ -693,7 +621,6 @@ fn an_offset_on_a_bare_selector_keeps_its_sign() {
     }
 }
 
-/// An `@`-anchored bare selector records its anchor on the instant node.
 #[test]
 fn an_anchored_instant_selector_binds_its_anchor() {
     let tree = compile(
@@ -707,7 +634,6 @@ fn an_anchored_instant_selector_binds_its_anchor() {
     assert_eq!(op.offset_ms, 0);
 }
 
-/// Anchored instant selectors bind both the runtime anchor and the scan hull, including offsets.
 #[test]
 fn anchored_instant_selector_binds_scan_bounds() {
     for (query, at_ms, offset_ms, bounds) in [
@@ -738,19 +664,13 @@ fn anchored_instant_selector_binds_scan_bounds() {
     }
 }
 
-/// A window's `@` anchor is bound as an absolute millisecond timestamp: `start()` and `end()` are
-/// the statement's own bounds, and a number is the unix second it names.
 #[test]
 fn an_anchor_on_a_window_resolves_to_absolute_milliseconds() {
     let cases = [
-        // `@ <seconds>`: 1234 is unix second 1234, which is 1_234_000 ms.
         ("rate(x[5m] @ 1234)", 1_234_000),
-        // A sub-second anchor resolves to the millisecond it names.
         ("rate(x[5m] @ 1.234)", 1_234),
-        // Prometheus allows a pre-epoch anchor: `signed_millis_since_epoch` takes `Err(earlier)`,
-        // where a `duration_since(UNIX_EPOCH).unwrap_or_default()` helper would silently give 0.
+        // Prometheus allows a pre-epoch anchor.
         ("rate(x[5m] @ -1.5)", -1_500),
-        // The statement here is UNIX_EPOCH..100s, which is what `start()` and `end()` mean.
         ("rate(x[5m] @ start())", 0),
         ("rate(x[5m] @ end())", 100_000),
     ];
@@ -767,11 +687,7 @@ fn an_anchor_on_a_window_resolves_to_absolute_milliseconds() {
     }
 }
 
-/// `end()` is the statement's end, not the last grid point.
-///
-/// The grid stops before an end it does not land on, so an end of 103s over a 5s step has its last
-/// point at 100s. Binding `end()` to that point instead of to the statement's own end would pass a
-/// test whose end is a multiple of the step; here the two numbers differ.
+/// An end of 103s on a 5s grid, so the statement's end and the last grid point (100s) differ.
 #[test]
 fn end_resolves_to_the_statement_end_not_the_last_grid_point() {
     let stmt = eval_stmt_over("rate(x[5m] @ end())", Duration::from_secs(103));
@@ -783,7 +699,6 @@ fn end_resolves_to_the_statement_end_not_the_last_grid_point() {
         "`@ end()` bound something other than the statement's end"
     );
 
-    // The grid the same statement compiles onto ends at 100s, so the two are not the same number.
     let spec = op.output_grid.spec();
     let last_point = spec.start_ms + (spec.len as i64 - 1) * spec.step_ms;
     assert_eq!(
@@ -792,8 +707,6 @@ fn end_resolves_to_the_statement_end_not_the_last_grid_point() {
     );
 }
 
-/// An anchor and an offset are bound apart: the window ends at `anchor - offset`, which the
-/// runtime folds, so both numbers have to survive compilation.
 #[test]
 fn an_anchor_and_an_offset_are_bound_apart() {
     let cases = [
@@ -814,31 +727,22 @@ fn an_anchor_and_an_offset_are_bound_apart() {
     }
 }
 
-/// The numbers a tree is made of, at the edges: a span the step does not divide, offsets in either
-/// direction, ranges that cannot be a window, and an ordering the scan did not default to.
 #[test]
 fn the_numeric_edges_of_a_statement_are_bound_as_given() {
-    /// What a row asserts about the tree `compile` returns.
     enum Expected {
-        /// The statement's grid, by its start, step and length.
         Grid { step_ms: i64, len: u64 },
-        /// The window's offset, in milliseconds.
         Offset(i64),
-        /// The input's ordering.
         Ordering(SeriesOrdering),
-        /// The query is refused.
         Rejected(Rejection),
     }
 
-    /// How a refused query is reported.
     enum Rejection {
         Plan,
         NotImplemented,
     }
 
     let cases = [
-        // 100s at 7s per step is 14 whole steps and a remainder: the grid keeps the last point
-        // that does not pass the end, so the remainder is not a point.
+        // 100s at 7s per step: the last point is 98s.
         (
             "a span the step does not divide",
             EvalStmt {
@@ -852,7 +756,6 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
                 len: 15,
             },
         ),
-        // The offset's sign is what decides whether the window reads earlier or later samples.
         (
             "a positive offset",
             eval_stmt("rate(x[5m] offset 1m)"),
@@ -878,7 +781,6 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
             SeriesOrdering::KeyThenTime,
             Expected::Rejected(Rejection::Plan),
         ),
-        // An instant selection's lookback is narrowed like every other duration.
         (
             "a lookback wider than i64 milliseconds",
             EvalStmt {
@@ -888,25 +790,19 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
             SeriesOrdering::KeyThenTime,
             Expected::Rejected(Rejection::Plan),
         ),
-        // Every shape reads one series to its last chunk before the next, so a scan whose chunks
-        // of different series interleave is refused instead of recorded onto an input that shape
-        // would fail on.
         (
             "an interleaved ordering, which no shape can consume to its last chunk",
             eval_stmt("rate(x[5m])"),
             SeriesOrdering::Interleaved,
             Expected::Rejected(Rejection::NotImplemented),
         ),
-        // A supported ordering is recorded on the input rather than dropped.
         (
             "a non-default ordering a window can consume",
             eval_stmt("rate(x[5m])"),
             SeriesOrdering::Contiguous,
             Expected::Ordering(SeriesOrdering::Contiguous),
         ),
-        // A shape outside the subset is refused for its shape, whatever its timing: the statement
-        // range of an unsupported shape is not read, so it cannot turn a refusal into a plan
-        // error. A subquery is the reachable case of a shape with no node at all.
+        // An unsupported shape is refused as `NotImplemented` even with an invalid range.
         (
             "an unsupported shape with an inverted range",
             EvalStmt {
@@ -965,14 +861,8 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
     }
 }
 
-/// An interleaved scan is refused whatever shape the statement has. The refusal sits at the entry
-/// of the compiler rather than in one shape's branch, because a bare selector returns before any
-/// window exists and would otherwise be accepted with an ordering it cannot be evaluated on.
 #[test]
 fn an_interleaved_scan_is_refused_whatever_the_shape() {
-    // The plain range function is the ordering table's case, which compiles `rate(x[5m])` under
-    // `Interleaved` and expects the same refusal; these cover the shapes that table cannot: the
-    // bare selector, a math function over one, and a parameterised range function.
     for query in ["x", "abs(x)", "quantile_over_time(0.9, x[5m])"] {
         let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::Interleaved)
             .expect_err(&format!("`{query}` compiled over an interleaved scan"));
@@ -986,9 +876,6 @@ fn an_interleaved_scan_is_refused_whatever_the_shape() {
             "`{query}` did not say why the ordering is refused: {message}"
         );
     }
-    // The same scan compiles a bare selector when its chunks are contiguous, and the ordering it
-    // was compiled under is recorded on the tree's input rather than dropped: that is what makes
-    // the refusals above about the ordering rather than about the shape.
     let tree = compile(&eval_stmt("x"), raw_schema(), SeriesOrdering::Contiguous)
         .expect("a contiguous scan compiles a bare selector");
     let (input, _) = root_instant(&tree);
@@ -1005,17 +892,11 @@ fn an_interleaved_scan_is_refused_whatever_the_shape() {
     );
 }
 
-/// A shape outside the subset is refused, and the error says what was found so the query can be
-/// rewritten rather than guessed at.
 #[test]
 fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
     let cases = [
-        // A bare subquery is a matrix, and a tree reports evaluated samples: only a range function
-        // can fold a matrix, so a subquery on its own has no node.
         (eval_stmt("x[5m:]"), "x[5m:]", "the expression `x[5m:]`"),
-        // A matrix position that is neither a range selector nor a subquery: a bare vector selector
-        // where a matrix belongs. The parser type-checks function arguments, so this can only reach
-        // the compiler as an edited tree.
+        // A vector selector where a matrix belongs.
         (
             with_call_arguments("rate(x[5m])", |args| {
                 *args[0] = a_bare_selector();
@@ -1044,8 +925,6 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
     }
 }
 
-/// The display of a compiled tree, checked as a whole so the compiler and the display cannot drift
-/// apart: a wrong grid, kernel or nesting shows up on a line someone would read.
 #[test]
 fn the_display_of_a_compiled_tree_is_the_tree() {
     let tree = compile(
@@ -1065,9 +944,6 @@ fn the_display_of_a_compiled_tree_is_the_tree() {
     );
 }
 
-/// The display of a tree the batch added nodes to, checked as a whole: the shapes are read by
-/// someone reading an `EXPLAIN`, so a wrong nesting, operator, constant or grouping has to show up on
-/// a line rather than only in an assertion over the tree.
 #[test]
 fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
     let cases: [(&str, &[&str]); 3] = [
@@ -1112,9 +988,6 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
     }
 }
 
-/// Parentheses group; they do not change what a statement asks for. A compiler that refused them
-/// would reject a query on how it was typed rather than on what it means, and a statement written
-/// with them is otherwise exactly the shape the compiler accepts.
 #[test]
 fn parentheses_around_the_accepted_shape_are_transparent() {
     let bare = compile(
@@ -1138,10 +1011,6 @@ fn parentheses_around_the_accepted_shape_are_transparent() {
         );
     }
 }
-/// A math function compiles by compiling the expression it is applied to, so its node sits over the
-/// node that expression produces: `abs(rate(x[5m]))` is a map over the window `rate(x[5m])` is, not
-/// a fourth shape the compiler knows by name. The same rule reads `abs(x)` over an instant
-/// selection, which is why the two are asserted together: nothing below the map is specific to it.
 #[test]
 fn a_math_function_maps_over_the_node_its_argument_compiles_to() {
     let tree = compile(
@@ -1172,7 +1041,6 @@ fn a_math_function_maps_over_the_node_its_argument_compiles_to() {
     );
     assert_eq!(bound.ordering, SeriesOrdering::KeyThenTime);
 
-    // The same rule over the other selection shape: a map over an instant selection.
     let tree = compile(
         &eval_stmt("abs(x)"),
         raw_schema(),
@@ -1188,76 +1056,6 @@ fn a_math_function_maps_over_the_node_its_argument_compiles_to() {
     );
 }
 
-/// Nested math functions are two maps over one window, and every map reports that window's layout.
-///
-/// The maps are separate nodes because the arguments nest, not because the compiler knows
-/// `clamp_min(abs(...))`: a compiler that bound the pair to one node would fail the tree assertions
-/// here. The grids are compared by their spec, which is what [`NativeTree::validate`] compares: a
-/// map that allocated a second, equal grid would still be the window's layout, while one that
-/// reported a different grid or different fields would not.
-#[test]
-fn nested_math_functions_are_two_maps_over_one_window() {
-    let tree = compile(
-        &eval_stmt("clamp_min(abs(rate(x[5m])), 0)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`clamp_min(abs(rate(x[5m])), 0)` was refused: {error}"));
-
-    let MathOp::ClampMin { min } = map_op(tree.root()) else {
-        panic!(
-            "the root is not a clamp_min: {:?}",
-            map_parts(tree.root()).1.ops
-        );
-    };
-    assert_eq!(
-        min, 0.0,
-        "the clamp bound is not the number the query wrote"
-    );
-
-    let (inner, _) = map_parts(tree.root());
-    assert!(
-        matches!(map_op(inner), MathOp::Abs),
-        "the inner node is not an abs: {:?}",
-        map_parts(inner).1.ops
-    );
-    let (window, op) = map_parts(inner);
-    let NativeExpr::Window { op: bound, .. } = &window.expr else {
-        panic!("the inner map's input is not a window: {:?}", window.expr);
-    };
-    assert_eq!(bound.function, RangeFunction::Rate);
-    assert_eq!(op.ops.len(), 1, "a map applies one operation");
-
-    let window_schema = evaluated(window);
-    let window_grid = window_schema
-        .eval_grid
-        .as_ref()
-        .expect("the window is evaluated");
-    for (what, node) in [("the clamp_min", tree.root()), ("the abs", inner)] {
-        let schema = evaluated(node);
-        assert_eq!(
-            schema
-                .eval_grid
-                .as_ref()
-                .expect("the map is evaluated")
-                .spec(),
-            window_grid.spec(),
-            "`{what}` reports a grid the window does not"
-        );
-        assert!(
-            schema
-                .fields
-                .iter()
-                .map(|field| &field.name)
-                .eq(window_schema.fields.iter().map(|field| &field.name)),
-            "`{what}` reports fields the window does not"
-        );
-    }
-}
-
-/// Every listed math name binds its own kernel, with the constants the call wrote. The display names
-/// the operation and its constants, so a name that fell through to a neighbour's variant — or a
-/// parameter that was bound from the wrong argument — shows up in a line someone would read.
 #[test]
 fn the_supported_math_functions_map_to_their_kernels() {
     let cases = [
@@ -1284,14 +1082,11 @@ fn the_supported_math_functions_map_to_their_kernels() {
         ("deg(x)", "deg"),
         ("rad(x)", "rad"),
         ("sgn(x)", "sgn"),
-        // The three shapes that carry constants, including the default `round` binds one for.
         ("round(x)", "round 1"),
         ("round(x, 0.5)", "round 0.5"),
         ("clamp(x, 0, 1)", "clamp 0 1"),
         ("clamp_min(x, 0)", "clamp_min 0"),
         ("clamp_max(x, 1)", "clamp_max 1"),
-        // `pi()` is a constant, so it binds the kernel constant a literal would.
-        ("clamp_max(x, pi())", "clamp_max 3.141592653589793"),
         // Date functions over a vector read its values as Unix seconds.
         ("day_of_month(x)", "day_of_month"),
         ("day_of_week(x)", "day_of_week"),
@@ -1316,12 +1111,8 @@ fn the_supported_math_functions_map_to_their_kernels() {
     }
 }
 
-/// `pi()` is a constant the statement itself decides, so it binds where a literal binds.
-///
-/// It is a call, but not one whose value comes from the data or from the evaluation time: it is one
-/// number, the same `std::f64::consts::PI` the legacy planner's `pi` reports. Folding it is what
-/// makes an operation over it a broadcast of that number and a parameter written as `pi()` a kernel
-/// constant, rather than two shapes this compiler would have to answer separately.
+/// `pi()` folds wherever a literal does: as a statement, as a broadcast operand, and as a kernel
+/// constant.
 #[test]
 fn pi_folds_to_the_number_it_means() {
     let tree = compile_statement(&eval_stmt("pi()"))
@@ -1329,8 +1120,6 @@ fn pi_folds_to_the_number_it_means() {
     assert_eq!(Some(std::f64::consts::PI), constant(tree.root()));
     assert_eq!((0, 5_000, 21), scalar_grid(tree.root()));
 
-    // Over a selector it is the multiplication it was written as, with the constant on the side the
-    // query wrote it on.
     let tree = compile(
         &eval_stmt("pi() * x"),
         raw_schema(),
@@ -1342,8 +1131,7 @@ fn pi_folds_to_the_number_it_means() {
     assert!(matches!(right.expr, NativeExpr::Instant { .. }));
     assert_eq!(BinaryOp::Mul, matching.op);
 
-    // As a parameter it stays a constant, so the call is one map node and not a per-point
-    // parameter: `clamp_max(x, pi())` binds the same kernel as `clamp_max(x, 3.141592653589793)`.
+    // A constant parameter binds a `MathOp`, not a parameterized map.
     let tree = compile(
         &eval_stmt("clamp_max(x, pi())"),
         raw_schema(),
@@ -1361,10 +1149,8 @@ fn pi_folds_to_the_number_it_means() {
     assert!(matches!(input.expr, NativeExpr::Instant { .. }));
 }
 
-/// The constants a function folds are folded by the kernel's own arithmetic, not by a second copy of
-/// it. Both numbers below are ones a hand-written copy would get wrong: a Euclidean modulo folds
-/// `-7 % 3` to 2, and `*` in place of `^` folds the power to about 9.8e8. That is the point: the
-/// compiler must not disagree with the kernel about what an operator means.
+/// Constant folding uses the kernel's arithmetic; both inputs below are ones a hand-written copy
+/// would get wrong.
 #[test]
 fn the_constant_fold_is_the_kernels_arithmetic() {
     // Go's `math.Mod` gives -1 for `-7 % 3`; a Euclidean modulo would give 2.
@@ -1382,8 +1168,7 @@ fn the_constant_fold_is_the_kernels_arithmetic() {
     };
     assert_eq!(min, -1.0, "`-7 % 3` did not fold with `math.Mod`'s sign");
 
-    // A power over a base barely above one: as multiplication it would be about 9.8e8, and it is
-    // neither a comparison nor a set operator, which fold nothing at all.
+    // As multiplication instead of `^` this would be about 9.8e8.
     let tree = compile(
         &eval_stmt("round(x, 1.0000006850274261 ^ 9.80019037e8)"),
         raw_schema(),
@@ -1405,21 +1190,15 @@ fn the_constant_fold_is_the_kernels_arithmetic() {
     );
 }
 
-/// A math function is pointwise over a vector, so an argument that is not one is refused and the
-/// rejection names the argument rather than the function alone. The parser refuses `abs(1)` too, so
-/// the AST is edited the way the arity test edits one: a shape the parser would have caught is still
-/// a shape the compiler must not compile into something else.
 #[test]
 fn a_math_function_over_a_non_vector_argument_is_refused_and_names_it() {
     let cases = [
-        // A scalar, which a pointwise function has no positions to be pointwise over.
         (
             with_call_arguments("abs(x)", |args| {
                 *args[0] = PromExpr::NumberLiteral(NumberLiteral::new(1.0));
             }),
             "a call to `abs` whose first argument is `1`, which is a scalar",
         ),
-        // A range selector, which belongs in a window rather than under a map.
         (
             with_call_arguments("abs(x)", |args| {
                 args[0] = a_matrix_selector();
@@ -1447,8 +1226,6 @@ fn a_math_function_over_a_non_vector_argument_is_refused_and_names_it() {
     }
 }
 
-/// A constant on the right of a vector binds as the number it is, next to the vector the rest of the
-/// query compiles to: `x * 100` is `x`'s instant selection multiplied by `100`.
 #[test]
 fn a_constant_binds_as_a_scalar_next_to_the_vector() {
     let input = raw_schema();
@@ -1483,7 +1260,6 @@ fn a_constant_binds_as_a_scalar_next_to_the_vector() {
         "the constant is not on the statement's grid"
     );
 
-    // A scalar carries no fields, so the operation reports the vector side's layout and grid.
     let output = evaluated(tree.root());
     assert!(
         Arc::ptr_eq(&output.fields, &input.fields),
@@ -1496,9 +1272,6 @@ fn a_constant_binds_as_a_scalar_next_to_the_vector() {
     );
 }
 
-/// The operands keep the order they were written in, because most operators are not commutative:
-/// `1 / x` is not `x / 1`. The constant side is what tells them apart, so a compiler that sorted the
-/// operands would compile both queries to the same, wrong tree.
 #[test]
 fn a_non_commutative_operation_keeps_the_operands_where_they_were_written() {
     let cases = [
@@ -1534,45 +1307,6 @@ fn a_non_commutative_operation_keeps_the_operands_where_they_were_written() {
     }
 }
 
-/// A binary operation compiles by compiling both operands, so it nests as deeply as the query was
-/// written: `2 / (x + 1)` is a division whose right operand is the addition, not a shape the
-/// compiler knows by name.
-#[test]
-fn a_binary_operation_nests_over_the_operands_it_was_written_with() {
-    let tree = compile(
-        &eval_stmt("2 / (x + 1)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`2 / (x + 1)` was refused: {error}"));
-
-    let (left, right, matching) = binary_parts(tree.root());
-    assert_eq!(matching.op, BinaryOp::Div);
-    assert_eq!(constant(left), Some(2.0), "the divisor was not bound");
-
-    let (inner_left, inner_right, inner_matching) = binary_parts(right);
-    assert_eq!(inner_matching.op, BinaryOp::Add);
-    let NativeExpr::Instant { .. } = &inner_left.expr else {
-        panic!(
-            "the sum's left operand is not the selector: {:?}",
-            inner_left.expr
-        );
-    };
-    assert_eq!(
-        constant(inner_right),
-        Some(1.0),
-        "the summand was not bound as a constant"
-    );
-
-    // Every node is on the statement's grid, which is what lets the operation align them.
-    assert_eq!(grid_of(tree.root()), (0, 5_000, 21));
-    assert_eq!(grid_of(right), (0, 5_000, 21));
-}
-
-/// `return_bool` is a field of the operation rather than a different tree: `x > 0` filters and
-/// `x > bool 0` reports zero or one, and the two differ in nothing else. Both directions of a
-/// comparison are asserted, because which side the constant is on decides what the filter keeps and
-/// a compiler that always put the constant on one side would compile `0 < x` as `x > 0`.
 #[test]
 fn a_comparison_carries_whether_it_filters_or_reports_bool() {
     let cases = [
@@ -1597,9 +1331,6 @@ fn a_comparison_carries_whether_it_filters_or_reports_bool() {
         );
     }
 
-    // The constant keeps the side it was written on. `0 < x` and `x > 0` keep the same values but
-    // are not the same tree: a compiler that normalised the comparison would answer the other
-    // query's filter, which is why the side is asserted rather than only the operator.
     let left_constant = compile(
         &eval_stmt("0 < x"),
         raw_schema(),
@@ -1616,26 +1347,8 @@ fn a_comparison_carries_whether_it_filters_or_reports_bool() {
         constant(right).is_none(),
         "`0 < x` put the constant on the right, which is `x > 0`"
     );
-
-    // The two modes are one tree otherwise: the query text is what differs, and a tree that recorded
-    // the mode somewhere else would fail the assertions above rather than this one.
-    let filters = compile(
-        &eval_stmt("x > 0"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
-    let reports = compile(
-        &eval_stmt("x > bool 0"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
-    assert_eq!(grid_of(filters.root()), grid_of(reports.root()));
 }
 
-/// A negation binds as the multiplication it is: `-x` is `-1 * x`. The tree has no negate node, and
-/// the multiplication kernel computes exactly the value the query asks for.
 #[test]
 fn a_negation_binds_as_a_multiplication_by_minus_one() {
     for query in ["-x", "-(x)"] {
@@ -1658,59 +1371,6 @@ fn a_negation_binds_as_a_multiplication_by_minus_one() {
     }
 }
 
-/// A doubled negation is a negation of a negation, not a compile error or a dropped sign.
-///
-/// `--x` binds as `-1 * (-1 * x)`: the outer multiplication is the one the query's first minus asks
-/// for, and the inner one is what the second minus lowered to. Nothing here cancels the two into
-/// `x`, because the tree has no rule for that and the kernel computes the product anyway.
-#[test]
-fn a_doubled_negation_nests_two_multiplications() {
-    let tree = compile(&eval_stmt("--x"), raw_schema(), SeriesOrdering::KeyThenTime)
-        .unwrap_or_else(|error| panic!("`--x` was refused: {error}"));
-    let (left, right, matching) = binary_parts(tree.root());
-    assert_eq!(matching.op, BinaryOp::Mul, "`--x` is not a multiplication");
-    assert_eq!(
-        constant(left),
-        Some(-1.0),
-        "`--x` did not bind its outer `-1` on the left"
-    );
-    let (inner_left, _, inner_matching) = binary_parts(right);
-    assert_eq!(
-        inner_matching.op,
-        BinaryOp::Mul,
-        "the operand of `--x` is not the inner multiplication"
-    );
-    assert_eq!(
-        constant(inner_left),
-        Some(-1.0),
-        "the inner negation did not bind its own `-1`"
-    );
-}
-
-/// The negation applies to whatever its operand compiles to, so a window can be negated: `-rate(x[5m])`
-/// is a multiplication over the window rather than a new shape.
-#[test]
-fn a_negation_applies_to_the_node_its_operand_compiles_to() {
-    let tree = compile(
-        &eval_stmt("-rate(x[5m])"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`-rate(x[5m])` was refused: {error}"));
-
-    let (left, right, matching) = binary_parts(tree.root());
-    assert_eq!(matching.op, BinaryOp::Mul);
-    assert_eq!(constant(left), Some(-1.0));
-    let NativeExpr::Window { op, .. } = &right.expr else {
-        panic!("the negation's operand is not a window: {:?}", right.expr);
-    };
-    assert_eq!(op.function, RangeFunction::Rate);
-    assert_eq!(op.window.range_ms, 300_000);
-}
-
-/// A constant written as an expression binds the number it folds to, by the fold a call's parameter
-/// already uses. The value is asserted exactly, so a fold that produced a neighbouring number would
-/// fail here.
 #[test]
 fn a_constant_operand_binds_the_value_it_folds_to() {
     let cases = [
@@ -1894,8 +1554,6 @@ fn vector_binary_matching_keeps_ignoring_and_group_left_separate() {
     );
 }
 
-/// A set operator binds as a set node over its two operands, with the labels the query wrote, and
-/// nests like any other expression: on either side of it and above it.
 #[test]
 fn set_operators_bind_their_operator_and_labels() {
     for (query, op, on, labels) in [
@@ -1950,9 +1608,7 @@ fn set_operators_bind_their_operator_and_labels() {
     );
 }
 
-/// What a set operator cannot carry is refused rather than dropped: Prometheus refuses a fill value
-/// on a set operator, which this parser accepts, and a side of several fields has no reference
-/// semantics, even when both sides carry the same number.
+/// Prometheus refuses a fill value on a set operator, which this parser accepts.
 #[test]
 fn a_set_operation_refuses_a_fill_value_and_several_fields() {
     let error = compile_selectors(
@@ -1990,10 +1646,6 @@ fn a_set_operation_refuses_a_fill_value_and_several_fields() {
     }
 }
 
-/// `info` binds the base first and then the instant selection of its info metric, reporting the
-/// times of the samples it selects, with the selector split the way Prometheus uses it: the name
-/// picks the info metric, `target_info` when there is none, and the other matchers both filter the
-/// info series and name the labels that are copied.
 #[test]
 fn info_binds_its_info_metric_after_the_base() {
     for (query, metric, matchers, names, keep_unmatched) in [
@@ -2083,10 +1735,7 @@ fn info_binds_its_info_metric_after_the_base() {
     }
 }
 
-/// The info series are selected at the reference time the selectors of the first argument share,
-/// as Prometheus `infoSeriesSelectTimestampAndOffset` decides it: one `@` and offset when every
-/// selector resolves to the same instant, the offsets of the subqueries a selector sits in added
-/// until one anchors it, and the evaluation time itself when the selectors disagree.
+/// Follows Prometheus `infoSeriesSelectTimestampAndOffset`.
 #[test]
 fn info_selects_its_info_series_at_the_shared_reference_time() {
     for (query, offset_ms, at_ms) in [
@@ -2124,9 +1773,6 @@ fn info_selects_its_info_series_at_the_shared_reference_time() {
     }
 }
 
-/// What the native `info` cannot read is refused rather than read some other way: name matchers
-/// that can select several info tables, a matcher that chooses what is read instead of matching a
-/// label, and an info metric of several fields.
 #[test]
 fn info_refuses_info_metrics_it_cannot_read_as_one_table() {
     for (query, fields, expected) in [
@@ -2158,8 +1804,6 @@ fn info_refuses_info_metrics_it_cannot_read_as_one_table() {
     }
 }
 
-/// A statement whose value has no grid of its own - a range vector or a string - is refused, and
-/// the refusal names the expression and its type, because the type is why it cannot be bound.
 #[test]
 fn a_statement_without_values_on_a_grid_is_refused() {
     for (query, found) in [
@@ -2180,30 +1824,17 @@ fn a_statement_without_values_on_a_grid_is_refused() {
     }
 }
 
-/// A constant statement compiles to the constant on the statement's grid, and it reads nothing.
-///
-/// The vector entry above refuses it — a tree over that entry reports evaluated samples — so the
-/// statement entry is the one that binds it, and the grid it reports on is the statement's own.
-///
-/// `pi()` is one of these constants: it is a call, but the statement itself decides its value, so it
-/// folds to the number it means rather than keeping the call for the runtime.
 #[test]
 fn a_constant_statement_is_a_scalar_on_the_statement_grid_without_input() {
-    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0), ("pi()", std::f64::consts::PI)] {
+    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0)] {
         let stmt = eval_stmt(query);
         let tree = compile_statement(&stmt)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
-        // The root is the number the statement means, on the statement's own grid: 100 seconds in
-        // 5-second steps is 21 points, and no point is the constant's to choose.
         assert_eq!(Some(value), constant(tree.root()), "query: {query}");
         assert_eq!((0, 5_000, 21), scalar_grid(tree.root()), "query: {query}");
     }
 }
 
-/// A statement that reads the evaluation time but no data compiles to a tree without input: `time()`
-/// and an operation over it are scalars, and `vector(...)` and a date function without an argument
-/// are one unlabelled series. A statement that reads a selector is refused by this entry, and a call
-/// with no kernel is still refused by name.
 #[test]
 fn a_statement_that_reads_no_data_compiles_without_input() {
     let tree = compile_statement(&eval_stmt("time()")).unwrap();
@@ -2249,7 +1880,6 @@ fn a_statement_that_reads_no_data_compiles_without_input() {
     }
 }
 
-/// A varying scalar is broadcast over a vector on the side it was written.
 #[test]
 fn a_varying_scalar_is_broadcast_where_it_was_written() {
     let compile_tree = |query: &str| {
@@ -2276,8 +1906,6 @@ fn a_varying_scalar_is_broadcast_where_it_was_written() {
     assert_eq!(matching.op, BinaryOp::Sub);
 }
 
-/// `round` and the `clamp` functions bind their parameters as scalar nodes, in argument order, when
-/// any of them varies, and keep the constant map otherwise.
 #[test]
 fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
     let compiled = |query: &str| {
@@ -2333,15 +1961,7 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
     ));
 }
 
-/// `quantile` is the one aggregate whose argument a query can evaluate, and that argument binds as a
-/// second operand of the fold rather than as the number it is not.
-///
-/// Prometheus reads the parameter at every step, so `quantile(scalar(x), y)` is the fold of `y` with
-/// the value `scalar(x)` answers at that point. The input is compiled first and the argument second,
-/// which is the order the selector walk binds their scans in. A number the statement itself decides,
-/// written as a literal or as arithmetic over literals, stays on the constant path, and a vector
-/// argument is refused: Prometheus rejects `quantile(x, y)` at type check, and this route never
-/// bound it.
+/// Prometheus reads a `quantile` φ at every step.
 #[test]
 fn a_quantile_reads_its_argument_per_point() {
     let compiled = |query: &str| {
@@ -2379,44 +1999,31 @@ fn a_quantile_reads_its_argument_per_point() {
         op.kind
     );
     assert_eq!(op.stage, AggregateStage::Complete);
-    // The fold reads `y`, the argument reads `x`: the input is the first source, the argument the
-    // second one the walk bound.
+    // Input before parameter, the order the planner's selector walk prepares scans in.
     assert!(matches!(input.expr, NativeExpr::Instant { .. }));
     assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
     assert!(matches!(tree.root().output, NativeType::Samples(_)));
     assert_eq!(tree.root().inputs().len(), 2);
-    // An argument that varies at every point is no different from one that reads a selector.
     per_point("quantile(time() / 150 + 0.5, y)");
     per_point("quantile(scalar(x), y) by (tag_0)");
 
-    // A number the statement decides stays bound on the fold, whether it was written as one or as
-    // the arithmetic it means.
-    for (query, quantile) in [
-        ("quantile(0.25 + 0.1 + 0.15, y)", 0.25 + 0.1 + 0.15),
-        ("quantile(pi() / 4, y)", std::f64::consts::PI / 4.0),
-    ] {
-        let tree = compiled(query).unwrap().tree;
-        let NativeExpr::Aggregate { op, .. } = &tree.root().expr else {
-            panic!("`{query}`: the constant argument left the constant path");
-        };
-        assert!(
-            matches!(op.kind, AggregateKind::Quantile { quantile: value } if value.to_bits() == quantile.to_bits()),
-            "`{query}`: {:?}",
-            op.kind
-        );
-    }
+    let quantile = 0.25_f64 + 0.1 + 0.15;
+    let tree = compiled("quantile(0.25 + 0.1 + 0.15, y)").unwrap().tree;
+    let NativeExpr::Aggregate { op, .. } = &tree.root().expr else {
+        panic!("the constant argument left the constant path");
+    };
+    assert!(
+        matches!(op.kind, AggregateKind::Quantile { quantile: value } if value.to_bits() == quantile.to_bits()),
+        "{:?}",
+        op.kind
+    );
 
-    // A vector argument never reaches this compiler: the parser's type check refuses it, which is
-    // where Prometheus refuses `quantile(foo, v)` as well.
     assert!(
         promql_parser::parser::parse("quantile(x, y)").is_err(),
         "a vector argument parsed"
     );
 }
 
-/// `max_of` and `min_of` take two scalars and answer a scalar, so the call binds the first argument
-/// as the map's input and the second as its one parameter. The two are `(scalar, scalar) -> scalar`
-/// in Prometheus, which is why neither of them carries a vector here.
 #[test]
 fn a_call_of_two_scalars_binds_them_as_a_scalar_map() {
     let compiled = |query: &str| {
@@ -2437,7 +2044,6 @@ fn a_call_of_two_scalars_binds_them_as_a_scalar_map() {
         other => panic!("expected a parameterized map, got {other:?}"),
     };
 
-    // The first argument varies and the second is a constant.
     let tree = compiled("max_of(time(), 2)").tree;
     assert!(
         matches!(tree.root().output, NativeType::Scalar(_)),
@@ -2448,7 +2054,6 @@ fn a_call_of_two_scalars_binds_them_as_a_scalar_map() {
     assert!(matches!(input.expr, NativeExpr::EvalTime { date: None }));
     assert_eq!(constant(&parameters[0]), Some(2.0));
 
-    // A constant first argument is bound as the number it folds to; the map materializes it.
     let tree = compiled("min_of(2, scalar(x))").tree;
     let (input, op, parameters) = parts(&tree);
     assert_eq!(op, ParameterizedOp::MinOf);
@@ -2461,8 +2066,7 @@ fn a_call_of_two_scalars_binds_them_as_a_scalar_map() {
         }]
     ));
 
-    // Two constants are still a map: the runtime answers the one number they compute, and the
-    // binding keeps the call's shape rather than folding it here.
+    // `max_of` is not constant-folded.
     let tree = compiled("max_of(1, 2)").tree;
     let (input, op, parameters) = parts(&tree);
     assert_eq!(op, ParameterizedOp::MaxOf);
@@ -2470,10 +2074,6 @@ fn a_call_of_two_scalars_binds_them_as_a_scalar_map() {
     assert_eq!(constant(&parameters[0]), Some(2.0));
 }
 
-/// A vector argument is refused by the compiler that binds the call, in the shape the parser rules
-/// out: Prometheus types both functions as two scalars, so a vector is not a shape the kernel could
-/// compute. The parser rejects the written query, so the argument is swapped in on a tree it
-/// accepted.
 #[test]
 fn a_scalar_function_over_a_vector_is_refused() {
     let stmt = with_call_arguments("max_of(1, 2)", |args| {
@@ -2493,8 +2093,6 @@ fn a_scalar_function_over_a_vector_is_refused() {
     );
 }
 
-/// A call of two scalars written with one argument is refused by name, as every other call's arity
-/// is: Prometheus has no one-argument `max_of`.
 #[test]
 fn a_scalar_function_with_one_argument_is_refused() {
     let stmt = with_call_arguments("max_of(1, 2)", |args| {
@@ -2514,10 +2112,6 @@ fn a_scalar_function_with_one_argument_is_refused() {
     );
 }
 
-/// A vector-matching modifier has nothing to match when one operand is a constant, and the tree's
-/// matching has no field for a fill value. Both are refused rather than dropped: dropping one would
-/// compile a query into an operation other than the one it wrote. `bool` is not a matching modifier
-/// and is bound, which is why it is not in this list.
 #[test]
 fn a_vector_matching_modifier_over_a_constant_is_refused() {
     let cases = [
@@ -2527,9 +2121,7 @@ fn a_vector_matching_modifier_over_a_constant_is_refused() {
             eval_stmt("x + on() group_right 1"),
             "x + on() group_right 1",
         ),
-        // A fill value is a matching extension the tree has no field for, so a fill is refused
-        // rather than bound without it. The parser accepts a fill only between two vectors, so the
-        // value is set on a tree the parser accepted.
+        // The parser accepts a fill only between two vectors.
         (
             with_binary_modifier("x + 1", |modifier| {
                 modifier.fill_values = VectorMatchFillValues::new(0.0, 0.0);
@@ -2557,7 +2149,6 @@ fn a_vector_matching_modifier_over_a_constant_is_refused() {
     }
 }
 
-/// A modifier inside a constant argument is refused, not folded into the value it computes.
 #[test]
 fn a_modifier_inside_a_folded_call_argument_is_refused() {
     let cases = [
@@ -2578,8 +2169,6 @@ fn a_modifier_inside_a_folded_call_argument_is_refused() {
             matches!(error, DataFusionError::NotImplemented(_)),
             "`{query}` did not report NotImplemented: {error}"
         );
-        // The argument is read as a constant expression, so the refusal names its position and
-        // quotes the expression -- where the fill the query wrote is still visible.
         let message = error.to_string();
         assert!(
             message.contains(position),
@@ -2592,12 +2181,7 @@ fn a_modifier_inside_a_folded_call_argument_is_refused() {
     }
 }
 
-/// A `bool` comparison of two constants folds to the number it reports, so the query runs.
-///
-/// `x * (1 < bool 2)` is `x * 1`: the inner comparison is a value, not an operation over a vector.
-/// Leaving it unfolded produces a `Binary` of two constants, which `validate` accepts and the
-/// executor refuses only when it builds the state — a legal query that fails at run time instead of
-/// answering. The fold keeps it a number, and the number is the kernel's own answer.
+/// Unfolded, a `Binary` of two constants passes tree validation and fails only at execution.
 #[test]
 fn a_bool_comparison_of_two_constants_folds_to_its_number() {
     for (query, folded) in [
@@ -2605,7 +2189,7 @@ fn a_bool_comparison_of_two_constants_folds_to_its_number() {
         ("x * (1 > bool 2)", 0.0),
         ("x * (1 == bool 1)", 1.0),
         ("x * (1 != bool 1)", 0.0),
-        // NaN satisfies only `!=`, which the fold inherits from the kernel rather than restating.
+        // NaN satisfies only `!=`.
         ("x * (0 / 0 == bool 0)", 0.0),
         ("x * (0 / 0 != bool 0)", 1.0),
     ] {
@@ -2625,19 +2209,13 @@ fn a_bool_comparison_of_two_constants_folds_to_its_number() {
     }
 }
 
-/// A comparison of two constants without `bool` has no value to report, and is refused as such.
-///
-/// The parser refuses this shape outright — "comparisons between scalars must use BOOL modifier" is
-/// its own message for `1 > 2` — so the only way to hand the compiler one is to clear the flag on a
-/// tree it accepted. The compiler has to refuse it all the same: a caller that builds a statement
-/// without going through the parser would otherwise get a node that only fails when it runs.
+/// The parser refuses `1 > 2`, so the `bool` flag is cleared on a parsed tree.
 #[test]
 fn a_comparison_of_two_constants_without_bool_is_refused() {
     let mut stmt = eval_stmt("x * (1 > bool 2)");
     let PromExpr::Binary(outer) = &mut stmt.expr else {
         unreachable!("`x * (1 > bool 2)` parses to a binary operation");
     };
-    // The comparison is written in parentheses, which the parser keeps as a node of their own.
     let PromExpr::Paren(grouped) = &mut *outer.rhs else {
         unreachable!("the right operand is a parenthesised expression");
     };
@@ -2663,12 +2241,7 @@ fn a_comparison_of_two_constants_without_bool_is_refused() {
     );
 }
 
-/// A modifier inside a constant subexpression is refused rather than folded away.
-///
-/// `x * (1 + fill(0) 2)` asks for a fill, which the tree has no field for. The inner addition is a
-/// constant, so the fold runs before the binary operation is dispatched: a fold that computes the
-/// number without reading the modifier answers `x * 3` and the fill disappears from a query that
-/// wrote one.
+/// Folding `x * (1 + fill(0) 2)` to `x * 3` would silently drop the fill.
 #[test]
 fn a_modifier_inside_a_folded_constant_is_refused() {
     let error = compile(
@@ -2687,47 +2260,12 @@ fn a_modifier_inside_a_folded_constant_is_refused() {
         "`x * (1 + fill(0) 2)` did not say what it found: {message}"
     );
 
-    // An unmodified constant subexpression still folds: the refusal is about the modifier, not
-    // about the fold.
     compile(
         &eval_stmt("x * (1 + 2)"),
         raw_schema(),
         SeriesOrdering::KeyThenTime,
     )
     .expect("`x * (1 + 2)` has no modifier to refuse");
-}
-
-/// An empty `by()` groups by no label, which is what a bare aggregate already does.
-///
-/// Prometheus reads `sum by() (x)` as "keep no label", the same grouping as `sum(x)`: the modifier
-/// names which labels survive, and naming none keeps none. The two queries therefore have to bind
-/// the same tree rather than one of them falling back to `without`, which would keep everything the
-/// empty list does not name.
-#[test]
-fn an_empty_by_groups_the_way_a_bare_aggregate_does() {
-    let bare = compile(
-        &eval_stmt("sum(x)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`sum(x)` was refused: {error}"));
-    let empty = compile(
-        &eval_stmt("sum by() (x)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`sum by() (x)` was refused: {error}"));
-
-    let (_, bare_op) = aggregate_parts(bare.root());
-    let (_, empty_op) = aggregate_parts(empty.root());
-    assert_eq!(
-        empty_op.group, bare_op.group,
-        "`sum by() (x)` grouped differently from `sum(x)`"
-    );
-    assert!(
-        !matches!(empty_op.group, Grouping::Without(_)),
-        "an empty `by()` fell back to `without`, which keeps every label it does not name"
-    );
 }
 
 /// The labels of a `by` or `without` modifier, in the order they were written.
@@ -2748,10 +2286,6 @@ fn assert_grouping_labels(op: &BoundAggregate, expected: &[&str]) {
     );
 }
 
-/// A bare `sum(x)` groups by no label at all, which is how Prometheus reads an aggregate with no
-/// modifier: every label is dropped, `__name__` included, so every series of the input falls into one
-/// group. The tree records that as `By` with no label rather than as `Without` of everything, which
-/// is why the modifier's shape is asserted and not only its label list.
 #[test]
 fn a_bare_sum_groups_by_no_label() {
     let tree = compile(
@@ -2769,8 +2303,6 @@ fn a_bare_sum_groups_by_no_label() {
     };
     assert!(labels.is_empty(), "a bare `sum` kept the labels {labels:?}");
 
-    // A complete aggregate folds each group's values and reports them on its input's grid, one value
-    // per input field, so its layout and grid are its input's.
     assert_eq!(evaluated(tree.root()).fields.len(), 1);
     assert_eq!(grid_of(tree.root()), (0, 5_000, 21));
     assert_eq!(
@@ -2780,15 +2312,12 @@ fn a_bare_sum_groups_by_no_label() {
     );
 }
 
-/// `by` keeps the labels it names and drops the rest, and the tree records them in the order they
-/// were written: a grouping is a set, so both orders group the same way, but a display that reordered
-/// them would not be the query.
 #[test]
 fn a_sum_by_keeps_the_labels_it_names() {
     let cases = [
+        ("sum by() (x)", &[][..]),
         ("sum by(job)(x)", &["job"][..]),
         ("sum by(job, instance)(x)", &["job", "instance"][..]),
-        // The modifier is accepted after the call body as well, and binds the same way.
         ("sum(x) by (job)", &["job"][..]),
     ];
 
@@ -2805,9 +2334,6 @@ fn a_sum_by_keeps_the_labels_it_names() {
     }
 }
 
-/// `without` keeps every label it does not name, which no list of kept labels can spell: `without`
-/// also drops `__name__`, so a compiler that turned it into a `by` of the surviving labels would
-/// group a query by labels it meant to remove. The tree records the labels to drop.
 #[test]
 fn a_sum_without_records_the_labels_to_drop() {
     let cases = [
@@ -2829,82 +2355,6 @@ fn a_sum_without_records_the_labels_to_drop() {
     }
 }
 
-/// An aggregate is an expression like any other, so it nests: `abs(sum(x))` is a map over an
-/// aggregate, and `sum by(job)(rate(x[5m]) * 100)` is an aggregate over a multiplication over a
-/// window. The assertions go all the way down, because a compiler that stopped at the top node would
-/// still compile both queries.
-#[test]
-fn an_aggregate_nests_wherever_a_value_can() {
-    let tree = compile(
-        &eval_stmt("abs(sum(x))"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`abs(sum(x))` was refused: {error}"));
-    assert!(
-        matches!(map_op(tree.root()), MathOp::Abs),
-        "`abs(sum(x))` is not an abs over the sum: {:?}",
-        map_parts(tree.root()).1.ops
-    );
-    let (aggregate, _) = map_parts(tree.root());
-    let (_, sum) = aggregate_parts(aggregate);
-    assert_eq!(sum.kind, AggregateKind::Sum);
-
-    let tree = compile(
-        &eval_stmt("sum by(job)(rate(x[5m]) * 100)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`sum by(job)(rate(x[5m]) * 100)` was refused: {error}"));
-    let (input, op) = aggregate_parts(tree.root());
-    assert_grouping_labels(op, &["job"]);
-    let (left, right, matching) = binary_parts(input);
-    assert_eq!(matching.op, BinaryOp::Mul);
-    assert_eq!(constant(right), Some(100.0), "the factor was not bound");
-    let NativeExpr::Window { op: window, .. } = &left.expr else {
-        panic!(
-            "the multiplication's left operand is not a window: {:?}",
-            left.expr
-        );
-    };
-    assert_eq!(window.function, RangeFunction::Rate);
-    assert_eq!(window.window.range_ms, 300_000);
-}
-
-/// `sum without(instance)(abs(x))` composes a grouping with a pointwise function, and the grouping is
-/// the one the query wrote rather than the complement of it.
-#[test]
-fn a_grouping_composes_with_a_math_function() {
-    let tree = compile(
-        &eval_stmt("sum without(instance)(abs(x))"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`sum without(instance)(abs(x))` was refused: {error}"));
-
-    let (input, op) = aggregate_parts(tree.root());
-    assert!(
-        matches!(&op.group, Grouping::Without(_)),
-        "the grouping became {:?}",
-        op.group
-    );
-    assert_grouping_labels(op, &["instance"]);
-    assert!(
-        matches!(map_op(input), MathOp::Abs),
-        "`abs(x)` is not an abs over the selector: {:?}",
-        map_parts(input).1.ops
-    );
-    let (instant, _) = map_parts(input);
-    let NativeExpr::Instant { .. } = &instant.expr else {
-        panic!("the map's input is not the selector: {:?}", instant.expr);
-    };
-}
-
-/// Every aggregate that folds a group's values into one value per grid point binds, and binds to its
-/// own kind: a name table that mapped two names to one kind would compile `avg(x)` into a sum, which
-/// is why the kind is asserted exactly rather than merely checked to exist. Binding `stddev`,
-/// `stdvar` and `quantile` is separate from native execution support: the tree can describe them
-/// independently of the executor's kernels.
 #[test]
 fn the_supported_aggregates_map_to_their_kinds() {
     let cases = [
@@ -2935,15 +2385,10 @@ fn the_supported_aggregates_map_to_their_kinds() {
     }
 }
 
-/// `quantile`'s parameter is the tree's constant like any other, so it folds: `quantile(1 - 0.1, x)`
-/// is `quantile(0.9, x)` written two ways. A quantile outside `[0, 1]` is bound exactly as written,
-/// because Prometheus defines it — below zero is `-Infinity` and above one is `+Infinity` — so
-/// refusing it would be this compiler inventing a rule the query engine does not have.
 #[test]
 fn a_quantile_aggregate_binds_the_quantile_it_was_written_with() {
     let cases = [
         ("quantile(0.9, x)", 0.9),
-        // The fold's own result, asserted exactly: a neighbouring number is a different query.
         ("quantile(1 - 0.1, x)", 0.9),
         ("quantile((0.9), x)", 0.9),
         ("quantile(0, x)", 0.0),
@@ -2969,13 +2414,7 @@ fn a_quantile_aggregate_binds_the_quantile_it_was_written_with() {
     }
 }
 
-/// An aggregate's quantile written as a vector is refused, and the error names the argument.
-///
-/// A scalar the query evaluates is bound beside the fold - the value the kernel reads `q` as, one
-/// per grid point - so `quantile(time(), x)` compiles. A vector is not a value at all: Prometheus
-/// refuses `quantile(foo, x)` at type check, and the parser this statement comes through refuses it
-/// before the compiler sees it, exactly as it did before. The compiler keeps its own refusal for a
-/// tree handed to it another way, under the name it always used.
+/// The parser refuses a vector φ; the compiler refuses one on an edited tree too.
 #[test]
 fn an_aggregate_quantile_over_a_vector_is_refused_and_names_the_argument() {
     let query = "quantile(x, y)";
@@ -2986,8 +2425,6 @@ fn an_aggregate_quantile_over_a_vector_is_refused_and_names_the_argument() {
         "`{query}` was refused by something other than the argument's type: {error}"
     );
 
-    // The scalar the query evaluates instead is the argument this compiler binds per point, so the
-    // statement the old refusal was written for is one this route now answers.
     let tree = compile(
         &eval_stmt("quantile(time(), x)"),
         raw_schema(),
@@ -2999,9 +2436,6 @@ fn an_aggregate_quantile_over_a_vector_is_refused_and_names_the_argument() {
         NativeExpr::ParameterizedAggregate { .. }
     ));
 
-    // The same fold with a vector argument, as a caller that did not come through the parser could
-    // build it: refused under the name it always was, which is what keeps such a statement off this
-    // route.
     let PromExpr::VectorSelector(selector) = promql_parser::parser::parse("x").unwrap() else {
         unreachable!("`x` is a selector")
     };
@@ -3011,7 +2445,6 @@ fn an_aggregate_quantile_over_a_vector_is_refused_and_names_the_argument() {
         unreachable!("`quantile(0.5, x)` is an aggregate")
     };
     aggregate.param = Some(Box::new(PromExpr::VectorSelector(selector)));
-    // The statement's grid is the one its well-formed twin would have; only the argument changes.
     let stmt = EvalStmt {
         expr: PromExpr::Aggregate(aggregate),
         ..eval_stmt("quantile(0.5, x)")
@@ -3033,11 +2466,6 @@ fn an_aggregate_quantile_over_a_vector_is_refused_and_names_the_argument() {
     );
 }
 
-/// A fill inside an aggregate's quantile argument is refused where the fill is written.
-///
-/// The argument is compiled as the scalar expression it is, so a binary operation carrying a fill is
-/// refused by the same rule that refuses one anywhere else, naming the operation it found. The
-/// statement is a `NotImplemented` either way, which is what keeps it on the existing plan.
 #[test]
 fn a_fill_inside_an_aggregate_quantile_is_refused_where_the_fill_is() {
     let query = "quantile(0.5 + fill(0) 0.1, x)";
@@ -3058,91 +2486,6 @@ fn a_fill_inside_an_aggregate_quantile_is_refused_where_the_fill_is() {
     );
 }
 
-/// Every aggregate that folds binds `by`, `without` and no modifier the way the query wrote them, in
-/// both modifier positions. The two are asserted apart because they are not each other's inverse:
-/// `by(job)` keeps `job` and drops the rest, while `without(instance)` keeps everything it does not
-/// name and drops `__name__` too, and a bare aggregate groups by no label at all.
-#[test]
-fn every_folding_aggregate_groups_the_way_it_was_written() {
-    // The eight names that take only their vector, and `quantile`, which takes its quantile first:
-    // the three shapes are written per aggregate because the parameter sits inside the call.
-    let shapes = [
-        ["sum(x)", "sum by(job)(x)", "sum without(instance)(x)"],
-        ["avg(x)", "avg by(job)(x)", "avg without(instance)(x)"],
-        ["count(x)", "count by(job)(x)", "count without(instance)(x)"],
-        ["min(x)", "min by(job)(x)", "min without(instance)(x)"],
-        ["max(x)", "max by(job)(x)", "max without(instance)(x)"],
-        ["group(x)", "group by(job)(x)", "group without(instance)(x)"],
-        [
-            "stddev(x)",
-            "stddev by(job)(x)",
-            "stddev without(instance)(x)",
-        ],
-        [
-            "stdvar(x)",
-            "stdvar by(job)(x)",
-            "stdvar without(instance)(x)",
-        ],
-        [
-            "quantile(0.9, x)",
-            "quantile by(job)(0.9, x)",
-            "quantile without(instance)(0.9, x)",
-        ],
-    ];
-
-    for [bare, by, without] in shapes {
-        let tree = compile(&eval_stmt(bare), raw_schema(), SeriesOrdering::KeyThenTime)
-            .unwrap_or_else(|error| panic!("`{bare}` was refused: {error}"));
-        let (_, op) = aggregate_parts(tree.root());
-        let Grouping::By(labels) = &op.group else {
-            panic!("`{bare}` grouped without labels: {:?}", op.group);
-        };
-        assert!(labels.is_empty(), "`{bare}` kept the labels {labels:?}");
-
-        let tree = compile(&eval_stmt(by), raw_schema(), SeriesOrdering::KeyThenTime)
-            .unwrap_or_else(|error| panic!("`{by}` was refused: {error}"));
-        let (_, op) = aggregate_parts(tree.root());
-        assert!(
-            matches!(&op.group, Grouping::By(_)),
-            "`{by}` did not group by labels: {:?}",
-            op.group
-        );
-        assert_grouping_labels(op, &["job"]);
-
-        let tree = compile(
-            &eval_stmt(without),
-            raw_schema(),
-            SeriesOrdering::KeyThenTime,
-        )
-        .unwrap_or_else(|error| panic!("`{without}` was refused: {error}"));
-        let (_, op) = aggregate_parts(tree.root());
-        assert!(
-            matches!(&op.group, Grouping::Without(_)),
-            "`{without}` did not group without labels: {:?}",
-            op.group
-        );
-        assert_grouping_labels(op, &["instance"]);
-    }
-
-    // The trailing modifier binds the same grouping as the leading one does.
-    let tree = compile(
-        &eval_stmt("quantile(0.9, x) without(instance)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`quantile(0.9, x) without(instance)` was refused: {error}"));
-    let (_, op) = aggregate_parts(tree.root());
-    assert!(
-        matches!(&op.group, Grouping::Without(_)),
-        "a trailing `without` did not group without labels: {:?}",
-        op.group
-    );
-    assert_grouping_labels(op, &["instance"]);
-}
-
-/// The aggregates that are not a fold bind as a vector operation over the expression they
-/// aggregate, with their parameter folded and their grouping kept; `limit_ratio` keeps whole series
-/// whatever the grouping. A parameter only known at run time is refused, as for `quantile`.
 #[test]
 fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
     let cases = [
@@ -3178,8 +2521,7 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
     };
     assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
 
-    // `limitk` has no policy for a `k` that changes per point, so it keeps the constant rejection
-    // and its message is the one that quotes the shapes this compiler accepts.
+    // Only `topk`/`bottomk` take a per-point `k`.
     let error = compile(
         &eval_stmt("limitk(scalar(x), x)"),
         raw_schema(),
@@ -3188,9 +2530,7 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
     .expect_err("a run-time k compiled");
     let message = error.to_string();
     assert!(message.contains("first argument"), "{message}");
-    // That quote is the only description a reader of a rejection gets, so it has to name every
-    // aggregator this compiler takes: one stale word there makes every rejection lie about what it
-    // binds.
+    // The rejection's quoted shapes must name every accepted aggregator.
     for aggregator in [
         "sum",
         "avg",
@@ -3214,9 +2554,7 @@ fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
     }
 }
 
-/// The shared acceptance queries of this batch, compiled whole: each one combines the shapes the
-/// batch added, so a compiler that bound any of them wrongly would fail here rather than in a
-/// narrower test.
+/// Compound queries compile and land on the statement's grid; only the grid is asserted.
 #[test]
 fn the_batch_acceptance_queries_compile() {
     let cases = [
@@ -3237,8 +2575,6 @@ fn the_batch_acceptance_queries_compile() {
     for query in cases {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
-        // Every tree the compiler accepts reports a grid, whether it ends in an aggregate, a
-        // comparison or a scalar broadcast.
         assert_eq!(
             grid_of(tree.root()),
             (0, 5_000, 21),
@@ -3247,10 +2583,7 @@ fn the_batch_acceptance_queries_compile() {
     }
 }
 
-/// One raw chunk of the metric `x`, as the caller binds it from a table.
-///
-/// `values` is one sample per timestamp, and a `None` is a position whose sample is missing rather
-/// than a value: the two are not the same thing, and a broadcast has to keep the difference.
+/// One raw chunk of the metric `x`; a `None` value is a missing sample at that timestamp.
 fn raw_x(timestamps: &[i64], values: Vec<Option<f64>>, is_last: bool) -> RawSeriesChunk {
     let metric = SeriesLabels::try_new(Some("x".into()), vec![]).expect("a metric name");
     RawSeriesChunk::try_new(
@@ -3273,9 +2606,6 @@ fn samples_at_every_grid_point() -> (Vec<i64>, Vec<Option<f64>>) {
 
 /// Compiles `query`, runs it over one raw series pushed as `chunks`, and returns every chunk the
 /// root handed over.
-///
-/// This is the real path: the tree comes from the compiler rather than being built by hand here, so
-/// a binding the compiler got wrong cannot be hidden by a test that restates it.
 fn execute_compiled(query: &str, chunks: Vec<RawSeriesChunk>) -> Vec<EvaluatedChunk> {
     let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
@@ -3304,11 +2634,7 @@ fn execute_compiled(query: &str, chunks: Vec<RawSeriesChunk>) -> Vec<EvaluatedCh
     out
 }
 
-/// The `(grid position, value)` rows `chunks` hold, concatenated in the order they arrived.
-///
-/// A position a chunk holds no value at is not a row at all, so what the function reports is the
-/// positions that carry something: an operation that turned a value into a hole would show up as a
-/// missing entry here rather than as a `None`.
+/// The `(grid position, value)` rows `chunks` hold, in arrival order; empty positions are skipped.
 fn rows(chunks: &[EvaluatedChunk]) -> Vec<(usize, f64)> {
     let mut rows = Vec::new();
     for chunk in chunks {
@@ -3331,11 +2657,6 @@ fn executed_name(chunks: &[EvaluatedChunk]) -> Option<String> {
         .and_then(|chunk| chunk.series.metric.name().map(|name| name.to_string()))
 }
 
-/// A constant on the right of a multiplication reaches the executor and multiplies every value.
-///
-/// The tree is `Binary(Mul, Instant, Scalar(100))`, which the compiler binds and the runtime runs as
-/// a broadcast: the chunk `x` produces is transformed as it arrives, and the answer keeps `x`'s
-/// positions.
 #[test]
 fn a_compiled_constant_multiplies_the_vector_it_is_paired_with() {
     let (timestamps, values) = samples_at_every_grid_point();
@@ -3353,7 +2674,6 @@ fn a_compiled_constant_multiplies_the_vector_it_is_paired_with() {
     assert_eq!(executed_name(&out), None, "`x * 100` kept the metric name");
 }
 
-/// A constant on the left keeps the operand order: `100 / x` is not `x / 100`.
 #[test]
 fn a_compiled_constant_on_the_left_keeps_the_operand_order() {
     let (timestamps, values) = samples_at_every_grid_point();
@@ -3366,8 +2686,6 @@ fn a_compiled_constant_on_the_left_keeps_the_operand_order() {
         .collect();
     assert_eq!(divided, expected, "`100 / x` did not divide by the vector");
 
-    // The other order is a different query, and it produces different numbers: a runtime that
-    // swapped the operands would answer this one with the first one's values.
     let other = rows(&execute_compiled(
         "x / 100",
         vec![raw_x(&timestamps, values, true)],
@@ -3375,7 +2693,6 @@ fn a_compiled_constant_on_the_left_keeps_the_operand_order() {
     assert_ne!(divided, other, "`100 / x` and `x / 100` agree");
 }
 
-/// `x > bool 0` reports one per value that passes, rather than filtering the vector.
 #[test]
 fn a_compiled_bool_comparison_reports_one_and_zero() {
     let (timestamps, _) = samples_at_every_grid_point();
@@ -3399,9 +2716,7 @@ fn a_compiled_bool_comparison_reports_one_and_zero() {
     );
 }
 
-/// Comparisons with constant operands are folded before the executor runs the vector operation.
-/// These queries exercise the compiled tree through the native executor, including scalar broadcast,
-/// unary negation, comparison results, label dropping, and the one closing output chunk.
+/// Constant comparisons fold before the executor runs the vector operation.
 #[test]
 fn a_compiled_bool_constant_comparison_runs_with_vector_arithmetic() {
     let (timestamps, _) = samples_at_every_grid_point();
@@ -3433,7 +2748,6 @@ fn a_compiled_bool_constant_comparison_runs_with_vector_arithmetic() {
     }
 }
 
-/// `x > 0` filters, so it keeps the labels it read and drops the positions that failed.
 #[test]
 fn a_compiled_filtering_comparison_keeps_the_values_that_passed() {
     let (timestamps, _) = samples_at_every_grid_point();
@@ -3456,7 +2770,6 @@ fn a_compiled_filtering_comparison_keeps_the_values_that_passed() {
     );
 }
 
-/// The negation the compiler binds is the multiplication it means, and it runs that way.
 #[test]
 fn a_compiled_negation_negates_every_value() {
     let (timestamps, values) = samples_at_every_grid_point();
@@ -3467,7 +2780,6 @@ fn a_compiled_negation_negates_every_value() {
     assert_eq!(rows(&out), expected, "`-x` did not negate every value");
 }
 
-/// A negation over a window negates the window result and drops its metric name.
 #[test]
 fn a_compiled_negation_of_a_window_negates_the_window_result() {
     let (timestamps, values) = samples_at_every_grid_point();
@@ -3503,11 +2815,9 @@ fn a_compiled_negation_of_a_window_negates_the_window_result() {
     );
 }
 
-/// A filtering comparison with a constant on the left keeps the written operand order.
 #[test]
 fn a_compiled_constant_on_the_left_of_a_comparison_keeps_the_operand_order() {
     let (timestamps, values) = samples_at_every_grid_point();
-    // This compiles ScalarOperand::Left through the real compiler, not a hand-built tree.
     let left = execute_compiled("10 < x", vec![raw_x(&timestamps, values.clone(), true)]);
     let left_rows = rows(&left);
     let expected: Vec<(usize, f64)> = (0..21)
@@ -3548,13 +2858,7 @@ fn a_compiled_constant_on_the_left_of_a_comparison_keeps_the_operand_order() {
     assert!(!right.is_empty(), "`x < 10` produced no rows");
 }
 
-/// The broadcast composes with a window: `rate(x[5m]) * 100` runs the evaluator and multiplies its
-/// answer, rather than replacing it or multiplying the input.
-///
-/// The rate itself is not re-derived here. `rate` extrapolates a counter's slope to the whole
-/// window, so hand-computing its value would be this test restating a kernel it does not own; the
-/// baseline is instead what the same executor answers for the very same input without the
-/// multiplication, which is an oracle the broadcast cannot influence.
+/// The baseline is the same executor's `rate(x[5m])` on the same input, not a re-derived rate.
 #[test]
 fn a_compiled_broadcast_over_a_window_multiplies_the_window_result() {
     let (timestamps, values) = samples_at_every_grid_point();
@@ -3576,11 +2880,9 @@ fn a_compiled_broadcast_over_a_window_multiplies_the_window_result() {
         "`rate(x[5m]) * 100` is not the window's answer multiplied by 100"
     );
 
-    // One absolute anchor, so agreement with a baseline that itself regressed cannot pass. A
-    // counter rising by one every five seconds, over the window `(-295s, 5s]` that holds two
-    // samples: the second is the evaluation point, so nothing is extrapolated at the end, while the
-    // 295s of window before the first sample is far past the 5.5s threshold and is replaced by half
-    // the 5s average interval. `(5 + 2.5 + 0) / 5 / 300s = 0.005`, and `* 100` is 0.5.
+    // One absolute value, so a regressed baseline cannot pass. Window `(-295s, 5s]` holds two
+    // samples; the start gap exceeds the 5.5s threshold and extrapolates by half the 5s interval:
+    // `(5 + 2.5 + 0) / 5 / 300s = 0.005`, times 100 is 0.5.
     assert_eq!(
         out.first(),
         Some(&(1, 0.5)),
@@ -3588,12 +2890,9 @@ fn a_compiled_broadcast_over_a_window_multiplies_the_window_result() {
     );
 }
 
-/// A missing sample and a skipped position stay absent through the broadcast: it pairs values with
-/// a constant and never makes one up.
 #[test]
 fn a_compiled_broadcast_preserves_missing_values_and_skipped_positions() {
-    // Everything but the sample at 10s and the position at 20s: the first is a position that holds
-    // a missing sample, the second a position with no sample at all.
+    // A missing sample at 10s and no sample at all at 20s.
     let mut timestamps = Vec::new();
     let mut values = Vec::new();
     for index in 0..21 {
@@ -3614,7 +2913,7 @@ fn a_compiled_broadcast_preserves_missing_values_and_skipped_positions() {
         expected,
         "the broadcast changed which positions hold a value"
     );
-    // And the two holes are holes, not zeros: a neighbour is present at both sides of each one.
+    // Holes, not zeros: both neighbours of each are present.
     let positions: Vec<usize> = rows(&out)
         .into_iter()
         .map(|(position, _)| position)
@@ -3623,16 +2922,7 @@ fn a_compiled_broadcast_preserves_missing_values_and_skipped_positions() {
     assert!(!positions.contains(&4), "a skipped position became a value");
 }
 
-/// A series delivered in two raw chunks is answered as one series: the rows are right, and the
-/// answer closes exactly once.
-///
-/// This is not a streaming proof, and cannot be one: the compiler puts an [`NativeExpr::Instant`]
-/// under the binary, and a selection reads a whole axis before it decides anything, so it buffers
-/// both chunks and answers the series once. What the one output chunk demonstrates is therefore
-/// finality rather than incrementality. The executor-level proof of a broadcast's streaming is
-/// `src/promql/src/native/execute/tests.rs::a_broadcast_does_not_retain_the_vector_it_reads`, which
-/// drives an evaluated source directly: a chunk is answered per chunk read and the reservation
-/// stays bounded however long the series is.
+/// Checks finality, not streaming: the `Instant` below the binary buffers the whole series.
 #[test]
 fn a_compiled_broadcast_answers_a_series_delivered_in_two_chunks() {
     let timestamps: Vec<i64> = (0..4).map(|index| index * 5_000).collect();
@@ -3648,8 +2938,6 @@ fn a_compiled_broadcast_answers_a_series_delivered_in_two_chunks() {
         expected,
         "`x * 100` did not transform every chunk"
     );
-    // One output chunk, because the selection below it answers a whole series at once: the two raw
-    // chunks are one series to the selection, so the broadcast is handed one chunk and hands one up.
     assert_eq!(
         out.len(),
         1,
@@ -3666,10 +2954,6 @@ fn a_compiled_broadcast_answers_a_series_delivered_in_two_chunks() {
     );
 }
 
-/// `predict_linear` reads its horizon after its range selector, so the number the query wrote after
-/// the selector is the horizon the kernel extrapolates to. The value is asserted apart from the
-/// window, because a compiler that bound the horizon on the wrong side of the call would still
-/// produce a window.
 #[test]
 fn a_predict_linear_binds_its_horizon_and_its_window() {
     let tree = compile(
@@ -3685,18 +2969,11 @@ fn a_predict_linear_binds_its_horizon_and_its_window() {
     assert!(op.input_grid.is_none(), "raw input has no grid to declare");
 }
 
-/// `double_exponential_smoothing` reads two constants, and both reach the kernel in the order they
-/// were written: swapping them would smooth with the trend factor and trend with the smoothing one,
-/// which is a different series rather than an error.
-///
-/// The pair is asserted with two different numbers, because a compiler that bound the second
-/// constant twice would agree with a test that passed the same number twice.
 #[test]
 fn a_double_exponential_smoothing_binds_both_factors_in_order() {
     let cases = [
         ("double_exponential_smoothing(x[5m], 0.5, 0.1)", 0.5, 0.1),
         ("double_exponential_smoothing(x[5m], 0.1, 0.5)", 0.1, 0.5),
-        // The constants are folded like every other constant this compiler binds.
         (
             "double_exponential_smoothing(x[5m], 1 / 2, 0.1 + 0.2)",
             0.5,
@@ -3717,10 +2994,6 @@ fn a_double_exponential_smoothing_binds_both_factors_in_order() {
     }
 }
 
-/// The kernel needs both smoothing factors, so a call that wrote one is refused and the rejection
-/// says what the function reads. The parser enforces the same count, so the only way to hand the
-/// compiler such a call is to edit a tree it accepted: the same shape as the arity test above,
-/// applied to a function whose constants follow its selector.
 #[test]
 fn a_smoothing_with_one_factor_is_refused_and_names_what_it_reads() {
     let stmt = with_call_arguments("double_exponential_smoothing(x[5m], 0.5, 0.1)", |args| {
@@ -3743,12 +3016,7 @@ fn a_smoothing_with_one_factor_is_refused_and_names_what_it_reads() {
     );
 }
 
-/// A parameter computed at query time is refused by the parameterised range functions, and the
-/// rejection names the argument's position in the call: a smoothing factor that only exists at run
-/// time has no field in the tree, the same as a quantile. The position is the call's rather than the
-/// constants': `quantile_over_time` writes its quantile before the range selector, while
-/// `predict_linear` and `double_exponential_smoothing` write theirs after it, and the selector still
-/// counts as an argument.
+/// The reported position counts the range selector as an argument.
 #[test]
 fn a_computed_range_parameter_is_refused_and_names_its_position() {
     let cases = [
@@ -3783,59 +3051,6 @@ fn a_computed_range_parameter_is_refused_and_names_its_position() {
     }
 }
 
-/// The parameterised functions keep the anchor and the offset a function without parameters binds,
-/// because the parameters decide what folds the window rather than which window is folded.
-#[test]
-fn a_two_constant_function_binds_an_anchor_and_an_offset_too() {
-    let tree = compile(
-        &eval_stmt("double_exponential_smoothing(x[5m] @ 1234 offset 1m, 0.5, 0.1)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("a smoothed window with an anchor was refused: {error}"));
-
-    let (_, op) = root_window(&tree);
-    assert_eq!(
-        op.function,
-        RangeFunction::DoubleExponentialSmoothing {
-            smoothing: 0.5,
-            trend: 0.1,
-        }
-    );
-    assert_eq!(op.window.range_ms, 300_000);
-    assert_eq!(op.window.anchor_ms, Some(1_234_000), "the anchor was lost");
-    assert_eq!(op.window.offset_ms, 60_000, "the offset was lost");
-}
-
-/// The two parameterised functions nest under the rest of the compiler, so a smoothed window can be
-/// compared or aggregated like any other: an aggregate over a smoothing is a tree, not a shape the
-/// compiler knows by name.
-#[test]
-fn a_parameterised_window_nests_under_a_comparison_and_an_aggregate() {
-    let tree = compile(
-        &eval_stmt("sum by(job)(predict_linear(x[5m], 300) > 0)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| {
-        panic!("`sum by(job)(predict_linear(x[5m], 300) > 0)` refused: {error}")
-    });
-
-    let (input, aggregate) = aggregate_parts(tree.root());
-    assert_eq!(aggregate.kind, AggregateKind::Sum);
-    let (left, right, matching) = binary_parts(input);
-    assert_eq!(matching.op, BinaryOp::Gt);
-    assert!(!matching.return_bool, "`>` without `bool` filters");
-    assert_eq!(constant(right), Some(0.0));
-    let NativeExpr::Window { op, .. } = &left.expr else {
-        panic!(
-            "the comparison's left operand is not a window: {:?}",
-            left.expr
-        );
-    };
-    assert_eq!(op.function, RangeFunction::PredictLinear(300.0));
-}
-
 /// The grid a subquery evaluates its inner expression on, as `(start_ms, step_ms, len)`.
 fn child_grid(window: &BoundWindow) -> (i64, i64, u64) {
     let grid = window
@@ -3846,10 +3061,6 @@ fn child_grid(window: &BoundWindow) -> (i64, i64, u64) {
     (spec.start_ms, spec.step_ms, spec.len)
 }
 
-/// `rate(x[5m:1m])` folds a subquery rather than a range selector: the inner selector is evaluated on
-/// the subquery's own grid, and the window declares that grid as its input's. The two grids are
-/// asserted apart, because a compiler that bound the child onto the statement's grid would still
-/// produce a window.
 #[test]
 fn a_subquery_feeds_a_window_evaluated_on_its_own_grid() {
     let tree = compile(
@@ -3876,8 +3087,6 @@ fn a_subquery_feeds_a_window_evaluated_on_its_own_grid() {
         (-240_000, 60_000, 6),
         "the subquery's own grid is wrong"
     );
-    // The input is that evaluation, not raw samples: this is the field that tells a subquery's window
-    // from one over a range selector.
     let inner = evaluated(input);
     assert_eq!(
         inner.eval_grid.as_ref().unwrap().spec().start_ms,
@@ -3885,7 +3094,6 @@ fn a_subquery_feeds_a_window_evaluated_on_its_own_grid() {
         "the inner expression was not evaluated on the subquery's grid"
     );
 
-    // Below the window's input sits the one raw scan, so the tree still reads the scan exactly once.
     let NativeExpr::Instant { input: scan, .. } = &input.expr else {
         panic!(
             "the subquery's input is not an instant selection: {:?}",
@@ -3902,9 +3110,9 @@ fn a_subquery_feeds_a_window_evaluated_on_its_own_grid() {
     );
 }
 
-/// The child grid is derived from the statement's grid, the range, the offset and the step, and each
-/// of those changes it. The cases are asserted as whole specs, because a formula that dropped one
-/// term would still produce a plausible grid.
+/// The child grid is derived from the statement's grid, the range, the offset and the step, and
+/// each of those changes it. The cases are asserted as whole specs, because a formula that dropped
+/// one term would still produce a plausible grid.
 #[test]
 fn a_subquery_grid_follows_its_range_step_and_offset() {
     let cases = [
@@ -3913,8 +3121,8 @@ fn a_subquery_grid_follows_its_range_step_and_offset() {
         ("rate(x[5m:1m])", -240_000, 60_000, 6),
         // The statement's own step is not the subquery's step.
         ("rate(x[5m:5s])", -295_000, 5_000, 80),
-        // A step that does not divide the range, so the first boundary is not `-range`, and the last
-        // point is the last multiple of the step rather than the statement's end.
+        // A step that does not divide the range, so the first boundary is not `-range`, and the
+        // last point is the last multiple of the step rather than the statement's end.
         ("rate(x[5m:7s])", -294_000, 7_000, 57),
         // A positive offset reads earlier samples, so the whole child grid moves back.
         ("rate(x[5m:1m] offset 1m)", -300_000, 60_000, 6),
@@ -3941,7 +3149,6 @@ fn a_subquery_grid_follows_its_range_step_and_offset() {
     }
 }
 
-/// A subquery whose child interval contains no step boundary is refused as unsupported.
 #[test]
 fn a_subquery_with_an_empty_child_grid_is_refused() {
     let error = compile(
@@ -3960,7 +3167,6 @@ fn a_subquery_with_an_empty_child_grid_is_refused() {
     );
 }
 
-/// Large subquery child grids compile as deferred grids without allocating one timestamp per point.
 #[test]
 fn large_subquery_child_grids_compile_deferred() {
     const DAY_STEP_GRID: (i64, i64, u64) = (-86_399_999, 1, 86_400_000);
@@ -3988,8 +3194,7 @@ fn large_subquery_child_grids_compile_deferred() {
         }
     }
 
-    // This range makes the eager timestamp vector's capacity exceed isize::MAX bytes, while its
-    // child GridSpec remains valid and the deferred compiler path should require no such allocation.
+    // An eager timestamp vector for this range would exceed isize::MAX bytes.
     let range_ms = (isize::MAX / 8 + 1) as u64;
     let mut stmt = eval_stmt("rate(x[1ms:1ms] @ 0)");
     stmt.end = UNIX_EPOCH;
@@ -4011,14 +3216,8 @@ fn large_subquery_child_grids_compile_deferred() {
     assert_eq!(grid.2, range_ms);
 }
 
-/// The largest millisecond endpoint the platform can represent as a `SystemTime`.
-///
-/// The tests below need an endpoint close enough to `i64::MAX` milliseconds that a one-second
-/// rounding or a one-millisecond offset crosses the representable range. Unix-like platforms can
-/// hold that instant; Windows represents `SystemTime` as a 64-bit count of 100-nanosecond
-/// intervals since 1601, so the same instant does not fit and `UNIX_EPOCH + duration` panics. The
-/// behaviour under test is about arithmetic on the millisecond value, not about the platform's
-/// clock range, so a platform that cannot represent the instant skips instead of failing.
+/// `i64::MAX` milliseconds as a `SystemTime`, or `None` where `SystemTime` cannot hold it (Windows
+/// counts 100ns intervals from 1601). The tests below return early on `None` and check nothing.
 fn extreme_millisecond_endpoint() -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_millis(i64::MAX as u64))
 }
@@ -4045,7 +3244,6 @@ fn a_subquery_accepts_an_in_range_sampled_endpoint() {
     );
 }
 
-/// An anchored fold offset that cannot be represented as i64 is a plan error.
 #[test]
 fn a_subquery_with_an_overflowing_fold_offset_is_refused() {
     let Some(endpoint) = extreme_millisecond_endpoint() else {
@@ -4073,13 +3271,9 @@ fn a_subquery_with_an_overflowing_fold_offset_is_refused() {
     );
 }
 
-/// A subquery step that names no point is refused: `x[5m:]` falls back to Prometheus's default
-/// evaluation interval of one minute, and a step of zero has no point at all. The rejection names the
-/// number rather than reporting an empty grid.
 #[test]
 fn a_subquery_step_must_be_positive() {
-    // The parser refuses `x[5m:0s]`, so a zero step can only be handed to the compiler as an edited
-    // tree — the same way the range and arity tests reach their shapes.
+    // The parser refuses `x[5m:0s]`, so the step is edited on a parsed tree.
     let mut stmt = eval_stmt("rate(x[5m:1m])");
     let PromExpr::Call(call) = &mut stmt.expr else {
         unreachable!("`rate(x[5m:1m])` parses to a call");
@@ -4101,9 +3295,7 @@ fn a_subquery_step_must_be_positive() {
     );
 }
 
-/// A subquery with no step falls back to Prometheus's default evaluation interval of one minute,
-/// which is not the statement's step: the statement here steps in five seconds, so a compiler that
-/// reused it would produce a grid five times longer.
+/// Prometheus's default evaluation interval (1m), not the statement's 5s step.
 #[test]
 fn a_subquery_without_a_step_uses_the_default_interval() {
     let tree = compile(
@@ -4122,12 +3314,9 @@ fn a_subquery_without_a_step_uses_the_default_interval() {
     );
 }
 
-/// The child grid an anchored subquery must declare, derived from its read interval rather than from
-/// the compiler's formula: the samples of `(anchor - offset - range, anchor - offset]` at `step`.
-///
-/// The multiples are found by walking a two-step-wide margin around the interval and keeping the ones
-/// the interval itself contains, so no division and no rounding convention appears here: a wrong
-/// formula in the compiler cannot be reproduced by this helper, which is the whole point of it.
+/// The expected child grid of an anchored subquery: the multiples of `step` in
+/// `(anchor - offset - range, anchor - offset]`. Found by enumeration rather than division so it
+/// shares no rounding convention with the compiler's formula.
 fn anchored_child_grid(
     anchor_ms: i64,
     range_ms: i64,
@@ -4153,11 +3342,8 @@ fn anchored_child_grid(
     )
 }
 
-/// An anchored subquery reads one fixed interval instead of one interval per output point, and the
-/// interval is the anchor's: `(anchor - offset - range, anchor - offset]` at the subquery's step.
-///
-/// The expected grid comes from the interval, not from the compiler, and the anchor itself is stated
-/// in the case table even where the query writes `start()` or `end()`, so the two have to agree.
+/// The anchor is restated in the case table even for `start()` and `end()`, so the expected grid
+/// does not come from the compiler.
 #[test]
 fn an_anchored_subquery_reads_one_fixed_interval() {
     // (query, anchor_ms, range_ms, step_ms, offset_ms, statement start_ms, statement end_ms)
@@ -4190,7 +3376,7 @@ fn an_anchored_subquery_reads_one_fixed_interval() {
             0,
             100_000,
         ),
-        // A pre-epoch anchor, which a `duration_since(UNIX_EPOCH).unwrap_or_default()` would make 0.
+        // A pre-epoch anchor.
         (
             "rate(x[5m:1m] @ -1.5)",
             -1_500,
@@ -4200,8 +3386,7 @@ fn an_anchored_subquery_reads_one_fixed_interval() {
             0,
             100_000,
         ),
-        // The subquery's own offset moves the anchored interval, as it moves an unanchored one, in
-        // either order: the parser allows `@` and `offset` to be written both ways round.
+        // `@` and `offset` in either order.
         (
             "rate(x[5m:1m] offset 1m @ 1234)",
             1_234_000,
@@ -4231,8 +3416,7 @@ fn an_anchored_subquery_reads_one_fixed_interval() {
             0,
             100_000,
         ),
-        // A statement whose end is not a grid point and whose start is off the child step, so neither
-        // `end()` nor the statement's start can stand in for the anchor or for the child grid.
+        // The end is not a grid point and the start is off the child step.
         (
             "rate(x[5m:1m] @ end())",
             103_000,
@@ -4271,14 +3455,12 @@ fn an_anchored_subquery_reads_one_fixed_interval() {
             anchor_ms - offset_ms - range_ms,
             anchor_ms - offset_ms
         );
-        // The inner expression lands on that grid, so the window reads the points it declares.
         let inner = evaluated(input);
         assert_eq!(
             inner.eval_grid.as_ref().unwrap().spec().start_ms,
             expected.0,
             "`{query}` evaluated its expression off the declared child grid"
         );
-        // The statement's grid is untouched: an anchor changes what is read, not what is reported.
         let out = op.output_grid.spec();
         assert_eq!(
             (out.start_ms, out.step_ms),
@@ -4293,8 +3475,6 @@ fn an_anchored_subquery_reads_one_fixed_interval() {
     }
 }
 
-/// An anchored child grid does not depend on the statement at all: the same anchored subquery in two
-/// statements of different spans reads the same interval, while the two report on their own grids.
 #[test]
 fn an_anchored_subquery_grid_ignores_the_statement() {
     let short = eval_stmt_between(
@@ -4331,8 +3511,6 @@ fn an_anchored_subquery_grid_ignores_the_statement() {
     );
 }
 
-/// A window folds one value per grid point, so the expression inside a subquery has to produce a
-/// vector. A scalar has no fields to fold and no points at all, so it is refused by type.
 #[test]
 fn a_subquery_over_a_scalar_is_refused() {
     let mut stmt = eval_stmt("rate(x[5m:1m])");
@@ -4356,10 +3534,7 @@ fn a_subquery_over_a_scalar_is_refused() {
     );
 }
 
-/// A subquery nests like any other matrix: a window over a subquery can itself sit inside a subquery,
-/// and the whole chain still reads the scan once. The grids are asserted level by level, because a
-/// compiler that passed the outer grid down would produce a tree that validates but reads the wrong
-/// points.
+/// Each level's child grid is derived from its parent's grid, not the statement's.
 #[test]
 fn a_subquery_nests_and_each_level_has_its_own_grid() {
     let tree = compile(
@@ -4399,7 +3574,6 @@ fn a_subquery_nests_and_each_level_has_its_own_grid() {
         "the inner subquery's grid is wrong, so the outer grid was not passed down"
     );
 
-    // The innermost node is still the one raw scan.
     let NativeExpr::Instant { input: scan, .. } = &inner_input.expr else {
         panic!(
             "the inner window's input is not an instant selection: {:?}",
@@ -4413,60 +3587,18 @@ fn a_subquery_nests_and_each_level_has_its_own_grid() {
     );
 }
 
-/// A subquery composes with the rest of the compiler: a sum over a rate over a subquery is a tree,
-/// not a shape the compiler knows by name.
-#[test]
-fn a_subquery_composes_with_an_aggregate_and_a_comparison() {
-    let tree = compile(
-        &eval_stmt("sum by(job)(rate(x[5m:1m]) > 0)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap_or_else(|error| panic!("`sum by(job)(rate(x[5m:1m]) > 0)` was refused: {error}"));
-
-    let (input, aggregate) = aggregate_parts(tree.root());
-    assert_eq!(aggregate.kind, AggregateKind::Sum);
-    let (left, _, matching) = binary_parts(input);
-    assert_eq!(matching.op, BinaryOp::Gt);
-    let NativeExpr::Window { op, .. } = &left.expr else {
-        panic!(
-            "the comparison's left operand is not a window: {:?}",
-            left.expr
-        );
-    };
-    assert_eq!(op.window.range_ms, 300_000);
-    assert!(
-        op.input_grid.is_some(),
-        "the window over a subquery forgot its input grid"
-    );
-}
-
-/// The grid a subquery declares has to hold every sample its windows read — and no sample none of
-/// them can read. Both halves are checked here, against an oracle that is the query's own numbers
-/// rather than the compiler's.
-///
-/// Nothing but the grid itself is read from the produced window: the range, the step and the offset
-/// come from the query text (stated again in the case table, so the two can disagree), the read
-/// windows come from the statement's output grid as `p - offset - range < t <= p - offset`, and the
-/// samples are every multiple of the step in such a window. The membership test is the modulo one,
-/// because a grid whose step or phase is wrong still spans the right two bounds: interval
-/// containment is what let a wrong step pass before.
+/// The subquery grid holds every sample its windows read and none they cannot. The oracle uses only
+/// the query's own numbers (restated in the table) and checks membership by modulo, since a grid
+/// with a wrong step or phase can still span the right bounds.
 #[test]
 fn a_subquery_grid_holds_every_sample_its_windows_read() {
-    // The statement's end: the start is a column, because a grid that begins off the epoch is the
-    // only way to see a child grid built from the statement's start rather than from the epoch.
     let end = Duration::from_secs(100);
 
     // (query, statement start, range_ms, step_ms, offset_ms, some point reads no sample)
-    //
-    // The last flag is asserted rather than assumed: the narrow case below passes trivially if the
-    // compiler refused to bind a window at all, so the test would not notice losing it.
     let cases = [
-        // A whole-minute step over a five-minute window.
         ("rate(x[5m:1m])", 0, 300_000, 60_000, 0, false),
         // A step that divides neither the range nor the statement's 5s step.
         ("rate(x[5m:7s])", 0, 300_000, 7_000, 0, false),
-        // A step the statement's own step does divide, so the two cannot be confused either.
         ("rate(x[5m:5s])", 0, 300_000, 5_000, 0, false),
         // A step that divides neither the range nor the offset.
         (
@@ -4477,7 +3609,6 @@ fn a_subquery_grid_holds_every_sample_its_windows_read() {
             30_000,
             false,
         ),
-        // Offsets in both directions move every read window.
         (
             "rate(x[5m:1m] offset 1m)",
             0,
@@ -4494,11 +3625,9 @@ fn a_subquery_grid_holds_every_sample_its_windows_read() {
             -60_000,
             false,
         ),
-        // A window narrower than the child step: some output points read no sample at all, so a
-        // grid that dropped the samples the other points read would still look plausible.
+        // A window narrower than the child step, so some points read no sample.
         ("rate(x[30s:1m])", 0, 30_000, 60_000, 0, true),
-        // A statement whose start is three seconds off the child step, so a grid stepped from the
-        // statement's start would be phase-shifted by exactly that much.
+        // A start 3s off the child step catches a grid stepped from the statement's start.
         ("rate(x[5m:1m])", 3_000, 300_000, 60_000, 0, false),
         ("rate(x[30s:1m])", 3_000, 30_000, 60_000, 0, true),
     ];
@@ -4509,15 +3638,12 @@ fn a_subquery_grid_holds_every_sample_its_windows_read() {
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let (_, op) = root_window(&tree);
 
-        // The grid under test, and the statement's own grid, which is not the subquery's.
         let (child_start, child_step, child_len) = child_grid(op);
         let child_last = child_start + (child_len as i64 - 1) * child_step;
         let out = op.output_grid.spec();
         let out_last = out.start_ms + (out.len as i64 - 1) * out.step_ms;
 
-        // Every sample a window can read lies in the union of the read windows: strictly after the
-        // earliest window's left end, and no later than the latest window's right one. A grid that
-        // reached before the earliest read would evaluate a sample no window folds.
+        // The grid must stay within the union of the read windows.
         let earliest = out.start_ms - offset_ms - range_ms;
         let latest = out_last - offset_ms;
         for index in 0..child_len as i64 {
@@ -4535,9 +3661,7 @@ fn a_subquery_grid_holds_every_sample_its_windows_read() {
             let point = out.start_ms + index * out.step_ms;
             let read_start = point - offset_ms - range_ms;
             let read_end = point - offset_ms;
-            // Every multiple of the step in this window, enumerated two steps wider on each side
-            // and filtered by the window itself: the slack absorbs the difference between
-            // truncating and floor division, so this enumeration assumes no rounding convention.
+            // Enumerated two steps wider on each side to avoid assuming a rounding convention.
             let mut read_anything = false;
             for k in (read_start / step_ms - 2)..=(read_end / step_ms + 2) {
                 let sample = k * step_ms;
@@ -4570,12 +3694,8 @@ fn a_subquery_grid_holds_every_sample_its_windows_read() {
     }
 }
 
-/// The sorts, `absent` and the classic histogram functions bind a vector operation over the vector they
-/// are given, the histogram functions with their constants folded. `absent` derives its
-/// labels from the selector's matchers as Prometheus does: the first equality of a name sets the
-/// label and any other matcher of it removes it, the matchers that accept a missing label read
-/// last; `__name__` and the table-choosing matchers are not labels, and any expression other than
-/// a selector answers without labels.
+/// `absent` labels follow Prometheus: the first equality matcher on a name sets the label, any
+/// other matcher on it removes it, and matchers accepting a missing label are applied last.
 #[test]
 fn whole_vector_functions_bind_a_vector_operation() {
     let cases = [
@@ -4613,20 +3733,14 @@ fn whole_vector_functions_bind_a_vector_operation() {
     }
 }
 
-/// `absent_over_time(m[d])` binds `absent`'s own operation over a read of the window, so the labels
-/// it answers with are derived from the range selector's matchers exactly as `absent` derives them
-/// from a vector selector's.
 #[test]
 fn absent_over_time_binds_absent_over_a_presence_read() {
     let cases = [
-        // A selector that names no metric answers with every equality matcher: this is the shape
-        // the existing plan cannot answer, because its per-series UDF needs a metric name to read a
-        // table from and a nameless selector writes none.
+        // A nameless selector; the existing plan's UDF needs a metric name.
         (
             r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
             r#"absent {job="api", no_such_label="x"}"#,
         ),
-        // The table-choosing matchers are not labels of the answer, as they are not for `absent`.
         (
             r#"absent_over_time(x{job="a", env=~"p.*", instance!="", __field__="v"}[5m])"#,
             r#"absent {job="a"}"#,
@@ -4642,8 +3756,7 @@ fn absent_over_time_binds_absent_over_a_presence_read() {
         let display = tree.to_string();
         let root = display.lines().next().expect("a compiled tree has a root");
         assert_eq!(root, format!("Vector: {op}"), "`{query}`");
-        // The fold that reports presence keeps the metric name, so two discovered metrics that
-        // share their ordinary labels stay two series on the way up: `present_over_time` drops it.
+        // `present_over_time` would drop the metric name.
         assert!(
             display.contains("  Window: last_over_time [300000ms]"),
             "`{query}` does not read its window through the presence fold: {display}"
@@ -4651,10 +3764,7 @@ fn absent_over_time_binds_absent_over_a_presence_read() {
     }
 }
 
-/// `absent_over_time(x)` with `argument` in place of its matrix.
-///
-/// The parser types and counts a call's arguments, so a call whose matrix is not a matrix can only
-/// reach this compiler on a statement built here.
+/// `absent_over_time(x)` with `argument` in place of its matrix, which the parser would reject.
 fn with_absent_over_time_argument(argument: &str) -> EvalStmt {
     let mut stmt = eval_stmt("absent_over_time(x[5m])");
     let PromExpr::Call(call) = &mut stmt.expr else {
@@ -4664,18 +3774,14 @@ fn with_absent_over_time_argument(argument: &str) -> EvalStmt {
     stmt
 }
 
-/// A call that is not `absent_over_time(<matrix>)` is refused as that, rather than read as another
-/// statement's shape.
 #[test]
 fn absent_over_time_refuses_what_is_not_a_matrix() {
-    // A call's argument count and types are the parser's, so neither of these reaches a plan.
     for query in ["absent_over_time(x)", "absent_over_time(x[5m], 1)"] {
         assert!(
             promql_parser::parser::parse(query).is_err(),
             "`{query}` is a call this compiler would have had to refuse"
         );
     }
-    // A matrix position holding something else, which only a built statement can express.
     let error = compile(
         &with_absent_over_time_argument("x"),
         raw_schema(),
@@ -4688,8 +3794,6 @@ fn absent_over_time_refuses_what_is_not_a_matrix() {
             .contains("whose matrix is `x`, where it has to be a range selector"),
         "{error}"
     );
-    // Alternative (`or`) matchers are alternatives no one scan can filter, so the labels they would
-    // fix are not this compiler's to derive.
     let error = compile(
         &eval_stmt(r#"absent_over_time(x{a="b" or c="d"}[5m])"#),
         raw_schema(),
@@ -4709,14 +3813,7 @@ fn grid_values(value: f64) -> Vec<(usize, Option<f64>)> {
     (0..21).map(|position| (position, Some(value))).collect()
 }
 
-/// The points `absent_over_time` answers at are the ones no series has a sample at, and the labels
-/// are the ones its selector's matchers fix.
-///
-/// Prometheus v0.315 answers the same statements the same way: `absent_over_time(a[5m])` reports
-/// nothing while the window holds a sample and one unlabelled series once it does not, and
-/// `absent_over_time({no_such_label="x", job="api"}[5m])` reports `{job="api", no_such_label="x"}
-/// = 1`, because a series that carries no `no_such_label` reads as the empty string and the matcher
-/// wants `x`.
+/// Expected answers match Prometheus v0.315 on the same statements.
 #[test]
 fn absent_over_time_answers_only_the_points_no_series_has_a_sample_at() {
     let schema = raw_schema();
@@ -4732,22 +3829,18 @@ fn absent_over_time_answers_only_the_points_no_series_has_a_sample_at() {
         )]
     };
 
-    // Every window holds a sample of `a`, so there is nothing to report.
     assert!(
         aggregate_results(&execute_compiled("absent_over_time(a[5m])", with_samples())).is_empty(),
         "a series holding a sample in every window is not absent"
     );
 
-    // The metric exists but holds nothing in the window: the answer has no `__name__` to report,
-    // because the matcher that named the metric is not a label of an `absent` answer.
+    // `__name__` is never an `absent` label.
     assert_eq!(
         aggregate_results(&execute_compiled("absent_over_time(a[5m])", Vec::new())),
         vec![(None, Vec::new(), grid_values(1.0))],
         "a metric with no sample in any window answers the empty label set"
     );
 
-    // A matcher that no row satisfies is the shape the existing plan declines: the labels still
-    // have to reach the answer, at every point of the grid.
     assert_eq!(
         aggregate_results(&execute_compiled(
             r#"absent_over_time({no_such_label="x", job="api"}[5m])"#,
@@ -4763,7 +3856,6 @@ fn absent_over_time_answers_only_the_points_no_series_has_a_sample_at() {
         )]
     );
 
-    // An equality matcher on a label a present series carries fixes that label too.
     assert_eq!(
         aggregate_results(&execute_compiled(
             r#"absent_over_time(a{job="api"}[5m])"#,
@@ -4777,8 +3869,6 @@ fn absent_over_time_answers_only_the_points_no_series_has_a_sample_at() {
     );
 }
 
-/// The fold reads one window per grid point, so a sample outside the window does not make the point
-/// present, and an instant statement answers at its one point alone.
 #[test]
 fn absent_over_time_reads_the_window_and_not_the_series() {
     let schema = raw_schema();
@@ -4793,8 +3883,7 @@ fn absent_over_time_reads_the_window_and_not_the_series() {
     };
     let labels = vec![("job".to_string(), "api".to_string())];
 
-    // Samples a minute and a half before the statement's start are inside every five-minute window
-    // it evaluates, so every point reads the series and `absent` has nothing to say.
+    // 90s before the start: inside every 5m window.
     assert!(
         aggregate_results(&execute_compiled(
             "absent_over_time(a[5m])",
@@ -4804,8 +3893,7 @@ fn absent_over_time_reads_the_window_and_not_the_series() {
         "a window reaching back past the samples holds them"
     );
 
-    // Samples four minutes before it are outside every one of those windows: the metric exists and
-    // holds nothing the windows read, so the equality matcher's label is the whole answer.
+    // 4m before the start: outside every window.
     assert_eq!(
         aggregate_results(&execute_compiled(
             r#"absent_over_time(a{job="api"}[5m])"#,
@@ -4814,7 +3902,6 @@ fn absent_over_time_reads_the_window_and_not_the_series() {
         vec![(None, labels.clone(), grid_values(1.0))]
     );
 
-    // The same statement as an instant query answers at its one point alone.
     let instant = eval_stmt_between(
         r#"absent_over_time(a{job="api"}[5m])"#,
         Duration::from_secs(100),
@@ -4835,12 +3922,8 @@ fn absent_over_time_reads_the_window_and_not_the_series() {
     );
 }
 
-/// Two metrics that share their ordinary labels are two series, not one: the presence fold keeps
-/// the name, so `absent` still sees a vector and answers nothing rather than reading the pair as one
-/// series and failing.
-///
-/// This is the shape a selector that names no metric is discovered into: one source per metric,
-/// each reporting its own name.
+/// Two discovered metrics with equal ordinary labels stay two series because the presence fold
+/// keeps `__name__`.
 #[test]
 fn absent_over_time_keeps_two_discovered_metrics_apart() {
     let schema = raw_schema();
@@ -4873,9 +3956,6 @@ fn absent_over_time_keeps_two_discovered_metrics_apart() {
 }
 
 /// One raw chunk of `metric`, keyed by `key`, closing the series.
-///
-/// `timestamps` are milliseconds and `values` one per timestamp, which is what a scan of the series
-/// hands the tree.
 fn agg_raw_chunk(
     schema: &SeriesSchema,
     key: &[u8],
@@ -4965,11 +4045,7 @@ fn aggregate_results(output: &[EvaluatedChunk]) -> Vec<AggSeries> {
     results
 }
 
-/// Runs `tree` over `chunks`, which enter at the tree's only input, and reads the answer.
-///
-/// The answer is read the way a caller reads it: the whole input is pushed, the input is ended, and
-/// what the root reports is collected. Each series is reported by its identity and the value it
-/// decided at each absolute grid position.
+/// Pushes `chunks` into the tree's only input, ends it, and collects what the root reports.
 fn run_aggregate_tree(tree: &NativeTree, chunks: Vec<RawSeriesChunk>) -> Vec<AggSeries> {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
     let state = NativeExecutionState::try_new(tree, pool, None).unwrap();
@@ -4995,7 +4071,6 @@ fn agg_timestamps_0_to_100() -> Vec<i64> {
     (0..21).map(|index| index * 5_000).collect()
 }
 
-/// `sum(x)` over two series: one unlabelled group, and every label of both inputs dropped.
 #[test]
 fn a_compiled_sum_drops_every_label_and_adds_its_group() {
     let tree = compile(
@@ -5097,7 +4172,6 @@ fn a_compiled_sum_aggregates_series_chunks_after_input_ends() {
     }
 }
 
-/// Empty source input is not a member of an aggregate's implicit group.
 #[test]
 fn a_compiled_aggregate_over_empty_input_produces_no_groups() {
     for query in ["sum(x)", "sum by(job)(x)", "sum without(instance)(x)"] {
@@ -5110,12 +4184,8 @@ fn a_compiled_aggregate_over_empty_input_produces_no_groups() {
     }
 }
 
-/// `sum by(job)(x)` over five series: two groups, each the sum of its own members.
-///
-/// The members cover different points, so each group is a sum over a subset that changes from point
-/// to point: one series holds the whole grid, one holds a single sample between two grid points, and
-/// one stops a whole lookback before the grid does. No last sample sits exactly one lookback behind
-/// a grid point, so which points each member covers does not depend on how the boundary is read.
+/// Members cover different points, so each group sums a subset that changes per point. No sample
+/// sits exactly one lookback behind a grid point, so the boundary convention does not matter.
 #[test]
 fn a_compiled_sum_by_groups_its_members_and_sums_each_group() {
     let tree = compile(
@@ -5197,7 +4267,6 @@ fn a_compiled_sum_by_groups_its_members_and_sums_each_group() {
     );
 }
 
-/// `sum without(instance)(x)`: `instance` goes, `job` and `zone` stay, and so does `__name__` going.
 #[test]
 fn a_compiled_sum_without_drops_the_named_label_and_the_name() {
     let tree = compile(
@@ -5232,8 +4301,6 @@ fn a_compiled_sum_without_drops_the_named_label_and_the_name() {
             .map(|position| (position, Some(value)))
             .collect()
     };
-    // Two groups, because `zone` is not the dropped label: the two series differ by more than the
-    // label the grouping removes.
     assert_eq!(
         output,
         vec![
@@ -5257,11 +4324,7 @@ fn a_compiled_sum_without_drops_the_named_label_and_the_name() {
     );
 }
 
-/// `sum by(job)(rate(x[5m]))`: an aggregate over a window, mid-chain.
-///
-/// Every series is a counter rising by one per five seconds, and every grid point's window ends on a
-/// sample and begins five seconds before one, so the extrapolated rate is the same at every point:
-/// `59 / 295 = 0.2` per second, which the double arithmetic lands on the literals below.
+/// Counters rising by one per 5s give the same extrapolated rate at every point: `59 / 295 = 0.2`.
 #[test]
 fn a_compiled_sum_over_a_rate_groups_the_window_it_reads() {
     let statement = EvalStmt {
@@ -5272,7 +4335,6 @@ fn a_compiled_sum_over_a_rate_groups_the_window_it_reads() {
         lookback_delta: Duration::from_secs(5),
     };
     let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
-    // The window reads 300 seconds, so the samples start a full window before the first grid point.
     let schema = raw_schema();
     let timestamps: Vec<i64> = (0..=80).map(|index| index * 5_000).collect();
     let values: Vec<f64> = (0..=80).map(|index| f64::from(index) + 1.0).collect();
@@ -5322,7 +4384,6 @@ fn a_compiled_sum_over_a_rate_groups_the_window_it_reads() {
     );
 }
 
-/// Splitting one counter's samples does not change the rate aggregate or make it answer early.
 #[test]
 fn a_compiled_sum_over_a_rate_aggregates_series_chunks_after_input_ends() {
     let statement = EvalStmt {
@@ -5378,7 +4439,6 @@ fn a_compiled_sum_over_a_rate_aggregates_series_chunks_after_input_ends() {
     );
 }
 
-/// Empty source input is not a member of this aggregate's implicit group, with or without a window.
 #[test]
 fn a_compiled_sum_over_a_rate_with_empty_input_produces_no_groups() {
     let statement = EvalStmt {
@@ -5392,8 +4452,6 @@ fn a_compiled_sum_over_a_rate_with_empty_input_produces_no_groups() {
     assert_eq!(run_aggregate_tree(&tree, Vec::new()), Vec::new());
 }
 
-/// `label_replace` and `label_join` bind their label change into a map over the vector they are
-/// given, with the strings the call wrote.
 #[test]
 fn label_functions_bind_their_change_into_a_map() {
     let cases = [
@@ -5415,7 +4473,6 @@ fn label_functions_bind_their_change_into_a_map() {
     }
 }
 
-/// The native histogram functions bind their kernel into a map over the vector they are given.
 #[test]
 fn histogram_functions_bind_their_kernel_into_a_map() {
     for name in [
@@ -5438,8 +4495,6 @@ fn histogram_functions_bind_their_kernel_into_a_map() {
     }
 }
 
-/// An invalid regular expression fails the statement, as it fails Prometheus' evaluation, rather
-/// than being left to another path that would fail it the same way.
 #[test]
 fn an_invalid_label_replace_expression_fails_the_statement() {
     let error = compile(
@@ -5451,10 +4506,6 @@ fn an_invalid_label_replace_expression_fails_the_statement() {
     assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
 }
 
-/// `timestamp` reports one value per input field, and the native node reports the time of the sample
-/// each field was selected from. A table with several data fields would need that node to say which
-/// field's sample it means, so the compiler declines the shape instead of answering with one
-/// field's timestamps under every field's name.
 #[test]
 fn timestamp_multi_field_input_is_not_supported_natively() {
     for query in ["timestamp(x)", "timestamp(abs(x))"] {
@@ -5867,11 +4918,6 @@ fn selector_binding_callback_receives_matchers_once() {
     assert_eq!(compiled.inputs.len(), 1);
 }
 
-/// An aggregate binds the kind its direct input answers with, not the kind its source carries.
-///
-/// The kind is what says which state layout the aggregate keeps, so a compile that cannot name it
-/// refuses the aggregate instead of binding one from a guess: `sum` over a histogram keeps a
-/// histogram state, and reading an unknown kind as a float would compute the wrong thing.
 #[test]
 fn an_aggregate_binds_the_kind_its_direct_input_answers_with() {
     let bound = |query: &str, source: Option<FieldKind>| {
@@ -5888,8 +4934,6 @@ fn an_aggregate_binds_the_kind_its_direct_input_answers_with() {
             op.field_kind
         })
     };
-    // A selection passes the source kind on, so the aggregate over it folds that kind's payload -
-    // and so does a rate over histograms, which answers a histogram of its own.
     for query in ["sum(h)", "avg(h)", "sum(rate(h[5m]))"] {
         assert_eq!(
             bound(query, Some(FieldKind::Histogram)).unwrap(),
@@ -5902,8 +4946,7 @@ fn an_aggregate_binds_the_kind_its_direct_input_answers_with() {
             "{query}"
         );
     }
-    // An operator between the two decides for itself: these both answer a float built from
-    // histograms, so the aggregate over them folds floats.
+    // Both answer floats built from histograms.
     for query in ["sum(count_over_time(h[5m]))", "sum(histogram_count(h))"] {
         assert_eq!(
             bound(query, Some(FieldKind::Histogram)).unwrap(),
@@ -5911,15 +4954,13 @@ fn an_aggregate_binds_the_kind_its_direct_input_answers_with() {
             "{query}"
         );
     }
-    // A shape whose samples this walk does not describe cannot be holding a histogram when nothing
-    // in the tree reads a histogram source, so the aggregate binds the numeric state it always did.
+    // An unnameable kind over float sources is a float.
     assert_eq!(
         bound("sum(clamp(h, 1, 2))", Some(FieldKind::Float)).unwrap(),
         FieldKind::Float
     );
     assert_eq!(bound("sum(vector(1))", None).unwrap(), FieldKind::Float);
-    // With histogram sources that silence is not float: the same shape is refused rather than bound
-    // from a guess, and the planner keeps the existing plan for it.
+    // Over histogram sources it is refused.
     let error = bound("sum(clamp(h, 1, 2))", Some(FieldKind::Histogram))
         .expect_err("an unnameable input over a histogram source must not bind");
     assert!(

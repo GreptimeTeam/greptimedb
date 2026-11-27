@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//！An extended "array" based on [DictionaryArray].
+//! An extended "array" based on [DictionaryArray].
 
 use datafusion::arrow::datatypes::Field;
 use datatypes::arrow::array::{Array, ArrayData, ArrayRef, DictionaryArray, Int64Array};
@@ -23,12 +23,11 @@ use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 
 pub type RangeTuple = (u32, u32);
 
-/// An compound logical "array" type. Represent serval ranges (slices) of one array.
-/// It's useful to use case like compute sliding window, or range selector from promql.
+/// A compound logical "array" type representing several ranges (slices) of one array, used for
+/// sliding windows such as PromQL range selectors.
 ///
-/// It's build on top of Arrow's [DictionaryArray]. [DictionaryArray] contains two
-/// sub-arrays, one for dictionary key and another for dictionary value. Both of them
-/// can be arbitrary types, but here the key array is fixed to u32 type.
+/// It's built on top of Arrow's [DictionaryArray], which holds a key array and a value array.
+/// The value array can be any type; the key array is fixed to i64.
 ///
 /// ```text
 ///             │ ┌─────┬─────┬─────┬─────┐
@@ -241,8 +240,6 @@ impl std::fmt::Debug for RangeArray {
             .finish()
     }
 }
-
-// util functions
 
 fn pack(offset: u32, length: u32) -> i64 {
     bytemuck::cast::<[u32; 2], i64>([offset, length])
