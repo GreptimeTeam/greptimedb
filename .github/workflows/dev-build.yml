@@ -55,7 +55,7 @@ on:
         type: boolean
         description: Build linux-arm64 artifacts
         required: false
-        default: true
+        default: false
       release_images:
         type: boolean
         description: Build and push images to DockerHub and ACR
@@ -239,7 +239,6 @@ jobs:
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
     ]
     runs-on: ubuntu-latest
     outputs:
@@ -251,16 +250,18 @@ jobs:
           persist-credentials: false
 
       - name: Build and push images to dockerhub
-        uses: ./.github/actions/build-images
+        uses: ./.github/actions/build-greptime-images
         with:
           image-registry: docker.io
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           image-name: ${{ vars.DEV_BUILD_IMAGE_NAME }}
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          version: ${{ needs.allocate-runners.outputs.version }}
+          image-tag: ${{ needs.allocate-runners.outputs.version }}
+          amd64-artifact-name: greptime-linux-amd64-${{ needs.allocate-runners.outputs.version }}
+          docker-file: docker/ci/ubuntu/Dockerfile
+          platforms: linux/amd64
           push-latest-tag: false # Don't push the latest tag to registry.
-          dev-mode: true # Only build the standard images.
 
       - name: Echo Docker image tag to step summary
         run: |
