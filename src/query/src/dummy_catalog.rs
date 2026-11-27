@@ -384,10 +384,6 @@ struct FlowScanDecision {
     /// Whether the read may cross an invalid boundary: it prunes at file granularity
     /// and forces the file barrier as each row's sequence.
     read_across_invalid_boundary: bool,
-    /// Whether the read requires its snapshot to cover the region's flushed frontier:
-    /// it must read the selected windows completely, so it gets no file pruning and no
-    /// forced override. Both reads return rows a stale cursor can no longer explain.
-    require_flushed_frontier: bool,
     /// Whether the scan reads physical row sequences and hides the rows a substitution
     /// produced, reporting the windows they occupy. Only the incremental delta asks for
     /// it: it is the read that must split an adopted file into consumed and unconsumed
@@ -408,7 +404,6 @@ impl FlowScanDecision {
             skip_sst_files: false,
             exact_sequence_range: false,
             read_across_invalid_boundary: false,
-            require_flushed_frontier: false,
             read_row_sequence: false,
             creator_cursor_shards: None,
         }
@@ -427,7 +422,6 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             skip_sst_files: false,
             exact_sequence_range: false,
             read_across_invalid_boundary: false,
-            require_flushed_frontier: false,
             read_row_sequence: false,
             creator_cursor_shards: None,
         });
@@ -485,10 +479,6 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         // still read rows an old cursor no longer explains, or recovery can never make progress.
         read_across_invalid_boundary: flow_extensions.repair_mode
             == Some(FlowRepairMode::Discovery),
-        // The fenced repair DML reads the selected windows completely: no file-level
-        // pruning and no forced sequence override, only crossing the invalid boundary
-        // and the `B <= H` proof.
-        require_flushed_frontier: flow_extensions.repair_mode == Some(FlowRepairMode::Fenced),
         read_row_sequence,
         // A physical-sequence read is the only read that compares a row of an adopted
         // file against the domain its number came from, so it is the only one that needs
@@ -515,7 +505,6 @@ fn build_scan_request(
         snapshot_on_scan: decision.snapshot_on_scan,
         exact_sequence_range: decision.exact_sequence_range,
         read_across_invalid_boundary: decision.read_across_invalid_boundary,
-        require_flushed_frontier: decision.require_flushed_frontier,
         read_row_sequence: decision.read_row_sequence,
         creator_cursor_shards: decision.creator_cursor_shards.clone(),
         memtable_min_sequence: decision.memtable_min_sequence,

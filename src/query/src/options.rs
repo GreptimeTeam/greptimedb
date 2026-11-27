@@ -463,44 +463,31 @@ fn should_collect_region_watermark(
 /// Version marker of the expression-keyed cursor form. A reader refuses a version it does not
 /// know.
 const CURSOR_SHARD_VERSION_KEY: &str = "version";
-/// The version this build writes while none of a region's slices states an upper bound: the
-/// shape earlier builds wrote, byte for byte, so a cursor without a bound stays readable by
-/// every build that could read it before.
+/// The only version of the expression-keyed cursor form. A slice states whether it carries an
+/// upper bound through [`CURSOR_SHARD_UNTIL_KEY`], so the version distinguishes nothing and
+/// carries no information.
 const CURSOR_SHARD_VERSION: u64 = 2;
-/// The version this build writes as soon as one of a region's slices states an upper bound
-/// ([`CursorShard::until`]).
-///
-/// An earlier build decodes an expression-keyed value by its version marker and ignores keys
-/// it does not know, so a bound stated under [`CURSOR_SHARD_VERSION`] would be dropped without
-/// a word and the request would degrade into the unbounded read the bound exists to prevent —
-/// pulling the creator's later rows into a round that does not stand for them. Stating the
-/// bound only under a version such a build *refuses* turns that silent degradation into an
-/// explicit rejection.
-const CURSOR_SHARD_VERSION_BOUNDED: u64 = 3;
 const CURSOR_SHARD_SHARDS_KEY: &str = "shards";
 const CURSOR_SHARD_EXPR_KEY: &str = "expr";
 const CURSOR_SHARD_SEQ_KEY: &str = "seq";
-/// Inclusive upper bound of a slice's delta. Written only under
-/// [`CURSOR_SHARD_VERSION_BOUNDED`]; absent means the slice is unbounded above, which is what
-/// every payload written before the bound existed states.
+/// Inclusive upper bound of a slice's delta; absent means the slice is unbounded above.
 const CURSOR_SHARD_UNTIL_KEY: &str = "until";
 
-/// Parses [`FLOW_INCREMENTAL_AFTER_SEQS`] in every shape it has taken.
+/// Parses [`FLOW_INCREMENTAL_AFTER_SEQS`].
 ///
-/// * expression-keyed (versions 2 and 3):
-///   `{"<region_id>": {"version": 2 | 3, "shards": [{"expr": "<partition expr json>", "seq":
+/// * expression-keyed (version [`CURSOR_SHARD_VERSION`]):
+///   `{"<region_id>": {"version": 2, "shards": [{"expr": "<partition expr json>", "seq":
 ///   seq, "until": seq?}, {"expr": null, "seq": seq}, ...]}}` — one cursor per partition
 ///   expression of that region, `null` selecting the region's complete value domain. `expr`
 ///   is the JSON form `PartitionExpr::as_json_str()` writes and is validated here, so an
 ///   expression identity that does not decode never reaches a scan. `until` is optional: a
 ///   slice that states it covers `seq < number <= until`, one that omits it is unbounded
-///   above, exactly like a payload written before the bound existed. This build writes version
-///   3 whenever a slice of the region states a bound and version 2 otherwise
-///   ([`CURSOR_SHARD_VERSION_BOUNDED`]); both versions decode here, because a version 2
-///   payload is what every earlier build wrote;
+///   above. [`encode_incremental_after_seqs`] writes exactly this shape;
 /// * region-keyed: `{"<region_id>": seq}` — one cursor for the region's complete value
-///   domain, i.e. the single whole-domain slice. A reader that only knows the holder's
-///   cursor keeps working, and it states exactly what it always stated.
+///   domain, i.e. the single whole-domain slice. Flow still writes it whenever it knows only
+///   the region projection and no per-slice cursor
+///   (`batching_mode::task::inc::BatchingTask::build_flow_query_extensions`), so it is a live
+///   shape, not history.
 ///
 /// Any other shape is refused as an unknown format: it is never read as a cursor this
 /// build can act on.
@@ -553,26 +540,17 @@ fn parse_expression_keyed_shards(
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Vec<CursorShard>> {
     match fields.get(CURSOR_SHARD_VERSION_KEY) {
-        Some(version)
-            if version.as_u64() == Some(CURSOR_SHARD_VERSION)
-                || version.as_u64() == Some(CURSOR_SHARD_VERSION_BOUNDED) => {}
+        Some(version) if version.as_u64() == Some(CURSOR_SHARD_VERSION) => {}
         Some(version) => {
             return Err(invalid_query_context_extension(format!(
-                "Unsupported cursor version {:?} in {} for region {}: this build reads versions {} and {}",
-                version,
-                FLOW_INCREMENTAL_AFTER_SEQS,
-                region_id,
-                CURSOR_SHARD_VERSION,
-                CURSOR_SHARD_VERSION_BOUNDED
+                "Unsupported cursor version {:?} in {} for region {}: this build reads version {}",
+                version, FLOW_INCREMENTAL_AFTER_SEQS, region_id, CURSOR_SHARD_VERSION
             )));
         }
         None => {
             return Err(invalid_query_context_extension(format!(
-                "Missing cursor version in {} for region {}: an object value must state version {} or {}",
-                FLOW_INCREMENTAL_AFTER_SEQS,
-                region_id,
-                CURSOR_SHARD_VERSION,
-                CURSOR_SHARD_VERSION_BOUNDED
+                "Missing cursor version in {} for region {}: an object value must state version {}",
+                FLOW_INCREMENTAL_AFTER_SEQS, region_id, CURSOR_SHARD_VERSION
             )));
         }
     }
@@ -598,9 +576,7 @@ fn parse_expression_keyed_shards(
 
 /// Parses one `{"expr": <partition expr json> | null, "seq": N, "until": N?}` slice.
 ///
-/// `until` is read under either version: a bound is a bound, and a payload that states one
-/// (this build's version [`CURSOR_SHARD_VERSION_BOUNDED`], or an intermediate build that put
-/// it under version [`CURSOR_SHARD_VERSION`]) must not lose it here.
+/// `until` is optional and read whenever it is stated: a bound is a bound.
 fn parse_cursor_shard(region_id: u64, shard: &serde_json::Value) -> Result<CursorShard> {
     let serde_json::Value::Object(fields) = shard else {
         return Err(invalid_query_context_extension(format!(
@@ -636,8 +612,7 @@ fn parse_cursor_shard(region_id: u64, shard: &serde_json::Value) -> Result<Curso
     };
     let seq = parse_cursor_seq(region_id, seq)?;
 
-    // A payload written before the bound existed states no `until`, and a slice that states
-    // no bound is the unbounded slice it always was; an explicit `null` states the same.
+    // A slice that states no bound is unbounded above; an explicit `null` states the same.
     let until = match fields.get(CURSOR_SHARD_UNTIL_KEY) {
         None | Some(serde_json::Value::Null) => None,
         Some(raw) => Some(parse_cursor_seq(region_id, raw)?),
@@ -697,20 +672,13 @@ fn parse_cursor_seq(region_id: u64, raw: &serde_json::Value) -> Result<u64> {
 /// which [`parse_incremental_after_seqs`] reads back.
 ///
 /// A whole-domain slice is written as an explicit `"expr": null`, and an upper bound
-/// ([`CursorShard::until`]) only when the slice states one. The version is chosen per region:
-/// a region none of whose slices states a bound is written under [`CURSOR_SHARD_VERSION`] and
-/// is byte for byte the payload earlier builds wrote, while a region that states a bound is
-/// written under [`CURSOR_SHARD_VERSION_BOUNDED`], so an earlier build rejects the request
-/// instead of reading it without the bound ([`CURSOR_SHARD_VERSION_BOUNDED`] explains why).
+/// ([`CursorShard::until`]) only when the slice states one. Every region is written under
+/// [`CURSOR_SHARD_VERSION`]: the bound travels per slice, so nothing about a region has to be
+/// stated at its version marker.
 pub fn encode_incremental_after_seqs(cursors: &BTreeMap<u64, Vec<CursorShard>>) -> Result<String> {
     let encoded = cursors
         .iter()
         .map(|(region_id, shards)| {
-            let version = if shards.iter().any(|shard| shard.until.is_some()) {
-                CURSOR_SHARD_VERSION_BOUNDED
-            } else {
-                CURSOR_SHARD_VERSION
-            };
             let shards = shards
                 .iter()
                 .map(|shard| {
@@ -719,8 +687,7 @@ pub fn encode_incremental_after_seqs(cursors: &BTreeMap<u64, Vec<CursorShard>>) 
                         CURSOR_SHARD_SEQ_KEY: shard.seq,
                     });
                     // A slice with no upper bound writes no `until`: the field states a
-                    // bound, and its absence is exactly the unbounded slice an older reader
-                    // already understands.
+                    // bound, so its absence is the unbounded slice.
                     if let Some(until) = shard.until {
                         encoded[CURSOR_SHARD_UNTIL_KEY] = serde_json::json!(until);
                     }
@@ -728,7 +695,7 @@ pub fn encode_incremental_after_seqs(cursors: &BTreeMap<u64, Vec<CursorShard>>) 
                 })
                 .collect::<Vec<_>>();
             let value = serde_json::json!({
-                CURSOR_SHARD_VERSION_KEY: version,
+                CURSOR_SHARD_VERSION_KEY: CURSOR_SHARD_VERSION,
                 CURSOR_SHARD_SHARDS_KEY: shards,
             });
             (region_id.to_string(), value)
@@ -1262,11 +1229,10 @@ mod flow_extension_tests {
         assert_eq!(None, parsed.region_cursor(8));
     }
 
-    /// A version 2 payload states no upper bound, and keeps decoding as the unbounded slice it
-    /// always stated: every earlier build wrote this shape, so this is the shape that must
-    /// never change meaning.
+    /// A slice that states no upper bound decodes as the unbounded slice it is, under the one
+    /// version the format has.
     #[test]
-    fn test_parse_flow_extensions_after_seqs_v2_unbounded_still_reads() {
+    fn test_parse_flow_extensions_after_seqs_unbounded_slice_reads() {
         let exts = HashMap::from([(
             FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
             r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10},{"expr":null,"seq":4}]}}"#
@@ -1281,7 +1247,7 @@ mod flow_extension_tests {
                 7,
                 vec![CursorShard::whole_domain(10), CursorShard::whole_domain(4)]
             )])),
-            "a slice that states no upper bound is the unbounded slice it always was"
+            "a slice that states no upper bound is the unbounded slice"
         );
         assert_eq!(
             None,
@@ -1289,28 +1255,11 @@ mod flow_extension_tests {
         );
     }
 
-    /// A version 3 payload carries the bound a memory-fenced read needs: `seq < number <=
-    /// until`. It decodes as the bounded slice it states, and an invalid bound is refused at
-    /// the boundary like `seq`.
+    /// A slice that states an upper bound carries it in the same version: `seq < number <=
+    /// until` decodes as the bounded slice it states, and an invalid bound is refused at the
+    /// boundary like `seq`.
     #[test]
-    fn test_parse_flow_extensions_after_seqs_v3_bounded_reads() {
-        let exts = HashMap::from([(
-            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
-            r#"{"7":{"version":3,"shards":[{"expr":null,"seq":10,"until":20}]}}"#.to_string(),
-        )]);
-        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            parsed.incremental_after_seqs,
-            Some(HashMap::from([(
-                7,
-                vec![CursorShard::whole_domain(10).with_until(20)]
-            )]))
-        );
-
-        // A bound stated under version 2 — what an intermediate build wrote — keeps its
-        // bound: dropping it here would read the creator's later rows into this round.
+    fn test_parse_flow_extensions_after_seqs_bounded_slice_reads() {
         let exts = HashMap::from([(
             FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
             r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10,"until":20}]}}"#.to_string(),
@@ -1328,8 +1277,8 @@ mod flow_extension_tests {
 
         // An upper bound that is not a sequence is refused at the boundary, like `seq`.
         for value in [
-            r#"{"7":{"version":3,"shards":[{"expr":null,"seq":10,"until":"nope"}]}}"#,
-            r#"{"7":{"version":3,"shards":[{"expr":null,"seq":10,"until":-1}]}}"#,
+            r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10,"until":"nope"}]}}"#,
+            r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10,"until":-1}]}}"#,
         ] {
             let exts =
                 HashMap::from([(FLOW_INCREMENTAL_AFTER_SEQS.to_string(), value.to_string())]);
@@ -1366,10 +1315,8 @@ mod flow_extension_tests {
         }
     }
 
-    /// Old bytes must not be reinterpreted as new semantics, in either direction: an
-    /// unknown version is refused and the version marker is mandatory for an object value.
-    /// This is the rule that makes a bound safe to ship: a build that knows only version 2
-    /// refuses a version 3 payload instead of reading it without the bound.
+    /// A version this build does not know is refused, and the version marker is mandatory for
+    /// an object value: a cursor is never guessed at from a shape that states its own format.
     #[test]
     fn test_parse_flow_extensions_after_seqs_rejects_unknown_version() {
         for value in [
@@ -1436,10 +1383,15 @@ mod flow_extension_tests {
         }
     }
 
+    /// The writer and the reader agree on the one surviving format: a region with two slices,
+    /// one bounded and one not, encodes to the expression-keyed shape and decodes back to the
+    /// very cursors it was written from.
     #[test]
     fn test_encode_incremental_after_seqs_round_trips() {
         let low = slice_expr(0, 50);
         let high = slice_expr(50, 100);
+        let low_json = serde_json::to_string(&low).unwrap();
+        let high_json = serde_json::to_string(&high).unwrap();
         let cursors = BTreeMap::from([
             (1, vec![CursorShard::whole_domain(10)]),
             (
@@ -1453,15 +1405,13 @@ mod flow_extension_tests {
 
         let json = encode_incremental_after_seqs(&cursors).unwrap();
         // Compared as JSON: the order of the object keys is serde_json's business, the
-        // identity, the sequence and the optional bound are what the wire states. The
-        // version is per region: region 1 states no bound, so it stays the version every
-        // build reads, while region 2 states one and says so with the version that a build
-        // without bounds refuses.
+        // identity, the sequence and the optional bound are what the wire states. Every region
+        // states the same version, and only a slice that carries a bound states `until`.
         assert_eq!(
             serde_json::json!({
                 "1": {"version": 2, "shards": [{"expr": null, "seq": 10}]},
                 "2": {
-                    "version": 3,
+                    "version": 2,
                     "shards": [
                         {"expr": low, "seq": 10, "until": 15},
                         {"expr": high, "seq": 3},
@@ -1471,6 +1421,17 @@ mod flow_extension_tests {
             serde_json::from_str::<serde_json::Value>(&json).unwrap()
         );
 
+        // The bytes themselves: `serde_json` keeps object keys sorted, so "shards" precedes
+        // "version" and "expr" precedes "seq".
+        assert_eq!(
+            format!(
+                r#"{{"1":{{"shards":[{{"expr":null,"seq":10}}],"version":2}},"2":{{"shards":[{{"expr":{},"seq":10,"until":15}},{{"expr":{},"seq":3}}],"version":2}}}}"#,
+                low_json, high_json,
+            ),
+            json
+        );
+
+        // The reader of this build reads it back as the cursors it was written from.
         let exts = HashMap::from([(FLOW_INCREMENTAL_AFTER_SEQS.to_string(), json)]);
         let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
             .unwrap()
@@ -1482,106 +1443,6 @@ mod flow_extension_tests {
                     .into_iter()
                     .collect::<HashMap<u64, Vec<CursorShard>>>()
             )
-        );
-    }
-
-    /// A cursor that states no upper bound writes exactly the bytes the earlier builds wrote:
-    /// the same keys, the same values and the same version marker, so nothing about a request
-    /// that needs no bound changes.
-    #[test]
-    fn test_encode_incremental_after_seqs_is_byte_identical_without_a_bound() {
-        let low = slice_expr(0, 50);
-        let cursors = BTreeMap::from([
-            (1, vec![CursorShard::whole_domain(10)]),
-            (
-                2,
-                vec![
-                    CursorShard::new(Some(low.clone()), 10),
-                    CursorShard::whole_domain(3),
-                ],
-            ),
-        ]);
-
-        // `serde_json` keeps object keys sorted, so "shards" precedes "version"; the bytes are
-        // pinned as they are, because "the same bytes" is the claim.
-        assert_eq!(
-            format!(
-                r#"{{"1":{{"shards":[{{"expr":null,"seq":10}}],"version":2}},"2":{{"shards":[{{"expr":{},"seq":10}},{{"expr":null,"seq":3}}],"version":2}}}}"#,
-                serde_json::to_string(&low).unwrap()
-            ),
-            encode_incremental_after_seqs(&cursors).unwrap()
-        );
-    }
-
-    /// The decoder an earlier build shipped, reduced to the rule that decides this
-    /// compatibility question: it reads each region's value under version 2 and refuses any
-    /// other version, ignoring keys it does not know.
-    fn decode_like_a_version_2_reader(payload: &str) -> std::result::Result<(), String> {
-        let regions = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload)
-            .map_err(|e| e.to_string())?;
-        for region in regions.values() {
-            let version = region
-                .get(CURSOR_SHARD_VERSION_KEY)
-                .and_then(|v| v.as_u64());
-            if version != Some(2) {
-                return Err(format!("unsupported cursor version {version:?}"));
-            }
-            let shards = region
-                .get(CURSOR_SHARD_SHARDS_KEY)
-                .and_then(|s| s.as_array())
-                .ok_or_else(|| "missing shards".to_string())?;
-            for shard in shards {
-                shard
-                    .get(CURSOR_SHARD_SEQ_KEY)
-                    .ok_or_else(|| "missing seq".to_string())?;
-            }
-        }
-        Ok(())
-    }
-
-    /// A cursor that states an upper bound states it under a version an older reader refuses.
-    ///
-    /// This is the whole point of the version: an older reader ignores keys it does not know,
-    /// so a bound stated under version 2 would be dropped and the request would read without
-    /// an upper bound — exactly the failure a bound exists to prevent. A rejected request is
-    /// the outcome we want, so the payload of a bounded cursor has to be unreadable to that
-    /// build.
-    #[test]
-    fn test_encode_incremental_after_seqs_states_a_bound_under_a_version_old_readers_refuse() {
-        let bounded = BTreeMap::from([(7, vec![CursorShard::whole_domain(10).with_until(20)])]);
-        let payload = encode_incremental_after_seqs(&bounded).unwrap();
-
-        // The old reader refuses it, rather than reading it without the bound.
-        assert_eq!(
-            Err(format!(
-                "unsupported cursor version {:?}",
-                Some(CURSOR_SHARD_VERSION_BOUNDED)
-            )),
-            decode_like_a_version_2_reader(&payload)
-        );
-        // A cursor that states no bound keeps the version that reader accepts, so nothing
-        // about a request that needs no bound changes.
-        let unbounded = BTreeMap::from([(7, vec![CursorShard::whole_domain(10)])]);
-        let payload = encode_incremental_after_seqs(&unbounded).unwrap();
-        assert_eq!(Ok(()), decode_like_a_version_2_reader(&payload));
-
-        // The version is chosen per region, so a cursor with one bounded region does not
-        // version up the regions whose slices state nothing.
-        let mixed = BTreeMap::from([
-            (7, vec![CursorShard::whole_domain(10).with_until(20)]),
-            (8, vec![CursorShard::whole_domain(10)]),
-        ]);
-        let value = serde_json::from_str::<serde_json::Value>(
-            &encode_incremental_after_seqs(&mixed).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            Some(CURSOR_SHARD_VERSION_BOUNDED),
-            value["7"][CURSOR_SHARD_VERSION_KEY].as_u64()
-        );
-        assert_eq!(
-            Some(CURSOR_SHARD_VERSION),
-            value["8"][CURSOR_SHARD_VERSION_KEY].as_u64()
         );
     }
 

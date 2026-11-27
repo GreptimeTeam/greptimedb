@@ -154,21 +154,15 @@ pub struct ScanRequest {
     /// Empty or absent means no cursor of the creator's domain is known, and an adopted file
     /// then **fails closed** with `SequenceRangeUnsupported`.
     pub creator_cursor_shards: Option<Arc<BTreeMap<u64, Vec<CursorShard>>>>,
-    /// Whether this read may cross an invalid boundary: rows whose sequence the region can no
-    /// longer vouch for are returned instead of the read being refused.
+    /// Whether this read may cross a boundary a stale cursor can no longer explain (the flag's
+    /// name says "invalid boundary"): rows whose sequence the region can no longer vouch for
+    /// are returned instead of the read being refused.
     ///
     /// It applies no lower sequence bound to memtables, prunes at file granularity only
     /// (**fails closed** with `SequenceRangeUnsupported` for a file stating no admission
     /// barrier), requires no row-level exactness, and returns a superset of the windows a stale
     /// cursor can no longer explain. Ordinary incremental deltas must leave it `false`.
     pub read_across_invalid_boundary: bool,
-    /// Whether this read requires its snapshot to cover the region's flushed frontier: it reads
-    /// whole windows under a frozen high watermark and may only be committed while that
-    /// watermark still covers everything flushed.
-    ///
-    /// Unlike [`Self::read_across_invalid_boundary`] it never prunes at file granularity and
-    /// never forces a row-sequence override.
-    pub require_flushed_frontier: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint from query-driven JSON type concretization.

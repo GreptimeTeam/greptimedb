@@ -707,14 +707,8 @@ pub struct RecordBatchMetrics {
     pub substituted_row_ranges: Vec<SubstitutedRowRanges>,
     /// The `(region, partition expression)` pairs this round's scans actually read, so the
     /// owner of a `(region, slice)` cursor advances only the slices that were read.
-    /// Deduplicated and sorted, omitted when empty. Old bytes carried a numeric projection
-    /// under the previous key, so the new key (`observed_partition_exprs`) is not read back as
-    /// expressions.
-    #[serde(
-        default,
-        rename = "observed_partition_exprs",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    /// Deduplicated and sorted, omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed_slices: Vec<ObservedPartitionExpr>,
     /// The creator regions of the files this round's scans **delivered rows** from, where the
     /// file was created by a region other than the one that read it (an adopted file).
@@ -2532,36 +2526,5 @@ mod test {
                 visible_foreign_file_creators: None,
             }]
         );
-    }
-
-    #[test]
-    fn test_observed_slices_keep_their_wire_key_and_carry_expressions() {
-        let metrics = RecordBatchMetrics {
-            observed_slices: vec![
-                ObservedPartitionExpr::new(7, Some(r#"{"op":"Eq"}"#.to_string())),
-                ObservedPartitionExpr::whole_domain(8),
-            ],
-            ..Default::default()
-        };
-
-        let value = serde_json::to_value(&metrics).unwrap();
-        // The old key carried a numeric projection, so the identity travels under its own key.
-        assert!(value.get("observed_slices").is_none());
-        assert_eq!(
-            value.get("observed_partition_exprs").unwrap(),
-            &json!([
-                { "region_id": 7, "partition_expr": r#"{"op":"Eq"}"# },
-                { "region_id": 8 }
-            ])
-        );
-
-        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.observed_slices, metrics.observed_slices);
-
-        // Old bytes are not reinterpreted: a reader of the new key sees no observation.
-        let mut legacy = serde_json::to_value(RecordBatchMetrics::default()).unwrap();
-        legacy["observed_slices"] = json!([{ "region_id": 7, "lo": 50, "hi": 100 }]);
-        let old: RecordBatchMetrics = serde_json::from_value(legacy).unwrap();
-        assert!(old.observed_slices.is_empty());
     }
 }
