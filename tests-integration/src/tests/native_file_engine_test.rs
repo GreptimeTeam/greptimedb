@@ -118,6 +118,8 @@ struct Case {
     /// sample its sort leaves last, keeps `NULL` and `''` apart, and fails on an integer tag
     /// (`Unsupported tag column type: Int64`).
     legacy_differs: bool,
+    /// The lookback delta of the statement, when not the default.
+    lookback: Option<&'static str>,
 }
 
 fn row(offset_secs: i64, labels: &str, value: f64) -> Row {
@@ -131,6 +133,7 @@ fn instant(promql: impl Into<String>, offset_secs: i64, expected: Vec<Row>) -> C
         end: BASE_SECS + offset_secs,
         expected,
         legacy_differs: false,
+        lookback: None,
     }
 }
 
@@ -216,6 +219,7 @@ fn metric_cases(table: &str) -> Vec<Case> {
             end: BASE_SECS + 240,
             expected: range_selector,
             legacy_differs: true,
+            lookback: None,
         },
         Case {
             promql: q("sum by (job) (fe_metric)"),
@@ -223,6 +227,7 @@ fn metric_cases(table: &str) -> Vec<Case> {
             end: BASE_SECS + 240,
             expected: range_sum,
             legacy_differs: true,
+            lookback: None,
         },
     ]
 }
@@ -265,7 +270,17 @@ fn sub_millisecond_cases(table: &str) -> Vec<Case> {
         // The last two samples in (60s, 62s] share the millisecond 61000, so there is no interval
         // to take a difference over.
         instant(q("idelta(fe_sub[2s])"), 62, vec![]),
+        // A zero lookback selects a sample stored exactly at the instant: 59.9995s is not at 60s.
+        zero_lookback(instant(q("fe_sub"), 60, vec![])),
+        zero_lookback(instant(q("fe_sub"), 61, vec![row(61, h, 4.0)])),
     ]
+}
+
+fn zero_lookback(case: Case) -> Case {
+    Case {
+        lookback: Some("0"),
+        ..case
+    }
 }
 
 /// `fe_labels`: `{code="200"}` holds 1 at offset 0 with `instance` NULL, 2 at 60 with `instance`
@@ -281,6 +296,7 @@ fn label_cases() -> Vec<Case> {
             end: BASE_SECS + 120,
             expected: vec![row(0, ok, 1.0), row(60, ok, 2.0), row(120, ok, 3.0)],
             legacy_differs: true,
+            lookback: None,
         },
         differs(instant("count(fe_labels)", 120, vec![row(120, "", 2.0)])),
         differs(instant(
@@ -318,6 +334,7 @@ fn histogram_cases() -> Vec<Case> {
             .map(|value| vec![(secs * 1000, String::new(), value)])
             .unwrap_or_default(),
         legacy_differs: false,
+        lookback: None,
     };
     vec![
         at(
@@ -552,8 +569,12 @@ async fn create_tables(instance: &Arc<Instance>, dir: &std::path::Path) {
 }
 
 async fn run(instance: &Arc<Instance>, case: &Case, native: bool) -> Result<Vec<Row>, String> {
+    let lookback = case
+        .lookback
+        .map(|lookback| format!(", '{lookback}'"))
+        .unwrap_or_default();
     let sql = format!(
-        "TQL EVAL ({}, {}, '60s') {}",
+        "TQL EVAL ({}, {}, '60s'{lookback}) {}",
         case.start, case.end, case.promql
     );
     let mut ctx = QueryContext::with_db_name(None);
