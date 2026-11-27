@@ -1,0 +1,19 @@
+src/servers/src/elasticsearch.rs
+  s_b42cba56c4911e::t_0fdb70eb2fa644 43,196,203-211,213,218-219,241-256,441-468
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a7e7e3340f7bf0a73fd85edd00013f9c042a16dc",
+  "prompts": {},
+  "sessions": {
+    "s_b42cba56c4911e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a207af-50d0-7c80-bdbc-8fe4eee39295",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
