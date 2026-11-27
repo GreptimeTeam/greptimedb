@@ -3504,7 +3504,7 @@ mod tests {
         let region = build_test_region(&env).await;
         let id = FileId::random();
         let path = format!(
-            "{}manifest.json",
+            "{}samples.idx",
             crate::sst::location::narthex_file_dir(
                 &region.access_layer.build_region_dir(region.region_id),
                 id

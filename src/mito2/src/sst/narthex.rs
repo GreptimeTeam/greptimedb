@@ -138,10 +138,10 @@ pub(crate) async fn write_samples(
         return Ok(Default::default());
     }
     let artifact = writer.finish().await?;
-    // The samples codec returns its manifest first, then parts in ID order.
-    let (manifest, parts) = artifact.objects.split_first().ok_or_else(|| {
+    // The samples codec returns its shared index first, then parts in ID order.
+    let (index, parts) = artifact.objects.split_first().ok_or_else(|| {
         InvalidRecordBatchSnafu {
-            reason: "missing Narthex samples manifest",
+            reason: "missing Narthex samples index",
         }
         .build()
     })?;
@@ -161,7 +161,7 @@ pub(crate) async fn write_samples(
         file_metadata: None,
         index_metadata: Default::default(),
         format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
-            index_size: manifest.file_size,
+            index_size: index.file_size,
             parts: parts
                 .iter()
                 .map(|part| NarthexPartMeta {

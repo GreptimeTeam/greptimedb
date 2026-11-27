@@ -124,6 +124,15 @@ pub(super) fn pack(
         !bytes.is_empty() && bytes.len() <= if page { PAGE_LIMIT } else { CHUNK_LIMIT },
         "sample encoded payload exceeds limit",
     )?;
+    pack_bytes(bytes, offset, encoding)
+}
+
+/// Compresses a size-checked payload and records the checksum of its stored representation.
+pub(super) fn pack_bytes(
+    bytes: &[u8],
+    offset: u64,
+    encoding: u16,
+) -> Result<(PayloadReference, Vec<u8>)> {
     let compressed =
         zstd::bulk::compress(bytes, 3).map_err(|e| invalid(format!("sample compression: {e}")))?;
     let (compression, stored) = if compressed.len() < bytes.len() {
@@ -139,7 +148,7 @@ pub(super) fn pack(
         encoding,
         compression,
     };
-    reference.validate(offset, reference.end()?, page)?;
+
     Ok((reference, stored))
 }
 
@@ -392,6 +401,14 @@ impl BlockOrder {
 }
 
 impl Block {
+    pub fn payload_end(&self) -> Result<u64> {
+        self.columns
+            .last()
+            .ok_or_else(|| invalid("sample block has no columns"))?
+            .payload
+            .end()
+    }
+
     /// The ordering boundary this block contributes, scoped to its leaf.
     pub(crate) fn order(&self, leaf: u64) -> BlockOrder {
         BlockOrder {
@@ -592,8 +609,7 @@ impl Page {
                 )?;
                 if previous.part_id == block.part_id {
                     require(
-                        previous.columns.last().unwrap().payload.end()?
-                            <= block.columns[0].payload.offset,
+                        previous.payload_end()? <= block.columns[0].payload.offset,
                         "overlapping sample blocks",
                     )?;
                 }

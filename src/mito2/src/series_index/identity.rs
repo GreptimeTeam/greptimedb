@@ -30,19 +30,7 @@ use store_api::storage::ColumnId;
 use crate::error::{DecodeSnafu, Result};
 use crate::series_index::MetricSeriesId;
 
-/// The identity semantics *and storage layout* an artifact was written with.
-///
-/// This is the one mandatory discriminator every artifact manifest carries. Artifacts
-/// written under hash-only identity are structurally valid and perfectly ordered, so
-/// nothing else in them distinguishes them from exact ones: an already collapsed series
-/// index looks fine and its lost labels cannot be recovered. A manifest that does not
-/// name this encoding is therefore not reusable, whatever its coverage says.
-///
-/// The serialized value names the layout as well as the identity, because two artifacts can
-/// store the same exact key in incompatible places: the samples format kept one copy per block
-/// inside its pages, then moved to one copy per series in a dedicated key area with a stored
-/// checksum. An artifact of the older layout is structurally valid and ordered too, so without
-/// the layout in this value maintenance would mark it reusable and only a part read would fail.
+/// Identifies the canonical key encoding in the series-index manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum IdentityEncoding {
     /// Identity is [`ExactSeriesKey`], stored inside the artifact's own pages: the
@@ -57,12 +45,6 @@ pub(crate) enum IdentityEncoding {
 }
 
 impl IdentityEncoding {
-    /// The encoding new samples artifacts are written with; their readers require exactly this.
-    ///
-    /// Distinct from the series-index encoding on purpose: it names the key-area layout, so an
-    /// artifact written before the key area cannot be taken for a current one.
-    pub(crate) const CURRENT_SAMPLES: Self = Self::ExactSparseKeyArea;
-
     /// The encoding new series-index artifacts are written with; their readers require this.
     pub(crate) const CURRENT_SERIES_INDEX: Self = Self::ExactSparseKey;
 }
@@ -246,21 +228,6 @@ pub(crate) fn decode_series_identity(
     Ok((key, tags))
 }
 
-/// Decodes only the reserved `(table_id, tsid)` prefix, without allocating the key.
-///
-/// Callers that already compared the raw bytes must not use this to decide identity;
-/// it only exists where the coarse bucket is the output.
-pub(crate) fn decode_series_id(
-    primary_key: &[u8],
-    offsets: &mut SparseOffsetsCache,
-) -> Result<MetricSeriesId> {
-    let view = SparsePrimaryKeyView::new(primary_key, offsets).context(DecodeSnafu)?;
-    Ok(MetricSeriesId {
-        table_id: view.table_id(),
-        tsid: view.tsid(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use store_api::codec::PrimaryKeyEncoding;
@@ -374,7 +341,9 @@ mod tests {
         let good = key(&["a", "b"], 1, 1);
         assert!(ExactSeriesKey::from_sparse_key(&good[..good.len() - 1], &mut offsets).is_err());
         assert_eq!(
-            decode_series_id(&good, &mut offsets).unwrap(),
+            ExactSeriesKey::from_sparse_key(&good, &mut offsets)
+                .unwrap()
+                .id(),
             MetricSeriesId {
                 table_id: 1,
                 tsid: 1

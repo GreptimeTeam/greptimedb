@@ -40,7 +40,7 @@ use crate::series_index::samples::metadata::{self, KeyRef, Page};
 use crate::series_index::{TABLE_ID_COLUMN, TSID_COLUMN};
 use crate::test_util::sst_util::new_sparse_primary_key;
 
-use super::{RecordingRead, build, exact, keyed_batch, request, root_page, store};
+use super::{RecordingRead, build, exact, first_leaf, keyed_batch, request, store};
 
 /// `(table_id, tsid, timestamp)` of every returned row, in output order.
 fn collect_times(batches: &[SamplesBatch]) -> Vec<(u32, u64, i64)> {
@@ -147,15 +147,15 @@ async fn key_longer_than_one_page_round_trips() {
     assert_eq!(vec![(1, 7, 100), (1, 7, 200)], collect_times(&batches));
     assert_eq!(vec![selection], exact_keys(&batches));
     // The stored key is the writer's key byte for byte.
-    let (manifest, trailer, page, bytes) = root_page(&store, &handle).await;
+    let (manifest, leaf_entry, page, bytes) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert_eq!(1, blocks.len());
     let reference = blocks[0].key;
-    assert_eq!(reference.offset, trailer.keys_start);
+    assert_eq!(reference.offset, leaf_entry.keys_start);
     assert_eq!(reference.length as usize, key.len());
     // One copy is the key plus its stored checksum, which the reference does not count.
     assert_eq!(
-        trailer.page.payload.offset - trailer.keys_start,
+        leaf_entry.page.payload.offset - leaf_entry.keys_start,
         key.len() as u64 + metadata::KEY_CHECKSUM_BYTES
     );
     assert_eq!(
@@ -177,7 +177,7 @@ async fn key_longer_than_one_page_round_trips() {
     );
     assert!(metadata::descriptor_bytes(blocks[0].columns.len()) + 12 < 65_536 / 2);
     // The key area is part of the part, not of any page.
-    assert!(trailer.page.payload.offset > trailer.keys_start);
+    assert!(leaf_entry.page.payload.offset > leaf_entry.keys_start);
     assert!(manifest.files[0].file_size < key.len() as u64);
 }
 
@@ -212,7 +212,7 @@ async fn many_fields_round_trip_a_key_past_the_old_ceiling() {
     assert_eq!(vec![(3, 11, 10), (3, 11, 20)], collect_times(&batches));
     assert_eq!(vec![selection], exact_keys(&batches));
     // The widest descriptor stays a fixed number of bytes whatever the key's length is.
-    let (_, trailer, page, _) = root_page(&store, &handle).await;
+    let (_, leaf_entry, page, _) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert_eq!(
         60 + 44 * 1027,
@@ -220,7 +220,7 @@ async fn many_fields_round_trip_a_key_past_the_old_ceiling() {
     );
     assert_eq!(3 + 1024, blocks[0].columns.len());
     assert_eq!(
-        trailer.page.payload.offset - trailer.keys_start,
+        leaf_entry.page.payload.offset - leaf_entry.keys_start,
         key.len() as u64 + metadata::KEY_CHECKSUM_BYTES
     );
 }
@@ -247,9 +247,9 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
         )],
     )
     .await;
-    let (manifest, trailer, page, bytes) = root_page(&store, &handle).await;
+    let (manifest, leaf_entry, page, _) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
-    let area = trailer.keys();
+    let area = leaf_entry.keys();
     // Past the end of the area, before its start, and a zero length: each one addresses
     // descriptor bytes that cannot be a key of this part.
     let corrupt = [
@@ -272,8 +272,8 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
         assert!(
             Page::decode(
                 &Page(patched).encode(),
-                &trailer.page,
-                trailer.keys(),
+                &leaf_entry.page,
+                leaf_entry.keys(),
                 &manifest
             )
             .is_err()
@@ -341,17 +341,17 @@ async fn colliding_series_keep_their_own_exact_keys() {
         assert_eq!(vec![selection], exact_keys(&batches));
     }
     // One copy per series: two references, in block order, and the area holds both keys.
-    let (_, trailer, page, bytes) = root_page(&store, &handle).await;
+    let (_, leaf_entry, page, bytes) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert_eq!(2, blocks.len());
     assert_eq!(first_key.id(), blocks[0].id);
     assert_eq!(partner_key.id(), blocks[0].id);
     assert_ne!(blocks[0].key, blocks[1].key);
     assert!(blocks[0].key.end().unwrap() <= blocks[1].key.offset);
-    assert_eq!(trailer.keys_start, blocks[0].key.offset);
+    assert_eq!(leaf_entry.keys_start, blocks[0].key.offset);
     assert_eq!(
         first.len() + partner.len() + 2 * metadata::KEY_CHECKSUM_BYTES as usize,
-        (trailer.page.payload.offset - trailer.keys_start) as usize
+        (leaf_entry.page.payload.offset - leaf_entry.keys_start) as usize
     );
     assert_eq!(
         first.as_slice(),
@@ -396,8 +396,8 @@ async fn key_area_traffic(
         .await
         .unwrap();
     let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
-    let (_, trailer, _, _) = root_page(store, handle).await;
-    let area = trailer.keys();
+    let (_, leaf_entry, _, _) = first_leaf(store, handle).await;
+    let area = leaf_entry.keys();
     let reads = reads.lock().unwrap();
     let (mut count, mut bytes) = (0usize, 0u64);
     for (_, range) in reads
@@ -484,10 +484,10 @@ async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
         &[keyed_batch(&meta, &[key], &[100], false)],
     )
     .await;
-    let (manifest, trailer, page, mut bytes) = root_page(&store, &handle).await;
+    let (manifest, leaf_entry, page, mut bytes) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     let reference = blocks[0].key;
-    assert_eq!(reference.offset, trailer.keys_start);
+    assert_eq!(reference.offset, leaf_entry.keys_start);
     // The canonical sparse prefix is `[column id 0..4][table_id marker 4][table_id 5..9]`
     // `[tsid column id 9..13][tsid marker 13][tsid 14..22]`, then the labels. Byte 16 is in the
     // middle of the tsid value, so the framing still parses and only the identifier changes.
@@ -511,9 +511,6 @@ async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
     );
 }
 
-/// The trailer and root page of one part, plus its bytes.
-///
-/// `root_page` insists on a single-part artifact; the part-boundary tests need one part at a time.
 /// Rewrites the two stored key entries of a two-series part in place.
 ///
 /// The descriptors stay untouched and the part keeps its length, so whatever rejects the part
@@ -523,7 +520,7 @@ async fn rewrite_entries(
     handle: SamplesFileHandle,
     edit: impl FnOnce(&mut [u8], [std::ops::Range<usize>; 2]),
 ) {
-    let (manifest, _, page, mut bytes) = root_page(store, &handle).await;
+    let (manifest, _, page, mut bytes) = first_leaf(store, &handle).await;
     let Page(blocks) = page;
     assert_eq!(2, blocks.len(), "the fixture holds two series");
     let entries = [&blocks[0].key, &blocks[1].key]
@@ -567,8 +564,8 @@ async fn recorded_key_area_reads(
         .try_collect::<Vec<_>>()
         .await
         .map(|batches| batches.iter().map(|batch| batch.num_rows()).sum::<usize>());
-    let (_, trailer, _, _) = root_page(store, handle).await;
-    let area = trailer.keys();
+    let (_, leaf_entry, _, _) = first_leaf(store, handle).await;
+    let area = leaf_entry.keys();
     let reads = reads.lock().unwrap();
     let (mut count, mut bytes) = (0usize, 0u64);
     for (_, range) in reads
@@ -614,7 +611,7 @@ async fn a_series_spanning_payload_parts_reuses_its_leaf_key() {
         super::manifest(&store, &handle).await.files.len(),
         "every block rolls its part"
     );
-    let (_, _, page, _) = root_page(&store, &handle).await;
+    let (_, _, page, _) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert_eq!(blocks[0].key, blocks[2].key);
     assert_ne!(blocks[0].part_id, blocks[2].part_id);
@@ -657,7 +654,7 @@ async fn colliding_series_across_payload_parts_use_distinct_key_references() {
     )
     .await;
     assert_eq!(2, super::manifest(&store, &handle).await.files.len());
-    let (_, _, page, _) = root_page(&store, &handle).await;
+    let (_, _, page, _) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert_ne!(blocks[0].key, blocks[1].key);
     assert!(blocks[1].min < blocks[0].max);
@@ -702,10 +699,10 @@ async fn corrupted_label_byte_is_rejected() {
         )],
     )
     .await;
-    let (manifest, trailer, page, mut bytes) = root_page(&store, &handle).await;
+    let (manifest, leaf_entry, page, mut bytes) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     let reference = blocks[0].key;
-    assert_eq!(reference.offset, trailer.keys_start);
+    assert_eq!(reference.offset, leaf_entry.keys_start);
     // Find a label byte whose flip keeps the key well framed and under the same identifier.
     let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
     let position = (22..key.len())
@@ -1051,8 +1048,8 @@ async fn per_key_fallback_reserves_fetch_and_retained_key() {
         &[keyed_batch(&meta, &keys, &times, false)],
     )
     .await;
-    let (_, trailer, _, _) = root_page(&store, &handle).await;
-    let area = trailer.keys();
+    let (_, leaf_entry, _, _) = first_leaf(&store, &handle).await;
+    let area = leaf_entry.keys();
     // What the reader charges for one retained key, plus room for one block's payload buffers.
     let entry = std::mem::size_of::<ExactSeriesKey>() + 64;
     let limit = rows as usize * (key_len + entry) + 8 * 1024;
@@ -1240,7 +1237,7 @@ async fn skipped_block_does_not_hide_reversed_keys() {
     // Swapping the first and last series' stored entries keeps both checksums and identifiers
     // valid; only the order of the two keys the request loads is wrong. The middle block is
     // outside the requested time range, so its key is never read.
-    let (manifest, _, page, mut bytes) = root_page(&store, &handle).await;
+    let (manifest, _, page, mut bytes) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert_eq!(3, blocks.len());
     let entries = [&blocks[0].key, &blocks[2].key]
@@ -1275,9 +1272,8 @@ async fn skipped_block_does_not_hide_reversed_keys() {
 async fn pruned_block_does_not_hide_the_boundary_key() {
     let store = store();
     let meta = super::metadata();
-    // One leaf holds two descriptors and the root holds one leaf, so the first two blocks share a
-    // page in the first part and the third block starts the second part. The pruned block is
-    // therefore traversed without being loaded, which is what used to lose the boundary key.
+    // The time predicate skips the second block of the first leaf. Keep the
+    // first block's key available to validate the first selected key in the next leaf.
     let format = ColumnarSamplesFormat {
         block_rows: 1,
         page_bytes: 484,

@@ -167,25 +167,7 @@ pub(super) fn encode_metadata(
         bytes.extend(key);
         bytes.extend(value);
     }
-    let decoded = bytes.len() as u32;
-    let compressed = zstd::bulk::compress(&bytes, 3)
-        .map_err(|e| invalid(format!("compressing samples metadata: {e}")))?;
-    let (compression, bytes) = if compressed.len() < bytes.len() {
-        (1, compressed)
-    } else {
-        (0, bytes)
-    };
-    Ok((
-        PayloadReference {
-            offset,
-            stored: bytes.len() as u32,
-            decoded,
-            checksum: checksum(&bytes),
-            encoding: 1,
-            compression,
-        },
-        bytes,
-    ))
+    super::metadata::pack_bytes(&bytes, offset, 1)
 }
 
 pub(super) fn decode_metadata(

@@ -280,7 +280,7 @@ async fn read_leaf(
     (manifest, entry, page, bytes)
 }
 
-async fn root_page(
+async fn first_leaf(
     store: &ObjectStore,
     handle: &SamplesFileHandle,
 ) -> (SamplesMetadata, index::LeafEntry, Page, Vec<u8>) {
@@ -293,7 +293,7 @@ async fn replace_leaf(
     handle: SamplesFileHandle,
     page: Page,
 ) -> SamplesFileHandle {
-    let (_, mut entry, _, mut bytes) = root_page(store, &handle).await;
+    let (_, mut entry, _, mut bytes) = first_leaf(store, &handle).await;
     let mut footer = index_footer(&bytes);
     assert_eq!(footer.leaves, 1);
     let metadata =
@@ -598,11 +598,11 @@ async fn long_keys_round_trip() {
     );
     // The key area keeps the key byte for byte, so a read returns the same bytes the writer
     // received; the descriptor only references it.
-    let (_, trailer, page, bytes) = root_page(&store, &handle).await;
+    let (_, leaf_entry, page, bytes) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert_eq!(1, blocks.len());
     let reference = blocks[0].key;
-    reference.validate(trailer.keys()).unwrap();
+    reference.validate(leaf_entry.keys()).unwrap();
     let end = reference.offset + u64::from(reference.length);
     assert_eq!(
         key.as_slice(),
@@ -1052,7 +1052,7 @@ async fn malformed_framing_and_payload_corruption() {
     let manifest = manifest(&store, &handle).await;
     let path = manifest.part_path(0);
     let original = store.read(&path).await.unwrap().to_vec();
-    let (_, entry, page, index_bytes) = root_page(&store, &handle).await;
+    let (_, entry, page, index_bytes) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     let decoded = Page(blocks.clone()).encode();
     let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
@@ -1335,7 +1335,7 @@ async fn real_samples_reconcile_reopen_and_retire(
 /// Rewrites the stored root page so every field column carries an unknown codec, and returns a
 /// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
 async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
-    let (_, _, page, _) = root_page(store, &handle).await;
+    let (_, _, page, _) = first_leaf(store, &handle).await;
     let Page(mut blocks) = page;
     let mut patched = 0;
     for column in blocks.iter_mut().flat_map(|block| block.columns.iter_mut()) {
@@ -1822,10 +1822,7 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     assert_eq!(input, collect_rows(&all));
     let (full_bytes, first_window_bytes) = {
         let reads = reads.lock().unwrap();
-        // Header, trailer, root (one leaf: a fixed 56-byte descriptor no longer carries the
-        // series key, so this fixture's 260 blocks fit one page where a key-carrying descriptor
-        // needed two), three windows of at most 128 blocks, and one merged key read for the
-        // page's selected keys.
+        // The 260 payload blocks require three windows of at most 128 blocks.
         assert_eq!(
             3,
             reads
@@ -1968,7 +1965,7 @@ async fn keys_are_kept_out_of_metadata_pages() {
         &[keyed_batch(&meta, &keys, &[100, 100, 100], false)],
     )
     .await;
-    let (_, trailer, page, _) = root_page(&store, &handle).await;
+    let (_, leaf_entry, page, _) = first_leaf(&store, &handle).await;
     assert!(
         page.retained_size() < 3 * 1024,
         "retained size {} still stores the keys in the page",
@@ -1978,7 +1975,7 @@ async fn keys_are_kept_out_of_metadata_pages() {
         keys.iter()
             .map(|key| key.len() as u64 + KEY_CHECKSUM_BYTES)
             .sum::<u64>(),
-        trailer.page.payload.offset - trailer.keys_start,
+        leaf_entry.page.payload.offset - leaf_entry.keys_start,
         "the key area holds one copy of each key and its checksum"
     );
 }
@@ -2005,7 +2002,7 @@ async fn stream_reuses_one_decoder_and_scratch_across_compressed_blocks() {
     assert_eq!(4, manifest.files[0].num_blocks);
     // Every block must decode a compressed payload, or a decoder rebuilt per block would build
     // no context and the assertion below could not fail.
-    let (_, _, page, _) = root_page(&store, &handle).await;
+    let (_, _, page, _) = first_leaf(&store, &handle).await;
     let Page(blocks) = page;
     assert!(blocks.iter().all(|block| {
         block

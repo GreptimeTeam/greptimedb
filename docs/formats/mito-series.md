@@ -11,11 +11,11 @@ Region manifests serialize these roles as `narthex_samples` and
 
 ## Region manifest
 
-With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
-`<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
-`part-<n>.series` objects. The region manifest records the manifest size and a
-`parts` array in part-ID order.
-Each part record contains its encoded `file_size` in bytes.
+With `sst_format = 'narthex'`, samples are authoritative SSTs. Each series-index artifact owns
+`<region_dir>/<file_id>/manifest.json` and its `part-<n>.series` objects.
+A [samples SST](mito-samples.md) owns `samples.idx` and `part-<n>.samples`.
+The region manifest records each descriptor object's size and each payload
+part's encoded size in part-ID order.
 
 A native index file belongs to one fixed, epoch-aligned time window. Its region
 manifest entry requires `window` with inclusive `start` and exclusive `end` in

@@ -121,7 +121,8 @@ impl SamplesWriter {
         super::validate_narthex_metadata(&metadata)?;
         require(
             (1..=super::MAX_ROWS).contains(&options.block_rows)
-                && (204..=metadata::PAGE_LIMIT).contains(&options.page_bytes)
+                && ((12 + metadata::descriptor_bytes(3))..=metadata::PAGE_LIMIT)
+                    .contains(&options.page_bytes)
                 && options.part_bytes > 0,
             "invalid samples packing options",
         )?;

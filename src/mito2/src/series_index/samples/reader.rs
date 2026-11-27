@@ -126,7 +126,7 @@ impl SamplesReader {
         }
         let length = *objects
             .get(path.as_str())
-            .ok_or_else(|| invalid("missing samples manifest"))?;
+            .ok_or_else(|| invalid("missing samples index"))?;
         require(
             length >= index::FOOTER_SIZE as u64,
             "truncated samples index",
@@ -419,7 +419,7 @@ impl SamplesFormatReader for SamplesReader {
                                 )?;
                             }
                             payload_boundary =
-                                Some((block.part_id, block.columns.last().unwrap().payload.end()?));
+                                Some((block.part_id, block.payload_end()?));
                             let counts = &mut totals[block.part_id as usize];
                             counts.0 = counts
                                 .0
