@@ -43,6 +43,7 @@ use crate::read::scan_util::{
     scan_flat_mem_ranges,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::read::substituted_rows::SubstitutedRowRangesStream;
 use crate::read::{ScannerMetrics, scan_util};
 
 /// Scans a region without providing any output ordering guarantee.
@@ -239,10 +240,17 @@ impl UnorderedScan {
             metrics,
         );
 
-        Ok(Box::pin(RecordBatchStreamWrapper::new(
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamWrapper::new(
             input.mapper.output_schema(),
             Box::pin(record_batch_stream),
-        )))
+        ));
+        // The rows this scan hid (a physical-sequence read only) travel with the result, so the
+        // caller learns which time windows it has to recompute.
+        Ok(SubstitutedRowRangesStream::wrap(
+            stream,
+            input.substituted_row_ranges_ref(),
+            input.region_metadata().region_id.as_u64(),
+        ))
     }
 
     #[tracing::instrument(

@@ -17,7 +17,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_recordbatch::adapter::{
+    RecordBatchMetrics, RegionWatermarkEntry, SubstitutedRange, SubstitutedRowRanges,
+};
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::warn;
 use datafusion::physical_plan::ExecutionPlan;
@@ -27,6 +29,8 @@ use futures_util::ready;
 use lazy_static::lazy_static;
 use prometheus::*;
 use session::context::QueryContextRef;
+
+use table::table::scan::RegionScanExec;
 
 use crate::dist_plan::MergeScanExec;
 use crate::error::Result;
@@ -212,6 +216,11 @@ impl RecordBatchStream for RegionWatermarkMetricsStream {
         if !region_watermarks.is_empty() {
             metrics.region_watermarks = region_watermarks;
         }
+        // A region scan reports the rows it substituted (files whose sequences a substitution
+        // produced) through its own stream metrics, which a merge-scan sub-stage keeps per
+        // region. Both sources are joined here so the caller sees one range set per region.
+        metrics.substituted_row_ranges =
+            collect_substituted_row_ranges(self.plan.clone(), &metrics);
         Some(metrics)
     }
 }
@@ -252,12 +261,15 @@ pub fn maybe_attach_region_watermark_metrics(
 pub fn terminal_recordbatch_metrics_from_plan(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Option<RecordBatchMetrics> {
-    let region_watermarks = collect_region_watermarks(plan);
-    if region_watermarks.is_empty() {
+    let region_watermarks = collect_region_watermarks(plan.clone());
+    let own = RecordBatchMetrics::default();
+    let substituted_row_ranges = collect_substituted_row_ranges(plan, &own);
+    if region_watermarks.is_empty() && substituted_row_ranges.is_empty() {
         None
     } else {
         Some(RecordBatchMetrics {
             region_watermarks,
+            substituted_row_ranges,
             ..Default::default()
         })
     }
@@ -273,6 +285,63 @@ pub fn terminal_recordbatch_metrics_from_plan_if_requested(
     } else {
         None
     }
+}
+
+/// Collects the time ranges of the rows the plan's region scans substituted.
+///
+/// `own` carries the ranges of the stream that already reported them, every merge-scan
+/// sub-stage contributes the ranges of its own regions, and a region scan that ran in this
+/// process contributes what its partition streams stated when they ended. Ranges are unioned
+/// per region, so a row substituted by two branches is reported once.
+fn collect_substituted_row_ranges(
+    plan: Arc<dyn ExecutionPlan>,
+    own: &RecordBatchMetrics,
+) -> Vec<SubstitutedRowRanges> {
+    let mut merged = BTreeMap::<u64, BTreeSet<(i64, i64)>>::new();
+    let mut merge = |entries: Vec<SubstitutedRowRanges>| {
+        for entry in entries {
+            let ranges = merged.entry(entry.region_id).or_default();
+            ranges.extend(
+                entry
+                    .ranges
+                    .into_iter()
+                    .map(|range| (range.start_millis, range.end_millis)),
+            );
+        }
+    };
+    merge(own.substituted_row_ranges.clone());
+
+    let mut stack = vec![plan];
+    while let Some(plan) = stack.pop() {
+        // A region scan keeps the ranges its partition streams stated when they ended, which
+        // is the only source of them once the stream of a plan that ran in this process is
+        // rebuilt from the plan's figures.
+        if let Some(region_scan) = plan.downcast_ref::<RegionScanExec>() {
+            merge(region_scan.substituted_row_ranges());
+        }
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
+            for metrics in merge_scan.sub_stage_metrics() {
+                merge(metrics.substituted_row_ranges);
+            }
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    merged
+        .into_iter()
+        .map(|(region_id, ranges)| SubstitutedRowRanges {
+            region_id,
+            ranges: ranges
+                .into_iter()
+                .map(|(start_millis, end_millis)| SubstitutedRange {
+                    start_millis,
+                    end_millis,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermarkEntry> {

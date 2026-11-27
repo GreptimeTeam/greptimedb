@@ -74,6 +74,7 @@ use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
+use crate::read::substituted_rows::{SubstitutedRowsAccumulator, SubstitutedRowsAccumulatorRef};
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
@@ -472,8 +473,26 @@ impl ScanRegion {
     }
 
     /// Scans by series.
+    ///
+    /// A physical row-sequence read is refused here: neither the per-series readers nor the
+    /// legacy distributor (`SeqScan::build_flat_partition_range_read`) applies the file's
+    /// substituted cut, so the read fails closed with the shared "exactness is not provable"
+    /// error.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
+        if self.request.read_row_sequence {
+            return SequenceRangeUnsupportedSnafu {
+                region_id: self.region_id(),
+                min_seq: self.request.memtable_min_sequence.unwrap_or_default(),
+                max_seq: self.request.memtable_max_sequence.unwrap_or_default(),
+                reason: "the PerSeries distribution cannot carry a physical row-sequence read: \
+                         its series readers do not apply the substituted cut of a file, so rows \
+                         a substitution produced would be delivered as if this region \
+                         allocated them; plan the incremental delta as a flat ordered read"
+                    .to_string(),
+            }
+            .fail();
+        }
         let experimental_series_scan_v2 = self.experimental_series_scan_v2;
         let input = self.scan_input().await?;
         Ok(SeriesScan::new(input, experimental_series_scan_v2))
@@ -648,6 +667,7 @@ impl ScanRegion {
                     .flatten(),
             )
             .with_sequence_range(sequence_range)
+            .with_read_row_sequence(self.request.read_row_sequence)
             .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "enterprise")]
         let input = if !self.request.skip_sst_files
@@ -1023,6 +1043,11 @@ pub struct ScanInput {
     /// carries an explicit exact range. When set, SST readers apply the same
     /// `(checkpoint, upper_bound]` row-level filter as memtables.
     pub(crate) sequence_range: Option<SequenceRange>,
+    /// Whether this scan reads the physical `__sequence` column of a foreign file and hides the
+    /// rows a substitution produced ([`ScanRequest::read_row_sequence`]).
+    pub(crate) read_row_sequence: bool,
+    /// Collects the timestamp ranges of the rows this scan substituted; `None` turns it off.
+    pub(crate) substituted_row_ranges: Option<SubstitutedRowsAccumulatorRef>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     /// Max number of compaction inputs decoded concurrently ahead of the merge.
@@ -1093,6 +1118,8 @@ impl ScanInput {
                 explain_flat_format: false,
                 snapshot_sequence: None,
                 sequence_range: None,
+                read_row_sequence: false,
+                substituted_row_ranges: None,
                 compaction: false,
                 compaction_read_parallelism: 1,
                 json2_rewrite_targets: Arc::default(),
@@ -1455,6 +1482,16 @@ impl ScanInputBuilder {
         self
     }
 
+    /// Sets whether this scan reads physical row sequences and hides substituted rows. It turns
+    /// the substituted-row collector on with it.
+    #[must_use]
+    pub(crate) fn with_read_row_sequence(mut self, read_row_sequence: bool) -> Self {
+        self.input.read_row_sequence = read_row_sequence;
+        self.input.substituted_row_ranges =
+            read_row_sequence.then(|| Arc::new(SubstitutedRowsAccumulator::new()));
+        self
+    }
+
     /// Sets whether this scan is for compaction.
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
@@ -1694,6 +1731,7 @@ impl ScanInput {
         };
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
+            .read_row_sequence(self.read_row_sequence)
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
             .enable_predicate_prefilter(enable_predicate_prefilter)
@@ -1997,6 +2035,33 @@ impl PruningStatistics for FileLevelPruningStats<'_> {
     }
 }
 
+impl ScanInput {
+    /// The timestamp ranges the rows this scan substituted occupy.
+    pub(crate) fn substituted_row_ranges(&self) -> Option<&SubstitutedRowsAccumulator> {
+        self.substituted_row_ranges.as_deref()
+    }
+
+    pub(crate) fn substituted_row_ranges_ref(&self) -> Option<SubstitutedRowsAccumulatorRef> {
+        self.substituted_row_ranges.clone()
+    }
+
+    /// Returns the substituted cut `file` states for its own bytes, when this scan reads
+    /// physical row sequences.
+    ///
+    /// The cut describes the file's bytes, not who allocated the numbers in them, so it applies
+    /// to every file that states one, local files included
+    /// ([`crate::sst::file::substituted_up_to_after_merge`]). The file's
+    /// `preserve_row_sequence` marker takes no part.
+    pub(crate) fn substituted_sequence_cut(&self, file: &FileHandle) -> Option<SequenceNumber> {
+        if !self.read_row_sequence {
+            return None;
+        }
+        // `None` means no row of the column was substituted; `Some(0)` means the column
+        // carries no per-row numbering at all, so every row is substituted.
+        file.meta_ref().substituted_up_to
+    }
+}
+
 #[cfg(test)]
 impl ScanInput {
     /// Returns SST file ids to scan.
@@ -2033,12 +2098,21 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 /// proves Flow has already consumed the entire file, so such a file is excluded
 /// before the capability check. An unknown bound cannot prove this exclusion.
 ///
-/// A foreign file is different: the parquet reader virtualizes every row to its
-/// target-local `FileMeta.sequence`. Consequently, a present sequence is the
-/// only trust requirement for a foreign file; its source marker is irrelevant.
-/// A foreign file without that barrier is retained as a failed-closed error so
-/// it cannot be mistaken for a local sequence domain. This check is performed
-/// even when another exact-range capability condition would return `None`.
+/// A foreign file only has to state a barrier: outside a physical-sequence read the parquet
+/// reader virtualizes every row to its target-local `FileMeta.sequence`, which is also what
+/// makes the `C >= barrier` exclusion sound for it. Its source marker is irrelevant. A foreign
+/// file without a barrier fails closed.
+///
+/// A physical-sequence read (`read_row_sequence`) keeps the file's own numbers instead, so a
+/// foreign file is never excluded here: its numbers are the creator's, which the barrier does
+/// not bound.
+///
+/// A **local** file may state a substitution as well: a merge substitutes a file-level constant
+/// for the rows of its foreign inputs and records the bound
+/// ([`crate::sst::file::substituted_up_to_after_merge`]). Such a file is attributable — the read
+/// hides the rows at or below the cut ([`ScanInput::substituted_sequence_cut`]) and the rest
+/// carries this region's numbering — and keeps the region's exact range. A local file with
+/// neither the marker nor a cut keeps failing closed.
 pub(crate) fn exact_sequence_range(
     request: &ScanRequest,
     version: &crate::region::version::Version,
@@ -2070,7 +2144,12 @@ pub(crate) fn exact_sequence_range(
         .filter(|file| file_in_range(file, &time_range))
     {
         let meta = file.meta_ref();
+        // A physical-sequence read keeps the creator's numbers, which the barrier does not
+        // bound: the file is kept and its substituted rows are hidden by the read.
+        let keeps_foreign_sequence_domain =
+            request.read_row_sequence && meta.region_id != version.metadata.region_id;
         let selected = (!request.exact_sequence_range
+            || keeps_foreign_sequence_domain
             || min.is_none_or(|min| meta.sequence.is_none_or(|sequence| sequence.get() > min)))
             && match (sst_min_sequence, meta.sequence) {
                 (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
@@ -2093,8 +2172,13 @@ pub(crate) fn exact_sequence_range(
                 }
                 .fail();
             }
+            // A local file whose marker is unset is attributable when it states a cut: the
+            // read hides the rows at or below it and the rest carries this region's numbering.
+            let cut_hides_substituted_rows =
+                request.read_row_sequence && meta.substituted_up_to.is_some();
             if meta.region_id == version.metadata.region_id
                 && !file.is_effective_target_sequence_trusted(version.metadata.region_id)
+                && !cut_hides_substituted_rows
                 && meta.sequence.is_none_or(|barrier| barrier.get() > min)
             {
                 // Match the capability helper's short-circuit behavior: once

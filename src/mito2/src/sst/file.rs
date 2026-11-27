@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId};
+use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId, SequenceNumber};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -393,6 +393,17 @@ pub struct FileMeta {
     /// restore this capability for untrusted inputs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
+    /// Upper bound of the physical `__sequence` values that a compaction *substituted* with a
+    /// file-level constant. Rows at or below it may carry a number this region never allocated
+    /// for them, so a reader may not compare them with a cursor. `Some(0)` = the column carries
+    /// no per-row numbering at all (legacy import). `None` (and the value of every older
+    /// manifest) means no row of the column was substituted.
+    ///
+    /// The value is a bound, not a verdict: a row above it still carries a number its writer
+    /// allocated. A merge states the maximum of the constants it substituted and of the bounds
+    /// its inputs carried ([`substituted_up_to_after_merge`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substituted_up_to: Option<SequenceNumber>,
     /// Physical encoding, omitted for legacy Parquet files.
     #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
     pub format: FileFormat,
@@ -716,6 +727,51 @@ pub(crate) fn known_max_input_sequence<'a>(
         max = Some(max.map_or(sequence, |current| current.max(sequence)));
     }
     max
+}
+
+/// Returns the constant a reader substitutes for *every* row of `input` when it reads the file
+/// inside `target_region_id`'s sequence domain, or `None` when the physical column is kept.
+///
+/// Mirrors the two substituting branches of the Parquet reader (`sst/parquet/reader.rs`): a
+/// foreign file, and a local file whose per-row numbering is not trusted and whose footer proves
+/// an all-zero `__sequence` column ([`need_override_sequence`], a property of the statistics and
+/// never of the rows).
+pub(crate) fn substituted_row_constant(
+    input: &FileMeta,
+    target_region_id: RegionId,
+    footer_all_zero: bool,
+) -> Option<SequenceNumber> {
+    let substitutes =
+        input.region_id != target_region_id || (!input.preserve_row_sequence && footer_all_zero);
+    if !substitutes {
+        return None;
+    }
+    input.sequence.map(|sequence| sequence.get())
+}
+
+/// Returns the [`FileMeta::substituted_up_to`] bound the merge of `inputs` states on its output:
+/// the maximum of every constant the merge's own reader substituted and of every bound the
+/// inputs already carried, or `None` when neither exists.
+///
+/// `footer_all_zero` is each input's all-zero `__sequence` footer fact, in input order. An
+/// input's bound must be inherited: a row substituted by an earlier merge stays substituted.
+pub(crate) fn substituted_up_to_after_merge<'a>(
+    target_region_id: RegionId,
+    inputs: impl IntoIterator<Item = (&'a FileMeta, bool)>,
+) -> Option<SequenceNumber> {
+    let mut bound: Option<SequenceNumber> = None;
+    let mut raise = |at: SequenceNumber| {
+        bound = Some(bound.map_or(at, |current| current.max(at)));
+    };
+    for (input, footer_all_zero) in inputs {
+        if let Some(inherited) = input.substituted_up_to {
+            raise(inherited);
+        }
+        if let Some(constant) = substituted_row_constant(input, target_region_id, footer_all_zero) {
+            raise(constant);
+        }
+    }
+    bound
 }
 
 impl FileHandle {
@@ -1964,5 +2020,168 @@ mod tests {
         // Tantivy indexes carry no bloom version.
         let tantivy = fulltext_column(FulltextBackend::Tantivy);
         assert!(file_meta(0).is_index_consistent_with_region(&tantivy, &IndexOptions::default()));
+    }
+
+    /// A manifest written before the cut existed deserializes to `None`, which means "no row
+    /// of this file was substituted", and a `None` cut is not written back.
+    #[test]
+    fn test_file_meta_substituted_up_to_backward_compatibility() {
+        // `FileMeta` of an older manifest: every field below is what such a manifest holds,
+        // and `substituted_up_to` is simply absent.
+        let legacy = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "level": 0,
+            "file_size": 1024,
+            "sequence": 7,
+            "num_rows": 3,
+            "num_row_groups": 1,
+            "preserve_row_sequence": true
+        }"#;
+        let meta: FileMeta = serde_json::from_str(legacy).unwrap();
+        assert_eq!(None, meta.substituted_up_to);
+        assert_eq!(Some(NonZeroU64::new(7).unwrap()), meta.sequence);
+
+        // The field is optional on the wire: `None` is omitted, so an older reader sees the
+        // manifest it wrote.
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert!(encoded.get("substituted_up_to").is_none());
+
+        // `Some(0)` is a real value ("the column carries no per-row numbering at all"), so it
+        // must survive both directions.
+        let legacy_import = FileMeta {
+            substituted_up_to: Some(0),
+            ..meta.clone()
+        };
+        let encoded = serde_json::to_value(&legacy_import).unwrap();
+        assert_eq!(
+            serde_json::json!(0),
+            encoded["substituted_up_to"],
+            "a zero cut records that the column carries no per-row numbering"
+        );
+        let decoded: FileMeta = serde_json::from_value(encoded).unwrap();
+        assert_eq!(legacy_import, decoded);
+    }
+
+    /// A foreign input's rows are read at the input's own file-level bound, so the merged
+    /// column carries that constant.
+    #[test]
+    fn test_substituted_up_to_from_foreign_input() {
+        let target = RegionId::new(1, 1);
+        let foreign = FileMeta {
+            region_id: RegionId::new(1, 2),
+            sequence: NonZeroU64::new(7),
+            // Trust and the cut are independent: this file's own numbering is usable, but the
+            // rows this merge writes are the constant `7`, not the creator's numbers.
+            preserve_row_sequence: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(7),
+            substituted_up_to_after_merge(target, [(&foreign, false)]),
+            "a foreign input is substituted at the handle bound"
+        );
+        // Without a bound the reader keeps the source numbers, so the merge states no
+        // constant of its own.
+        let unbounded = FileMeta {
+            sequence: None,
+            ..foreign.clone()
+        };
+        assert_eq!(
+            None,
+            substituted_up_to_after_merge(target, [(&unbounded, false)])
+        );
+    }
+
+    /// A local input whose per-row numbering is not trusted and whose footer proves an all-zero
+    /// `__sequence` column is substituted at the handle bound, and a repartition can re-stamp
+    /// that bound above every foreign one.
+    #[test]
+    fn test_substituted_up_to_from_local_all_zero_input() {
+        let target = RegionId::new(1, 1);
+        let local = FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(9),
+            preserve_row_sequence: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(9),
+            substituted_up_to_after_merge(target, [(&local, true)]),
+            "an all-zero local input is normalized to its handle bound"
+        );
+        // A footer that is not all-zero keeps the physical column: nothing is substituted.
+        assert_eq!(
+            None,
+            substituted_up_to_after_merge(target, [(&local, false)])
+        );
+
+        // The local all-zero constant can exceed a foreign one, so the output must reach it.
+        let foreign = FileMeta {
+            region_id: RegionId::new(1, 2),
+            sequence: NonZeroU64::new(4),
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(9),
+            substituted_up_to_after_merge(target, [(&foreign, false), (&local, true)])
+        );
+    }
+
+    /// An input that already carries a cut stays substituted even when this round substitutes
+    /// nothing, or substitutes less.
+    #[test]
+    fn test_substituted_up_to_inherits_input_bound() {
+        let target = RegionId::new(1, 1);
+        let trusted_input = FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(5),
+            preserve_row_sequence: true,
+            substituted_up_to: Some(12),
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(12),
+            substituted_up_to_after_merge(target, [(&trusted_input, false)]),
+            "a cut an input carries is inherited, not recomputed from fresh constants"
+        );
+
+        let foreign = FileMeta {
+            region_id: RegionId::new(1, 2),
+            sequence: NonZeroU64::new(4),
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(12),
+            substituted_up_to_after_merge(target, [(&foreign, false), (&trusted_input, false)]),
+            "a smaller fresh constant never lowers an inherited cut"
+        );
+    }
+
+    /// A merge of purely local, trusted inputs substitutes nothing, so the output states no
+    /// cut and the next exact read is a plain incremental one.
+    #[test]
+    fn test_substituted_up_to_of_trusted_local_merge_is_none() {
+        let target = RegionId::new(1, 1);
+        let first = FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(3),
+            preserve_row_sequence: true,
+            ..Default::default()
+        };
+        let second = FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(5),
+            preserve_row_sequence: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            None,
+            substituted_up_to_after_merge(target, [(&first, false), (&second, false)])
+        );
     }
 }

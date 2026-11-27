@@ -2380,6 +2380,7 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
         &limits,
         plan.max_output_file_size,
         (0, 0),
+        |_| false,
         Arc::default(),
     )
     .write(source)

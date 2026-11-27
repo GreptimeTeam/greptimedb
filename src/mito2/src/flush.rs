@@ -1013,6 +1013,10 @@ impl MemtableSstWriter {
             primary_key_min,
             primary_key_max,
             preserve_row_sequence,
+            // A flush encodes this region's own rows, so it substitutes no file-level
+            // constant over the column. (The `preserve_row_sequence = false` writer override is
+            // a row-level rewrite inside the region's own domain and states no bound.)
+            substituted_up_to: None,
             format: sst_info.format.clone(),
         })
     }
