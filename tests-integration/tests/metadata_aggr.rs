@@ -128,7 +128,11 @@ async fn test_metadata_count_distributed_with_filter_and_memtables(#[case] enabl
         ENGINE=mito WITH (append_mode = 'false', 'memtable.type' = 'bulk')",
     )
     .await;
-    execute_sql(frontend, "INSERT INTO split_count VALUES ('a', 500, 0), ('z', 500, 0)").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO split_count VALUES ('a', 500, 0), ('z', 500, 0)",
+    )
+    .await;
     execute_sql(frontend, "ADMIN FLUSH_TABLE('split_count')").await;
     execute_sql(
         frontend,
@@ -137,7 +141,11 @@ async fn test_metadata_count_distributed_with_filter_and_memtables(#[case] enabl
     )
     .await;
     execute_sql(frontend, "ADMIN FLUSH_TABLE('split_count')").await;
-    execute_sql(frontend, "INSERT INTO split_count VALUES ('a', 3000, 5), ('z', 3000, 6)").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO split_count VALUES ('a', 3000, 5), ('z', 3000, 6)",
+    )
+    .await;
 
     let sql = "SELECT count(*) FROM split_count WHERE ts >= TIMESTAMP '1970-01-01 00:00:01'";
     assert_count(frontend, sql, 6).await;
@@ -185,7 +193,11 @@ async fn test_metadata_count_logical_metric_skips_other_table_footers() {
 
     // Flush each logical table separately. The two files overlap in time in
     // the same physical region, but their leading table IDs are disjoint.
-    execute_sql(frontend, "INSERT INTO logical_a VALUES (1000, 1, 'a'), (2000, 2, 'a')").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO logical_a VALUES (1000, 1, 'a'), (2000, 2, 'a')",
+    )
+    .await;
     execute_sql(frontend, "ADMIN FLUSH_TABLE('physical_count')").await;
     execute_sql(
         frontend,
@@ -214,7 +226,12 @@ async fn test_metadata_count_logical_metric_skips_other_table_footers() {
     let cache = standalone.mito_engine.cache_manager();
     for file in [target, unrelated] {
         cache.remove_parquet_meta_data(file).await;
-        assert!(cache.get_parquet_meta_data_from_mem_cache(file).await.is_none());
+        assert!(
+            cache
+                .get_parquet_meta_data_from_mem_cache(file)
+                .await
+                .is_none()
+        );
     }
 
     let sql = "SELECT count(*) FROM logical_a";
@@ -225,10 +242,25 @@ async fn test_metadata_count_logical_metric_skips_other_table_footers() {
 
     // Loading a footer through this read path populates the enabled cache.
     // Only the file whose rows contributed to the metadata count was loaded.
-    assert!(cache.get_parquet_meta_data_from_mem_cache(target).await.is_some());
-    assert!(cache.get_parquet_meta_data_from_mem_cache(unrelated).await.is_none());
+    assert!(
+        cache
+            .get_parquet_meta_data_from_mem_cache(target)
+            .await
+            .is_some()
+    );
+    assert!(
+        cache
+            .get_parquet_meta_data_from_mem_cache(unrelated)
+            .await
+            .is_none()
+    );
     assert_count(frontend, "SELECT count(*) FROM logical_b", 3).await;
-    assert!(cache.get_parquet_meta_data_from_mem_cache(unrelated).await.is_some());
+    assert!(
+        cache
+            .get_parquet_meta_data_from_mem_cache(unrelated)
+            .await
+            .is_some()
+    );
 }
 
 async fn execute_sql(frontend: &Instance, sql: &str) -> Output {

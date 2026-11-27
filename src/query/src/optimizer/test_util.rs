@@ -336,8 +336,7 @@ pub(crate) fn metadata_aggr_region_scan(
     let schema = Arc::new(Schema::new(vec![]));
     let scanner = |rows, exact, statistics_split| RangesScanner {
         metadata: log_region_metadata(),
-        properties: ScannerProperties::new(vec![vec![]], false, rows)
-            .with_exact_num_rows(exact),
+        properties: ScannerProperties::new(vec![vec![]], false, rows).with_exact_num_rows(exact),
         batches: Some(
             RecordBatches::try_new(
                 schema.clone(),
