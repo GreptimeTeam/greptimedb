@@ -416,9 +416,7 @@ async fn open_sidecar_sources(
             "columnar series coverage changed after series preparation",
         ));
     };
-    let cache = input
-        .cache_strategy
-        .columnar_metadata(index.cache_namespace);
+    let cache = input.cache_strategy.columnar_metadata();
     let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
     let assigned: HashSet<_> = files
         .iter()

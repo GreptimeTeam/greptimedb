@@ -2432,13 +2432,9 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
     let strategy = CacheStrategy::EnableAll(Arc::new(
         CacheManager::builder().page_cache_size(1024 * 1024).build(),
     ));
-    let reader = reader::SamplesReader::open_cached(
-        store,
-        handle,
-        strategy.columnar_metadata(FileId::random()),
-    )
-    .await
-    .unwrap();
+    let reader = reader::SamplesReader::open_cached(store, handle, strategy.columnar_metadata())
+        .await
+        .unwrap();
     let pool = Arc::new(GreedyMemoryPool::new(capacity));
     let mut request = full_request();
     request.memory_pool = Some(pool.clone());
@@ -2502,13 +2498,12 @@ async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
             .sst_meta_cache_size(1024 * 1024)
             .build(),
     ));
-    let namespace = FileId::random();
     for id in [1, 2, 1] {
         reads.lock().unwrap().clear();
         let reader = reader::SamplesReader::open_cached(
             store.clone(),
             handle.clone(),
-            strategy.columnar_metadata(namespace),
+            strategy.columnar_metadata(),
         )
         .await
         .unwrap();
@@ -2537,10 +2532,9 @@ async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
             );
         }
     }
-    let reader =
-        reader::SamplesReader::open_cached(store, handle, strategy.columnar_metadata(namespace))
-            .await
-            .unwrap();
+    let reader = reader::SamplesReader::open_cached(store, handle, strategy.columnar_metadata())
+        .await
+        .unwrap();
     let pool = Arc::new(GreedyMemoryPool::new(1024 * 1024));
     let mut request = full_request();
     request.memory_pool = Some(pool.clone());

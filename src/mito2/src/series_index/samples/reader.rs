@@ -32,8 +32,7 @@ use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
 use crate::cache::columnar::{
-    self as metadata_cache, ManifestEntry, MetadataCache, MetadataIdentity, MetadataPart,
-    ObjectReader, PartArea,
+    self as metadata_cache, MetadataCache, MetadataIdentity, MetadataPart, ObjectReader, PartArea,
 };
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
@@ -62,10 +61,7 @@ impl SamplesReader {
         handle: SamplesFileHandle,
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
-        let identity = MetadataIdentity::Manifest {
-            file: handle.file_id(),
-            entry: ManifestEntry::Samples(handle.shared_entry()),
-        };
+        let identity = MetadataIdentity::SamplesManifest(handle.entry().artifact.generation);
         let loader_store = store.clone();
         let loader_handle = handle.clone();
         let loader_cache = cache.clone();
@@ -286,7 +282,6 @@ impl SamplesFormatReader for SamplesReader {
         let handle = self.handle.clone();
         let parts = self.parts.clone();
         Ok(Box::pin(async_stream::try_stream! {
-            let _handle = &handle;
             let mut metrics = ColumnarReadMetrics::default();
             if empty { return; }
             // One decoder and one scratch per stream, reused by every block. The decoder holds
@@ -321,19 +316,21 @@ impl SamplesFormatReader for SamplesReader {
                 .map(|pool| MemoryConsumer::new("ColumnarSamplesBoundaryKey").register(pool));
             let mut spanning_key: Option<ExactSeriesKey> = None;
             let mut spanning_bytes = 0usize;
+            let manifest_path = handle.manifest_path();
+            let prefix = manifest_path.strip_suffix("manifest.json").ok_or_else(|| invalid("invalid manifest path"))?;
             for part in &manifest.files {
                 let bounds = Bounds { first: part.first, last: part.last, min: part.min_timestamp, max: part.max_timestamp };
                 if !matches(bounds, &request, ids.as_ref()) { adjacent = false; continue; }
-                let path = manifest.part_path(part.part_id);
+                let path = Manifest::part_path_in(prefix, part.part_id);
                 // One lazy reader per accessed part, shared across this query's streams.
                 let reader = parts[part.part_id as usize].get_or_try_init(|| async {
                     ObjectReader::open(cache.as_ref(), handle.narthex_file(), crate::cache::file_cache::FileType::Samples(Some(part.part_id)), &store, &path, part.file_size).await
                 }).await?;
                 let size = part.file_size;
-                let object = MetadataPart { generation: manifest.generation, part_id: part.part_id, size };
+                let object = MetadataPart { generation: manifest.generation, part_id: part.part_id };
                 let metadata_started = Instant::now();
                 let framing_reader = reader.clone();
-                let trailer = metadata_cache::load(cache.as_ref(), MetadataIdentity::SamplesTrailer { part: object, bounds }, |_| std::mem::size_of::<Trailer>(), move || async move {
+                let trailer = metadata_cache::load(cache.as_ref(), MetadataIdentity::SamplesTrailer(object), |_| std::mem::size_of::<Trailer>(), move || async move {
                     let framing = framing_reader.fetch(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
                     metadata::validate_header(&framing[0])?;
                     let trailer = Trailer::decode(&framing[1], size)?;
@@ -806,7 +803,6 @@ async fn load_metadata_page(
             part,
             reference,
             depth,
-            areas,
         },
         Page::retained_size,
         move || async move {

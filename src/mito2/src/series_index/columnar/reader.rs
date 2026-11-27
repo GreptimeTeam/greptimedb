@@ -30,8 +30,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 
 use crate::cache::columnar::{
-    self as metadata_cache, ManifestEntry, MetadataCache, MetadataIdentity, MetadataPart,
-    ObjectReader, PartArea,
+    self as metadata_cache, MetadataCache, MetadataIdentity, MetadataPart, ObjectReader, PartArea,
 };
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
@@ -88,10 +87,7 @@ impl ColumnarReader {
         handle: SeriesIndexFileHandle,
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
-        let identity = MetadataIdentity::Manifest {
-            file: handle.file_id(),
-            entry: ManifestEntry::Series(handle.shared_entry()),
-        };
+        let identity = MetadataIdentity::SeriesManifest(handle.entry().index_uuid);
         let loader_store = store.clone();
         let loader_handle = handle.clone();
         let loader_cache = cache.clone();
@@ -382,20 +378,21 @@ impl ColumnarReader {
             .chain(manifest.tags.iter().map(|tag| tag.name.clone()))
             .collect();
         Box::pin(async_stream::try_stream! {
-            // Retained across every yield, even after the reader object is dropped.
-            let _handle = handle;
             let mut metrics = ColumnarReadMetrics::default();
+            // Resolve this handle's location even when the descriptor was cached from another store.
+            let manifest_path = handle.manifest_path();
+            let prefix = manifest_path.strip_suffix("manifest.json").ok_or_else(|| invalid("invalid manifest path"))?;
             for part in &manifest.files {
                 if !matches_range(part.first, part.last, &request) { continue; }
                 *metrics.counts.entry("series_parts").or_default() += 1;
                 let timer = metrics.timer("columnar_series_metadata_wall");
-                let path = manifest.part_path(part.part_id);
+                let path = Manifest::part_path_in(prefix, part.part_id);
                 let size = part.file_size;
-                let object = MetadataPart { generation: manifest.generation, part_id: part.part_id, size };
-                let reader = ObjectReader::open(cache.as_ref(), _handle.narthex_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
+                let object = MetadataPart { generation: manifest.generation, part_id: part.part_id };
+                let reader = ObjectReader::open(cache.as_ref(), handle.narthex_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
                 let framing_reader = reader.clone();
                 let expected = (part.first, part.last);
-                let trailer = metadata_cache::load(cache.as_ref(), MetadataIdentity::SeriesTrailer { part: object, first: expected.0, last: expected.1 }, |_| std::mem::size_of::<Trailer>(), move || async move {
+                let trailer = metadata_cache::load(cache.as_ref(), MetadataIdentity::SeriesTrailer(object), |_| std::mem::size_of::<Trailer>(), move || async move {
                     let framing = framing_reader.fetch(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
                     require(
                         framing.len() == 2
@@ -504,7 +501,6 @@ async fn load_metadata_page(
             part,
             reference,
             depth,
-            payload_end,
         },
         Page::retained_size,
         move || async move {

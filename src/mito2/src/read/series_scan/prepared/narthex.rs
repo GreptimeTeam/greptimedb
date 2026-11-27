@@ -133,10 +133,7 @@ pub(crate) async fn open_sources(
                         .access_layer
                         .build_region_dir(file.meta_ref().region_id),
                 )?,
-                context
-                    .input
-                    .cache_strategy
-                    .columnar_metadata(file.meta_ref().file_id),
+                context.input.cache_strategy.columnar_metadata(),
             )
             .await?;
             reader.adapt_tags(context.input.region_metadata())?;
@@ -165,7 +162,6 @@ pub(crate) async fn open_sources(
     windows.retain(|start, _| !unavailable.contains(start));
     for i in indices {
         let file = &context.input.files[i];
-        let namespace = file.meta_ref().file_id;
         let reader = SamplesReader::open_cached(
             context.input.access_layer.object_store().clone(),
             SamplesFileHandle::from_narthex(
@@ -175,7 +171,7 @@ pub(crate) async fn open_sources(
                     .access_layer
                     .build_region_dir(file.meta_ref().region_id),
             )?,
-            context.input.cache_strategy.columnar_metadata(namespace),
+            context.input.cache_strategy.columnar_metadata(),
         )
         .await?;
         // Match Parquet: foreign SSTs use the destination admission sequence,

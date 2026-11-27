@@ -747,7 +747,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
         region.access_layer.object_store().clone(),
         handle.clone(),
-        strategy.columnar_metadata(file.meta_ref().file_id),
+        strategy.columnar_metadata(),
     )
     .await?;
     let request = crate::series_index::format::SeriesReadRequest {
@@ -780,10 +780,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let result = crate::series_index::columnar::reader::ColumnarReader::open_cached(
         region.access_layer.object_store().clone(),
         handle.clone(),
-        crate::cache::columnar::MetadataCache::maintenance(
-            engine.cache_manager().write_cache(),
-            file.meta_ref().file_id,
-        ),
+        crate::cache::columnar::MetadataCache::maintenance(engine.cache_manager().write_cache()),
     )
     .await;
     let error = result

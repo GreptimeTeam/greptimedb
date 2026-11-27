@@ -52,9 +52,9 @@ use store_api::metric_engine_consts::{
 
 use crate::error::Result;
 #[cfg(test)]
-pub(crate) use crate::series_index::catalog::RangeIndexEntry;
+pub(crate) use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
 pub(crate) use crate::series_index::catalog::{
-    SeriesIndexEntry, delete_catalogs, load_version_control, series_index_path,
+    delete_catalogs, load_version_control, series_index_path,
 };
 pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
 pub use crate::series_index::searcher::SeriesIndexSearcher;
@@ -69,7 +69,6 @@ pub use crate::series_index::writer::{
 /// Index storage and pinned catalog snapshot for a query.
 #[derive(Clone)]
 pub(crate) struct SeriesIndexReadContext {
-    pub(crate) cache_namespace: store_api::storage::FileId,
     pub(crate) format: crate::config::SeriesIndexFormat,
     pub(crate) store: ObjectStore,
     pub(crate) version: Arc<SeriesIndexVersion>,

@@ -1017,7 +1017,7 @@ async fn selective_io_and_pinned_stream_retirement() {
         let cached = super::reader::ColumnarReader::open_cached(
             store.clone(),
             handle.clone(),
-            strategy.columnar_metadata(handle.file_id().file_id()),
+            strategy.columnar_metadata(),
         )
         .await
         .unwrap();

@@ -313,7 +313,6 @@ fn scan_input(
                 .collect(),
         )
         .with_series_index(Some(SeriesIndexReadContext {
-            cache_namespace: store_api::storage::FileId::random(),
             format,
             store,
             version: region.series_index_version(),
@@ -1580,7 +1579,7 @@ async fn series_artifact_read_failure_propagates() {
 }
 
 #[tokio::test]
-async fn metadata_cache_reuses_structures_and_isolates_storage() {
+async fn metadata_cache_reuses_structures_and_isolates_generations() {
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::series_index::columnar::reader::ColumnarReader;
     use crate::series_index::samples::reader::SamplesReader;
@@ -1610,11 +1609,9 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
             .sst_meta_cache_size(8 * 1024 * 1024)
             .build(),
     ));
-    let namespace = FileId::random();
     let contexts = [
-        strategy.columnar_metadata(namespace),
-        strategy.columnar_metadata(namespace),
-        strategy.columnar_metadata(FileId::random()),
+        strategy.columnar_metadata(),
+        strategy.columnar_metadata(),
         None,
     ];
     let mut results = Vec::new();
@@ -1667,43 +1664,25 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
         counts[1] < counts[0],
         "warm metadata should avoid reads: {counts:?}"
     );
-    assert_eq!(counts[0], counts[2], "a new storage namespace must miss");
-    assert_eq!(counts[0], counts[3], "disabled caches must read metadata");
-    // The same generation can be presented with a different catalog entry. A warm
-    // descriptor must still reject coverage or inventory that disagrees with the manifest.
+    assert_eq!(counts[0], counts[2], "disabled caches must read metadata");
+    // An already decoded manifest can be reused through another store without I/O.
+    let other_store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    SamplesReader::open_cached(other_store, samples.clone(), strategy.columnar_metadata())
+        .await
+        .unwrap();
+    // A rebuilt sidecar for the same source SST must open the new generation's manifest.
     let (purger, _) = crate::series_index::series_index_channel(store.clone());
-    let mut coverage = series.entry().clone();
-    coverage.max_file_sequence ^= 1;
-    let changed = crate::series_index::SeriesIndexFileHandle::new(
-        series.file_id().region_id(),
-        coverage,
-        purger.clone(),
-    );
-    let result = ColumnarReader::open_cached(
-        store.clone(),
-        changed,
-        strategy.columnar_metadata(namespace),
-    )
-    .await;
+    let mut next = samples.entry().clone();
+    next.artifact.generation = FileId::random();
+    let next =
+        crate::series_index::artifact::SamplesFileHandle::new(samples.file_id(), next, purger);
+    let result = SamplesReader::open_cached(store, next, strategy.columnar_metadata()).await;
     assert!(
         result
             .err()
             .unwrap()
             .output_msg()
-            .contains("coverage mismatch")
-    );
-    let mut inventory = samples.entry().clone();
-    inventory.artifact.file_size += 1;
-    let changed =
-        crate::series_index::artifact::SamplesFileHandle::new(samples.file_id(), inventory, purger);
-    let result =
-        SamplesReader::open_cached(store, changed, strategy.columnar_metadata(namespace)).await;
-    assert!(
-        result
-            .err()
-            .unwrap()
-            .output_msg()
-            .contains("objects/size mismatch")
+            .contains("missing samples manifest")
     );
     engine.stop().await.unwrap();
 }
@@ -1717,7 +1696,6 @@ async fn native_preparation_metadata_benchmark() {
     use crate::cache::{CacheManager, CacheStrategy};
     use std::time::Instant;
     use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::FileId;
 
     // Keep wide-artifact setup small: this measures preparation, not sample writing.
     for (series_count, field_count) in [(4096, 1), (64, 1024)] {
@@ -1841,7 +1819,6 @@ async fn native_preparation_metadata_benchmark() {
         flush_region(&engine, region.region_id, None).await;
         build(&engine, &region).await;
         let store = region.series_index_store.clone().unwrap();
-        let namespace = FileId::random();
         let mut cold = Vec::new();
         let mut warm = Vec::new();
         for _ in 0..7 {
@@ -1858,7 +1835,6 @@ async fn native_preparation_metadata_benchmark() {
                     (0..metadata.column_metadatas.len()).collect(),
                 );
                 input.cache_strategy = cache.clone();
-                input.series_index.as_mut().unwrap().cache_namespace = namespace;
                 let scanner = SeriesScan::new(input, false);
                 let binding = labels(scanner.metadata());
                 let start = Instant::now();

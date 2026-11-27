@@ -15,7 +15,6 @@
 //! Immutable Narthex reader metadata shares the decoded SST reservation.
 
 use std::any::{Any, TypeId};
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use snafu::IntoError;
@@ -29,95 +28,32 @@ use crate::cache::{
 };
 use crate::error::Result;
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
-use crate::series_index::artifact::{ArtifactMetadata, ArtifactObject, SamplesEntry};
 use crate::series_index::columnar as series;
 use crate::series_index::samples;
-use crate::series_index::{MetricSeriesId, SeriesIndexEntry};
-use crate::sst::file::RegionFileId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct MetadataPart {
     pub(crate) generation: FileId,
     pub(crate) part_id: u32,
-    pub(crate) size: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ManifestEntry {
-    Series(Arc<SeriesIndexEntry>),
-    Samples(Arc<SamplesEntry>),
-}
-
-// Hash the immutable generation. Equality also checks the catalog metadata so a
-// changed inventory or coverage cannot reuse a descriptor validated for another entry.
-impl Hash for ManifestEntry {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Self::Series(entry) => entry.index_uuid.hash(state),
-            Self::Samples(entry) => entry.artifact.generation.hash(state),
-        }
-    }
-}
-
-impl ManifestEntry {
-    fn retained_size(&self) -> usize {
-        let inventory = |artifact: &ArtifactMetadata| {
-            artifact.objects.capacity() * size_of::<ArtifactObject>()
-                + artifact
-                    .objects
-                    .iter()
-                    .map(|o| o.path.capacity())
-                    .sum::<usize>()
-        };
-        (match self {
-            Self::Series(entry) => {
-                size_of::<SeriesIndexEntry>()
-                    + entry.artifact.as_ref().map_or(0, inventory)
-                    + entry.source_file_ids.as_ref().map_or(0, Vec::capacity) * size_of::<FileId>()
-                    + 512
-                    + entry.window_sequences.len() * 128
-            }
-            Self::Samples(entry) => {
-                size_of::<SamplesEntry>()
-                    + inventory(&entry.artifact)
-                    + entry.source_file_ids.capacity() * size_of::<FileId>()
-                    + entry.source_windows.capacity() * (size_of::<(FileId, Vec<i64>)>() + 1)
-                    + entry
-                        .source_windows
-                        .values()
-                        .map(|v| v.capacity() * size_of::<i64>())
-                        .sum::<usize>()
-            }
-        }) + 2 * size_of::<usize>()
-    }
-}
-
+// Published generations are immutable. A sample sidecar rebuild gets a new UUID
+// even when its source SST is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum MetadataIdentity {
-    Manifest {
-        file: RegionFileId,
-        entry: ManifestEntry,
-    },
-    SeriesTrailer {
-        part: MetadataPart,
-        first: MetricSeriesId,
-        last: MetricSeriesId,
-    },
-    SamplesTrailer {
-        part: MetadataPart,
-        bounds: samples::Bounds,
-    },
+    SeriesManifest(FileId),
+    SamplesManifest(FileId),
+    SeriesTrailer(MetadataPart),
+    SamplesTrailer(MetadataPart),
     SeriesPage {
         part: MetadataPart,
         reference: series::PageReference,
         depth: u32,
-        payload_end: u64,
     },
     SamplesPage {
         part: MetadataPart,
         reference: samples::PageReference,
         depth: u32,
-        areas: samples::Areas,
     },
 }
 
@@ -126,7 +62,6 @@ pub(crate) const COLUMNAR_META: &str = "columnar_metadata";
 /// Identity of one immutable Narthex reader structure.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct DecodedKey {
-    namespace: FileId,
     identity: MetadataIdentity,
     representation: TypeId,
 }
@@ -141,37 +76,32 @@ pub(crate) struct DecodedValue {
 pub(crate) struct MetadataCache {
     memory: Option<CacheManagerRef>,
     disk: Option<WriteCacheRef>,
-    namespace: FileId,
     download_on_miss: bool,
 }
 impl CacheStrategy {
-    pub(crate) fn columnar_metadata(&self, namespace: FileId) -> Option<MetadataCache> {
+    pub(crate) fn columnar_metadata(&self) -> Option<MetadataCache> {
         match self {
             Self::EnableAll(manager) => Some(MetadataCache {
                 memory: Some(manager.clone()),
                 disk: manager.write_cache().cloned(),
-                namespace,
                 download_on_miss: true,
             }),
-            Self::Compaction(manager) => {
-                MetadataCache::maintenance(manager.write_cache(), namespace)
-            }
+            Self::Compaction(manager) => MetadataCache::maintenance(manager.write_cache()),
             Self::Disabled => None,
         }
     }
 }
 
 impl MetadataCache {
-    pub(crate) fn maintenance(disk: Option<&WriteCacheRef>, namespace: FileId) -> Option<Self> {
+    pub(crate) fn maintenance(disk: Option<&WriteCacheRef>) -> Option<Self> {
         Some(Self {
             memory: None,
             disk: Some(disk?.clone()),
-            namespace,
             download_on_miss: false,
         })
     }
 
-    pub(crate) fn preload(manager: &CacheManagerRef, namespace: FileId) -> Option<Self> {
+    pub(crate) fn preload(manager: &CacheManagerRef) -> Option<Self> {
         let cache = manager.sst_decoded_meta_cache.as_ref()?;
         if manager.columnar_load_metrics.is_none() || cache.weighted_size() >= cache.capacity() {
             return None;
@@ -179,7 +109,6 @@ impl MetadataCache {
         Some(Self {
             memory: Some(manager.clone()),
             disk: manager.write_cache().cloned(),
-            namespace,
             download_on_miss: false,
         })
     }
@@ -445,8 +374,8 @@ enum Uncached<T> {
     Error(Arc<crate::error::Error>),
 }
 
-/// Loads only validated immutable structures. Identities include the generation,
-/// object length, and the complete reference/codec context used to validate the value.
+/// Loads immutable metadata by generation and format. Page keys also include the parent
+/// reference and traversal depth used to validate the decoded page.
 /// Oversized entries bypass admission; disabled caches perform the same validation.
 pub(crate) async fn load<T, F>(
     cache: Option<&MetadataCache>,
@@ -458,7 +387,7 @@ where
     T: Send + Sync + 'static,
     F: Future<Output = Result<T>> + Send + 'static,
 {
-    let Some((context, manager)) = cache.and_then(|c| Some((c, c.memory.as_ref()?))) else {
+    let Some(manager) = cache.and_then(|c| c.memory.as_ref()) else {
         return loader().await.map(Arc::new);
     };
     let (Some(decoded), Some(metrics)) = (
@@ -468,7 +397,6 @@ where
         return loader().await.map(Arc::new);
     };
     let key = SstDecodedMetaKey::Narthex(DecodedKey {
-        namespace: context.namespace,
         identity,
         representation: TypeId::of::<T>(),
     });
@@ -477,16 +405,7 @@ where
         return Ok(hit.value.downcast::<T>().expect("type is part of the key"));
     }
     CACHE_MISS.with_label_values(&[COLUMNAR_META]).inc();
-    let overhead = size_of::<SstDecodedMetaKey>()
-        + size_of::<MetaValue>()
-        + 2 * size_of::<usize>()
-        + match &key {
-            SstDecodedMetaKey::Narthex(DecodedKey {
-                identity: MetadataIdentity::Manifest { entry, .. },
-                ..
-            }) => entry.retained_size(),
-            _ => 0,
-        };
+    let overhead = size_of::<SstDecodedMetaKey>() + size_of::<MetaValue>() + 2 * size_of::<usize>();
     let cache = decoded.clone();
     let worker_metrics = metrics.clone();
     let worker_load = loader.clone();
@@ -535,32 +454,17 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
 
-    fn trailer_key(generation: FileId) -> MetadataIdentity {
-        let id = MetricSeriesId {
-            table_id: 1,
-            tsid: 1,
-        };
-        MetadataIdentity::SeriesTrailer {
-            part: MetadataPart {
-                generation,
-                part_id: 0,
-                size: 256,
-            },
-            first: id,
-            last: id,
-        }
-    }
-
     #[tokio::test]
     async fn oversized_metadata_is_returned_without_retention() {
         let strategy = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder().sst_meta_cache_size(8192).build(),
         ));
-        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
+        let cache = strategy.columnar_metadata().unwrap();
+        let generation = FileId::random();
         for expected in [1, 2] {
             let value = load(
                 Some(&cache),
-                trailer_key(cache.namespace),
+                MetadataIdentity::SeriesManifest(generation),
                 |_| usize::MAX,
                 move || async move { Ok(expected) },
             )
@@ -575,7 +479,8 @@ mod tests {
         let strategy = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder().sst_meta_cache_size(8192).build(),
         ));
-        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
+        let cache = strategy.columnar_metadata().unwrap();
+        let generation = FileId::random();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let loader = {
             let calls = calls.clone();
@@ -588,7 +493,7 @@ mod tests {
         let read = || {
             load(
                 Some(&cache),
-                trailer_key(cache.namespace),
+                MetadataIdentity::SeriesManifest(generation),
                 |_| 1,
                 loader.clone(),
             )
@@ -603,7 +508,8 @@ mod tests {
         let strategy = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder().sst_meta_cache_size(8192).build(),
         ));
-        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
+        let cache = strategy.columnar_metadata().unwrap();
+        let generation = FileId::random();
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let loader = {
@@ -617,7 +523,7 @@ mod tests {
         };
         let mut first = Box::pin(load(
             Some(&cache),
-            trailer_key(cache.namespace),
+            MetadataIdentity::SeriesManifest(generation),
             |_| 1,
             loader,
         ));
@@ -625,7 +531,7 @@ mod tests {
         started.notified().await;
         let mut second = Box::pin(load(
             Some(&cache),
-            trailer_key(cache.namespace),
+            MetadataIdentity::SeriesManifest(generation),
             |_| 1,
             || async {
                 Err::<Vec<u8>, _>(crate::series_index::columnar::invalid(

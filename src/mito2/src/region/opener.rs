@@ -1389,8 +1389,7 @@ async fn preload_narthex_descriptor(
     local_store: Option<&object_store::ObjectStore>,
 ) -> Result<bool> {
     let id = file.file_id();
-    let Some(context) = crate::cache::columnar::MetadataCache::preload(manager, id.file_id())
-    else {
+    let Some(context) = crate::cache::columnar::MetadataCache::preload(manager) else {
         return Ok(false);
     };
     let series = file.meta_ref().series_window().is_some();

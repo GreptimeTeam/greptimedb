@@ -206,8 +206,7 @@ async fn series_keys(
         source.clone(),
         &layer.build_region_dir(source.region_id()),
     )?;
-    let context =
-        crate::cache::columnar::MetadataCache::maintenance(cache, source.file_id().file_id());
+    let context = crate::cache::columnar::MetadataCache::maintenance(cache);
     let mut reader =
         ColumnarReader::open_cached(layer.object_store().clone(), handle, context).await?;
     reader.adapt_tags(metadata)?;
@@ -278,10 +277,7 @@ pub(crate) async fn write_series(
                         source.clone(),
                         &layer.build_region_dir(source.region_id()),
                     )?;
-                    let context = crate::cache::columnar::MetadataCache::maintenance(
-                        cache,
-                        source.file_id().file_id(),
-                    );
+                    let context = crate::cache::columnar::MetadataCache::maintenance(cache);
                     SamplesReader::open_cached(layer.object_store().clone(), handle, context)
                         .await?
                         .read(Default::default())?
