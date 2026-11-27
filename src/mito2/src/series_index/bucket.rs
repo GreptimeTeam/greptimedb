@@ -48,7 +48,7 @@ impl IndexBucket {
             end: entry.bucket_end,
             index_ids: smallvec![entry.index_uuid],
             unknown_sequence_sources: if entry.min_file_sequence == 0 {
-                entry.source_file_ids.iter().copied().collect()
+                entry.source_file_ids().iter().copied().collect()
             } else {
                 HashSet::new()
             },
@@ -368,7 +368,7 @@ impl SeriesBucket {
             index_uuid: FileId::random(),
             bucket_start: self.start,
             bucket_end: self.end,
-            source_file_ids,
+            source_file_ids: Some(source_file_ids),
             min_file_sequence: if self.has_unknown_sequence {
                 0
             } else {
@@ -554,7 +554,7 @@ mod tests {
                 .map(|file| file.file_id().file_id())
                 .collect()
         );
-        assert_eq!(expected, entry.source_file_ids.iter().copied().collect());
+        assert_eq!(expected, entry.source_file_ids().iter().copied().collect());
         assert_eq!((15, 33), (entry.min_file_sequence, entry.max_file_sequence));
         assert!(plan.expired_index_ids.is_empty());
         assert_eq!(1, plan.index_buckets.len());
@@ -613,7 +613,7 @@ mod tests {
                 .map(|file| file.file_id().file_id())
                 .collect()
         );
-        assert_eq!(expected, entry.source_file_ids.iter().copied().collect());
+        assert_eq!(expected, entry.source_file_ids().iter().copied().collect());
         assert_eq!((1, 5), (entry.min_file_sequence, entry.max_file_sequence));
         assert_eq!(
             [entry.index_uuid].as_slice(),

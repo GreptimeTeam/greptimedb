@@ -107,7 +107,7 @@ impl FileRegion {
 mod tests {
     use std::assert_matches;
 
-    use common_datasource::object_store::LocalFileAccess;
+    use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
     use common_error::ext::{ErrorExt, RetryHint};
     use common_error::status_code::StatusCode;
     use store_api::region_request::PathType;
@@ -177,7 +177,11 @@ mod tests {
             .unwrap();
 
         let error = match region
-            .query(ScanRequest::default(), &LocalFileAccess::Disabled)
+            .query(
+                ScanRequest::default(),
+                &LocalFileAccess::Disabled,
+                &RemoteStorageAccess::unrestricted(),
+            )
             .await
         {
             Ok(_) => panic!("local file query must be rejected"),

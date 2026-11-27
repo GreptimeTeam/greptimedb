@@ -453,8 +453,7 @@ async fn wait_for_append_count_regions(instance: &Arc<Instance>, table: &str, ex
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let plan =
-                append_count_query(instance, &format!("EXPLAIN ANALYZE SELECT * FROM {table}"))
-                    .await;
+                query_output(instance, &format!("EXPLAIN ANALYZE SELECT * FROM {table}")).await;
             if plan.matches("UnorderedScan: region=").count() == expected {
                 return;
             }
@@ -465,7 +464,7 @@ async fn wait_for_append_count_regions(instance: &Arc<Instance>, table: &str, ex
     .expect("new partition routes must become visible");
 }
 
-async fn append_count_query(instance: &Arc<Instance>, sql: &str) -> String {
+async fn query_output(instance: &Arc<Instance>, sql: &str) -> String {
     let output = run_sql(instance, sql, QueryContext::arc()).await.unwrap();
     let batches = match output.data {
         common_query::OutputData::Stream(stream) => {
@@ -486,16 +485,16 @@ async fn assert_append_count(
     statistics_regions: usize,
 ) {
     let expected = format!("+-----+\n| n   |\n+-----+\n| {rows:<3} |\n+-----+");
-    let count = append_count_query(instance, &format!("SELECT count(*) AS n FROM {table}")).await;
+    let count = query_output(instance, &format!("SELECT count(*) AS n FROM {table}")).await;
     assert_eq!(count, expected, "unbounded COUNT for {table}");
-    let scanned_count = append_count_query(
+    let scanned_count = query_output(
         instance,
         &format!("SELECT count(*) AS n FROM (SELECT * FROM {table} LIMIT 1000)"),
     )
     .await;
     assert_eq!(scanned_count, expected, "scanned COUNT for {table}");
     // Only regions whose source row counts are exact may use statistics.
-    let plan = append_count_query(
+    let plan = query_output(
         instance,
         &format!("EXPLAIN ANALYZE SELECT count(*) FROM {table}"),
     )
@@ -737,6 +736,17 @@ async fn test_repartition_multi_hop_fulltext_index_gc() {
             .any(|(_, origin_region_id, region_id)| origin_region_id != region_id),
         "expected at least one cross-origin indexed SST before GC, got {manifest_entries:?}"
     );
+
+    // Both grandchildren inherit the ancestor SST, which carries the expression of the region
+    // that wrote it, not theirs; a merge requires every participant to hold only files it wrote,
+    // so materialise each region first. Strict-window compaction rewrites even a lone file.
+    run_sql(
+        instance,
+        "ADMIN COMPACT_TABLE('repartition_multi_hop_index_table', 'strict_window', 'window=3600')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
 
     run_sql(
         instance,
@@ -1831,6 +1841,34 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
         )
         .await
         .unwrap();
+        let latest = "SELECT * FROM partition_table_id_metric_high ORDER BY ts DESC LIMIT 100";
+        let plan = query_output(instance, &format!("EXPLAIN ANALYZE {latest}")).await;
+        assert_eq!(
+            plan.matches("Scan: region=").count(),
+            expected_regions.len(),
+            "{plan}"
+        );
+
+        let filtered_latest = "SELECT val FROM partition_table_id_metric_high WHERE host = 'z_host' ORDER BY ts DESC LIMIT 100";
+        let plan = query_output(instance, &format!("EXPLAIN ANALYZE {filtered_latest}")).await;
+        assert_eq!(plan.matches("Scan: region=").count(), 1, "{plan}");
+        assert_eq!(
+            query_output(instance, filtered_latest).await,
+            "+------+\n| val  |\n+------+\n| 40.0 |\n+------+"
+        );
+
+        // Project the values from the latest-row query to keep the assertion
+        // independent of physical columns and timestamp rendering.
+        let values = query_output(
+            instance,
+            "SELECT val FROM partition_table_id_metric_high ORDER BY ts DESC, host LIMIT 100",
+        )
+        .await;
+        assert_eq!(
+            values,
+            "+------+\n| val  |\n+------+\n| 30.0 |\n| 40.0 |\n| 10.0 |\n+------+"
+        );
+
         let result = run_sql(
             instance,
             "SELECT host, val FROM partition_table_id_metric_high WHERE host IN ('c_host', 'z_host') ORDER BY host",

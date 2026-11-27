@@ -58,7 +58,7 @@ fn entry() -> SeriesIndexEntry {
         index_uuid: FileId::random(),
         bucket_start: common_time::Timestamp::new_second(0),
         bucket_end: common_time::Timestamp::new_second(100),
-        source_file_ids: Vec::new(),
+        source_file_ids: Some(Vec::new()),
         min_file_sequence: 1,
         max_file_sequence: 2,
         compaction_window_secs: 100,
@@ -195,6 +195,48 @@ fn references_beyond_four_gib_and_bounded_decode() {
     }
     let bomb = codec::compress(&vec![0; 1024 * 1024], Compression::Zstd, 3).unwrap();
     assert!(codec::decompress(&bomb, 1, 16).is_err());
+}
+
+#[tokio::test]
+async fn full_key_reader_reconstructs_sparse_keys_and_counts() {
+    let store = store();
+    let mut meta = metadata();
+    // Physical tag chunks are in primary-key order; exact keys are in label-name order.
+    Arc::make_mut(&mut meta).primary_key.swap(2, 3);
+    let format = ColumnarSeriesFormat {
+        block_rows: 3,
+        ..Default::default()
+    };
+    let entry = entry();
+    let mut writer = format
+        .writer(meta.clone(), store.clone(), &entry)
+        .await
+        .unwrap();
+    let keys = [
+        new_sparse_primary_key(&[], &meta, 1, 7),
+        new_sparse_primary_key(&[""], &meta, 1, 7),
+        new_sparse_primary_key(&["", "west"], &meta, 1, 7),
+        // The next table has a whole block without a tag_1 chunk.
+        new_sparse_primary_key(&["api"], &meta, 2, 7),
+    ];
+    for (i, key) in keys.iter().enumerate() {
+        writer
+            .write(&batch(&vec![key.clone(); i + 1], false, 0))
+            .await
+            .unwrap();
+    }
+    let handle = handle_of(&store, entry, writer).await;
+    let reader = super::reader::ColumnarReader::open(store, handle)
+        .await
+        .unwrap();
+    let mut stream = reader.read_full_keys();
+    drop(reader);
+    for (i, key) in keys.iter().enumerate() {
+        let (actual, count) = stream.try_next().await.unwrap().unwrap();
+        assert_eq!(actual.bytes(), key);
+        assert_eq!(count, (i + 1) as u64);
+    }
+    assert!(stream.try_next().await.unwrap().is_none());
 }
 
 #[tokio::test]

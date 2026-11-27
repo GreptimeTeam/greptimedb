@@ -4945,6 +4945,7 @@ experimental_series_index_max_size = "5GiB"
 experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
+experimental_series_index_min_files = 4
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
 experimental_compaction_output_parallelism = 1
@@ -5024,6 +5025,8 @@ experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"
 experimental_memory_pool_policy = "greedy"
 experimental_native_promql = false
+remote_allowed_hosts = []
+allow_server_credentials = true
 
 [memory]
 enable_heap_profiling = true

@@ -585,6 +585,7 @@ impl MetaStateHandler {
 }
 
 pub struct Metasrv {
+    node_expiry_listener: Arc<NodeExpiryListener>,
     state: StateRef,
     started: Arc<AtomicBool>,
     start_time_ms: u64,
@@ -684,10 +685,7 @@ impl Metasrv {
             leadership_change_notifier.add_listener(self.wal_provider.clone());
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
-            leadership_change_notifier.add_listener(Arc::new(NodeExpiryListener::new(
-                self.options.node_max_idle_time,
-                self.in_memory.clone(),
-            )));
+            leadership_change_notifier.add_listener(self.node_expiry_listener.clone());
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
             }
@@ -790,6 +788,7 @@ impl Metasrv {
                 .start()
                 .await
                 .context(StartProcedureManagerSnafu)?;
+            self.node_expiry_listener.start();
         }
 
         info!("Metasrv started");
@@ -807,6 +806,7 @@ impl Metasrv {
             return Ok(());
         }
 
+        self.node_expiry_listener.stop();
         self.procedure_manager
             .stop()
             .await

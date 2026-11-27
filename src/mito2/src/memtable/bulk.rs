@@ -35,6 +35,7 @@ fn env_usize(name: &str, default: usize) -> usize {
 
 use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -59,8 +60,8 @@ use crate::memtable::bulk::part_reader::BulkPartBatchIter;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
-    IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
+    IterBuilder, KeyValues, MemScanMetrics, MemoryCharge, Memtable, MemtableBuilder, MemtableId,
+    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
     group_by_sequence,
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
@@ -188,6 +189,8 @@ struct CollectedParts {
 struct BulkParts {
     /// Unordered small parts.
     unordered_part: UnorderedPart,
+    /// Write buffer charges of the parts in `unordered_part`.
+    unordered_charges: Vec<Arc<MemoryCharge>>,
     /// All parts (raw and encoded).
     parts: Vec<BulkPartWrapper>,
 }
@@ -197,6 +200,13 @@ impl BulkParts {
     fn num_parts(&self) -> usize {
         let unordered_count = if self.unordered_part.is_empty() { 0 } else { 1 };
         self.parts.len() + unordered_count
+    }
+
+    /// Returns the charged bytes of the parts this memtable holds.
+    fn held_bytes(&self) -> usize {
+        let unordered: usize = self.unordered_charges.iter().map(|c| c.bytes()).sum();
+        let parts: usize = self.parts.iter().map(|w| w.charge.bytes()).sum();
+        unordered + parts
     }
 
     /// Returns true if there is no part.
@@ -233,16 +243,23 @@ impl BulkParts {
     }
 
     /// Converts buffered small writes into a sorted part once a threshold is reached.
-    fn seal_unordered(&mut self, metadata: &RegionMetadataRef) -> Result<()> {
+    fn seal_unordered(
+        &mut self,
+        metadata: &RegionMetadataRef,
+        alloc_tracker: &Arc<AllocTracker>,
+    ) -> Result<()> {
         if let Some(part) = self.unordered_part.to_bulk_part(metadata)? {
+            let charge = Arc::new(alloc_tracker.charge(part.estimated_size()));
             self.parts.push(BulkPartWrapper {
                 part: PartToMerge::Bulk {
                     part,
                     file_id: FileId::random(),
                 },
                 merging: false,
+                charge,
             });
             self.unordered_part.clear();
+            self.unordered_charges.clear();
         }
         Ok(())
     }
@@ -333,12 +350,13 @@ impl BulkParts {
         CollectedParts { groups }
     }
 
-    /// Installs merged parts and removes the original parts by file ids.
+    /// Replaces the parts in `merged_file_ids` with `merged_parts`, charging the merged parts.
     /// Returns the total number of rows in the merged parts.
     fn install_merged_parts<I>(
         &mut self,
         merged_parts: I,
         merged_file_ids: &HashSet<FileId>,
+        alloc_tracker: &Arc<AllocTracker>,
     ) -> usize
     where
         I: IntoIterator<Item = MergedPart>,
@@ -346,30 +364,32 @@ impl BulkParts {
         let mut total_output_rows = 0;
 
         for merged_part in merged_parts {
-            match merged_part {
+            let part = match merged_part {
                 MergedPart::Encoded(encoded_part) => {
                     total_output_rows += encoded_part.metadata().num_rows;
-                    self.parts.push(BulkPartWrapper {
-                        part: PartToMerge::Encoded {
-                            part: encoded_part,
-                            file_id: FileId::random(),
-                        },
-                        merging: false,
-                    });
+                    PartToMerge::Encoded {
+                        part: encoded_part,
+                        file_id: FileId::random(),
+                    }
                 }
                 MergedPart::Multi(multi_part) => {
                     total_output_rows += multi_part.num_rows();
-                    self.parts.push(BulkPartWrapper {
-                        part: PartToMerge::Multi {
-                            part: multi_part,
-                            file_id: FileId::random(),
-                        },
-                        merging: false,
-                    });
+                    PartToMerge::Multi {
+                        part: multi_part,
+                        file_id: FileId::random(),
+                    }
                 }
-            }
+            };
+            let charge = Arc::new(alloc_tracker.charge(part.held_bytes()));
+            self.parts.push(BulkPartWrapper {
+                part,
+                merging: false,
+                charge,
+            });
         }
 
+        // Readers may still hold the removed parts; their charges release when the last
+        // holder drops them.
         self.parts
             .retain(|wrapper| !merged_file_ids.contains(&wrapper.file_id()));
 
@@ -429,12 +449,15 @@ pub struct BulkMemtable {
     config: BulkMemtableConfig,
     parts: Arc<RwLock<BulkParts>>,
     metadata: RegionMetadataRef,
-    alloc_tracker: AllocTracker,
+    alloc_tracker: Arc<AllocTracker>,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
     min_sequence: AtomicU64,
     num_rows: AtomicUsize,
+    /// Bytes written into this memtable before encoding. Unlike the write buffer charges, it
+    /// does not shrink when parts are encoded, so it sizes flush reads and counts written data.
+    written_bytes: AtomicUsize,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
     /// Dispatcher for scheduling compaction tasks
@@ -496,15 +519,17 @@ impl Memtable for BulkMemtable {
             let mut bulk_parts = self.parts.write().unwrap();
 
             let fragment_size = fragment.estimated_size();
+            let charge = Arc::new(self.alloc_tracker.charge(fragment_size));
             // Routes small parts to unordered_part based on row and byte thresholds.
             if bulk_parts.unordered_part.should_accept(fragment.num_rows())
                 && fragment_size <= self.config.encode_bytes_threshold
             {
                 bulk_parts.unordered_part.push(fragment);
+                bulk_parts.unordered_charges.push(charge);
 
                 // Compacts unordered_part if the row or byte threshold is exceeded.
                 if bulk_parts.should_compact_unordered_part(self.config.encode_bytes_threshold) {
-                    bulk_parts.seal_unordered(&self.metadata)?;
+                    bulk_parts.seal_unordered(&self.metadata, &self.alloc_tracker)?;
                 }
             } else {
                 bulk_parts.parts.push(BulkPartWrapper {
@@ -513,6 +538,7 @@ impl Memtable for BulkMemtable {
                         file_id: FileId::random(),
                     },
                     merging: false,
+                    charge,
                 });
             }
 
@@ -565,6 +591,8 @@ impl Memtable for BulkMemtable {
                             part: unordered_bulk_part,
                             context: context.clone(),
                             sequence,
+                            // The sorted part may share buffers with the buffered writes.
+                            charges: bulk_parts.unordered_charges.clone(),
                         }),
                         predicate.clone(),
                     )),
@@ -582,16 +610,19 @@ impl Memtable for BulkMemtable {
                 }
 
                 let part_stats = part_wrapper.part.to_memtable_stats(&self.metadata);
+                let charges = vec![part_wrapper.charge.clone()];
                 let iter_builder: Box<dyn IterBuilder> = match &part_wrapper.part {
                     PartToMerge::Bulk { part, .. } => Box::new(BulkRangeIterBuilder {
                         part: part.clone(),
                         context: context.clone(),
                         sequence,
+                        charges,
                     }),
                     PartToMerge::Multi { part, .. } => Box::new(MultiBulkRangeIterBuilder {
                         part: part.clone(),
                         context: context.clone(),
                         sequence,
+                        charges,
                     }),
                     PartToMerge::Encoded { part, file_id } => {
                         Box::new(EncodedBulkRangeIterBuilder {
@@ -599,6 +630,7 @@ impl Memtable for BulkMemtable {
                             part: part.clone(),
                             context: context.clone(),
                             sequence,
+                            charges,
                         })
                     }
                 };
@@ -630,11 +662,17 @@ impl Memtable for BulkMemtable {
     }
 
     fn stats(&self) -> MemtableStats {
-        let estimated_bytes = self.alloc_tracker.bytes_allocated();
+        // Only the parts this memtable holds: flushing it cannot free the parts readers hold.
+        let (estimated_bytes, num_ranges) = {
+            let bulk_parts = self.parts.read().unwrap();
+            (bulk_parts.held_bytes(), bulk_parts.num_parts())
+        };
 
+        let decoded_bytes = Some(self.written_bytes.load(Ordering::Relaxed));
         if estimated_bytes == 0 || self.num_rows.load(Ordering::Relaxed) == 0 {
             return MemtableStats {
                 estimated_bytes,
+                decoded_bytes,
                 time_range: None,
                 num_rows: 0,
                 num_ranges: 0,
@@ -655,10 +693,9 @@ impl Memtable for BulkMemtable {
         let max_timestamp = ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
 
-        let num_ranges = self.parts.read().unwrap().num_parts();
-
         MemtableStats {
             estimated_bytes,
+            decoded_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges,
@@ -669,7 +706,7 @@ impl Memtable for BulkMemtable {
     }
 
     fn min_sequence(&self) -> SequenceNumber {
-        if self.alloc_tracker.bytes_allocated() == 0 || self.num_rows.load(Ordering::Relaxed) == 0 {
+        if self.num_rows.load(Ordering::Relaxed) == 0 {
             return 0;
         }
         self.min_sequence.load(Ordering::Relaxed)
@@ -691,6 +728,7 @@ impl Memtable for BulkMemtable {
             &self.metadata,
             !self.append_mode,
             self.merge_mode,
+            &self.alloc_tracker,
         )
     }
 }
@@ -702,12 +740,13 @@ impl BulkMemtable {
             config: self.config.clone(),
             parts: Arc::new(RwLock::new(BulkParts::default())),
             metadata: metadata.clone(),
-            alloc_tracker: AllocTracker::new(self.alloc_tracker.write_buffer_manager()),
+            alloc_tracker: Arc::new(AllocTracker::new(self.alloc_tracker.write_buffer_manager())),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
             min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
+            written_bytes: AtomicUsize::new(0),
             compactor: Arc::new(Mutex::new(
                 MemtableCompactor::new(
                     metadata.region_id,
@@ -794,12 +833,13 @@ impl BulkMemtable {
             config: config.clone(),
             parts: Arc::new(RwLock::new(BulkParts::default())),
             metadata,
-            alloc_tracker: AllocTracker::new(write_buffer_manager),
+            alloc_tracker: Arc::new(AllocTracker::new(write_buffer_manager)),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
             min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
+            written_bytes: AtomicUsize::new(0),
             compactor: Arc::new(Mutex::new(MemtableCompactor::new(
                 region_id,
                 id,
@@ -840,9 +880,6 @@ impl BulkMemtable {
     ///
     /// Please update this inside the write lock scope.
     fn update_stats(&self, stats: WriteMetrics) {
-        self.alloc_tracker
-            .on_allocation(stats.key_bytes + stats.value_bytes);
-
         self.max_timestamp
             .fetch_max(stats.max_ts, Ordering::Relaxed);
         self.min_timestamp
@@ -852,6 +889,8 @@ impl BulkMemtable {
         self.min_sequence
             .fetch_min(stats.min_sequence, Ordering::Relaxed);
         self.num_rows.fetch_add(stats.num_rows, Ordering::Relaxed);
+        self.written_bytes
+            .fetch_add(stats.key_bytes + stats.value_bytes, Ordering::Relaxed);
     }
 
     /// Returns the estimated time series count.
@@ -886,6 +925,7 @@ impl BulkMemtable {
                 parts: self.parts.clone(),
                 _guard: guard,
                 compactor: self.compactor.clone(),
+                alloc_tracker: self.alloc_tracker.clone(),
                 append_mode: self.append_mode,
                 merge_mode: self.merge_mode,
             };
@@ -905,6 +945,8 @@ pub struct BulkRangeIterBuilder {
     pub part: BulkPart,
     pub context: Arc<BulkIterContext>,
     pub sequence: Option<SequenceRange>,
+    /// Keeps the write buffer charged for the part while the range or its iterators are alive.
+    charges: Vec<Arc<MemoryCharge>>,
 }
 
 /// Iterator builder for multi bulk range
@@ -912,6 +954,8 @@ struct MultiBulkRangeIterBuilder {
     part: MultiBulkPart,
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
+    /// Keeps the write buffer charged for the part while the range or its iterators are alive.
+    charges: Vec<Arc<MemoryCharge>>,
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
@@ -949,7 +993,7 @@ impl IterBuilder for BulkRangeIterBuilder {
             metrics,
         );
 
-        Ok(Box::new(iter))
+        Ok(charged(Box::new(iter), &self.charges))
     }
 
     fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
@@ -986,7 +1030,7 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
             .part
             .read(self.context.clone(), self.sequence, metrics)?
         {
-            Some(iter) => Ok(iter),
+            Some(iter) => Ok(charged(iter, &self.charges)),
             // All batches were pruned by the predicate. Return an empty iterator.
             None => Ok(Box::new(std::iter::empty())),
         }
@@ -1007,6 +1051,8 @@ struct EncodedBulkRangeIterBuilder {
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
+    /// Keeps the write buffer charged for the part while the range or its iterators are alive.
+    charges: Vec<Arc<MemoryCharge>>,
 }
 
 impl IterBuilder for EncodedBulkRangeIterBuilder {
@@ -1034,7 +1080,7 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
             .part
             .read(self.context.clone(), self.sequence, metrics)?
         {
-            Ok(iter)
+            Ok(charged(iter, &self.charges))
         } else {
             // Return an empty iterator if no data to read
             Ok(Box::new(std::iter::empty()))
@@ -1049,8 +1095,33 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
         Some(EncodedRange {
             data: self.part.data()?.clone(),
             sst_info: self.part.to_sst_info(self.file_id)?,
+            _charges: self.charges.clone(),
         })
     }
+}
+
+/// Iterator that keeps the write buffer charges of the parts it reads.
+struct ChargedIter {
+    iter: BoxedRecordBatchIterator,
+    _charges: Vec<Arc<MemoryCharge>>,
+}
+
+impl Iterator for ChargedIter {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+fn charged(
+    iter: BoxedRecordBatchIterator,
+    charges: &[Arc<MemoryCharge>],
+) -> BoxedRecordBatchIterator {
+    Box::new(ChargedIter {
+        iter,
+        _charges: charges.to_vec(),
+    })
 }
 
 struct BulkPartWrapper {
@@ -1058,6 +1129,8 @@ struct BulkPartWrapper {
     part: PartToMerge,
     /// Whether this part is currently being merged.
     merging: bool,
+    /// Write buffer charge of the part, shared with the ranges that read it.
+    charge: Arc<MemoryCharge>,
 }
 
 impl BulkPartWrapper {
@@ -1162,25 +1235,24 @@ impl PartToMerge {
         }
     }
 
+    /// Returns the bytes this part holds in memory, charged to the write buffer. An encoded
+    /// Parquet part also keeps its parsed metadata, which grows with the schema and row groups.
+    fn held_bytes(&self) -> usize {
+        match self {
+            PartToMerge::Encoded { part, .. } => part.size_bytes().saturating_add(
+                part.parquet_metadata()
+                    .map_or(0, |metadata| metadata.memory_size()),
+            ),
+            _ => self.estimated_size(),
+        }
+    }
+
     /// Returns the estimated decoded size of all rows.
     fn uncompressed_size(&self) -> u64 {
         match self {
             PartToMerge::Bulk { part, .. } => part.estimated_size() as u64,
             PartToMerge::Multi { part, .. } => part.estimated_size() as u64,
-            PartToMerge::Encoded { part, .. } => {
-                let metadata = part.metadata();
-                let encoded: u64 =
-                    part.parquet_metadata()
-                        .map_or(part.size_bytes() as u64, |metadata| {
-                            metadata
-                                .row_groups()
-                                .iter()
-                                .flat_map(|row_group| row_group.columns())
-                                .map(|column| column.uncompressed_size() as u64)
-                                .sum()
-                        });
-                encoded.max(metadata.var_len_bytes)
-            }
+            PartToMerge::Encoded { part, .. } => part.decoded_size(),
         }
     }
 
@@ -1296,6 +1368,7 @@ impl MemtableCompactor {
         metadata: &RegionMetadataRef,
         dedup: bool,
         merge_mode: MergeMode,
+        alloc_tracker: &Arc<AllocTracker>,
     ) -> Result<()> {
         let start = Instant::now();
 
@@ -1351,7 +1424,11 @@ impl MemtableCompactor {
         // Install all merged parts
         let total_output_rows = {
             let mut parts = bulk_parts.write().unwrap();
-            parts.install_merged_parts(merged_parts.into_iter().flatten(), &merged_file_ids)
+            parts.install_merged_parts(
+                merged_parts.into_iter().flatten(),
+                &merged_file_ids,
+                alloc_tracker,
+            )
         };
 
         guard.mark_success();
@@ -1577,6 +1654,8 @@ struct MemCompactTask {
     _guard: CompactTaskGuard,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
+    /// Memory accounting of the memtable, which charges the merged parts.
+    alloc_tracker: Arc<AllocTracker>,
     /// Whether the append mode is enabled
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
@@ -1590,6 +1669,7 @@ impl MemCompactTask {
             &self.metadata,
             !self.append_mode,
             self.merge_mode,
+            &self.alloc_tracker,
         )
     }
 }
@@ -2508,6 +2588,163 @@ mod tests {
     }
 
     #[test]
+    fn test_encoding_parts_releases_their_written_bytes() {
+        let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 2,
+            encode_row_threshold: 1,
+            ..Default::default()
+        };
+        let memtable =
+            BulkMemtable::new(999, config, metadata, None, None, false, MergeMode::LastRow);
+        let mut written = 0;
+        for i in 0..32u32 {
+            let ts: Vec<i64> = (0..4096).map(|t| i as i64 * 10_000 + t).collect();
+            let values: Vec<Option<f64>> = (0..4096).map(|v| Some((v % 7) as f64)).collect();
+            let part =
+                create_bulk_part_with_converter("host", i, ts, values, 100 + i as u64).unwrap();
+            written += part.estimated_size();
+            memtable.write_bulk(part).unwrap();
+        }
+        for _ in 0..8 {
+            memtable.compact(false).unwrap();
+        }
+        let held: usize = memtable
+            .parts
+            .read()
+            .unwrap()
+            .parts
+            .iter()
+            .map(|wrapper| expected_held_bytes(&wrapper.part))
+            .sum();
+        // Encoded parts hold far fewer bytes than the batches written into them, including their
+        // parsed metadata.
+        assert!(held * 4 < written, "held {held}, written {written}");
+        let stats = memtable.stats();
+        assert_eq!(held, stats.estimated_bytes);
+        // Flush sizes reads and region statistics count written data by the decoded size.
+        assert_eq!(written, stats.decoded_bytes());
+        let ranges = memtable
+            .ranges(None, RangesOptions::for_flush())
+            .unwrap()
+            .ranges;
+        assert!(ranges.values().all(|range| range.encoded().is_some()));
+        for range in ranges.values() {
+            let stats = range.stats();
+            assert!(stats.decoded_bytes() > stats.estimated_bytes, "{stats:?}");
+        }
+    }
+
+    #[test]
+    fn test_small_writes_track_sealed_and_encoded_parts() {
+        let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 2,
+            encode_row_threshold: 1,
+            ..Default::default()
+        };
+        let memtable =
+            BulkMemtable::new(999, config, metadata, None, None, false, MergeMode::LastRow);
+        let held_bytes = |memtable: &BulkMemtable| {
+            let parts = memtable.parts.read().unwrap();
+            parts.unordered_part.estimated_bytes()
+                + parts
+                    .parts
+                    .iter()
+                    .map(|wrapper| expected_held_bytes(&wrapper.part))
+                    .sum::<usize>()
+        };
+        // Fragments below the unordered threshold are buffered and sealed into sorted parts.
+        for i in 0..200u32 {
+            let ts: Vec<i64> = (0..100).map(|t| i as i64 * 1_000 + t).collect();
+            let values: Vec<Option<f64>> = (0..100).map(|v| Some(v as f64)).collect();
+            let part = create_bulk_part_with_converter(
+                &format!("host{}", i % 13),
+                i,
+                ts,
+                values,
+                100 + i as u64,
+            )
+            .unwrap();
+            memtable.write_bulk(part).unwrap();
+        }
+        assert!(!memtable.parts.read().unwrap().parts.is_empty());
+        assert_eq!(held_bytes(&memtable), memtable.stats().estimated_bytes);
+
+        for _ in 0..4 {
+            memtable.compact(false).unwrap();
+        }
+        assert_eq!(held_bytes(&memtable), memtable.stats().estimated_bytes);
+    }
+
+    #[test]
+    fn test_ranges_keep_replaced_parts_charged() {
+        use crate::flush::{WriteBufferManager, WriteBufferManagerImpl, WriteBufferManagerRef};
+
+        let manager = Arc::new(WriteBufferManagerImpl::new(1 << 30));
+        let config = BulkMemtableConfig {
+            merge_threshold: 2,
+            encode_row_threshold: 1,
+            ..Default::default()
+        };
+        let memtable = BulkMemtable::new(
+            999,
+            config,
+            metadata_for_test(),
+            Some(manager.clone() as WriteBufferManagerRef),
+            None,
+            false,
+            MergeMode::LastRow,
+        );
+        let part = |i: u32| {
+            let ts: Vec<i64> = (0..4096).map(|t| i as i64 * 10_000 + t).collect();
+            let values: Vec<Option<f64>> = (0..4096).map(|v| Some((v % 7) as f64)).collect();
+            create_bulk_part_with_converter("host", i, ts, values, 100 + i as u64).unwrap()
+        };
+        let first = part(0);
+        let first_bytes = first.estimated_size();
+        memtable.write_bulk(first).unwrap();
+        // A scan opened before the parts are merged keeps reading the first part.
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        // The second part reaches the merge threshold and both are encoded into a smaller part.
+        let second = part(1);
+        let written = first_bytes + second.estimated_size();
+        memtable.write_bulk(second).unwrap();
+        let held = memtable.stats().estimated_bytes;
+        assert_eq!(1, memtable.parts.read().unwrap().parts.len());
+        assert!(held * 2 < written, "held {held}, written {written}");
+        assert_eq!(first_bytes + held, manager.memory_usage());
+        drop(ranges);
+        assert_eq!(held, manager.memory_usage());
+        assert_eq!(held, manager.mutable_usage());
+
+        // Iterators and encoded data built from a range keep the charge after the range drops,
+        // as flush does with its sources.
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        let range = ranges.ranges.values().next().unwrap();
+        let encoded = range.encoded().unwrap();
+        let iter = range.build_record_batch_iter(None, None).unwrap();
+        drop(ranges);
+        memtable.write_bulk(part(2)).unwrap();
+        let merged = memtable.stats().estimated_bytes;
+        assert_eq!(held + merged, manager.memory_usage());
+        drop(encoded);
+        assert_eq!(held + merged, manager.memory_usage());
+        assert!(iter.count() > 0);
+        assert_eq!(merged, manager.memory_usage());
+        let held = merged;
+
+        // A scan also keeps the parts of a flushed memtable charged after the memtable drops.
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        memtable.freeze().unwrap();
+        drop(memtable);
+        assert_eq!(held, manager.memory_usage());
+        assert_eq!(0, manager.mutable_usage());
+        drop(ranges);
+        assert_eq!(0, manager.memory_usage());
+    }
+
+    #[test]
     fn test_bulk_memtable_fork() {
         let metadata = metadata_for_test();
         let original_memtable = BulkMemtable::new_with_row_group_size_and_encoding(
@@ -3009,7 +3246,22 @@ mod tests {
                 file_id: FileId::random(),
             },
             merging: false,
+            charge: untracked_charge(),
         }
+    }
+
+    /// Bytes a part keeps in memory: an encoded Parquet part holds its data and parsed metadata.
+    fn expected_held_bytes(part: &PartToMerge) -> usize {
+        match part {
+            PartToMerge::Encoded { part, .. } => {
+                part.data().unwrap().len() + part.parquet_metadata().unwrap().memory_size()
+            }
+            part => part.estimated_size(),
+        }
+    }
+
+    fn untracked_charge() -> Arc<MemoryCharge> {
+        Arc::new(Arc::new(AllocTracker::new(None)).charge(0))
     }
 
     #[test]
@@ -3175,6 +3427,7 @@ mod tests {
                         file_id: FileId::random(),
                     },
                     merging: false,
+                    charge: untracked_charge(),
                 },
                 create_bulk_part_wrapper(make_part(60, 60)),
                 BulkPartWrapper {
@@ -3183,6 +3436,7 @@ mod tests {
                         file_id: FileId::random(),
                     },
                     merging: false,
+                    charge: untracked_charge(),
                 },
             ],
             ..Default::default()
