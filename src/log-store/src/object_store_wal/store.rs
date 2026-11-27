@@ -199,6 +199,21 @@ pub struct WalHole {
     pub max_entry_id: EntryId,
 }
 
+/// The regions that hold unreleased entries in a store, listed together with
+/// a bound, see [`ObjectStoreLogStore::unreleased_regions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreleasedRegions {
+    /// Regions with an entry above their obsolete watermark in an indexed
+    /// object.
+    pub region_ids: Vec<RegionId>,
+    /// The largest entry id indexed when the regions were listed, or zero
+    /// without one. Every entry of a listed region at or below it is durable.
+    /// Every entry not yet indexed at the listing, and every entry appended
+    /// later, is above it, so a release through it keeps them, and their
+    /// region is listed again once they are indexed.
+    pub entry_id_bound: EntryId,
+}
+
 type TerminalError = Arc<Mutex<Option<Arc<Error>>>>;
 
 /// The delete attempts in flight, one per object.
@@ -583,6 +598,28 @@ impl ObjectStoreLogStore {
             .unwrap_or_default())
     }
 
+    /// Lists the regions that hold unreleased entries in this store, from the
+    /// in-memory catalog without I/O. The listing includes open regions, so
+    /// the caller releases only the regions that no longer need their
+    /// entries, through [`UnreleasedRegions::entry_id_bound`] with
+    /// [`release_entries`](LogStore::release_entries). A release takes effect
+    /// in memory once admitted and survives a restart once the object carrying
+    /// its record is durable on the recovered chain. A region whose entries are
+    /// obsolete only in memory, see [`obsolete`](LogStore::obsolete), is listed
+    /// again by a store opened later.
+    pub fn unreleased_regions(&self) -> UnreleasedRegions {
+        let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+        UnreleasedRegions {
+            region_ids: catalog.live_regions(),
+            entry_id_bound: catalog.max_entry_id(),
+        }
+    }
+
+    /// Returns the provider that selects `region_id` in this store.
+    pub fn provider(&self, region_id: RegionId) -> Provider {
+        Provider::object_store_provider(region_id, self.prefix.clone())
+    }
+
     /// Returns the region of `provider`, which must select this store's prefix.
     fn region_of(&self, provider: &Provider) -> Result<RegionId> {
         let provider =
@@ -936,10 +973,7 @@ impl LogStore for ObjectStoreLogStore {
                 actual: options.prefix.clone(),
             }
         );
-        Ok(Provider::object_store_provider(
-            options.region_id,
-            self.prefix.clone(),
-        ))
+        Ok(self.provider(options.region_id))
     }
 
     fn flush_candidates(&self) -> Vec<RegionId> {
@@ -1123,7 +1157,7 @@ impl LogStore for ObjectStoreLogStore {
             .collect::<BTreeSet<_>>();
         Ok(regions
             .into_iter()
-            .map(|region_id| Provider::object_store_provider(region_id, self.prefix.clone()))
+            .map(|region_id| self.provider(region_id))
             .collect())
     }
 
@@ -10217,6 +10251,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_unreleased_regions_stay_listed_until_released_through_bound() {
+        let _serialized = SERIALIZED.lock().await;
+        for config in [manual(), enqueued(manual())] {
+            let object_store = memory_store();
+            let store = open(object_store.clone(), &config).await;
+            assert_eq!(
+                UnreleasedRegions {
+                    region_ids: Vec::new(),
+                    entry_id_bound: 0,
+                },
+                store.unreleased_regions()
+            );
+            let (one, two) = (region(1), region(2));
+            let first = spawn_append_batch(
+                &store,
+                vec![
+                    entry(&store, one, "a"),
+                    entry(&store, two, "b"),
+                    entry(&store, two, "b2"),
+                ],
+            );
+            store.wait_for_admitted_appends(1).await.unwrap();
+            store.seal_open_batch().await.unwrap();
+            first.await.unwrap().unwrap();
+            // Region one appends again; its entry stays in the open batch.
+            let later = spawn_append_batch(&store, vec![entry(&store, one, "c")]);
+            store.wait_for_admitted_appends(2).await.unwrap();
+
+            let listed = store.unreleased_regions();
+            assert_eq!(
+                HashSet::from([one, two]),
+                listed.region_ids.iter().copied().collect::<HashSet<_>>()
+            );
+            // In the `enqueued` mode a release through a bound that includes the
+            // open batch is clamped instead of refused, so the bound is asserted
+            // exactly.
+            assert_eq!(id(1, 2), listed.entry_id_bound);
+            // The bound is above the largest entry of region one.
+            for region_id in listed.region_ids {
+                store
+                    .release_entries(&store.provider(region_id), region_id, listed.entry_id_bound)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                UnreleasedRegions {
+                    region_ids: Vec::new(),
+                    entry_id_bound: id(1, 2),
+                },
+                store.unreleased_regions()
+            );
+
+            store.seal_open_batch().await.unwrap();
+            later.await.unwrap().unwrap();
+            let listed = store.unreleased_regions();
+            assert_eq!(vec![one], listed.region_ids);
+            assert_eq!(id(2, 1), listed.entry_id_bound);
+            assert_eq!(
+                expected_entries(one, &[(id(2, 1), "c")]),
+                read_entries(&store, one, 0).await
+            );
+            // A region hidden only by an obsolete mark is listed again after a reopen.
+            store.obsolete(&provider(one), one, id(2, 1)).await.unwrap();
+            assert!(store.unreleased_regions().region_ids.is_empty());
+            store.stop().await.unwrap();
+            let reopened = open(object_store, &config).await;
+            assert_eq!(vec![one], reopened.unreleased_regions().region_ids);
+            reopened.stop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn test_bounded_release_preserves_entries_not_durable_at_admission() {
         let _serialized = SERIALIZED.lock().await;
         let object_store = memory_store();
@@ -10611,6 +10717,7 @@ mod tests {
             let store = open(object_store.clone(), &config).await;
             assert_eq!(Some(id(3, 1)), watermark(&store, one));
             assert!(read_entries(&store, one, 0).await.is_empty());
+            assert_eq!(vec![pin], store.unreleased_regions().region_ids);
             store.obsolete_all(&provider(one), one).await.unwrap();
             // A later stale bounded hint must not undo a permanent release.
             store
