@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,22 +25,25 @@ use common_error::ext::BoxedError;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_query::OutputData;
 use common_query::logical_plan::breakup_insert_plan;
+use common_recordbatch::adapter::RegionWatermarkEntry;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::{TimeToLive, Timestamp};
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::utils::quote_identifier;
+use datafusion_common::{DFSchema, DataFusionError, Result as DfResult};
 use datafusion_common::{DFSchemaRef, ScalarValue, TableReference};
-use datafusion_expr::{DmlStatement, LogicalPlan, Projection, WriteOp, col, lit};
+use datafusion_expr::{DmlStatement, Filter, LogicalPlan, Projection, WriteOp, col, lit};
 use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
 use futures::TryStreamExt;
 use query::QueryEngineRef;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
-    FLOW_RETURN_REGION_SEQ,
+    FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_DISCOVERY, FLOW_RETURN_REGION_SEQ,
 };
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
@@ -198,6 +202,258 @@ fn encode_insert_plan_request(
             },
         )),
     })
+}
+
+/// One round of the read-only source watermark sample.
+///
+/// A region absent from the proved map is never reported as `0`: a missing report is not a
+/// sequence.
+///
+/// The sample keeps the `(region, partition expression, watermark)` statements it read
+/// ([`Self::slices`]) beside the projections built from them, because a caller that owns a
+/// per-slice cursor advances one slice at a time: projecting the round onto its regions first
+/// loses which part of a region's value domain the proved sequence belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegionWatermarkSample {
+    /// Regions this round covered, i.e. regions the sample plan named and whose
+    /// terminal metrics reported them. The plan no longer truncates, so a named
+    /// region is opened and read to EOF and answers either "watermark unknown" or a
+    /// proved watermark; a region missing from this set is one the plan never named
+    /// (for example, a region the source route pruned), which this round did not read
+    /// at all.
+    read_regions: BTreeSet<u64>,
+    /// Watermarks proved for a subset of `read_regions`, projected over the region's slices.
+    watermarks: BTreeMap<u64, u64>,
+    /// Every `(region, partition expression)` slice this round stated, ordered by region id and
+    /// then by expression, with the sequence it proved for that slice, the files the region had
+    /// visible when it was opened and the creator set of those files. `None` for the expression is
+    /// the region's complete value domain, never "unknown"; `watermark: None` is a slice that was
+    /// read without a provable bound.
+    slices: Vec<RegionWatermarkEntry>,
+}
+
+impl RegionWatermarkSample {
+    fn new(
+        read_regions: BTreeSet<u64>,
+        entries: impl IntoIterator<Item = RegionWatermarkEntry>,
+    ) -> Self {
+        let mut by_slice = BTreeMap::<(u64, Option<String>), RegionWatermarkEntry>::new();
+        for entry in entries {
+            match by_slice.entry((entry.region_id, entry.partition_expr.clone())) {
+                Entry::Occupied(mut occupied) => {
+                    let merged = occupied.get_mut();
+                    // The same slice stated twice: equal proofs converge, a differing proof is a
+                    // conflict that leaves the slice unproved. Never the min/max of two proofs.
+                    merged.watermark = match (merged.watermark, entry.watermark) {
+                        (Some(current), Some(incoming)) if current == incoming => Some(current),
+                        _ => None,
+                    };
+                    // Two statements that named different file sets saw different file lists, so
+                    // neither set is the one the slice was read under.
+                    merged.visible_foreign_file_creators = match (
+                        &merged.visible_foreign_file_creators,
+                        entry.visible_foreign_file_creators,
+                    ) {
+                        (Some(current), Some(incoming)) if *current == incoming => Some(incoming),
+                        (Some(_), Some(_)) => None,
+                        (Some(current), None) => Some(current.clone()),
+                        (None, incoming) => incoming,
+                    };
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert(entry);
+                }
+            }
+        }
+        let slices = by_slice.into_values().collect::<Vec<_>>();
+
+        // The region projection: a region may only advance to the least advanced of its slices,
+        // and it is omitted entirely when one of them is unproved.
+        let mut regions = BTreeMap::<u64, Option<u64>>::new();
+        for entry in &slices {
+            let slot = regions.entry(entry.region_id).or_insert(entry.watermark);
+            *slot = match (*slot, entry.watermark) {
+                (Some(current), Some(seq)) => Some(current.min(seq)),
+                _ => None,
+            };
+        }
+
+        Self {
+            read_regions,
+            watermarks: regions
+                .into_iter()
+                .filter_map(|(region_id, watermark)| watermark.map(|seq| (region_id, seq)))
+                .collect(),
+            slices,
+        }
+    }
+
+    /// The `(region, partition expression, watermark)` statements of this round, ordered by
+    /// region id and then by expression.
+    ///
+    /// A caller that owns per-slice cursors builds one cursor entry per statement: the expression
+    /// keys the slice (as the identity a cursor entry is keyed by, `None` = the region's complete
+    /// value domain) and the watermark is the sequence that slice proved, or `None` when the
+    /// slice was read without a provable bound. A slice is never projected onto its region here,
+    /// and an unproved slice stays in place instead of disappearing.
+    ///
+    /// Each statement also carries
+    /// [`RegionWatermarkEntry::visible_foreign_file_creators`]: the creators of the files the
+    /// region had visible when this round opened it, i.e. the other regions whose rows its files
+    /// may hold - including rows this round's pinned time index pruned away and therefore never
+    /// delivered. A caller that enumerates the regions a source's rows can come from needs this
+    /// beside the participating set: it is the half of that domain a row-level read cannot
+    /// report. `Some(vec![])` states "no file of another region was visible", `None` states the
+    /// round could not say.
+    ///
+    /// A statement about the whole domain and a statement about one expression of the same
+    /// region are different slices: they are reported separately rather than merged, because
+    /// neither subsumes the other. A build that predates expression-keyed statements reports
+    /// every region as the whole domain, so mixing builds makes a region's statements disagree -
+    /// see the upgrade note on the datanode's region watermark reporting.
+    pub fn slices(&self) -> &[RegionWatermarkEntry] {
+        &self.slices
+    }
+
+    /// Proved watermarks, always a subset of `read_regions`.
+    pub fn watermarks(&self) -> &BTreeMap<u64, u64> {
+        &self.watermarks
+    }
+
+    /// The regions this round read, i.e. the sample plan's own participating set.
+    ///
+    /// A caller that must tell "read without a proved terminal watermark" from "never read"
+    /// (the plan pruned it) needs this beside [`Self::watermarks`]: the proved map alone
+    /// cannot distinguish them, and a baseline frozen from it alone would silently omit a
+    /// region the plan read and could not prove. Such a region's history would then be
+    /// aggregated from `0` by the first later read naming it, so freezing has to compare the
+    /// two sets instead of projecting the sample onto its proved watermarks.
+    pub fn read_regions(&self) -> &BTreeSet<u64> {
+        &self.read_regions
+    }
+
+    /// Keeps only the proved watermarks, dropping the read/unproved distinction.
+    pub fn into_watermarks(self) -> BTreeMap<u64, u64> {
+        self.watermarks
+    }
+}
+
+/// Returns the earliest timestamp the time index unit can represent.
+///
+/// Used to pin the sample below any value the source can hold: no row satisfies
+/// `time_index < earliest_representable_timestamp`.
+fn earliest_representable_timestamp(schema: &DFSchema, column: &str) -> Option<Timestamp> {
+    schema.fields().iter().find_map(|field| {
+        if field.name() != column {
+            return None;
+        }
+        let DataType::Timestamp(unit, _) = field.data_type() else {
+            return None;
+        };
+        Some(match unit {
+            TimeUnit::Second => Timestamp::MIN_SECOND,
+            TimeUnit::Millisecond => Timestamp::MIN_MILLISECOND,
+            TimeUnit::Microsecond => Timestamp::MIN_MICROSECOND,
+            TimeUnit::Nanosecond => Timestamp::MIN_NANOSECOND,
+        })
+    })
+}
+
+/// Pins the time index of every source scan below every representable value, so the
+/// drained sample opens each region without producing a business row.
+struct ZeroRowTimeIndexRewriter {
+    column: String,
+}
+
+impl TreeNodeRewriter for ZeroRowTimeIndexRewriter {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        let LogicalPlan::TableScan(scan) = &node else {
+            return Ok(Transformed::no(node));
+        };
+        let Some(bound) =
+            earliest_representable_timestamp(scan.projected_schema.as_ref(), &self.column)
+        else {
+            // This source does not carry the flow's time index, so it cannot be
+            // pinned and the sample leaves it alone.
+            return Ok(Transformed::no(node));
+        };
+        let bound = to_df_literal(bound).map_err(|err| DataFusionError::External(Box::new(err)))?;
+        let filter = Filter::try_new(col(&self.column).lt(lit(bound)), Arc::new(node))?;
+        Ok(Transformed::yes(LogicalPlan::Filter(filter)))
+    }
+}
+
+/// Builds the source-side plan of the read-only region watermark sample.
+///
+/// The sample must reach **every** participating region, because a region states its watermark
+/// through its own terminal metrics and only once its read finishes. With `parallelism = 1` a
+/// single `LIMIT` stops after the first region's first batch (the remaining region clients are
+/// never opened, which is how watermarks went missing), and `LIMIT 0` is rewritten into an
+/// `EmptyRelation` by `EliminateLimit`, so no region opens at all. The plan therefore carries no
+/// truncating operator and the caller drains it to EOF.
+///
+/// Draining must not read business rows, so the sample pins the time index below every
+/// representable value: the storage layer prunes everything against it, and each region's read
+/// still opens (binding the scan-open snapshot the watermark proves) and finishes at once.
+fn region_watermark_sample_plan(
+    input: LogicalPlan,
+    time_index_column: &str,
+    catalog: &str,
+    schema: &str,
+) -> Result<LogicalPlan, Error> {
+    let mut zero_rows = ZeroRowTimeIndexRewriter {
+        column: time_index_column.to_string(),
+    };
+    let input = input
+        .rewrite(&mut zero_rows)
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to pin the region watermark sample time index".to_string(),
+        })?
+        .data;
+    let projection = LogicalPlan::Projection(
+        Projection::try_new(vec![col(time_index_column)], Arc::new(input)).context(
+            DatafusionSnafu {
+                context: "Failed to project the region watermark source".to_string(),
+            },
+        )?,
+    );
+    // The decoded plan carries the source tables under their `datafusion.public`
+    // names; resolve them back to the flow's catalog/schema like the recovery
+    // window capture does, otherwise the frontend cannot find the table.
+    projection
+        .transform_down_with_subqueries(|p| {
+            if let LogicalPlan::TableScan(mut table_scan) = p {
+                let resolved = table_scan.table_name.resolve(catalog, schema);
+                table_scan.table_name = resolved.into();
+                Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+            } else {
+                Ok(Transformed::no(p))
+            }
+        })
+        .with_context(|_| DatafusionSnafu {
+            context: "Failed to fix table ref in the region watermark plan".to_string(),
+        })
+        .map(|transformed| transformed.data)
+}
+
+/// Consumes an output so its terminal metrics become ready.
+async fn drain_output_data(output: &mut OutputData) -> Result<(), Error> {
+    match output {
+        OutputData::AffectedRows(_) => Ok(()),
+        OutputData::RecordBatches(_) => Ok(()),
+        OutputData::Stream(stream) => {
+            while stream
+                .try_next()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .is_some()
+            {}
+            Ok(())
+        }
+    }
 }
 
 fn recovery_aggregate_input(plan: &LogicalPlan) -> Result<LogicalPlan, Error> {
@@ -735,6 +991,105 @@ impl BatchingTask {
             .await
     }
 
+    /// Reads the region watermarks of this flow's sources **without reading business
+    /// rows**, covering **every** participating region.
+    ///
+    /// This is the baseline/degraded-advance read. It asks for `flow.return_region_seq`,
+    /// projects only the time-index column and sends no incremental `after_seqs`, so
+    /// - it never runs an insert plan and never writes the sink;
+    /// - it does not depend on `sequence_range_capable()`.
+    ///
+    /// The sample plan carries no truncating operator (see
+    /// [`region_watermark_sample_plan`]), so draining it opens every source region
+    /// instead of the first non-empty one, and an empty region is sampled too. A
+    /// region states its watermark through its own terminal metrics, which are only
+    /// final once it has been read to EOF, so the drain - not the rows - is what makes
+    /// the sample complete. The result keeps "not read this round" and "read but no
+    /// watermark proved" apart, and never substitutes `0` for a missing report.
+    ///
+    /// Cost: the pinned time index makes every region read zero rows, so the read
+    /// reports metadata only.
+    pub async fn sample_region_watermarks(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &FrontendClient,
+    ) -> Result<RegionWatermarkSample, Error> {
+        let query_ctx = self.query_context_snapshot();
+        let plan = sql_to_df_plan(query_ctx, engine.clone(), &self.config.query, false).await?;
+        let input = recovery_aggregate_input(&plan)?;
+        let column_name = self
+            .config
+            .time_window_expr
+            .as_ref()
+            .map(|expr| expr.column_name.clone())
+            .context(UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} region watermark query requires a time-window expression",
+                    self.config.flow_id
+                ),
+            })?;
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
+        let plan = region_watermark_sample_plan(input, &column_name, catalog, schema)?;
+        let message = DFLogicalSubstraitConvertor {}
+            .encode(&plan, DefaultSerializer)
+            .context(SubstraitEncodeLogicalPlanSnafu)?;
+        let request = api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
+        };
+        let mut peer_desc = None;
+        // No `after_seqs`: this read must not depend on exact incremental capability.
+        let extensions = [(FLOW_RETURN_REGION_SEQ, "true")];
+        let mut result = frontend_client
+            .query_with_terminal_metrics(
+                catalog,
+                schema,
+                request,
+                &extensions,
+                &HashMap::new(),
+                &mut peer_desc,
+            )
+            .await?;
+        // Terminal metrics are only ready once the output is fully consumed: the drain
+        // is what drives every region scan to EOF, and never a row bound.
+        drain_output_data(&mut result.output.data).await?;
+        // A region is "read" only when its terminal metrics arrived for this round; a
+        // region without proved terminal metrics was read and still unknown. Neither
+        // is defaulted to a sequence.
+        let read_regions = result.participating_regions().context(UnexpectedSnafu {
+            reason: format!(
+                "Flow {} region watermark query returned no terminal metrics",
+                self.config.flow_id
+            ),
+        })?;
+        // The triples travel as stated: the sample keeps the expression dimension instead of
+        // only the region projection, so a caller that owns per-slice cursors can advance one
+        // slice at a time.
+        let entries = result.region_watermark_entries().context(UnexpectedSnafu {
+            reason: format!(
+                "Flow {} region watermark query returned no per-region watermarks",
+                self.config.flow_id
+            ),
+        })?;
+        Ok(RegionWatermarkSample::new(read_regions, entries))
+    }
+
+    /// Reads the proved region watermarks of this flow's sources.
+    ///
+    /// Convenience wrapper of [`Self::sample_region_watermarks`] for callers that only
+    /// need the proved bounds: a region the sample did not read, and a region it read
+    /// without proving a watermark, are both absent from the map - never reported as
+    /// `0`. Callers that must tell those two apart use the sample itself.
+    pub async fn query_region_watermarks(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &FrontendClient,
+    ) -> Result<BTreeMap<u64, u64>, Error> {
+        self.sample_region_watermarks(engine, frontend_client)
+            .await
+            .map(RegionWatermarkSample::into_watermarks)
+    }
+
     /// Discovers windows under `lower` using a caller-frozen retention bound.
     ///
     /// The caller owns the execution guard and freezes this bound with its recovery scope.
@@ -852,6 +1207,10 @@ impl BatchingTask {
             (FLOW_RETURN_REGION_SEQ, "true"),
             (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE),
             (FLOW_INCREMENTAL_AFTER_SEQS, lower_json.as_str()),
+            // This query only discovers the windows a stale cursor can no longer
+            // explain; it reads rows an old cursor no longer explains and does not need
+            // row-level sequence exactness.
+            (FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_DISCOVERY),
         ];
         let mut peer_desc = None;
         let result = frontend_client
@@ -1217,7 +1576,22 @@ impl BatchingTask {
         let (affected_rows, _) = res.output.extract_rows_and_cost();
         let decision = {
             let mut state = self.state.write().unwrap();
-            Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage)
+            match self.refuse_substituted_delta(&mut state, &res, elapsed, coverage) {
+                Ok(Some(decision)) => decision,
+                Ok(None) => Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage),
+                Err(err) => {
+                    // The delta's DML already ran, so a scan that hid rows cannot be settled
+                    // additively and there is no fence to recompute the affected windows
+                    // under. Fail the round with the cursor untouched: the caller restores
+                    // the consumed dirty signal, and the next round replays the same delta
+                    // instead of advancing past rows no window received.
+                    drop(state);
+                    warn!(
+                        "Flow {flow_id} refused to settle an incremental delta that hid rows: {err}"
+                    );
+                    return Err(err);
+                }
+            }
         };
         Self::record_checkpoint_decision(flow_id, decision);
         Ok(Some((affected_rows, elapsed)))

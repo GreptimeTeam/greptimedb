@@ -21,7 +21,8 @@ use datafusion_expr::{DmlStatement, LogicalPlan};
 use query::QueryEngineRef;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SINK_TABLE_ID,
+    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_READ_ROW_SEQUENCE, FLOW_REPAIR_MODE,
+    FLOW_REPAIR_MODE_FENCED, FLOW_SINK_TABLE_ID,
 };
 use snafu::ResultExt;
 use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
@@ -265,6 +266,11 @@ impl BatchingTask {
     ) -> Result<Vec<(&'static str, String)>, Error> {
         let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
 
+        let repair_fenced = {
+            let state = self.state.read().unwrap();
+            state.pending_fenced_repair().is_some()
+        };
+
         let incremental_checkpoints_json = {
             let state = self.state.read().unwrap();
             if incremental_safe
@@ -273,12 +279,29 @@ impl BatchingTask {
                 && state.checkpoint_mode() == CheckpointMode::Incremental
                 && !state.checkpoints().is_empty()
             {
-                Some(serde_json::to_string(state.checkpoints()).map_err(|err| {
-                    UnexpectedSnafu {
-                        reason: format!("Failed to serialize checkpoint map: {err}"),
-                    }
-                    .build()
-                })?)
+                let shards = state.checkpoint_shards();
+                if shards.is_empty() {
+                    // Only the region projection is known: the region-keyed form, which
+                    // every reader understands as one slice over the whole value domain.
+                    Some(serde_json::to_string(state.checkpoints()).map_err(|err| {
+                        UnexpectedSnafu {
+                            reason: format!("Failed to serialize checkpoint map: {err}"),
+                        }
+                        .build()
+                    })?)
+                } else {
+                    // The owner of the cursor proved its expression slices: send them instead
+                    // of the region projection, so a reader of an adopted file can filter its
+                    // rows by the slice the file belongs to.
+                    Some(
+                        query::options::encode_incremental_after_seqs(shards).map_err(|err| {
+                            UnexpectedSnafu {
+                                reason: format!("Failed to serialize checkpoint slices: {err}"),
+                            }
+                            .build()
+                        })?,
+                    )
+                }
             } else {
                 None
             }
@@ -322,6 +345,23 @@ impl BatchingTask {
             extensions.push((FLOW_SINK_TABLE_ID, sink_table_id.to_string()));
             extensions.push((FLOW_INCREMENTAL_MODE, incremental_mode.to_string()));
             extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
+            if capable {
+                // A `sequence_range` delta is the only read that must split an adopted
+                // file into already-consumed and not-yet-consumed rows. It reads the
+                // physical `__sequence` column and lets the file's own substituted cut
+                // hide the rows whose number a compaction substituted; the hidden rows'
+                // windows come back in the terminal metrics so the caller can recompute
+                // exactly those windows. Every other reader keeps today's substitution.
+                extensions.push((FLOW_READ_ROW_SEQUENCE, "true".to_string()));
+            }
+        }
+
+        // Repair reads are marked independently of the incremental branch: a fenced
+        // repair DML is not an incremental delta (it advances no checkpoint) yet it
+        // must still read rows an old cursor no longer explains, otherwise the repair it performs
+        // is rejected by `C < B` and recovery can never make progress.
+        if repair_fenced {
+            extensions.push((FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED.to_string()));
         }
 
         Ok(extensions)
