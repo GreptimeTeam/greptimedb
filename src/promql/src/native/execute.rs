@@ -917,6 +917,14 @@ impl InstantRuntime {
                 (payloads.as_slice(), windows.as_slice())
             }
         };
+        // A zero lookback selects only a sample exactly at the instant, and the window time of a
+        // sample less than a millisecond before it is the instant too. The selection's candidate is
+        // the latest sample at or before the instant, so it is the exact one if there is one.
+        let exact_only = |lookback_ms: i64| lookback_ms == 0 && !self.time_unit.is_whole_millis();
+        let at_instant = |index: u64, instant_ms: i128| {
+            self.time_unit
+                .is_at(ticks.as_ref()[index as usize], instant_ms)
+        };
         let grid = Arc::clone(&self.selection.output_grid);
         let spec = grid.spec();
         // The grid's own points are what the selection decides, so the range and the step it is
@@ -944,18 +952,25 @@ impl InstantRuntime {
                 let metric = drop_metric_name(&metric)?;
                 return no_row_chunk(&self.schema, metric);
             };
+            let selection_offset = if self.selection.value == InstantValue::Timestamp {
+                0
+            } else {
+                self.selection.offset_ms
+            };
             let Some(index) = select_instant_at(
                 window_time,
                 &fields,
                 selection_at,
                 selection_lookback,
-                if self.selection.value == InstantValue::Timestamp {
-                    0
-                } else {
-                    self.selection.offset_ms
-                },
+                selection_offset,
             )?
-            else {
+            .filter(|&index| {
+                !exact_only(selection_lookback)
+                    || at_instant(
+                        index,
+                        i128::from(selection_at) - i128::from(selection_offset),
+                    )
+            }) else {
                 return no_row_chunk(&self.schema, self.output_metric(&metric)?);
             };
             let grid_len = usize::try_from(spec.len).unwrap_or(usize::MAX);
@@ -985,7 +1000,7 @@ impl InstantRuntime {
                 None => no_row_chunk(&self.schema, metric),
             };
         }
-        let (indices, timestamps) = select_instants(
+        let (mut indices, mut timestamps) = select_instants(
             window_time,
             &fields,
             spec.start_ms..=grid_end_ms(spec),
@@ -993,6 +1008,14 @@ impl InstantRuntime {
             self.selection.lookback_ms,
             self.selection.offset_ms,
         )?;
+        if exact_only(self.selection.lookback_ms) {
+            let offset_ms = i128::from(self.selection.offset_ms);
+            (indices, timestamps) = indices
+                .into_iter()
+                .zip(timestamps)
+                .filter(|&(index, timestamp)| at_instant(index, i128::from(timestamp) - offset_ms))
+                .unzip();
+        }
         if self.selection.value != InstantValue::Sample {
             return self.project(&metric, time, &fields, &indices, &timestamps);
         }

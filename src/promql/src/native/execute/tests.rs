@@ -7307,6 +7307,46 @@ fn instant_candidate_span_covers_native_selection_at_boundaries() {
     }
 }
 
+/// A zero lookback selects only a sample at the instant itself. A microsecond sample just before
+/// the instant shares its window millisecond, and must not stand in for it, anchored or not.
+#[test]
+fn zero_lookback_does_not_select_a_sub_millisecond_sample_before_the_instant() {
+    let schema = raw_schema();
+    for (tick, selected) in [(999_001, false), (1_000_000, true)] {
+        for (value, offset_ms) in [
+            (InstantValue::Sample, 0),
+            (InstantValue::Sample, 1),
+            (InstantValue::Timestamp, 0),
+        ] {
+            for anchored in [false, true] {
+                let instant = 1_000 + offset_ms;
+                let selection = BoundInstant {
+                    lookback_ms: 0,
+                    offset_ms,
+                    at_ms: anchored.then_some(instant),
+                    value,
+                    output_grid: grid(instant, 1_000, 1),
+                };
+                let mut runtime = InstantRuntime::try_new(
+                    &schema,
+                    &selection,
+                    crate::raw_time::RawTimeUnit::Microsecond,
+                )
+                .unwrap();
+                let out = runtime
+                    .push(raw_chunk(&schema, &[tick], &[1.0], true))
+                    .unwrap()
+                    .expect("the closing chunk gathers the series");
+                assert_eq!(
+                    sample_values(&out).iter().flatten().count(),
+                    usize::from(selected),
+                    "tick {tick}us, {value:?}, offset {offset_ms}, anchored {anchored}"
+                );
+            }
+        }
+    }
+}
+
 /// A selection reserves the points it can decide, not the points the grid plans.
 ///
 /// The review's shape: a seven-day grid at a one-minute step is 10,081 points, and one sample at

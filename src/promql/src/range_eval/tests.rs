@@ -54,6 +54,7 @@ use crate::grid_series::reference::{
 use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::range_array::RangeArray;
+use crate::raw_time::RawTimeUnit;
 use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
@@ -2114,6 +2115,46 @@ fn decided_missing_positions_cost_no_rows_and_do_not_delay_the_close() {
 /// The closing chunk of a series is labelled like the chunks before it, including the metadata
 /// labels a function drops: `rate` removes `__name__`, and a consumer that keyed series by label
 /// set would see the same series split in two if the closing chunk kept it.
+/// Two microsecond samples in one millisecond share a window time, so a chunk ending on the first
+/// one has not settled the window ending at that millisecond: the second may arrive next.
+#[test]
+fn samples_of_one_millisecond_split_across_chunks_stay_in_one_window() {
+    let window = RangeWindow {
+        range_ms: 1,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: None,
+    };
+    let rows: Vec<Row> = vec![(1_001, vec![Some(1.0)]), (1_500, vec![Some(2.0)])];
+    for pieces in [
+        vec![chunk(&rows, 1, 0, true)],
+        vec![
+            chunk(&rows[..1], 1, 0, false),
+            chunk(&rows[1..], 1, 0, true),
+        ],
+    ] {
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(2, 1, 1),
+            window,
+            RangeFunction::CountOverTime,
+        )
+        .unwrap()
+        .with_raw_time_unit(RawTimeUnit::Microsecond);
+        let chunks = collect_chunks(&mut evaluator, &pieces);
+        let series =
+            fold_chunks(&chunks, evaluator.output_schema()).expect("the window has samples");
+        let counts: Vec<_> = series.fields.as_slice()[0]
+            .iter()
+            .filter_map(|sample| match sample {
+                SampleRef::Float(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counts, [2.0], "{} chunks", pieces.len());
+    }
+}
+
 #[test]
 fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
     let window = RangeWindow {
