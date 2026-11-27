@@ -870,7 +870,8 @@ impl ColumnarPreparedSource {
         // Time-only conjuncts drop every version of a (series, time) key alike, so they
         // commute with dedup and must run before the merge: a row selector inside the
         // merge would otherwise pick a row they reject. Other conjuncts may depend on
-        // which version dedup keeps and stay after the merge.
+        // which version dedup keeps and stay after the merge. Volatile conjuncts never get
+        // here: DataFusion's `PushDownFilter` keeps them in the `Filter` above the scan.
         let mut time_filters = Vec::new();
         let mut filters = Vec::new();
         if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
