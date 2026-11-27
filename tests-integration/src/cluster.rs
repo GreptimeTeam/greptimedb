@@ -1098,6 +1098,108 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_recover_procedures_with_missing_checkpoint_segments() {
+        use common_meta::ddl::create_database::{
+            CreateDatabaseData, CreateDatabaseProcedure, CreateDatabaseState,
+        };
+        use common_meta::rpc::store::RangeRequest;
+        use common_meta::state_store::KvStateStore;
+        use common_procedure::store::ProcedureMessage;
+        use common_procedure::store::state_store::StateStore;
+        use common_procedure::{ProcedureId, SubprocedureRecovery};
+
+        let builder = GreptimeDbClusterBuilder::new("corrupt_checkpoint_recovery")
+            .await
+            .with_datanodes(1);
+        let kv = builder.kv_backend.clone();
+        let store = KvStateStore::new(kv.clone()).with_max_value_size(Some(32));
+        let replayed_id = ProcedureId::random();
+        let lost_id = ProcedureId::random();
+        for (schema, id, damage, has_previous) in [
+            ("replayed_db", replayed_id, true, true),
+            ("healthy_db", ProcedureId::random(), false, false),
+            ("lost_db", lost_id, true, false),
+        ] {
+            let data = CreateDatabaseData {
+                state: CreateDatabaseState::Prepare,
+                catalog: "greptime".to_string(),
+                schema: schema.to_string(),
+                create_if_not_exists: false,
+                options: Default::default(),
+                creator: None,
+            };
+            let mut message = ProcedureMessage {
+                type_name: CreateDatabaseProcedure::TYPE_NAME.into(),
+                data: serde_json::to_string(&data).unwrap(),
+                parent_id: None,
+                subprocedure_recovery: SubprocedureRecovery::Discard,
+                step: 7,
+                error: None,
+                context: Default::default(),
+            };
+            if has_previous {
+                store
+                    .put(
+                        &format!("procedure/{id}/0000000007.step"),
+                        serde_json::to_vec(&message).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            message.step = 8;
+            let suffix = if has_previous { "rollback" } else { "step" };
+            let key = format!("procedure/{id}/0000000008.{suffix}");
+            store
+                .put(&key, serde_json::to_vec(&message).unwrap())
+                .await
+                .unwrap();
+            if damage {
+                store.delete(&format!("{key}/0000000001")).await.unwrap();
+            }
+        }
+
+        let lost_keys = RangeRequest::new()
+            .with_prefix(format!("/__procedure__/procedure/{lost_id}/").into_bytes());
+        let replayed_keys = RangeRequest::new()
+            .with_prefix(format!("/__procedure__/procedure/{replayed_id}/").into_bytes());
+        let before = kv.range(lost_keys.clone()).await.unwrap().kvs;
+        assert!(before.len() > 1);
+        let cluster = builder.build(false).await;
+        let schemas = cluster.metasrv.table_metadata_manager().schema_manager();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                use common_meta::key::schema_name::SchemaNameKey;
+                if schemas
+                    .exists(SchemaNameKey::new("greptime", "replayed_db"))
+                    .await
+                    .unwrap()
+                    && schemas
+                        .exists(SchemaNameKey::new("greptime", "healthy_db"))
+                        .await
+                        .unwrap()
+                    && kv
+                        .range(replayed_keys.clone())
+                        .await
+                        .unwrap()
+                        .kvs
+                        .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        crate::test_util::execute_sql(
+            cluster.fe_instance(),
+            "CREATE TABLE after_recovery (ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+        assert_eq!(kv.range(lost_keys).await.unwrap().kvs, before);
+    }
+
     #[tokio::test]
     async fn test_do_get_stats_follow_response_body_lifetime() {
         let stats = Arc::new(DatanodeRpcStats::default());

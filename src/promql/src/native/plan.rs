@@ -15,17 +15,12 @@
 //! The bound tree a native PromQL evaluation compiles to.
 //!
 //! A query is compiled into [`NativeTree`]: [`NativeNode`]s whose operations are already bound to
-//! kernels, fields and grids. Nothing in this module interprets a function name, resolves a label
-//! or picks a column at run time; those decisions are made before the tree exists, so the hot
-//! path only feeds batches to kernels it was handed.
+//! kernels, fields and grids, so nothing here interprets a function name, resolves a label or picks
+//! a column at run time.
 //!
-//! The tree is also the unit of legality. [`NativeNode::validate`] checks the contract every
-//! operation states about its input, which is what lets a new combination of supported operations
-//! be an ordinary tree instead of another hand-written shape.
-//!
-//! What the tree cannot express yet is deliberate for this stage: [`NativeExpr::Scalar`] holds a
-//! constant, so `time()` and `scalar(v)` have no node. The legality below is therefore about the
-//! operations that exist, not about PromQL's whole surface.
+//! The tree is also the unit of legality: [`NativeNode::validate`] checks the contract each
+//! operation states about its input, so any combination of supported operations that passes it is
+//! executable.
 
 use std::hash::Hash;
 use std::sync::Arc;
@@ -52,54 +47,31 @@ use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
 };
 
-/// The bucket-bound label a classic histogram's series carry, which the histogram function folds and
-/// its result does not report.
+/// The bucket-bound label a classic histogram function folds away.
 const LE_LABEL: &str = "le";
 
-/// The label a metric name is stored under, which a scan binds beside its tag columns rather than
-/// among them.
+/// The metric-name label. A scan binds it beside its tag columns, not among them.
 pub(crate) const METRIC_NAME: &str = "__name__";
 
-/// Metadata labels the runtime removes from histogram result label sets.
+/// The labels `map::drop_metric_name` removes (`grid_series::METADATA_LABELS`).
 const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
-/// A conservative set of reportable label names for `node`.
+/// A conservative set of label names `node` may report, following Prometheus' result labels.
 ///
 /// `source_tags` is indexed by each leaf's `source_index`. The canonical pass supplies runtime
-/// label names, including `__name__` for named scans; the planner supplies declared tag columns
-/// to derive output columns. The result need not describe the labels of any individual series:
-/// `or` includes a nullable `__name__` column even when both operands drop their names. Math
-/// operations remove only `__name__` here, while their runtime also removes `__type__` and
-/// `__unit__`.
+/// label names, including `__name__` for named scans; the planner supplies declared tag columns.
+/// The result is a superset over all output series: `or` includes a nullable `__name__` even when
+/// both operands drop their names. A node whose kernel drops the metric name drops it here too, so
+/// a name rewrite below it cannot make the name reappear above it.
 ///
-/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
-/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
-/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
-/// of each value keeps its operand's; a scalar and `vector(s)` have none; `count_values` keeps its
-/// grouping and the label it writes; a fill that answers a missing many-side sample files the one
-/// side's matching labels, so they join the set, while a grouped `include` label joins them only when
-/// the one side carries it or the matching keeps it in the key a fill reads. A label rewrite writes
-/// its destination, and a destination that names the metric name writes that name.
-///
-/// A node that reports a value of its own drops the name where its kernel does - `timestamp`, a
-/// range function whose result is computed (`rate`, `increase`, ...), a math or histogram map,
-/// `histogram_quantile`, every non-filtering binary - so a name rewrite below one of them cannot
-/// make the name reappear above it.
-///
-/// `None` for a node whose labels this walk does not derive - a `count_values` whose destination is
-/// empty, or an input whose source has no entry. `None` proves nothing: the canonical pass treats
-/// it as "may alias" rather than as "distinct", and the planner keeps the statement off the native
-/// route.
+/// `None` when the labels are not derived (a `count_values` with an empty destination, or an input
+/// without a `source_tags` entry). Callers must treat `None` as "may alias", not as "distinct".
 pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
         NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
             Some(Vec::new())
         }
-        // These report a value of their own rather than the sample they read, and the runtime drops
-        // the name for each of them. `source_tags` is the authority on what an input carries, so a
-        // discovery input arrives carrying `__name__` and these arms are what decides it does not
-        // survive.
         NativeExpr::Instant { input, op } => {
             let tags = fused_output_tags(input, source_tags)?;
             Some(match op.value {
@@ -119,10 +91,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             input,
             source_tags,
         )?)),
-        // A label rewrite changes the label set itself: `label_replace` adds its destination label
-        // and an empty replacement removes it, so the input's labels are not the output's. A math or
-        // histogram kernel drops the metric name where it runs, and the ops apply in written order,
-        // so what follows a rewrite sees the set the rewrite left.
+        // The ops apply in written order, so a math op after a rewrite of `__name__` still drops it.
         NativeExpr::Map { input, op } => {
             let mut tags = fused_output_tags(input, source_tags)?;
             for operation in op.ops.iter() {
@@ -130,14 +99,9 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                     MapOp::Label(rewrite) => {
                         let destination = rewrite.destination();
                         if tags.iter().any(|tag| tag == destination) {
-                            // The input carries the label, so the rewrite changes its value - and an
-                            // empty replacement may remove it, which the column still represents.
                             tags.retain(|tag| tag != destination);
                             tags.push(destination.to_string());
                         } else if rewrite.writes_value() {
-                            // A fresh destination is a label the output only carries when the
-                            // rewrite can write a value; a delete-only rewrite of a label no input
-                            // carried publishes nothing.
                             tags.push(destination.to_string());
                         }
                     }
@@ -146,48 +110,26 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             }
             Some(tags)
         }
-        // Its parameters are scalars, which carry no labels; the map computes a value of its own
-        // with the input, and its kernel drops the metric name.
         NativeExpr::ParameterizedMap { input, .. } => Some(without_metadata_labels(
             fused_output_tags(input, source_tags)?,
         )),
-        // `scalar()` reports one value and no labels, like the scalar it produces.
         NativeExpr::ScalarOf { .. } => Some(Vec::new()),
-        // Its parameter is a scalar, which carries no labels, and ranking keeps each selected
-        // series' own labels.
         NativeExpr::ParameterizedTopK { input, .. } => fused_output_tags(input, source_tags),
-        // A parameterized histogram function folds the bucket series that share the other labels
-        // into one series and drops `le` along with the metadata labels, exactly as its bound
-        // counterpart does. Its parameters are scalars and carry no labels.
         NativeExpr::ParameterizedHistogram { input, .. } => {
             let mut tags = fused_output_tags(input, source_tags)?;
             tags.retain(|tag| tag != LE_LABEL && !PROMQL_METADATA_LABELS.contains(&tag.as_str()));
             Some(tags)
         }
-        // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
-        // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
-        // does. A grouping by `__name__` keeps the name where the input reports one - which is
-        // `source_tags`'s answer, not the schema's: a named input declares it when the statement
-        // reads more than one, so the groups two metrics form stay apart, and a statement reading
-        // one leaves the column to the rows layout's appended name, which is what `sum by
-        // (__name__)` over one metric reports.
         NativeExpr::Aggregate { input, op } => grouped_output_tags(input, op, source_tags),
-        // Its parameter is a scalar, which carries no labels, so a fold that reads it per point
-        // reports the same columns as the one that binds its `φ`.
         NativeExpr::ParameterizedAggregate { input, op, .. } => {
             grouped_output_tags(input, op, source_tags)
         }
-        // Selecting some of the input's series keeps each one's own labels, and `count_values`
-        // keeps its grouping's; `histogram` folds bucket series into one histogram, so it does not
-        // report the input's set.
         NativeExpr::Vector { input, op } => match op {
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
             | BoundVectorOp::Sort(_) => fused_output_tags(input, source_tags),
-            // `absent` reports the labels its own matchers name, not the input's set and not the
-            // table's columns: it answers one series carrying exactly those, so a label the input
-            // does not carry is still a label of the result.
+            // `absent` reports the equality matchers' labels, not the input's.
             BoundVectorOp::Absent { labels } => Some(
                 labels
                     .tags()
@@ -195,17 +137,8 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                     .map(|label| label.name.to_string())
                     .collect(),
             ),
-            // `count_values` writes the value it counts into its own label and then keeps its
-            // grouping: `by(...)` keeps the labels named plus that destination, `without(...)`
-            // keeps the rest minus the labels named and the metric name. What the node reports is
-            // therefore the grouping applied to the labels its input carries, with the destination
-            // among them - not the input's set, and not the scan's, since the grouping narrows both.
-            //
-            // The destination is a label the node creates, so a rewrite of it above this node is a
-            // rewrite of an existing label. A destination naming the metric name writes the name
-            // the node groups by, which is the one label its result carries. This walk derives the
-            // labels; it does not decide which groupings the kernel accepts, and those refusals stay
-            // where they are.
+            // `count_values` adds its destination label, then applies its grouping; `by` always
+            // keeps the destination.
             BoundVectorOp::CountValues { label, group } if !label.is_empty() => {
                 let mut tags = fused_output_tags(input, source_tags)?;
                 if !tags.contains(&label.to_string()) {
@@ -217,7 +150,6 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                             .into_iter()
                             .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
                             .collect::<Vec<_>>();
-                        // `by` keeps the label the node writes whether the input carried it or not.
                         if !output.contains(&label.to_string()) {
                             output.push(label.to_string());
                         }
@@ -232,9 +164,6 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                 })
             }
             BoundVectorOp::CountValues { .. } => None,
-            // A classic histogram function folds the bucket series that share the other labels into
-            // one series and drops `le`, along with the metadata labels the runtime does not put on
-            // its result. What it keeps is everything else its input carried.
             BoundVectorOp::Histogram(_) => {
                 let mut tags = fused_output_tags(input, source_tags)?;
                 tags.retain(|tag| {
@@ -274,19 +203,15 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                     };
                     let left_tags = fused_output_tags(left, source_tags)?;
                     let right_tags = fused_output_tags(right, source_tags)?;
-                    // One-to-one matching narrows the left side's labels with `on`/`ignoring`.
-                    // A group retains the many side's labels and copies the named labels from the one
-                    // side: `group_left(container)` keeps the left labels and adds `container` from
-                    // the right.
+                    // One-to-one narrows the left side's labels by `on`/`ignoring`; a group keeps
+                    // the many side's labels and copies its include labels from the one side.
                     let mut tags = match &matching.cardinality {
                         Cardinality::OneToOne => kept(left_tags.clone()),
                         Cardinality::ManyToOne(_) => left_tags.clone(),
                         Cardinality::OneToMany(_) => right_tags.clone(),
                     };
-                    // `result_metric` drops the metadata labels before it matches or copies an
-                    // included label, so an arithmetic result starts without the name. An include can
-                    // still put it back from the one side, which is why the final rule below does not
-                    // run on this branch.
+                    // `result_metric` drops the name before copying include labels, so an include can
+                    // still put it back from the one side.
                     if !keeps_name {
                         tags.retain(|tag| tag != METRIC_NAME);
                     }
@@ -303,18 +228,12 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                             tags.push(tag.clone());
                         }
                     }
-                    // A grouped result carries an include label only when a row can give it one.
-                    // `result_metric` removes the label from the many side's labels unless the one side
-                    // has it, so a paired row and a row filed from a one-side series take it from the
-                    // one series, which is what the loop above declares. A row filed from a many-side
-                    // series takes it from that series' match key instead, so it carries the label only
-                    // when the matching keeps the label in the key. Everything else the many side
-                    // carries is the base above, so a label neither of those can provide has to leave
-                    // the set: nothing would ever fill its column.
+                    // `result_metric` removes an include label from the many side unless the one side
+                    // has it. A row filled from a many-side series takes it from its match key, so
+                    // the label survives only if the one side carries it or a fill keys on it.
                     if !includes.is_empty() {
                         let many_rows_filled = match &matching.cardinality {
-                            // `group_right` puts the one side on the left, so the fills trade places:
-                            // `fill_left` is the one that answers a missing one-side sample there.
+                            // `group_right` puts the one side on the left, so the fills swap.
                             Cardinality::OneToMany(_) => matching.fill.lhs,
                             Cardinality::ManyToOne(_) | Cardinality::OneToOne => matching.fill.rhs,
                         }
@@ -335,24 +254,16 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                                 || (many_rows_filled && in_match_key(tag))
                         });
                     }
-                    // A fill answers a missing sample from the series of the other side, and the kernel
-                    // files that row at the label set the series it has gives it
-                    // (`vector_match::binary_field`): a many-side series keeps all of its labels, which
-                    // `tags` already holds, while a one-side series keeps only its matching labels plus
-                    // the group labels the modifier names, which the loop above adds. So what a fill can
-                    // add here is the one side's matching labels, and only a fill that can file a
-                    // one-side row has any to add: one where the many side is the missing side. Which
-                    // fill that is follows the kernel, which trades the two for `group_right`, whose one
-                    // side is the left - there it is `fill_right` that leaves the many side missing.
+                    // A row filled from a one-side series keeps only its matching labels plus the
+                    // include labels (`vector_match::binary_field`), so only the fill for a missing
+                    // many side adds labels here. `group_right` swaps the fills.
                     let (one_tags, fills_many_side) = match &matching.cardinality {
                         Cardinality::OneToMany(_) => (&left_tags, matching.fill.rhs),
                         Cardinality::ManyToOne(_) | Cardinality::OneToOne => {
                             (&right_tags, matching.fill.lhs)
                         }
                     };
-                    // A filled row keeps only the one side's matching labels, so the name can reach
-                    // it only through an `on` key that names the metric name, and only while the
-                    // operation reports its samples' names.
+                    // A filled one-side row carries the name only through an `on(__name__)` key.
                     let fill_carries_name = keeps_name
                         && matches!(&matching.labels, MatchingLabels::On(names)
                             if names.iter().any(|name| name.as_ref() == METRIC_NAME));
@@ -383,17 +294,15 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                         tags.push(tag);
                     }
                 }
-                // `or` reports the series of both sides, and each row keeps the name of the side it
-                // came from, so the name is a label of the result even when neither source declares
-                // it as a tag column. A side whose kernel dropped the name leaves the column empty.
+                // Each `or` row keeps its own side's name, so the result needs the column even
+                // when neither source declares it.
                 if !tags.iter().any(|tag| tag == METRIC_NAME) {
                     tags.push(METRIC_NAME.to_string());
                 }
             }
             Some(tags)
         }
-        // A base series keeps its labels and takes the data labels of its info series: the ones the
-        // selector names, or all of them when it names none.
+        // The selector's data labels, or all of the info series' labels when it names none.
         NativeExpr::Info {
             base,
             info,
@@ -415,15 +324,8 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
     }
 }
 
-/// The labels an aggregate reports: the ones its grouping keeps among those its input carries.
-///
-/// `by(...)` keeps exactly the labels it names, and `without(...)` keeps the rest and drops the
-/// metric name, as Prometheus does. A grouping by `__name__` keeps the name where the input reports
-/// one; a named scan only reports it among the runtime labels, so the aggregate keeps it there and
-/// publishes no column for it, which is what `sum by (__name__)` over one metric reports.
-///
-/// Both the fold that binds its argument and the one that reads it per point answer this way: what
-/// decides the columns is the grouping, not where the aggregate's one argument comes from.
+/// `without(...)` also drops the metric name, as Prometheus does. A named scan reports `__name__`
+/// only among the runtime labels, so `by (__name__)` keeps it there and publishes no column for it.
 fn grouped_output_tags(
     input: &NativeNode,
     op: &BoundAggregate,
@@ -444,23 +346,12 @@ fn grouped_output_tags(
     })
 }
 
-/// Whether a binary operation reports the samples of the side it keeps, name included.
-///
-/// A filtering comparison reports those samples, so the name survives it. Every other binary
-/// operation computes new values, and `bool` reports the comparison's own outcome rather than
-/// either operand's samples, so both drop the name.
+/// Whether a binary operation keeps the metric name: only a filtering comparison does.
 fn keeps_metric_name(matching: &BinaryMatching) -> bool {
     matching.op.is_comparison() && !matching.return_bool
 }
 
-/// The labels a node reports after the metadata labels are dropped, which is what a kernel that
-/// computes a value of its own does to the samples it reports.
-///
-/// The runtime drops all of [`PROMQL_METADATA_LABELS`] here, not the name alone: a name-dropping
-/// window and `timestamp` both go through `drop_metric_name`, and both end with
-/// `remove_all(&METADATA_LABELS)` - an empty value leaves with them too. Deriving only the name
-/// would leave `__type__` and `__unit__` in a label set the runtime no longer reports them in, and
-/// a drop above such a node would then be collected for labels that are already gone.
+/// Mirrors `map::drop_metric_name`, which removes `__type__` and `__unit__` along with the name.
 fn without_metadata_labels(tags: Vec<String>) -> Vec<String> {
     tags.into_iter()
         .filter(|tag| !PROMQL_METADATA_LABELS.contains(&tag.as_str()))
@@ -469,19 +360,13 @@ fn without_metadata_labels(tags: Vec<String>) -> Vec<String> {
 
 /// What one node produces.
 ///
-/// A sample type with an evaluation grid is an evaluated series: one value per grid point. Without
-/// a grid it is raw samples carrying their own timestamps. A scalar is one value per grid point
-/// and no labels. Intermediate aggregate state is a different type altogether, so an operation
-/// that cannot consume it is rejected by type rather than by convention.
+/// Aggregate state is a type of its own, so an operation that cannot consume it is rejected by type.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub enum NativeType {
     /// Samples, evaluated when the schema carries a grid and raw otherwise.
     Samples(Arc<SeriesSchema>),
-    /// One value per grid point and no labels, which binary operations broadcast.
-    ///
-    /// PromQL scalars vary with the evaluation time (`time()`, `scalar(v)`), so this carries the
-    /// grid it is evaluated on. Its value carrier is a series without labels, but its type is
-    /// what keeps a broadcast from becoming label matching.
+    /// One value per grid point and no labels, which binary operations broadcast rather than
+    /// match.
     Scalar(Arc<EvalGrid>),
     /// Intermediate aggregate state, not a query value.
     AggregateState(Arc<AggregateStateSchema>),
@@ -496,10 +381,7 @@ impl NativeType {
         }
     }
 
-    /// The grid this type is evaluated on, or `None` when it holds raw samples or state.
-    ///
-    /// A scalar is evaluated on its grid like a vector, which is what lets a binary operation
-    /// line it up with a vector point by point; only raw samples and state have no positions.
+    /// The grid this type is evaluated on, or `None` for raw samples and state.
     pub fn grid(&self) -> Option<&Arc<EvalGrid>> {
         match self {
             Self::Samples(schema) => schema.eval_grid.as_ref(),
@@ -508,7 +390,6 @@ impl NativeType {
         }
     }
 
-    /// What this type is, for a rejection that has to say what a consumer was handed.
     fn describe(&self) -> &'static str {
         match self {
             Self::Samples(schema) if schema.eval_grid.is_some() => "an evaluated vector",
@@ -518,10 +399,8 @@ impl NativeType {
         }
     }
 
-    /// Whether `self` binds the same thing as `other`: the same samples or the same state.
-    ///
-    /// Bindings compare their semantic content, not process-local allocation identity. Scalars are
-    /// produced by a node and never handed to one by a source, so they never match.
+    /// Whether `self` and `other` bind equal schemas. Scalars never come from a source, so they
+    /// never match.
     fn same_binding(&self, other: &NativeType) -> bool {
         match (self, other) {
             (Self::Samples(mine), Self::Samples(theirs)) => **mine == **theirs,
@@ -531,12 +410,8 @@ impl NativeType {
     }
 }
 
-/// The [`FieldKind`] every referenced field of a scan carries, or `None` when they disagree or one
-/// is a type this route does not answer.
-///
-/// The route declares one output column per field, so a statement whose selectors carry different
-/// kinds has no column to declare them in and keeps the existing plan. `Float64` and the canonical
-/// native histogram struct are the two kinds this route answers.
+/// The [`FieldKind`] every referenced field carries, or `None` when they disagree or one is neither
+/// `Float64` nor the native histogram struct.
 pub fn uniform_field_kind<'a>(
     kinds: impl IntoIterator<Item = Option<&'a DataType>>,
 ) -> Option<FieldKind> {
@@ -575,8 +450,8 @@ pub fn binary_output_field_kind(
         | BinaryOp::Mod
         | BinaryOp::Pow
         | BinaryOp::Atan2 => {
-            // An unsupported pair emits no sample, not a float. Fill values are floats, so one
-            // field can be produced by the real pair and by either enabled synthetic pair.
+            // An unsupported pair emits no sample. Fill values are floats, so the field must agree
+            // across the real pair and each enabled fill pair.
             let payload_kind = |left, right| match (left, op, right) {
                 (FieldKind::Float, _, FieldKind::Float) => Some(FieldKind::Float),
                 (FieldKind::Histogram, BinaryOp::Add | BinaryOp::Sub, FieldKind::Histogram)
@@ -601,11 +476,8 @@ pub fn binary_output_field_kind(
             // With no possible samples, retain the legacy float layout for an empty result.
             Some(kind.unwrap_or(FieldKind::Float))
         }
-        // A comparison over one kind answers that kind's samples, which is what keeps a histogram
-        // column a histogram. A comparison over two kinds answers no sample at all: the kernel
-        // reports every mixed pair - `(Float, Histogram)` and `(Histogram, Float)` included - as
-        // unsupported and skips it without counting a match (`vector_match::elem_binop`), so the
-        // column is the same empty float layout arithmetic keeps for a pair that can emit nothing.
+        // A mixed-kind comparison emits no sample (`vector_match::elem_binop`), so it gets the
+        // empty float layout.
         _ if left == right => Some(left),
         _ => Some(FieldKind::Float),
     }
@@ -614,64 +486,44 @@ pub fn binary_output_field_kind(
 impl NativeNode {
     /// The kind this node's output field carries, given the kind its sources carry.
     ///
-    /// `None` means this walk cannot name it: either the caller has no kind for the statement's
-    /// sources and this tree reads one, or the shape's samples are ones the model does not describe.
-    /// Both keep the existing plan rather than declaring a column the first batch might not fill.
+    /// `None` when `input` is `None` and the tree reads a source, or when the kind is not derived,
+    /// e.g. a math function over histograms, a set over two kinds, or a vector binary whose fill
+    /// pairs disagree.
     pub fn output_field_kind(&self, input: Option<FieldKind>) -> Option<FieldKind> {
         let kind_of = |node: &NativeNode| node.output_field_kind(input);
         match &self.expr {
             NativeExpr::Input(_) => input,
-            // A tree that reads no source answers floats: a constant, the evaluation time, `vector()`
-            // over one of them, and a date function of the evaluation time. None of them carries a
-            // sample kind of its own, so none of them needs the source kind either.
             NativeExpr::Scalar(_)
             | NativeExpr::EvalTime { .. }
             | NativeExpr::VectorOf { .. }
             | NativeExpr::Timestamp { .. } => Some(FieldKind::Float),
-            // The window functions that answer with a histogram are the ones the range kernel says
-            // yield one; every other range function reduces its window to a float.
             NativeExpr::Window { input, op } => {
                 let inner = kind_of(input)?;
                 (!op.function.yields_histograms())
                     .then_some(FieldKind::Float)
                     .or(Some(inner))
             }
-            // An instant selection reads one sample of the field, so it keeps the kind; the two
-            // timestamp forms replace the sample with a float of its own time.
             NativeExpr::Instant { input, op } => match op.value {
                 InstantValue::Sample => kind_of(input),
                 InstantValue::Timestamp | InstantValue::InfoTimestamp => Some(FieldKind::Float),
             },
-            // `histogram_count` and the other native-histogram readers answer with one float per
-            // sample; the map kernels that keep the samples keep their kind as well.
             NativeExpr::Map { input, op } => {
                 let mut kind = kind_of(input)?;
                 for op in op.ops.iter() {
                     kind = match op {
-                        // The native-histogram readers answer one float per sample.
                         MapOp::Histogram(_) => FieldKind::Float,
-                        // A label rewrite writes labels only, so the samples it passes on are the
-                        // ones it was given, kind included.
                         MapOp::Label(_) => kind,
-                        // No math function keeps a histogram, so a histogram reaching one is a
-                        // shape this walk does not name rather than a silent float.
                         MapOp::Math(_) if kind == FieldKind::Histogram => return None,
                         MapOp::Math(_) => FieldKind::Float,
                     };
                 }
                 Some(kind)
             }
-            // A constant beside a vector is broadcast over it, so the operation answers with the
-            // vector's own samples: a histogram times a float is still a histogram. Two vectors
-            // use the arithmetic result's kind, including any samples emitted by fill, and an
-            // empty float field only when no possible pairing can emit a sample.
             NativeExpr::Binary {
                 left,
                 right,
                 matching,
             } => {
-                // `bool` makes a comparison answer 1 or 0 whatever its operands hold, which is
-                // what the kernel does before it looks at the kinds.
                 if matching.return_bool {
                     return Some(FieldKind::Float);
                 }
@@ -692,43 +544,17 @@ impl NativeNode {
                     }
                 }
             }
-            // A canonical merge collects pieces of one label set: it assembles the samples it was
-            // given and never converts them, so the field keeps the kind it had.
             NativeExpr::Merge { input } => kind_of(input),
-            // A set operation keeps the payloads it selects - `and` and `unless` keep the left
-            // samples, `or` keeps the left's and the right's unmatched ones - so a pair of
-            // different kinds would answer a field carrying both. This route declares one type per
-            // field, so it names the answer only when both sides agree. That is this planner's
-            // condition for a uniformly typed column, not a rule Prometheus states.
+            // A set passes both sides' samples through, so it is typed only when the sides agree.
             NativeExpr::Set { left, right, .. } => {
                 let left_kind = kind_of(left)?;
                 (left_kind == kind_of(right)?).then_some(left_kind)
             }
-            // `scalar()` answers one float per grid point, whatever its input holds.
             NativeExpr::ScalarOf { .. } => Some(FieldKind::Float),
-            // A ranking hands on the series it selected, so the field keeps the kind it read; its
-            // parameter is a scalar, which carries no samples of its own.
             NativeExpr::ParameterizedTopK { input, .. } => kind_of(input),
-            // `histogram_quantile` and `histogram_fraction` reduce a histogram to one float per
-            // sample whatever their arguments are, constant or per point.
             NativeExpr::ParameterizedHistogram { .. } => Some(FieldKind::Float),
-            // An aggregate answers the kind its own state carries: `count`/`group` answer a count
-            // or a `1` whatever the samples they counted, `min`/`max`/`stddev`/`stdvar`/`quantile`
-            // fold the float samples and skip the histogram ones, and `sum`/`avg` answer the
-            // payload they folded - a native histogram when their binding is a histogram state, a
-            // float otherwise. Naming it here is what lets `sum(count_over_time(h[5m]))` - a float
-            // built from histograms - declare a float column, and `sum(h)` declare a histogram one.
             NativeExpr::Aggregate { op, .. } => Some(aggregate_output_kind(op)),
-            // A per-point parameter decides the `φ` the fold reads, not the layout it answers, so
-            // the kind is the one the same aggregate's state carries.
             NativeExpr::ParameterizedAggregate { op, .. } => Some(aggregate_output_kind(op)),
-            // A whole-vector operation either hands on the series it selected - a ranking keeps the
-            // ones it ranked, `limit_ratio` the ones its hash kept, and `sort` the same series in
-            // another order - so the field keeps the kind it read, which is the rule the
-            // per-point `k` form above already states for the same `TopK`. The other three compute
-            // the value: `absent` writes `1.0` where the input held nothing, `histogram_quantile`
-            // and `histogram_fraction` reduce a classic histogram to one float, and `count_values`
-            // counts samples as floats.
             NativeExpr::Vector { input, op } => Some(match op {
                 BoundVectorOp::TopK { .. }
                 | BoundVectorOp::LimitK { .. }
@@ -738,25 +564,16 @@ impl NativeNode {
                 | BoundVectorOp::Histogram(_)
                 | BoundVectorOp::CountValues { .. } => FieldKind::Float,
             }),
-            // `info` answers the base series' own samples with the info series' data labels added,
-            // so the field is the base's field: natively it never reads the info series' values as
-            // the answer (`info` is selected as a timestamp, `InstantValue::InfoTimestamp`).
             NativeExpr::Info { base, .. } => kind_of(base),
-            // A parameterized map is a math function over its input - `round` and the three
-            // `clamp`s - and math skips native histogram samples rather than converting them
-            // (`map::map_math`), so the field shape is unchanged and keeps the input's kind. The
-            // two scalar functions, `max_of` and `min_of`, take a scalar input, whose kind is a
-            // float whether or not the source carries histograms.
+            // `round` and `clamp*` skip histogram samples rather than converting them
+            // (`map::map_math`); `max_of`/`min_of` take a scalar input, which is float.
             NativeExpr::ParameterizedMap { input, .. } => kind_of(input),
         }
     }
 }
 
-/// The kind an aggregate's own output column carries.
-///
-/// It follows the state the aggregate keeps rather than the samples it read, because the two can
-/// differ in both directions: `count` over a histogram answers a float, and so does every aggregate
-/// that skips histogram samples, while `sum`/`avg` over a histogram answer the histogram they folded.
+/// The kind an aggregate's output column carries, which follows its state binding rather than its
+/// input: `count` over histograms answers a float, `sum`/`avg` over histograms a histogram.
 pub fn aggregate_output_kind(op: &BoundAggregate) -> FieldKind {
     match aggregate_state_binding(op.kind, op.field_kind) {
         Some((kind, _)) if kind.is_histogram() => FieldKind::Histogram,
@@ -764,13 +581,9 @@ pub fn aggregate_output_kind(op: &BoundAggregate) -> FieldKind {
     }
 }
 
-/// The layout of intermediate aggregate state.
-///
-/// State is indexed by `(group labels, absolute grid index)`, so it carries the grid it was
-/// accumulated on. It is not a query value and does not pretend to be one.
+/// The layout of intermediate aggregate state, indexed by `(group labels, absolute grid index)`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct AggregateStateSchema {
-    /// How the groups its rows are indexed by are identified.
     pub group: Grouping,
     /// Aggregate whose partial accumulator this state carries.
     pub kind: AggregateStateKind,
@@ -782,15 +595,8 @@ pub struct AggregateStateSchema {
     pub grid: Arc<EvalGrid>,
 }
 
-/// Returns the state type implied by an aggregate over an input of `field_kind`, if that state can
-/// be merged across a partition boundary.
-///
-/// Two families share this table. A numeric input keeps the components the accumulator kernel
-/// declares, and the component list comes from that kernel rather than a second mapping, so changing
-/// a kernel's state fields changes the native binding in lockstep. A native-histogram input binds
-/// the histogram state of the same aggregate: it carries the payload and the compensation that
-/// belongs to it, plus the evidence a merge of two partitions has to report. A quantile has no
-/// partial kernel at all, whatever it reads.
+/// The state an aggregate over `field_kind` binds, or `None` when it has no mergeable partial state
+/// (a quantile). Numeric components come from the accumulator kernel, so the two stay in lockstep.
 pub fn aggregate_state_binding(
     kind: AggregateKind,
     field_kind: FieldKind,
@@ -799,18 +605,14 @@ pub fn aggregate_state_binding(
         let state_kind = match kind {
             AggregateKind::Sum => AggregateStateKind::HistogramSum,
             AggregateKind::Avg => AggregateStateKind::HistogramAvg,
-            // Every other aggregate folds a float answer out of the samples it reads - a count is a
-            // count whatever it counted, and the extreme and deviation kinds skip a histogram
-            // sample - so a histogram input keeps their numeric state.
+            // The rest answer floats over histograms (count, or skipping histogram samples).
             _ => return float_state_binding(kind),
         };
-        // The layout is the kind's own canonical list, which is the list its frame accepts.
         return Some((state_kind, state_kind.components().to_vec()));
     }
     float_state_binding(kind)
 }
 
-/// The numeric state one aggregate keeps, from the components its kernel declares.
 fn float_state_binding(kind: AggregateKind) -> Option<(AggregateStateKind, Vec<StateComponent>)> {
     use crate::aggregate::{AggregateOp, StateField};
 
@@ -840,35 +642,27 @@ fn float_state_binding(kind: AggregateKind) -> Option<(AggregateStateKind, Vec<S
 }
 
 /// A scan or exchange boundary bound as a node input.
-///
-/// The binding records what the input was created for: the output a consumer type-checks against,
-/// and the ordering it guarantees. An instant selection and a window both read the ordering,
-/// rejecting an interleaved input; no other consumer reads it yet.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundInput {
-    /// Child index in the DataFusion plan. The compiler initially assigns selector-occurrence
-    /// indices; the caller maps them to child indices when constructing the plan.
-    ///
-    /// Multiple logical inputs may reference the same child after plan collapse. This is not a
-    /// runtime `InputId` or an identity for an input leaf.
+    /// Child index in the DataFusion plan. The compiler assigns selector-occurrence indices; the
+    /// caller maps them to child indices. Several inputs may share one child, so this is not an
+    /// identity for an input leaf.
     pub source_index: usize,
-    /// What the input produces: raw samples from a scan, or state from an exchange boundary.
+    /// Raw samples from a scan, or state from an exchange boundary.
     pub output: NativeType,
-    /// The ordering the input guarantees.
+    /// The ordering the input guarantees; an instant selection and a window reject an interleaved
+    /// one.
     pub ordering: SeriesOrdering,
     /// The unit of the timestamps a raw input hands over. Evaluated and state inputs are on a
     /// millisecond grid.
     pub time_unit: RawTimeUnit,
 }
 
-/// A constant scalar bound for broadcast or a statement root.
-///
-/// A scalar that varies per grid point is the same [`NativeType::Scalar`] as this constant: what
-/// keeps a binary operation from label-matching it is its type, not its constness. The varying
-/// ones are [`NativeExpr::EvalTime`] and a binary operation between scalars.
+/// A constant scalar. Varying scalars ([`NativeExpr::EvalTime`], [`NativeExpr::ScalarOf`], a
+/// scalar-producing [`NativeExpr::ParameterizedMap`], a binary between scalars) share its
+/// [`NativeType::Scalar`] output type.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BoundScalar {
-    /// The constant value.
     pub value: f64,
 }
 
@@ -879,11 +673,9 @@ pub struct BoundInstant {
     pub lookback_ms: i64,
     /// Selector offset; positive reads earlier samples.
     pub offset_ms: i64,
-    /// Anchored selection instant; samples are selected at this time for every grid point.
+    /// The `@` instant; when set, every grid point selects at this time.
     pub at_ms: Option<i64>,
-    /// What the selection reports for the sample it selects.
     pub value: InstantValue,
-    /// The grid the selection produces values on.
     pub output_grid: Arc<EvalGrid>,
 }
 
@@ -899,19 +691,14 @@ pub enum InstantValue {
     InfoTimestamp,
 }
 
-/// A window function over raw samples or over an evaluated input.
-///
-/// The input and output grids are bound separately: a subquery evaluates its inner expression on
-/// its own grid and consumes the result directly, without resampling it onto the outer grid.
+/// A window function over raw samples or over an evaluated input. A subquery's input grid differs
+/// from its output grid; the input is consumed without resampling.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundWindow {
-    /// The function this node runs.
     pub function: RangeFunction,
-    /// The window length, offset and anchor.
     pub window: RangeWindow,
     /// The grid the input is evaluated on, or `None` when the input is raw samples.
     pub input_grid: Option<Arc<EvalGrid>>,
-    /// The grid this node produces values on.
     pub output_grid: Arc<EvalGrid>,
 }
 
@@ -922,15 +709,11 @@ pub struct BoundMap {
     pub ops: Arc<[MapOp]>,
 }
 
-/// A math function whose scalar parameters are bound as nodes, because at least one of them varies
-/// per grid point; Prometheus reads each parameter at every step. With constant parameters the same
-/// function is a [`MathOp`] in a [`BoundMap`].
+/// A math function whose scalar parameters are bound as nodes because at least one varies per grid
+/// point. With constant parameters the same function is a [`MathOp`] in a [`BoundMap`].
 ///
-/// Every function here reads one parameter per point except `max_of` and `min_of`, which are
-/// functions of two scalars: their input is the one scalar the call wrote first and their one
-/// parameter is the other. [`Self::takes_a_scalar_input`] says which shape a function has, so the
-/// node's input and output are checked against the function it carries rather than against a
-/// convention the functions no longer all share.
+/// `max_of` and `min_of` are functions of two scalars: the input is the first argument and the one
+/// parameter is the second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum ParameterizedOp {
     /// `round(v, to_nearest)`.
@@ -948,7 +731,7 @@ pub enum ParameterizedOp {
 }
 
 impl ParameterizedOp {
-    /// How many parameters the function reads after its input.
+    /// The number of parameters after the input.
     pub fn arity(self) -> usize {
         match self {
             Self::Clamp => 2,
@@ -956,19 +739,13 @@ impl ParameterizedOp {
         }
     }
 
-    /// Whether the function's input is a scalar, which is what a function of two scalars has.
-    ///
-    /// A parameterized map otherwise maps a vector's fields onto the same fields; `max_of` and
-    /// `min_of` answer one scalar from one, so their input carries a scalar's single unlabelled
-    /// field and their answer is a scalar on that field's grid.
+    /// Whether the input and output are scalars rather than vectors.
     pub fn takes_a_scalar_input(self) -> bool {
         matches!(self, Self::MaxOf | Self::MinOf)
     }
 }
 
-/// One operation of a map, applied to each series on its own: math over its float values, a
-/// function of its native histograms, or a change of its labels. Each can give two series one label
-/// set, which is why all live in a map.
+/// One per-series operation of a map. Each can give two series one label set.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub enum MapOp {
     Math(MathOp),
@@ -976,42 +753,23 @@ pub enum MapOp {
     Label(Arc<LabelRewrite>),
 }
 
-/// Which aggregate a node computes.
+/// An aggregate that folds each group's values into one value per grid point. Series-selecting
+/// aggregates and `count_values` are [`BoundVectorOp`]s.
 ///
-/// Every kind here folds a group's values into one value per grid point. The aggregates that
-/// instead select some of the input's series (`topk`, `bottomk`, `limitk`, `limit_ratio`) or write
-/// one output label per distinct value (`count_values`) are a different shape and have no variant,
-/// so a node cannot claim to compute one of them.
-///
-/// A kind may be bound before its kernel exists: whether the tree can run is
-/// [`NativeTree::try_new`]'s and the runtime's question, not this enum's.
-///
-/// `Eq` is missing because [`AggregateKind::Quantile`] carries an `f64`, as
-/// [`RangeFunction::QuantileOverTime`] does.
-///
-/// [`RangeFunction::QuantileOverTime`]: crate::range_eval::RangeFunction::QuantileOverTime
+/// [`AggregateKind::Quantile`] carries an `f64`, so equality and hashing are implemented by hand
+/// over its bits.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum AggregateKind {
-    /// `sum`: the total of each group's values at each grid point.
     Sum,
-    /// `avg`: the mean of each group's values at each grid point.
     Avg,
-    /// `count`: how many values each group has at each grid point.
     Count,
-    /// `min`: the smallest of each group's values at each grid point.
     Min,
-    /// `max`: the largest of each group's values at each grid point.
     Max,
-    /// `group`: `1` where a group has any value at a grid point.
     Group,
-    /// `stddev`: the standard deviation of each group's values at each grid point.
     Stddev,
-    /// `stdvar`: the variance of each group's values at each grid point.
     Stdvar,
-    /// `quantile`: the φ-quantile of each group's values at each grid point, as written.
     Quantile {
-        /// The φ the query wrote, which `0` to `1` does not bound: Prometheus reads a negative φ as
-        /// `-Infinity` and one above `1` as `+Infinity`.
+        /// φ as written, unbounded: Prometheus answers `-Inf` below `0` and `+Inf` above `1`.
         quantile: f64,
     },
 }
@@ -1027,12 +785,7 @@ pub enum AggregateStage {
     Final,
 }
 
-/// How an aggregate's groups are identified, in the binding's own terms.
-///
-/// The kernel already takes both shapes ([`aggregate::Grouping`]), and the two are not
-/// interchangeable: `by(job)` keeps `job` and drops everything else, while `without(job)` keeps
-/// every other label and drops `job` too. A list of group labels can only spell the first, so a
-/// `without` written that way would group a query by labels it meant to remove.
+/// How an aggregate's groups are identified; mirrors [`aggregate::Grouping`].
 ///
 /// [`aggregate::Grouping`]: crate::aggregate::Grouping
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
@@ -1046,27 +799,16 @@ pub enum Grouping {
 /// An aggregate bound to its kind, grouping and stage.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundAggregate {
-    /// Which aggregate to compute.
     pub kind: AggregateKind,
-    /// How its groups are identified.
     pub group: Grouping,
-    /// Where this aggregate sits in the execution.
     pub stage: AggregateStage,
-    /// The kind the aggregate's direct input answers with, decided where this node was bound.
-    ///
-    /// It is what its state carries: a `sum` or `avg` over native histograms keeps histogram state,
-    /// while the same aggregate over floats keeps numeric components. It is decided from the input's
-    /// own output kind rather than from the source, because an operator between the two can change
-    /// it -- `sum(count_over_time(h[5m]))` aggregates a float built from histograms.
+    /// The direct input's field kind, which picks the state binding. It is not the source's kind:
+    /// `sum(count_over_time(h[5m]))` aggregates floats built from histograms.
     pub field_kind: FieldKind,
 }
 
-/// An operator over the whole input vector at each grid point: one that keeps some of the input's
-/// samples with their series' labels and values, orders the series, reports where none is present,
-/// reads a classic histogram from its bucket series, or counts the samples sharing a value.
-///
-/// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
-/// field.
+/// An operator over the whole input vector at each grid point, with constant parameters. A per-point
+/// `k` is [`NativeExpr::ParameterizedTopK`].
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum BoundVectorOp {
     /// `topk` (`top`) or `bottomk`: the `k` largest or smallest values of each group.
@@ -1076,18 +818,15 @@ pub enum BoundVectorOp {
     /// `limit_ratio`: the series whose label hash falls in the ratio; it keeps whole series, so it
     /// has no grouping.
     LimitRatio { ratio: f64 },
-    /// `sort`, `sort_desc`, `sort_by_label` and `sort_by_label_desc`: the input's series in another
-    /// order, which only an instant result shows. `sort` and `sort_desc` also drop histogram
-    /// samples, in a range result too.
+    /// `sort`, `sort_desc`, `sort_by_label` and `sort_by_label_desc`. The order shows only in an
+    /// instant result; `sort` and `sort_desc` also drop histogram samples, in a range result too.
     Sort(SortOrder),
-    /// `absent`: `1` under `labels` at every point where the input holds no sample. The labels are
-    /// what the compiler derives from the argument's matchers.
+    /// `absent`: `1` under `labels` (derived from the argument's matchers) at every point where the
+    /// input holds no sample.
     Absent { labels: SeriesLabels },
-    /// `histogram_quantile` or `histogram_fraction`: each classic histogram is read from the bucket
-    /// series that share its labels, so this too reads the whole vector at a point.
+    /// `histogram_quantile` or `histogram_fraction` over classic bucket series.
     Histogram(HistogramFunction),
-    /// `count_values(label, v)`: how many samples of each group share a value, under a label set
-    /// per value. It writes a label per distinct value, which an aggregate's fixed groups cannot.
+    /// `count_values(label, v)`.
     CountValues { label: Arc<str>, group: Grouping },
 }
 
@@ -1099,57 +838,47 @@ pub enum BoundVectorOp {
 pub struct BoundSetOp {
     /// `and`, `or` or `unless`.
     pub op: SetOp,
-    /// The labels a sample's match group is read from on either side.
     pub labels: MatchingLabels,
 }
 
-/// What a node computes. Every variant holds a bound operation, never a name to resolve.
+/// What a node computes.
 ///
-/// The variants are numbered by their position, and postcard writes that number, so these indices
-/// are a wire contract: a version 3 [`crate::extension_plan::FusedSeries`] envelope carries the
-/// whole [`NativeTree`] rather than a prefix of it, and a variant inserted anywhere but the end
-/// renames every variant after it for a reader of an earlier build. New variants are therefore
-/// appended after `Info`, and `native_expr_variant_indices_are_a_wire_contract` in the tests below
-/// pins the numbers.
+/// Postcard encodes a variant by its position and a [`crate::extension_plan::FusedSeries`] carries
+/// the whole [`NativeTree`], so variant indices are a wire contract: append new variants at the end
+/// (pinned by `native_expr_variant_indices_are_a_wire_contract`).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum NativeExpr {
     /// A scan or an exchange boundary.
     Input(BoundInput),
-    /// A constant scalar, evaluated on the statement's grid.
+    /// A constant scalar.
     Scalar(BoundScalar),
-    /// The evaluation time of each grid point, as `time()` reads it in seconds, or a date function
-    /// of it, as a date function called without an argument reads it.
+    /// `time()` in seconds, or a date function called without an argument.
     ///
-    /// A date function is bound here rather than over `time()`: Prometheus reads the calendar from
-    /// the evaluation timestamp truncated to whole seconds, which the float `time()` does not carry
-    /// exactly for every timestamp.
+    /// The date function is bound here rather than over `time()` because Prometheus reads the
+    /// calendar from the timestamp truncated to whole seconds, which the float `time()` does not
+    /// carry exactly.
     EvalTime { date: Option<DateFunction> },
     /// `vector(s)`: the scalar as one series without labels.
     VectorOf { input: Box<NativeNode> },
-    /// An instant selection over its input.
+    /// An instant selection over raw samples.
     Instant {
         input: Box<NativeNode>,
         op: BoundInstant,
     },
     /// Canonicalizes evaluated fragments that share a label set.
     Merge { input: Box<NativeNode> },
-    /// A window function over its input.
+    /// A range function over raw samples or a subquery's evaluated input.
     Window {
         input: Box<NativeNode>,
         op: BoundWindow,
     },
-    /// Point-wise operations over its input.
+    /// Point-wise operations, applied in order.
     Map {
         input: Box<NativeNode>,
         op: BoundMap,
     },
-    /// A point-wise math function over its input whose parameters are scalar nodes, in argument
-    /// order.
-    ///
-    /// The input is the evaluated vector the function maps, or -- for `max_of` and `min_of`, which
-    /// are functions of two scalars -- the scalar the call wrote first, which the node answers as
-    /// one scalar on the same grid. A constant input has no chunk of its own and is read off its
-    /// binding, as a constant parameter is.
+    /// A point-wise math function whose parameters are scalar nodes, in argument order. For
+    /// `max_of`/`min_of` the input is the first scalar argument and the output is a scalar.
     ParameterizedMap {
         input: Box<NativeNode>,
         op: ParameterizedOp,
@@ -1157,7 +886,7 @@ pub enum NativeExpr {
     },
     /// The timestamp of an evaluated input, in seconds.
     Timestamp { input: Box<NativeNode> },
-    /// An aggregate over its input.
+    /// An aggregate at the stage its binding names.
     Aggregate {
         input: Box<NativeNode>,
         op: BoundAggregate,
@@ -1167,23 +896,20 @@ pub enum NativeExpr {
         input: Box<NativeNode>,
         op: BoundVectorOp,
     },
-    /// A binary operation between two inputs, with its matching rules.
-    ///
-    /// Scalar operands are broadcast, so `matching` only applies to vector–vector operations.
+    /// Scalar operands are broadcast, so `matching` only applies between two vectors.
     Binary {
         left: Box<NativeNode>,
         right: Box<NativeNode>,
         matching: BinaryMatching,
     },
-    /// A set operation between two vectors, which keeps samples of either side as they are.
+    /// `and`, `or` or `unless` between two vectors.
     Set {
         left: Box<NativeNode>,
         right: Box<NativeNode>,
         op: BoundSetOp,
     },
-    /// `info(base, {selector})`: the series of `base` with the data labels of the info series that
-    /// share their identifying labels. `info` is the instant selection of those info series, whose
-    /// values are the times of the samples it selected ([`InstantValue::InfoTimestamp`]).
+    /// `info(base, {selector})`. `info` is an instant selection with
+    /// [`InstantValue::InfoTimestamp`].
     Info {
         base: Box<NativeNode>,
         info: Box<NativeNode>,
@@ -1192,10 +918,7 @@ pub enum NativeExpr {
     /// `scalar(v)`: at each grid point, the sole sample value or NaN when the vector has zero or
     /// more than one sample.
     ScalarOf { input: Box<NativeNode> },
-    /// `topk`/`bottomk` whose `k` is evaluated at every grid point instead of bound as a constant.
-    ///
-    /// `op` is still the `TopK` the constant path binds; its `k` is unused here, because the value
-    /// this node selects with is the parameter's, read once per point.
+    /// `topk`/`bottomk` with a per-point `k`. `op` is a `TopK` whose own `k` is ignored.
     ParameterizedTopK {
         input: Box<NativeNode>,
         op: BoundVectorOp,
@@ -1207,14 +930,7 @@ pub enum NativeExpr {
         op: BoundVectorOp,
         parameters: Vec<NativeNode>,
     },
-    /// An aggregate whose argument is read at every grid point instead of bound as a constant:
-    /// `quantile(<φ per point>, v)`.
-    ///
-    /// `op` is still the `Quantile` the constant path binds; its `φ` is unused here, because the
-    /// value this node folds with is the parameter's, read once per point -- exactly as
-    /// [`Self::ParameterizedTopK`] ignores the `k` its own binding carries. What the fold keeps is
-    /// its group's sample set either way, so a parameter read per point changes what is folded, not
-    /// how.
+    /// `quantile` with a per-point φ. `op` is a `Quantile` whose own φ is ignored.
     ParameterizedAggregate {
         input: Box<NativeNode>,
         op: BoundAggregate,
@@ -1225,9 +941,7 @@ pub enum NativeExpr {
 /// One node of a bound tree.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq, Hash)]
 pub struct NativeNode {
-    /// What this node computes, including its bound operands.
     pub expr: NativeExpr,
-    /// What this node produces.
     pub output: NativeType,
 }
 
@@ -1386,8 +1100,7 @@ impl NativeNode {
         }
     }
 
-    /// The input leaves below this node, in the order the tree evaluates them. A source that two
-    /// leaves read is listed once per leaf.
+    /// The input leaves below this node in evaluation order, one entry per leaf.
     pub fn inputs(&self) -> Vec<&BoundInput> {
         fn collect<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a BoundInput>) {
             if let NativeExpr::Input(input) = &node.expr {
@@ -1402,8 +1115,7 @@ impl NativeNode {
         inputs
     }
 
-    /// Whether this node reads no data at all: a constant, the evaluation time, or an operation
-    /// between them. Every execution computes the same value for it.
+    /// Whether this node reads no data, so every execution computes the same value for it.
     pub fn is_data_free(&self) -> bool {
         match &self.expr {
             NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
@@ -1414,65 +1126,23 @@ impl NativeNode {
     }
 }
 
-/// Whether this tree can hand over two series that share one canonical label set.
+/// Whether this tree can hand over two series that share one canonical label set (the metric name
+/// plus the ordinary labels, which is what [`NativeExpr::Merge`] groups by).
 ///
-/// A canonical label set is the identity a [`NativeExpr::Merge`] groups by: the metric name plus the
-/// ordinary labels, which is exactly what [`SeriesLabels`] holds. One scan partition holds one
-/// series per such set - a stored series is one identity, and the scan splits rows by storage key
-/// rather than by label set - so only a computation that *writes* an existing label, or drops one,
-/// can turn two of those identities into one. A `label_replace` or a `label_join` writes one, and it
-/// may name the very label that told its input's series apart; a range function that drops the
-/// metric name, and `timestamp` in either of its forms, drop one.
+/// A scan partition holds one series per canonical label set, so only a node that writes an
+/// existing label or drops one can create duplicates:
 ///
-/// The rewrite is judged by the labels it writes and the ones its input carries, which is why the
-/// caller supplies what it knows about each source's tags, indexed by the `source_index` the leaves
-/// were bound to: a destination that names no ordinary label of the input writes a fresh one, and a
-/// fresh ordinary label cannot make two series equal. That is the difference between
-/// `label_replace(x, "dst", "$1", "host", "(.*)")` - which no merge has to collect - and
-/// `label_replace(x, "host", "same", "host", ".*")`, which folds every series of `x` into one label
-/// set.
+/// - A label rewrite whose destination the input already carries, judged against `source_tags`
+///   (indexed by `source_index`). A `__name__` destination always counts, because the scan below
+///   may hold several metrics whose ordinary labels are equal.
+/// - A node that drops [`PROMQL_METADATA_LABELS`] (a name-dropping window, `timestamp`, a math or
+///   histogram map, a parameterized map, an arithmetic or `bool` scalar broadcast), unless
+///   [`metadata_labels_keep_series_apart`] proves the drop injective.
 ///
-/// A source's entry is its complete runtime label set, so `__name__` is one of its labels whenever
-/// its series carry a name - a scan bound to one metric names every series from its binding. That is
-/// what makes `label_replace(x, "__name__", "same", "__name__", ".*")` a rewrite of an existing
-/// label: two metrics whose ordinary labels are equal can be told apart by name alone, and rewriting
-/// that name folds them into one identity. A name write is collected even when the derived set no
-/// longer carries `__name__` - after `abs`, a `timestamp` or a range function dropped it - because
-/// the scan below those kernels can still hold several metrics whose ordinary labels are equal, and
-/// writing one name puts them under one identity; the walk has no proof that the input reads a
-/// single metric, so the conservative answer is the one that collects.
-///
-/// Everything else either keeps the set it read or answers a set of its own:
-///
-/// - A map of math drops the metadata labels, and so do a histogram map, a parameterized map, an
-///   arithmetic or `bool` scalar broadcast, a range function that computes its result and a
-///   `timestamp` in either of its forms. Such a node is judged by the labels it and its input
-///   report ([`metadata_labels_keep_series_apart`]): a source bound to one metric names every series
-///   it hands over, so the name the drop removes told none of them apart, and a source that may hand
-///   over several is collected. A key column that holds `NULL` in one series and `''` in another is
-///   *not* part of that proof - see the doc comment of the function - so a drop whose labels prove
-///   it is never collected for the storage keys alone.
-/// - An `Aggregate` answers its groups, a `Vector` that folds series answers its result sets, and a
-///   `Binary` that reads whole vectors files its rows by the label set a sample *ends* under and
-///   refuses two values of a field at one point. A `Set` does the same, and `info` merges the
-///   results that share a label set. Each answers one series per set it names.
-/// - A `Window` that drops the metadata labels, and the two timestamps, claim one of their own: the
-///   name is part of the identity a merge groups by, so two series that shared every other label are
-///   one label set from there on - unless the labels tell them apart by the same rule the kernels
-///   above are judged by.
-/// - A [`Merge`](NativeExpr::Merge) at or below a drop answers nothing for it
-///   ([`canonical_below`](crate::native::plan::canonical_below)): a merge hands over one series per
-///   canonical label set, but the labels that tell two of its series apart still have to prove the
-///   drop. A chain of drops over one metric is therefore collected once per collision the labels do
-///   not prove, and not at all when they do.
-/// - A node that hands its input's series over unchanged - a selection, a name-keeping window,
-///   `topk` and its ranking siblings - passes the answer on: an alias below it is still an alias
-///   above it.
-///
-/// This is the fact [`merge_label_rewrites`](crate::native::canonicalize::merge_label_rewrites)
-/// inserts a `Merge` for: a consumer that reads a whole label set cannot answer from pieces, and this
-/// says where pieces of one set can exist at all. A `Merge` is the collection itself, so it answers
-/// `false` - which is what makes the pass idempotent.
+/// Nodes that file their rows by result label set (aggregates, vector-vector binaries, sets, `info`,
+/// `absent`, `count_values`, histogram functions) answer `false`, and so does `Merge`, which is what
+/// makes [`merge_label_rewrites`](crate::native::canonicalize::merge_label_rewrites) idempotent.
+/// Nodes that pass their input's series through propagate the input's answer.
 pub fn duplicates_canonical_labels(
     node: &NativeNode,
     source_tags: &[Vec<String>],
@@ -1483,35 +1153,21 @@ pub fn duplicates_canonical_labels(
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
         | NativeExpr::VectorOf { .. } => false,
-        // The collection itself: one series per label set comes out of it.
         NativeExpr::Merge { .. } => false,
-        // These hand each series over as they read it, so what aliases below them still aliases --
-        // except `timestamp`, which reports a sample's own time under the metadata labels dropped
-        // and is therefore a source of duplicates in its own right unless the labels prove that
-        // drop injective ([`metadata_labels_keep_series_apart`]).
         NativeExpr::Instant { input, op } => {
             (op.value == InstantValue::Timestamp
                 && !metadata_labels_keep_series_apart(input, source_tags, source_metrics))
                 || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
-        // A window that drops the metadata labels can fold two series that agreed on every other
-        // label into one set, so it is a source of duplicates whether or not its input was one -
-        // unless the labels below it provably tell those series apart still.
         NativeExpr::Window { input, op } => {
             (op.function.drops_metric_name()
                 && !metadata_labels_keep_series_apart(input, source_tags, source_metrics))
                 || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
-        // `timestamp` always drops the metadata labels, so two series it reads can become one set -
-        // unless the labels below it are all bound to one metric, which is what proves that the name
-        // it removes told none of those series apart.
         NativeExpr::Timestamp { input } => {
             !metadata_labels_keep_series_apart(input, source_tags, source_metrics)
                 || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
-        // A parameterized map is a math kernel - `round`, `clamp` - and drops the metadata labels as
-        // a math map does, so it answers for the same reason. Its parameter is a scalar and carries
-        // no labels of the input's.
         NativeExpr::ParameterizedMap { input, .. } => {
             !metadata_labels_keep_series_apart(input, source_tags, source_metrics)
                 || duplicates_canonical_labels(input, source_tags, source_metrics)
@@ -1519,19 +1175,8 @@ pub fn duplicates_canonical_labels(
         NativeExpr::ParameterizedTopK { input, .. } => {
             duplicates_canonical_labels(input, source_tags, source_metrics)
         }
-        // `scalar()` answers one value, which names no label set at all.
         NativeExpr::ScalarOf { .. } => false,
-        // The histogram functions fold the bucket series of one histogram into one series, so two
-        // pieces of one label set cannot survive them.
         NativeExpr::ParameterizedHistogram { .. } => false,
-        // A rewrite writes a caller-chosen destination label, so two series can end under one set -
-        // but only if that label was one of the input's, because writing a label no series carries
-        // leaves every series' identity distinct. `map_writes_existing_label` is that question, and
-        // an input whose labels this walk cannot derive is collected rather than trusted. Even a
-        // whole-vector consumer can emit distinct series whose labels a later rewrite makes equal.
-        // A math or histogram kernel in the same map drops the metadata labels, which is a source of
-        // duplicates of its own unless the labels tell its input's series apart - see the doc
-        // comment above.
         NativeExpr::Map { input, op } => {
             (op.ops
                 .iter()
@@ -1540,18 +1185,14 @@ pub fn duplicates_canonical_labels(
                 || map_writes_existing_label(input, op, source_tags).unwrap_or(true)
                 || duplicates_canonical_labels(input, source_tags, source_metrics)
         }
-        // A fold answers one series per group, which is one label set per group.
         NativeExpr::Aggregate { .. } | NativeExpr::ParameterizedAggregate { .. } => false,
         NativeExpr::Vector { input, op } => match op {
-            // These keep and order the series they read, so they alias exactly as their input does.
             BoundVectorOp::TopK { .. }
             | BoundVectorOp::LimitK { .. }
             | BoundVectorOp::LimitRatio { .. }
             | BoundVectorOp::Sort(_) => {
                 duplicates_canonical_labels(input, source_tags, source_metrics)
             }
-            // `absent` reports one series, `count_values` one per distinct value, and the histogram
-            // functions fold the bucket series of one histogram into one series.
             BoundVectorOp::Absent { .. }
             | BoundVectorOp::Histogram(_)
             | BoundVectorOp::CountValues { .. } => false,
@@ -1563,13 +1204,9 @@ pub fn duplicates_canonical_labels(
         } => {
             let vector = |side: &NativeNode| side.output.samples().is_some();
             match (vector(left), vector(right)) {
-                // Two vectors are matched by label, and the kernel files its rows by the label set a
-                // sample ends under, refusing two values of one field at one point.
                 (true, true) => false,
-                // A broadcast reaches each series of its vector side as it is, one series of the
-                // vector side per output series. An arithmetic one and one that reports a `bool`
-                // drop the metadata labels, which is a source of duplicates of its own unless the
-                // labels tell its series apart; a filtering comparison keeps the set it read.
+                // Arithmetic and `bool` broadcasts drop the metadata labels; a filtering comparison
+                // keeps them.
                 (true, false) | (false, true) => {
                     let carried = if vector(left) { left } else { right };
                     let drops_metadata = !matching.op.is_comparison() || matching.return_bool;
@@ -1577,32 +1214,19 @@ pub fn duplicates_canonical_labels(
                         && !metadata_labels_keep_series_apart(carried, source_tags, source_metrics))
                         || duplicates_canonical_labels(carried, source_tags, source_metrics)
                 }
-                // Two scalars name no label set at all.
                 (false, false) => false,
             }
         }
-        // A set operation keeps each side's samples and files them by result label set, refusing two
-        // values of one field at one point.
         NativeExpr::Set { .. } => false,
-        // `info` indexes the info side by identifying labels and merges the results that share a
-        // label set.
         NativeExpr::Info { .. } => false,
     }
 }
 
-/// Whether `op`, applied to `input`'s series, writes a label those series already carry.
+/// Whether `op`, applied in written order to `input`'s series, writes a label they already carry.
 ///
-/// The walk is over the ops in written order, starting from the labels the input reports. A
-/// destination the input already carries can fold two series into one; a fresh destination cannot.
-/// A `__name__` destination is always treated as carried, even when the derived set has lost it: a
-/// kernel such as `abs`, `timestamp` or a range function drops the name, but the scan below it can
-/// still hold several metrics whose ordinary labels are equal, and writing one name puts those
-/// identities under one label set. Nothing here proves the input reads a single metric, so the
-/// conservative answer is the one that collects.
-///
-/// `None` when the input's label set is not derivable, which is treated as "it may carry the
-/// destination" by the caller: an unknown set proves nothing, so the conservative answer is the one
-/// that collects.
+/// A `__name__` destination always counts as carried: even after a kernel dropped the name, the
+/// scan below may hold several metrics whose ordinary labels are equal. `None` when the input's
+/// labels are not derivable.
 fn map_writes_existing_label(
     input: &NativeNode,
     op: &crate::native::plan::BoundMap,
@@ -1616,8 +1240,6 @@ fn map_writes_existing_label(
             if destination == METRIC_NAME || tags.iter().any(|tag| tag == destination) {
                 existing = true;
             }
-            // A label the input did not carry is one the rewrite publishes only when it can write a
-            // value; a delete-only rewrite adds nothing a later op could read as carried.
             if rewrite.writes_value() && !tags.iter().any(|tag| tag == destination) {
                 tags.push(destination.to_string());
             }
@@ -1626,53 +1248,21 @@ fn map_writes_existing_label(
     Some(existing)
 }
 
-/// Whether the metadata labels a rewrite drops are the only ones telling `node`'s series apart.
+/// Whether dropping [`PROMQL_METADATA_LABELS`] from `node`'s series keeps them distinct.
 ///
-/// A range function that computes its result and `timestamp` in either of its forms drop
-/// [`PROMQL_METADATA_LABELS`] - the metric name, `__type__` and `__unit__` - and a consumer above
-/// them that reads a whole label set has to establish those series cannot collide once the three are
-/// gone. Two series of one input collide only if they differed in one of the three alone,
-/// so the drop is injective - and nothing has to be collected - when neither can tell two of them
-/// apart:
+/// - If `node` reports `__type__` or `__unit__`, nothing is proved.
+/// - If `node` still reports `__name__`, it is proved when every series carries the same name
+///   ([`single_metric_name`]).
+/// - If the name is already gone, it is proved when `node` itself answers one series per label set
+///   ([`answers_one_series_per_label_set`]), or when every source below reads the same one metric
+///   ([`single_source_metric`]), since a drop on the way may have folded several metrics.
 ///
-/// - The name: a source bound to one metric names every series it hands over, so the name is the
-///   same for all of them and removing it merges nothing (see [`single_metric_name`]). A source that
-///   may hand over several - one selector that discovered several metrics, or a caller that cannot
-///   tell - is not proved, and the conservative answer is the one that collects.
-/// - `__type__` and `__unit__`: both are removed along with the name, and neither is a label this
-///   walk can prove constant across a source's series. They are ordinary labels when a source
-///   carries them as tags or a rewrite writes them, and two series that agree on everything else are
-///   one label set once they are gone. Their presence anywhere in `node`'s output is therefore
-///   enough to withhold the proof.
+/// `false` when `node`'s labels are not derivable. [`duplicates_canonical_labels`] and
+/// [`unifies_its_own_contributions`] both use this, so planning and runtime agree on a merge.
 ///
-/// A node whose own kernel answers one series per label set - a fold, a match between two vectors, a
-/// set operation, `info`, `count_values` - has already told those series apart, so a drop above it is
-/// proved whatever metrics it reads ([`answers_one_series_per_label_set`]).
-///
-/// A node whose labels already lost the name - `abs`, a name-dropping window below it - has no name
-/// of its own left to remove, and what its surviving labels tell apart is then only as good as the
-/// metrics below it: a drop that happened on the way there removed a name without asking this walk,
-/// so the proof asks instead that every source it reads is bound to the same one metric
-/// ([`single_source_metric`]). Over a selector that discovered several metrics that drop folds them
-/// together, and the answer is the one that collects.
-///
-/// `false` when the walk cannot derive `node`'s labels at all, because an unknown set proves nothing.
-///
-/// This is the whole of the drop's proof: every arm of [`duplicates_canonical_labels`] that decides
-/// whether a collection is needed asks it, and so does [`unifies_its_own_contributions`] at run
-/// time, so the two cannot disagree about a merge.
-///
-/// What it does not answer is a key column that holds `NULL` in one series and `''` in another, both
-/// of which decode to no label once the empty value is dropped with the name. That pair is
-/// deliberately outside the proof: it is a property of a nullable tag column rather than of the
-/// labels, and every tag column of a metric-engine table is nullable, so collecting a drop for it
-/// puts a canonical merge - and the fragmenting boundary that merge carries - over every statement
-/// whose kernel drops the metadata labels, including the ones whose labels prove the drop injective.
-/// The fact is still read from the resolved table
-/// ([`keys_survive_metadata_drop`](crate::extension_plan::keys_survive_metadata_drop)) and the
-/// statements whose labels prove the drop while that pair does not are still counted
-/// ([`leaves_a_drop_to_the_storage_keys`]), so what the pair can hide stays observable even though
-/// nothing is collected for it.
+/// A key column holding `NULL` in one series and `''` in another is deliberately outside the proof:
+/// every metric-engine tag column is nullable, so counting it would put a merge over every
+/// name-dropping statement. [`leaves_a_drop_to_the_storage_keys`] reports those statements instead.
 fn metadata_labels_keep_series_apart(
     node: &NativeNode,
     source_tags: &[Vec<String>],
@@ -1688,50 +1278,27 @@ fn metadata_labels_keep_series_apart(
         return false;
     }
     if !tags.iter().any(|tag| tag == METRIC_NAME) {
-        // A node whose own kernel already answers one series per label set told those series apart
-        // itself, so the drop above it removes a name no two of them were told apart by: `1 - a / b`
-        // matches the two metrics and refuses two values of one field at one point, and the broadcast
-        // above that match only drops a name the match no longer carries. Nothing is collected for
-        // such a consumer, whatever metrics it reads.
+        // e.g. `1 - a / b`: the vector match already filed its rows by result label set.
         if answers_one_series_per_label_set(node) {
             return true;
         }
-        // Otherwise no name is left to lose, so what the surviving labels tell apart is decided by
-        // the sources below: every one of them reading the same single metric is what says a name
-        // dropped on the way here could not have folded two metrics together either. `abs` and a
-        // name-dropping window both drop the name without asking, so without that fact nothing
-        // below is proved.
         return single_source_metric(node, source_metrics).is_some();
     }
     single_metric_name(node, source_metrics).is_some()
 }
 
-/// Whether `node` answers one series per label set by construction.
+/// Whether `node`'s kernel files or folds its rows by result label set, so its series are distinct
+/// whatever its inputs held.
 ///
-/// These are the nodes whose own kernel files or folds its rows by the label set a sample ends
-/// under, so two of the series it answers are distinct label sets whatever its inputs held: a fold
-/// answers one series per group, a match between two vectors and a set operation file their rows by
-/// the result label set and refuse two values of one field at one point, `info` merges the results
-/// that share a label set, and the functions that build one series out of many - `absent`,
-/// `count_values` and the histogram functions - answer a set of their own.
-///
-/// A metadata drop above one of them therefore cannot fold two of its series by removing the name:
-/// the identity that told them apart is the label set the kernel filed them under, and that set is
-/// what the drop is handed.
-///
-/// A [`NativeExpr::Merge`] is deliberately not one of them. It answers one series per *canonical*
-/// label set, and that set includes the name: a merge keeps `a{job="x"}` and `b{job="x"}` apart, so a
-/// drop above it that removes the name does fold those two, and it is collected
-/// (`a_merge_below_a_drop_does_not_answer_the_metadata_labels`).
+/// [`NativeExpr::Merge`] is not one: its canonical label set includes the name, so a drop above it
+/// can still fold `a{job="x"}` and `b{job="x"}`.
 fn answers_one_series_per_label_set(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Aggregate { .. }
         | NativeExpr::Set { .. }
         | NativeExpr::Info { .. }
         | NativeExpr::ParameterizedHistogram { .. } => true,
-        // A match between two vectors is the one `Binary` shape that files its rows by the result
-        // label set; a node with a scalar on one side reaches each series of its vector side as it
-        // is, which tells nothing apart on its own.
+        // Only vector-vector matching; a scalar broadcast passes series through.
         NativeExpr::Binary { left, right, .. } => {
             left.output.samples().is_some() && right.output.samples().is_some()
         }
@@ -1745,20 +1312,11 @@ fn answers_one_series_per_label_set(node: &NativeNode) -> bool {
     }
 }
 
-/// Whether a [`NativeExpr::Merge`] collects the series `node` hands over, at it or below it.
+/// Whether a [`NativeExpr::Merge`] sits at or below `node` on its sample-carrying path.
 ///
-/// A merge holds one series per canonical label set, so the series above one are not stored series
-/// any more: a merge with nothing to merge hands its input's pieces through, and one that does
-/// merge keeps the first piece's labels and drops the pieces it folded, so what comes out is unique
-/// under the label set Prometheus compares (`label_set` in `grid_series`) - the one that treats an
-/// empty label value as no label. Two pieces that came out of one merge are therefore distinct under
-/// that comparison even though their rows may still spell an empty value, which is what makes a
-/// second drop above the merge unable to fold them by removing an empty value. What it does not make
-/// impossible is the rest of such a drop: a merge keeps two series that differ in `__name__`,
-/// `__type__` or `__unit__`, and removing those is exactly what a metadata drop does.
-///
-/// Only the children that carry samples are searched: a parameter is a scalar or a vector of
-/// constants, and a merge below one reads series this node's own samples did not come from.
+/// A merge's output is unique under Prometheus' `label_set` comparison, which treats an empty value
+/// as absent, so the `NULL`/`''` key pair cannot collide above it. Parameter children are skipped:
+/// their series are not the ones `node` hands over.
 fn canonical_below(node: &NativeNode) -> bool {
     matches!(node.expr, NativeExpr::Merge { .. })
         || node
@@ -1769,32 +1327,15 @@ fn canonical_below(node: &NativeNode) -> bool {
             .any(canonical_below)
 }
 
-/// Whether `node` drops [`PROMQL_METADATA_LABELS`] on its own over series whose labels are proved to
-/// tell apart and whose keys are not.
-///
-/// This is what the pair the proof leaves outside costs, stated rather than collected: the labels
-/// prove the drop ([`metadata_labels_keep_series_apart`]), nothing at or below it has collected
-/// already ([`canonical_below`]), and the scan's primary key holds a column that can spell `NULL` in
-/// one series and `''` in another. Those two decode to an absent and to an empty label, and the drop
-/// normalizes them into one - the case a collection used to be inserted for and that a name-dropping
-/// kernel over a metric-engine table, whose tag columns are all nullable, paid a merge for. The
-/// collection is gone (see [`metadata_labels_keep_series_apart`]) and this is the count that keeps
-/// the statements it would have covered observable.
-///
-/// Every node that drops the metadata labels on its own counts: a map of math, a histogram map, a
-/// parameterized map and an arithmetic or `bool` scalar broadcast, and the three that rewrite a
-/// sample's own value - a name-dropping range function, `timestamp(x)` and a `timestamp` over an
-/// evaluated input.
+/// Whether `node` or a descendant drops [`PROMQL_METADATA_LABELS`] where the labels prove the drop
+/// ([`metadata_labels_keep_series_apart`]) but the storage keys may not: `keys_survive` is `false`
+/// and no merge sits below the drop ([`canonical_below`]).
 fn drops_metadata_labels_over_one_metric(
     node: &NativeNode,
     source_tags: &[Vec<String>],
     source_metrics: &[Option<Arc<str>>],
     keys_survive: bool,
 ) -> bool {
-    // The statement is counted exactly when the labels prove the drop and the key columns are the
-    // only thing left that does not: nothing at or below it has collected already
-    // ([`canonical_below`]), and the resolved table's keys can spell the `NULL`/`''` pair - which is
-    // the fact this count exists to surface now that nothing is collected for it.
     let decided_by_the_keys = |carried: &NativeNode| {
         !keys_survive
             && metadata_labels_keep_series_apart(carried, source_tags, source_metrics)
@@ -1815,8 +1356,6 @@ fn drops_metadata_labels_over_one_metric(
                 .any(|operation| matches!(operation, MapOp::Math(_) | MapOp::Histogram(_)))
                 && decided_by_the_keys(input)
         }
-        // A broadcast reaches each series of its vector side as it is; an arithmetic one and one
-        // that reports a `bool` drop the metadata labels, a filtering comparison keeps them.
         NativeExpr::Binary {
             left,
             right,
@@ -1843,15 +1382,9 @@ fn drops_metadata_labels_over_one_metric(
         })
 }
 
-/// Whether `tree` holds a node that drops the metadata labels over series whose labels are proved to
-/// tell apart and whose keys are not (see [`drops_metadata_labels_over_one_metric`]).
-///
-/// A statement this answers `true` for is one whose drop the labels prove while the scan below it
-/// keys its series by a column that can hold `NULL` in one series and `''` in another
-/// (`keys_survive` is `false`, and the caller states that fact from the resolved table). Nothing is
-/// collected for that pair - the labels are the whole of the proof - so this is the count that keeps
-/// the statements it leaves unproved observable, and the caller reports it as the reason its
-/// label-set check does not cover them.
+/// Whether `tree` drops the metadata labels where the labels prove the drop but a key column that
+/// can hold both `NULL` and `''` may not (`keys_survive` is `false`). Nothing is merged for that
+/// case; the caller reports it.
 pub fn leaves_a_drop_to_the_storage_keys(
     tree: &NativeTree,
     source_tags: &[Vec<String>],
@@ -1861,11 +1394,7 @@ pub fn leaves_a_drop_to_the_storage_keys(
     drops_metadata_labels_over_one_metric(tree.root(), source_tags, source_metrics, keys_survive)
 }
 
-/// The one metric every source `node` reads is bound to, or `None` when they are not all one.
-///
-/// This is the facts-free question about the leaves alone: a node can drop the metric name on the
-/// way (a math map, a range function) whatever its sources hold, so what the surviving labels tell
-/// apart is only as good as the set of metrics below them.
+/// The one metric every source below `node` is bound to, or `None` when they are not all one.
 fn single_source_metric(
     node: &NativeNode,
     source_metrics: &[Option<Arc<str>>],
@@ -1874,7 +1403,6 @@ fn single_source_metric(
     let mut metric: Option<&Arc<str>> = None;
     while let Some(node) = pending.pop() {
         match &node.expr {
-            // A source that may hand over several metrics proves nothing about their names.
             NativeExpr::Input(input) => {
                 let bound = source_metrics.get(input.source_index)?.as_ref()?;
                 match metric {
@@ -1908,8 +1436,6 @@ fn single_source_metric(
                 pending.push(input);
                 pending.push(parameter);
             }
-            // A fold reads its group's values and the series its argument is answered from, so both
-            // halves are sources this question is asked of.
             NativeExpr::ParameterizedAggregate {
                 input, parameter, ..
             } => {
@@ -1931,17 +1457,11 @@ fn single_source_metric(
     metric.cloned()
 }
 
-/// The one metric every series `node` hands over is named, or `None` when this walk cannot say.
-///
-/// Only the nodes that hand their input's label set on unchanged can carry a name: every kernel that
-/// reports a value of its own drops it, so a name above one of those is one a rewrite wrote. What is
-/// left is the boundary the leaves are bound to - where `source_metrics` answers, indexed by the
-/// `source_index` the leaf reads - and the nodes that pass a set through.
+/// The one metric name every series `node` hands over carries, followed only through nodes that
+/// pass their input's label set on unchanged. `None` when this walk cannot say.
 fn single_metric_name(node: &NativeNode, source_metrics: &[Option<Arc<str>>]) -> Option<Arc<str>> {
     match &node.expr {
         NativeExpr::Input(input) => source_metrics.get(input.source_index).cloned().flatten(),
-        // These report the label set they read rather than one of their own, so the name is their
-        // input's. A map that computes a value or writes a name is not one of them.
         NativeExpr::Merge { input }
         | NativeExpr::ParameterizedTopK { input, .. }
         | NativeExpr::Vector {
@@ -1968,34 +1488,16 @@ fn single_metric_name(node: &NativeNode, source_metrics: &[Option<Arc<str>>]) ->
         {
             single_metric_name(input, source_metrics)
         }
-        // A kernel that reports a value of its own drops the name, and a fold, a set operation, an
-        // `info` lookup and a rewrite writing the name answer a set this walk does not follow.
         _ => None,
     }
 }
 
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
-/// An `Aggregate` folds every series of its group, whether its argument is bound or read per point,
-/// a `Binary` and a `Set` pair two vectors' series by label, an `Info` looks the info series of each
-/// series up by its identifying labels, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
-/// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point.
-///
-/// `Merge` answers one series per label set, and the label sets it answers span every input series:
-/// two of them can collapse into the one it emits. It is therefore whole-vector too, which is why it
-/// also cannot be moved below a boundary that holds only part of a metric. Everything else - an
-/// input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
-/// side, whose broadcast reaches each series the other side answers - answers one series from one
-/// series' rows.
-///
-/// Both a region-side placement and the native route's admission ask this, and they must agree: a
-/// tree admitted here but refused there becomes a node the physical layer cannot build, and one
-/// refused here but admitted there would be pushed to a region that holds part of the metric.
-///
-/// The walk asks the facts-free form of [`unifies_its_own_contributions`]: a placement reads a tree
-/// without the binding that says which metric each of its inputs reads, and every reader of this
-/// answer - the admission below, the region-side classification and the locality of a built node -
-/// asks it of the same tree, so the conservative answer is the one that keeps them agreeing.
+/// Aggregates, vector-vector binaries, sets, `info`, vector operations, `scalar()`, per-point
+/// `topk`/histogram functions and `Merge` do; so does a window over an input that may hand over
+/// fragments of one label set. A region-side placement and the native route's admission both ask
+/// this and must agree, so it passes no source facts to [`unifies_its_own_contributions`].
 pub fn reads_across_series(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
@@ -2007,27 +1509,19 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         | NativeExpr::VectorOf { input }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input } => reads_across_series(input),
-        // A parameterized operation reads its parameters too, and one of them can read across series
-        // as well: `clamp_min(b, scalar(a))` bounds each series of `b` by a value that only exists
-        // once the whole of `a` is gathered, so the node reads across series wherever its parameter
-        // does.
+        // e.g. `clamp_min(b, scalar(a))` reads across series through its parameter.
         NativeExpr::ParameterizedMap {
             input, parameters, ..
         } => reads_across_series(input) || parameters.iter().any(reads_across_series),
-        // `scalar()` needs the whole vector: which series carries the one value at a point decides
-        // the answer, so the node reads across series.
         NativeExpr::ScalarOf { .. } => true,
         NativeExpr::Binary { left, right, .. } => {
             let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
             if scalar(left) || scalar(right) {
                 reads_across_series(left) || reads_across_series(right)
             } else {
-                // Two vectors are matched by label, which pairs series of the whole vector.
                 true
             }
         }
-        // A parameterized operation reads its parameter too, and a `k` that changes per point
-        // decides which series survive.
         NativeExpr::ParameterizedTopK { .. } | NativeExpr::ParameterizedHistogram { .. } => true,
         NativeExpr::Aggregate { .. }
         | NativeExpr::ParameterizedAggregate { .. }
@@ -2038,48 +1532,26 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
     }
 }
 
-/// Whether `node` is a supported child of a [`NativeExpr::Merge`], and the evaluated vector it hands
-/// over.
-///
-/// A merge receives fragments and groups them by canonical label set, combining the ones a label set
-/// shares by grid position; it names neither the tree nor the operator that produced a fragment. What
-/// it reads is therefore the whole of its requirement: samples evaluated on one grid in one field
-/// layout, which is an evaluated vector and nothing else. This is that type check and no more, so no
-/// node kind is refused for what it computes: a scan's samples, a window's rate, an aggregate's fold
-/// and a binary operation's match all hand over the same thing, and which one of them did says
-/// nothing about whether the fragments merge.
-///
-/// The collection does rely on the shape of the stream - a series arrives whole, its chunks
-/// contiguous and its last one marked as closing it - and every node that answers an evaluated vector
-/// keeps it. A window, a map, an instant selection, a timestamp and a scalar broadcast hand their
-/// input's closing on, and an aggregate, a vector operation, a binary or set operation and a merge
-/// itself close each series they answer, because each decides a whole series at once. There is hence
-/// no operator above a merge that could break the collection, and none has to be listed here; the
-/// collector checks the shape chunk by chunk before it keeps a fragment, which is where a stream that
-/// broke it is refused.
+/// The evaluated vector a [`NativeExpr::Merge`] child hands over, or `None` if it is not one.
 fn merge_shape_supported(node: &NativeNode) -> Option<(&Arc<SeriesSchema>, &Arc<EvalGrid>)> {
     evaluated_vector(&node.output)
 }
 
-/// A bound evaluation tree.
-///
-/// The tree itself carries no run-time state: every execution builds its own, so one compiled plan
-/// can serve every partition.
+/// A validated bound evaluation tree. It carries no run-time state, so one tree serves every
+/// partition.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq, Hash)]
 pub struct NativeTree {
     root: NativeNode,
 }
 
 impl NativeTree {
-    /// Creates a tree over `root`, checking that every node's contract holds.
-    ///
-    /// A structurally inconsistent tree is a compiler defect.
+    /// Creates a tree over `root`. Errors when [`NativeNode::validate`] rejects it, which is a
+    /// compiler defect.
     pub fn try_new(root: NativeNode) -> Result<Self> {
         root.validate()?;
         Ok(Self { root })
     }
 
-    /// The root node.
     pub fn root(&self) -> &NativeNode {
         &self.root
     }
@@ -2116,59 +1588,26 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
     }
 }
 
-/// Whether the native runtime executes `tree`, answered from the tree itself.
+/// Whether the native runtime builds `tree`.
 ///
-/// This is the question the native route asks before it commits a statement: a tree the runtime
-/// refuses has to keep the plan it had, because a refusal raised during physical planning cannot
-/// fall back. It used to be answered by building a
-/// [`NativeExecutionState`](crate::native::execute::NativeExecutionState) over the tree and
-/// dropping it, which allocates a runtime node per node per partition only to throw it away. Every
-/// term of the answer is bound on the tree, so the answer is read from the tree instead.
+/// The native route asks this before committing a statement, because a refusal raised during
+/// physical planning cannot fall back. It mirrors what `RuntimeNode::build` and
+/// `NativeExecutionState::try_new` refuse beyond [`NativeNode::validate`]:
 ///
-/// # What is refused
+/// - a root of raw samples;
+/// - an interleaved input leaf;
+/// - `scalar()`, `topk`, `bottomk`, `limitk`, `sort` or `sort_desc` over more than one field;
+/// - a binary of two literals, a scalar broadcast with vector-matching modifiers, or `bool` on
+///   arithmetic;
+/// - a `quantile` aggregate at any stage but `Complete`;
+/// - an aggregate below `Final`, or a `topk`/`bottomk`/`limitk`/`count_values`, whose grouping names
+///   a value field, and a `count_values` with an empty label;
+/// - an `anchored` or `smoothed` window over evaluated input, over a function its kernel does not
+///   correct, or with a negative lookback;
+/// - a window whose `@` fold offset or `predict_linear` instants overflow `i64`.
 ///
-/// This lists what `RuntimeNode::build` (and the root check in
-/// `NativeExecutionState::try_new`) refuses, less what [`NativeNode::validate`] has already
-/// refused: a `NativeTree` exists only through [`NativeTree::try_new`] or `Deserialize`, and both
-/// validate, so a compiled tree's per-node type contracts hold by the time this runs. What is left
-/// is the shape of the nodes, and the arithmetic each of them leaves to the runtime:
-///
-/// - a root that answers raw samples, which has no positions to answer on;
-/// - an input leaf whose series chunks may interleave, which no consumer of a leaf can order;
-/// - `scalar()` over a vector carrying more than one field;
-/// - a binary node that is neither a vector–vector operation nor a broadcast the runtime performs:
-///   two constant operands (no series to carry the result), a scalar broadcast carrying
-///   vector-matching modifiers, or `bool` on an arithmetic operator, which has no `bool` form;
-/// - a `quantile` aggregate at any stage but `Complete`, which would need a partial state it does
-///   not keep (`validate` refuses one for the same reason; this arm keeps the predicate and the
-///   runtime agreeing on it);
-/// - an aggregate below `Final` whose `by` names a value field, which would fold series the
-///   existing plan keeps apart;
-/// - `topk`, `bottomk`, `limitk`, `sort` and `sort_desc` over a vector carrying more than one
-///   field, whose series have no one value to rank;
-/// - a `topk`, `bottomk`, `limitk` or `count_values` grouping that names a value field, and a
-///   `count_values` label that is empty;
-/// - a window whose `anchored` or `smoothed` modifier reads evaluated input, names a function its
-///   kernel does not correct, or carries a negative lookback;
-/// - a window whose timestamps do not fit: the fold offset an `@` anchor turns into, or the one
-///   `predict_linear` adds to a point of the grid, where the sum leaves `i64`. Not a shape, but it
-///   is decided by the grid and the window alone, so this is where it is decided (see
-///   `window_instants_fit`).
-///
-/// # What `NativeExecutionState::try_new` still decides
-///
-/// Not every refusal is decided by the tree, and the ones below stay where the runtime builds:
-///
-/// - a reservation the memory pool refuses, which no tree carries. Every site that admits a tree
-///   ran the trial build over an
-///   [`UnboundedMemoryPool`](datafusion::execution::memory_pool::UnboundedMemoryPool), which
-///   refuses nothing, and none of them builds a runtime any more, so this is not a refusal
-///   admission can meet at any site;
-/// - a tree a test assembled directly, whose nodes disagree about their types, which
-///   [`NativeNode::validate`] rejects for every compiled one.
+/// A memory reservation refusal is left to the runtime.
 pub fn native_tree_supported(tree: &NativeTree) -> bool {
-    // A constant root and a state root are answers the state produces itself; a root of raw
-    // samples is not one, because raw samples carry their own timestamps instead of positions.
     let root_supported = match &tree.root().output {
         NativeType::Scalar(_) | NativeType::AggregateState(_) => true,
         NativeType::Samples(schema) => schema.eval_grid.is_some(),
@@ -2176,17 +1615,12 @@ pub fn native_tree_supported(tree: &NativeTree) -> bool {
     root_supported && native_node_supported(tree.root())
 }
 
-/// Whether `node` and every input below it is a shape the runtime builds.
 fn native_node_supported(node: &NativeNode) -> bool {
     stacker::maybe_grow(VALIDATE_STACK_RED_ZONE, VALIDATE_STACK_GROWTH, || {
         native_node_supported_within_stack(node)
     })
 }
 
-/// [`native_node_supported`] one tree level down.
-///
-/// Every arm reads this node's own shape and recurses into exactly the inputs its variant holds,
-/// so a new [`NativeExpr`] variant does not compile until it is classified here.
 fn native_node_supported_within_stack(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(bound) => bound.ordering != SeriesOrdering::Interleaved,
@@ -2210,9 +1644,6 @@ fn native_node_supported_within_stack(node: &NativeNode) -> bool {
         NativeExpr::Aggregate { input, op } => {
             native_node_supported(input) && aggregate_supported(node, input, op)
         }
-        // A per-point argument does not change which fold runs, only where its `φ` comes from: the
-        // same aggregate checks apply, and the parameter is a subtree like any other. That it is a
-        // scalar on this fold's grid is a type contract `validate` already refuses.
         NativeExpr::ParameterizedAggregate {
             input,
             op,
@@ -2220,8 +1651,7 @@ fn native_node_supported_within_stack(node: &NativeNode) -> bool {
         } => {
             native_node_supported(input)
                 && native_node_supported(parameter)
-                // A literal hands over no chunk, so the fold could never read a value from it:
-                // `validate` refuses one, and a tree this predicate admits must be one it does not.
+                // A literal hands over no chunk to read φ from; `validate` refuses it too.
                 && !matches!(parameter.expr, NativeExpr::Scalar(_))
                 && aggregate_supported(node, input, op)
         }
@@ -2239,15 +1669,12 @@ fn native_node_supported_within_stack(node: &NativeNode) -> bool {
         } => {
             native_node_supported(input)
                 && native_node_supported(parameter)
-                // A per-point `k` ranks the same series as the constant one, one value per series.
                 && node.output.samples().is_some_and(|schema| {
                     schema.fields.len() == 1 && vector_op_supported(schema, op)
                 })
         }
         NativeExpr::ScalarOf { input } => {
             native_node_supported(input)
-                // `scalar()` answers the sole value of a vector, so a vector of several fields has
-                // more than one value to answer with.
                 && input
                     .output
                     .samples()
@@ -2271,12 +1698,8 @@ fn native_node_supported_within_stack(node: &NativeNode) -> bool {
     }
 }
 
-/// Whether a binary node over `left` and `right` is a shape the runtime builds.
-///
-/// Two evaluated vectors are matched by `matching`, which the kernel takes as it is bound. Every
-/// other pair is a broadcast over one scalar side, and a broadcast has no labels to match and no
-/// series to pair: two constants leave no series to carry the result, a modifier a vector match
-/// would use has no meaning over a scalar, and arithmetic has no `bool` form.
+/// Two evaluated vectors are always supported. A broadcast must have default matching and no `bool`
+/// on arithmetic, and two scalars must not both be literals.
 fn binary_supported(left: &NativeNode, right: &NativeNode, matching: &BinaryMatching) -> bool {
     let evaluated = |node: &NativeNode| {
         node.output
@@ -2300,11 +1723,8 @@ fn binary_supported(left: &NativeNode, right: &NativeNode, matching: &BinaryMatc
         && !(!matching.op.is_comparison() && matching.return_bool)
 }
 
-/// Whether the runtime folds `op` over `input` with the layout `node` declares.
-///
-/// A `Complete` or `Partial` node folds values into groups it keys by series labels only, while
-/// `Final` merges state that was already grouped, which is why only the folding stages are checked
-/// against the schema.
+/// Only `Complete` and `Partial` are checked against the schema; `Final` merges state that was
+/// already grouped.
 fn aggregate_supported(node: &NativeNode, input: &NativeNode, op: &BoundAggregate) -> bool {
     match op.kind {
         AggregateKind::Sum
@@ -2316,9 +1736,7 @@ fn aggregate_supported(node: &NativeNode, input: &NativeNode, op: &BoundAggregat
         | AggregateKind::Stddev
         | AggregateKind::Stdvar => {}
         AggregateKind::Quantile { .. } => {
-            // A quantile is one `Complete` fold over its group's whole input: it keeps no state,
-            // so `validate` refuses a `Partial` or `Final` one and there is nothing to merge. The
-            // runtime answers the `Complete` stage, which is the only shape compiled.
+            // A quantile keeps no partial state.
             if op.stage != AggregateStage::Complete {
                 return false;
             }
@@ -2333,10 +1751,7 @@ fn aggregate_supported(node: &NativeNode, input: &NativeNode, op: &BoundAggregat
         .is_some_and(|schema| grouping_supported(schema, &op.group))
 }
 
-/// Whether `op` is an operation the vector kernel runs over a vector of `schema`.
 fn vector_op_supported(schema: &SeriesSchema, op: &BoundVectorOp) -> bool {
-    // These five rank or order one value per series, so a vector whose samples carry several
-    // fields has no one value to rank.
     let one_field = matches!(
         op,
         BoundVectorOp::TopK { .. }
@@ -2366,26 +1781,18 @@ fn vector_op_supported(schema: &SeriesSchema, op: &BoundVectorOp) -> bool {
     }
 }
 
-/// Whether the kernel folds `schema`'s series the way `group` asks.
-///
-/// The kernel validates its grouping by the schema alone: the group is a set of series labels, and
-/// a `by` naming one of the schema's fields would group by a value that varies between samples.
-/// This is the check `FloatAggregator::try_new_budgeted` and `VectorRuntime::try_new` run, spelled
-/// once so a reader of either name finds the same rule.
+/// The grouping check `FloatAggregator::try_new_budgeted` and `VectorRuntime::try_new` run.
 fn grouping_supported(schema: &SeriesSchema, group: &Grouping) -> bool {
     let names = group_names(group);
     crate::aggregate::validate_vector_grouping(schema, kernel_grouping(group, &names)).is_ok()
 }
 
-/// The labels `group` names, which is what the kernel's grouping is built over.
 fn group_names(group: &Grouping) -> Vec<&str> {
     match group {
         Grouping::By(names) | Grouping::Without(names) => names.iter().map(AsRef::as_ref).collect(),
     }
 }
 
-/// `group` spelled with the kernel's own [`Grouping`](crate::aggregate::Grouping), over the labels
-/// [`group_names`] reports for it: `by` and `without` are not interchangeable to the kernel.
 fn kernel_grouping<'a>(group: &Grouping, names: &'a [&'a str]) -> crate::aggregate::Grouping<'a> {
     match group {
         Grouping::By(_) => crate::aggregate::Grouping::By(names),
@@ -2393,15 +1800,9 @@ fn kernel_grouping<'a>(group: &Grouping, names: &'a [&'a str]) -> crate::aggrega
     }
 }
 
-/// Whether the runtime evaluates `op` over `input`, with or without a range modifier.
-///
-/// An `anchored` or `smoothed` window reads samples around the window to pin its boundary values,
-/// which only a raw sample stream can offer and only a kernel that corrects its boundaries reads.
-/// That is one rule, not two: [`check_modifier`](crate::range_eval::check_modifier) states it for
-/// [`RangeEvaluator::try_new`](crate::range_eval::RangeEvaluator::try_new), and it is asked here
-/// over the schema the tree binds, so a modifier a runtime refuses is one admission declines.
+/// The [`check_modifier`](crate::range_eval::check_modifier) rule
+/// [`RangeEvaluator::try_new`](crate::range_eval::RangeEvaluator::try_new) applies.
 fn window_modifier_supported(input: &NativeNode, op: &BoundWindow) -> bool {
-    // Without a modifier there is nothing for the rule to decide.
     let Some(modifier) = op.window.modifier else {
         return true;
     };
@@ -2410,37 +1811,23 @@ fn window_modifier_supported(input: &NativeNode, op: &BoundWindow) -> bool {
     })
 }
 
-/// Whether the runtime can compute the timestamps `op` reads.
-///
-/// Unlike the window itself, which a point of the grid opens alone, these timestamps are sums of
-/// the window's own parts: an `@` anchor becomes an offset from the grid's first point, and
-/// `predict_linear` adds that offset to the first and last point of the grid. Every term of either
-/// sum is bound on the node, but a sum of two that fit can still leave `i64`, and the runtime
-/// refuses the window when one does. Asking [`fold_offset`] and [`predict_linear_instants`] here
-/// rather than repeating their arithmetic keeps the two verdicts the same one: a query whose only
-/// refusal is this one keeps the plan it had instead of failing while the runtime is built.
+/// Whether the `@` fold offset and `predict_linear` instants fit in `i64`, asked through the same
+/// functions the runtime calls.
 fn window_instants_fit(op: &BoundWindow) -> bool {
     let grid = op.output_grid.spec();
     let Ok(fold_offset) = fold_offset(grid, op.window) else {
         return false;
     };
     match op.function {
-        // Only `predict_linear` reads the instant it reports; every other function reads the
-        // window it opens, which the grid alone decides.
         RangeFunction::PredictLinear(_) => predict_linear_instants(grid, fold_offset).is_ok(),
         _ => true,
     }
 }
 
-/// Stack one [`NativeNode::validate`] level needs below it before the check grows its stack.
-///
-/// The check recurses once per tree level, and a debug build's frame for one level is large:
-/// measured on an 80-term chain, the whole check needed about 1.9 MiB, which overflows the 2 MiB
-/// stack a test thread has. There is no depth limit on the trees this route compiles, so the check
-/// grows its stack on demand rather than relying on the caller's.
+/// Stack reserve before a tree walk grows its stack. Trees have no depth limit, and in a debug build
+/// an 80-term chain needed about 1.9 MiB, over a test thread's 2 MiB.
 const VALIDATE_STACK_RED_ZONE: usize = 256 * 1024;
 
-/// Stack a growth adds when the reserve above is spent. It holds several levels of the same check.
 const VALIDATE_STACK_GROWTH: usize = 4 * 1024 * 1024;
 
 impl NativeNode {
@@ -2454,8 +1841,6 @@ impl NativeNode {
     fn validate_within_stack(&self) -> Result<()> {
         match &self.expr {
             NativeExpr::Input(input) => {
-                // An input node's output is exactly the binding it was bound to: a scan hands over
-                // the samples it was created for, and an exchange boundary the state.
                 if !self.output.same_binding(&input.output) {
                     return Err(invalid(
                         "an input node's output is not the binding it was bound to",
@@ -2488,14 +1873,10 @@ impl NativeNode {
                 if !self.output.samples().is_some_and(|s| s.fields.len() == 1) {
                     return Err(invalid("vector() produces one field"));
                 }
-                // The scalar is materialized on the grid it is evaluated on, so an output on another
-                // grid would address positions the scalar does not have.
                 ensure_grid(&self.output, input_grid, "vector()")?;
             }
             NativeExpr::Instant { input, op } => {
                 input.validate()?;
-                // An instant selection reads raw samples and stamps them onto its own grid: an
-                // evaluated vector is already stamped, and a scalar has no timestamps at all.
                 match &input.output {
                     NativeType::Samples(schema) if schema.eval_grid.is_none() => {}
                     NativeType::Samples(_) => {
@@ -2510,17 +1891,11 @@ impl NativeNode {
                 }
                 ensure_not_interleaved(input)?;
                 ensure_samples(&self.output, "an instant selection")?;
-                // A selection is one source row per grid point: `select_instants` picks row
-                // indices and every field is taken at them, so it carries one value per input
-                // field.
                 ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
             }
             NativeExpr::Merge { input } => {
                 input.validate()?;
-                // A merge canonicalizes evaluated fragments, so an evaluated vector is the whole of
-                // what it needs of its input: [`merge_shape_supported`] is that check, and its
-                // documentation says why no shape of tree above those fragments matters.
                 let Some((_input_schema, input_grid)) = merge_shape_supported(input) else {
                     return Err(invalid(&format!(
                         "a merge consumes an evaluated vector, not {}",
@@ -2533,27 +1908,19 @@ impl NativeNode {
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;
-                // A window reads a range of samples per grid point, so it consumes samples: state
-                // is not a sample stream and a scalar has no timestamps.
                 let NativeType::Samples(schema) = &input.output else {
                     return Err(invalid(&format!(
                         "a window consumes samples, not {}",
                         input.output.describe()
                     )));
                 };
-                // A range that is not positive reads nothing at every grid point.
                 if op.window.range_ms <= 0 {
                     return Err(invalid(
                         "a window reads an empty range: its range must be positive",
                     ));
                 }
                 ensure_not_interleaved(input)?;
-                // What is checked here and just below is that the declared input grid equals the
-                // input's grid, and that the output grid matches the declared one. That the grid
-                // covers the window's read range
-                // `(out.start - offset - range, out.end - offset]` is not checked here: only a
-                // subquery feeds an evaluated input to a window, and deriving that coverage is the
-                // compiler's, which builds the subquery's child grid to span it.
+                // That a subquery's input grid covers the read range is the compiler's to ensure.
                 match (op.input_grid.as_ref(), schema.eval_grid.as_ref()) {
                     (None, None) => {}
                     (Some(bound), Some(actual)) if bound.spec() == actual.spec() => {}
@@ -2569,8 +1936,6 @@ impl NativeNode {
             }
             NativeExpr::Map { input, op } => {
                 input.validate()?;
-                // A map is point-wise over an evaluated vector: raw samples have no shared
-                // positions to be point-wise over, and a scalar is not a vector.
                 let Some((_, input_grid)) = evaluated_vector(&input.output) else {
                     return Err(invalid(&format!(
                         "a map consumes an evaluated vector, not {}",
@@ -2590,9 +1955,6 @@ impl NativeNode {
                 parameters,
             } => {
                 input.validate()?;
-                // `max_of` and `min_of` are functions of two scalars, so their input is the first
-                // of the two rather than a vector's fields; every other function here maps an
-                // evaluated vector and answers one of the same shape.
                 let input_grid = if op.takes_a_scalar_input() {
                     let NativeType::Scalar(input_grid) = &input.output else {
                         return Err(invalid(&format!(
@@ -2707,8 +2069,6 @@ impl NativeNode {
             }
             NativeExpr::Vector { input, .. } => {
                 input.validate()?;
-                // A vector operation keeps the input's fields and grid, so it consumes and produces
-                // the same evaluated vector.
                 let Some((_, input_grid)) = evaluated_vector(&input.output) else {
                     return Err(invalid(&format!(
                         "a vector operation consumes an evaluated vector, not {}",
@@ -2730,13 +2090,9 @@ impl NativeNode {
             }
             NativeExpr::Aggregate { input, op } => {
                 input.validate()?;
-                // A stage's contract is a pair of types, not only what it produces: `Partial`
-                // turns a vector into state and `Final` turns state back into a vector, so state
-                // never sits where a value is expected and a value never sits where state is.
+                // `Partial` turns a vector into state and `Final` turns state back into a vector.
                 match op.stage {
                     AggregateStage::Complete => {
-                        // Every contribution lies within this execution: vector in, vector out,
-                        // both on the input's grid, one value per input field.
                         let Some((_, input_grid)) = evaluated_vector(&input.output) else {
                             return Err(invalid(&format!(
                                 "a complete aggregate consumes an evaluated vector, not {}",
@@ -2748,9 +2104,6 @@ impl NativeNode {
                         ensure_grid(&self.output, input_grid, "a complete aggregate")?;
                     }
                     AggregateStage::Partial => {
-                        // Only this execution's contributions were seen, so the output is state
-                        // for a later merge: on the input's grid, grouped the same way, one
-                        // accumulator per input field.
                         let Some((input_schema, input_grid)) = evaluated_vector(&input.output)
                         else {
                             return Err(invalid(&format!(
@@ -2802,8 +2155,6 @@ impl NativeNode {
                         }
                     }
                     AggregateStage::Final => {
-                        // The state was collected from every contributing execution, so the
-                        // output is the complete value on the grid that state is indexed on.
                         let NativeType::AggregateState(state) = &input.output else {
                             return Err(invalid(&format!(
                                 "a final aggregate consumes aggregate state, not {}",
@@ -2837,7 +2188,6 @@ impl NativeNode {
                             ));
                         }
                         let output = ensure_samples(&self.output, "a final aggregate")?;
-                        // The merged value carries one value per accumulator the state holds.
                         ensure_field_count(
                             output.fields.len(),
                             state.accumulators.len(),
@@ -2854,36 +2204,24 @@ impl NativeNode {
             } => {
                 input.validate()?;
                 parameter.validate()?;
-                // The parameter is read off the chunk its node hands over, once per grid point, so
-                // it has to be a scalar the node answers a series for -- `scalar()`, `time()` and
-                // the like all do. A literal has no chunk of its own: its value is on the binding
-                // of a node that carries it, and a fold that never receives one would run to the
-                // end of its input and fail instead of folding. A query that writes a constant gets
-                // the constant path, which binds the number on the fold itself; a tree that reaches
-                // here with one was not built by the compiler, so it is refused before it runs.
+                // φ is read off the parameter's chunks, and a literal hands over none; the compiler
+                // binds a constant φ on the `Aggregate` instead.
                 if matches!(parameter.expr, NativeExpr::Scalar(_)) {
                     return Err(invalid(
                         "a parameterized aggregate reads a parameter node that hands over a \
                          scalar series, not a literal",
                     ));
                 }
-                // Only a `quantile` takes an argument a query reads per point: it is the one
-                // aggregate whose argument is a value rather than a name, and every other kind
-                // binds its parameter into its own op (or is not an aggregate at all).
                 if !matches!(op.kind, AggregateKind::Quantile { .. }) {
                     return Err(invalid(
                         "a parameterized aggregate that is not a `quantile`",
                     ));
                 }
-                // A quantile answers from its group's whole sample set, so it keeps no state: the
-                // stage that reads a parameter is the one that folds, exactly as for the bound `φ`.
                 if op.stage != AggregateStage::Complete {
                     return Err(invalid(
                         "a parameterized aggregate at a stage other than `Complete`",
                     ));
                 }
-                // The parameter is read at every point the fold answers, one value per point and no
-                // labels, so it is a scalar on the grid the answer is stamped on.
                 let Some((_, output_grid)) = evaluated_vector(&self.output) else {
                     return Err(invalid(
                         "a parameterized aggregate does not produce an evaluated vector",
@@ -2915,9 +2253,6 @@ impl NativeNode {
             NativeExpr::Binary { left, right, .. } => {
                 left.validate()?;
                 right.validate()?;
-                // A binary operation is point-wise, so both sides are evaluated on the statement's
-                // grid: state has no positions at all, and raw samples carry their own timestamps
-                // instead of positions on a shared grid.
                 let Some(left_grid) = left.output.grid() else {
                     return Err(invalid(&format!(
                         "a binary operation consumes evaluated values, not {} on its left",
@@ -2934,7 +2269,6 @@ impl NativeNode {
                     return Err(invalid("a binary operation aligns two different grids"));
                 }
                 match (&left.output, &right.output) {
-                    // Two scalars make a scalar: there is nothing to match and nothing to keep.
                     (NativeType::Scalar(_), NativeType::Scalar(_)) => {
                         if !matches!(&self.output, NativeType::Scalar(grid) if grid.spec() == left_grid.spec())
                         {
@@ -2943,9 +2277,6 @@ impl NativeNode {
                             ));
                         }
                     }
-                    // A scalar side carries no labels and no fields, so the operation is a
-                    // broadcast on the statement's grid and `matching` is not consulted. A scalar
-                    // has no fields of its own, so the broadcast keeps the vector side's fields.
                     (NativeType::Scalar(_), NativeType::Samples(vector))
                     | (NativeType::Samples(vector), NativeType::Scalar(_)) => {
                         let Some(output) = self.output.samples() else {
@@ -2961,8 +2292,7 @@ impl NativeNode {
                             ));
                         }
                     }
-                    // Two vectors are matched by `matching` on the grid they share, and the match
-                    // pairs fields by position, so it keeps the shorter side's fields.
+                    // The match pairs fields by position, so it keeps the shorter side's count.
                     (NativeType::Samples(left_vector), NativeType::Samples(right_vector)) => {
                         let Some(output) = self.output.samples() else {
                             return Err(invalid(&format!(
@@ -2977,10 +2307,7 @@ impl NativeNode {
                         )?;
                         ensure_grid(&self.output, left_grid, "a binary operation")?;
                     }
-                    // State has no grid, so the grid checks above return for either side before
-                    // this match and these two arms cannot be reached at run time. They are
-                    // spelled out because `NativeType` names `AggregateState` and the match has to
-                    // cover the pair; the message says so rather than pretending a value arrived.
+                    // Unreachable: state has no grid, so the checks above already returned.
                     (NativeType::AggregateState(_), _) | (_, NativeType::AggregateState(_)) => {
                         return Err(invalid(
                             "a binary operation reached aggregate state, which has no grid: the \
@@ -2992,8 +2319,6 @@ impl NativeNode {
             NativeExpr::Set { left, right, .. } => {
                 left.validate()?;
                 right.validate()?;
-                // A set operation keeps samples of whole vectors on the grid both share: a scalar
-                // has no labels to match, and PromQL refuses it on either side.
                 let Some((left_schema, left_grid)) = evaluated_vector(&left.output) else {
                     return Err(invalid(&format!(
                         "a set operation consumes evaluated vectors, not {} on its left",
@@ -3009,8 +2334,7 @@ impl NativeNode {
                 if left_grid.spec() != right_grid.spec() {
                     return Err(invalid("a set operation aligns two different grids"));
                 }
-                // `or` hands the right side's samples on under the left side's fields, so the
-                // kernel pairs every field by position and refuses sides of different counts.
+                // `or` emits the right side's samples under the left side's fields, by position.
                 if left_schema.fields.len() != right_schema.fields.len() {
                     return Err(invalid(&format!(
                         "a set operation pairs fields by position, and its sides carry {} and {}",
@@ -3031,12 +2355,8 @@ impl NativeNode {
                         base.output.describe()
                     )));
                 };
-                // The kernel reads the info side's values as sample times, which only an instant
-                // selection that reports them produces. A canonical merge above that selection only
-                // collects the pieces of one label set into one series, so it hands the times on
-                // unchanged and the check looks through it. Nothing else is looked through: an
-                // evaluated value vector is not a set of sample times, and reading one as times
-                // would compare a sample's value against another's.
+                // The kernel reads the info side's values as sample times, so it must be an
+                // `InfoTimestamp` selection; a merge above it passes the times through unchanged.
                 let mut source = info.as_ref();
                 while let NativeExpr::Merge { input } = &source.expr {
                     source = input;
@@ -3073,56 +2393,23 @@ impl NativeNode {
     }
 }
 
-/// Whether a binary operation drops the metric name when one side is a scalar broadcast.
-///
-/// `BroadcastRuntime::drops_labels` in [`execute`](crate::native::execute) is the rule the runtime
-/// applies: arithmetic and a `bool` comparison answer a series under the metric name dropped, and a
-/// filtering comparison keeps the label set it read.
+/// Whether a scalar broadcast drops the metric name; mirrors `BroadcastRuntime::drops_labels` in
+/// [`execute`](crate::native::execute).
 fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
     !matching.op.is_comparison() || matching.return_bool
 }
 
-/// Whether `node` hands over one logical series per canonical label set, or several.
+/// Whether `node` hands over one series per canonical label set.
 ///
-/// This is the rule the runtime collectors use to decide whether a consumer above `node` has to
-/// collect what `node` emits. `RuntimeNode::build` in [`execute`](crate::native::execute) and the
-/// Window and `limitk` collectors share this predicate so their decisions cannot disagree.
+/// - `Some(true)`: one series per label set; a consumer collects nothing.
+/// - `Some(false)`: several series may share a label set; the `Window` runtime collects them
+///   through `MergeInput`, and `limitk` merges its retained input.
+/// - `None`: unknown. Only an [`NativeExpr::Input`] answers this, and pass-through nodes propagate
+///   it; the runtime collectors treat it like `Some(true)`.
 ///
-/// Three answers, because what a consumer may do about a contribution carries two facts and a
-/// boundary answers neither:
-///
-/// - `Some(true)`: the output is one series per canonical label set, established here, so a
-///   consumer that needs one unified series already has it and collects nothing.
-/// - `Some(false)`: the output may hold several series of one label set, and this node *says so*,
-///   so a consumer that needs one unified series collects them through `MergeInput`. A
-///   [`NativeExpr::Merge`] above such a node would make it stream an already-merged series and
-///   turn that collection off.
-/// - `None`: the output may hold several, and this node says nothing: it has neither a proof to
-///   offer nor a report to make. Only a boundary ([`NativeExpr::Input`]) answers this, and a node
-///   that hands its input's series back unchanged passes the answer on. Runtime collectors leave
-///   this case alone because they collect only when the answer is `Some(false)`.
-///
-/// The collection condition is `matches!(answer, Some(false))`: the Window `MergeInput` collector
-/// at runtime and the `limitk` collector both ask this predicate of their input.
-///
-/// `source_tags` and `source_metrics` are the same facts
-/// [`duplicates_canonical_labels`] judges a whole label set by, indexed the same way: a node that
-/// drops the metadata labels reports fragments only when
-/// [`metadata_labels_keep_series_apart`] cannot prove the labels tell its series apart. That is the
-/// whole of the drop's proof, so this predicate and the canonical pass cannot disagree about a drop:
-/// a `NULL`/`''` pair in one key column is outside it for both, and the statements the pair leaves
-/// unproved are counted by [`leaves_a_drop_to_the_storage_keys`] rather than collected.
-///
-/// This predicate is only ever asked of a node by the consumer directly above it - the `Window`
-/// `MergeInput` collector and the `limitk` one, both in [`execute`](crate::native::execute) - and
-/// that is exactly where the canonical pass puts its [`NativeExpr::Merge`] when a collection is
-/// needed: it collects the input of a `Window`, an `Aggregate`, a `Vector`, a `Map`, a
-/// `ParameterizedMap` and each side of a `Binary`/`Set`/`Info`
-/// ([`merge_label_rewrites`](crate::native::canonicalize::merge_label_rewrites)). The collector
-/// then reads the merge's `Some(true)` - a merge *is* the collection - so the weaker answer this
-/// function gives about the node beneath it is never the one acted on. Where the pass left the tree
-/// alone, the proof held, and the answer asked here is the same one. A caller without these facts
-/// (placement, which reads a tree without a binding) passes empty slices and gets the conservative
+/// A metadata-label drop is judged by [`metadata_labels_keep_series_apart`] with the same
+/// `source_tags` and `source_metrics` as [`duplicates_canonical_labels`], so this and the canonical
+/// pass agree about a drop. [`reads_across_series`] passes empty slices and gets the conservative
 /// answer.
 #[allow(clippy::match_same_arms)] // Keep each expression's contribution guarantee explicit.
 pub fn unifies_its_own_contributions(
@@ -3131,26 +2418,13 @@ pub fn unifies_its_own_contributions(
     source_metrics: &[Option<Arc<str>>],
 ) -> Option<bool> {
     match &node.expr {
-        // A boundary hands over the pieces some upstream execution produced: what it holds is one
-        // storage series at a time for a scan and one partition's fragments of a label set for an
-        // exchange, and nothing in the tree can tell which series those fragments belong to. A
-        // merge binds samples evaluated on a grid rather than proving the pieces are one series
-        // per label set, so a proof is not this function's to give: it answers `None`. Runtime
-        // collectors gather only when this node reports fragments with `Some(false)`.
         NativeExpr::Input(_) => None,
-        // A constant holds no label set at all, so it has nothing that could arrive twice.
         NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
             Some(true)
         }
-        // A selection reads raw samples - `validate` refuses an evaluated input - and raw samples
-        // arrive one whole storage series at a time, so it answers one series per series it read,
-        // under the label set it read. `timestamp(x)` is the exception: it reports the sample's own
-        // time under the metric name dropped, which can give two series one label set.
+        // Raw samples arrive one whole storage series at a time.
         NativeExpr::Instant { input, op } => {
             if op.value == InstantValue::Timestamp {
-                // `timestamp` drops the metadata labels, so what it emits aliases unless the drop
-                // provably tells its series apart. The labels half is asked here; the keys half is
-                // what the pass collects with, above this node - see this function's docs.
                 Some(metadata_labels_keep_series_apart(
                     input,
                     source_tags,
@@ -3160,34 +2434,15 @@ pub fn unifies_its_own_contributions(
                 Some(true)
             }
         }
-        // The merge is the collection: whatever its input handed over, it groups the fragments by
-        // canonical label set and emits one series per set, so what it emits shares none.
         NativeExpr::Merge { .. } => Some(true),
-        // A window answers three ways, and what the function does to labels decides the first:
-        //
-        // - the function drops the metric name, so what it emits can coincide with another series'
-        //   label set whatever its input held: `Some(false)` (this is a real report, and the case
-        //   `Map`, `Timestamp` and a label-dropping broadcast are in);
-        // - the function keeps the metric name, and the child answers one series per label set -
-        //   `Some(true)` - or reports fragments the window's `MergeInput` collects - `Some(false)`.
-        //   Either way the window emits one series per label set and answers `Some(true)`: an
-        //   already-unified child keeps that property through the labels the window retains, and
-        //   fragments are collected before the window folds them;
-        // - the function keeps the metric name, but the child is a boundary - `None`. The window
-        //   folds each contribution on its own, so what it emits does alias its input's fragments,
-        //   and `Some(false)` is exact.
+        // Over a boundary the window folds each fragment on its own, so its output may alias.
+        // Otherwise its input is unified or collected through `MergeInput`, so only a
+        // name-dropping function can make two series collide.
         NativeExpr::Window { input, op } => {
             let child = unifies_its_own_contributions(input, source_tags, source_metrics);
             if child.is_none() {
-                // A boundary hands the pieces of one series over one at a time, and the window folds
-                // them without ever seeing the whole series: what it emits aliases whatever the
-                // labels say.
                 Some(false)
             } else if op.function.drops_metric_name() {
-                // The function drops the metadata labels, so the window answers `Some(true)` exactly
-                // when the labels say the drop tells its input's series apart. The keys half is the
-                // pass's to ask: where it fails, the pass has already put its merge above this
-                // window and the collector reads that merge's answer - see this function's docs.
                 Some(metadata_labels_keep_series_apart(
                     input,
                     source_tags,
@@ -3197,21 +2452,12 @@ pub fn unifies_its_own_contributions(
                 Some(true)
             }
         }
-        // A map can rewrite labels, so two series can end under one label set: what it hands out is
-        // not one series per set until a canonical merge has collected the set.
         NativeExpr::Map { .. } | NativeExpr::ParameterizedMap { .. } => Some(false),
-        // `topk` hands back the series it read with their labels, so the input's answer is its own -
-        // exactly as for the bound operation.
         NativeExpr::ParameterizedTopK { input, .. } => {
             unifies_its_own_contributions(input, source_tags, source_metrics)
         }
-        // A histogram function groups its rows by label set itself, so it emits one series per set.
         NativeExpr::ParameterizedHistogram { .. } => Some(true),
-        // `scalar()` answers one value per point, which is not several series.
         NativeExpr::ScalarOf { .. } => Some(true),
-        // A timestamp reports a position under the metadata labels dropped, and the labels half
-        // asked here is answered for the same reason the `timestamp` selection's is: the keys half
-        // is the one the pass turns into a merge above this node - see this function's docs.
         NativeExpr::Timestamp { input } => Some(metadata_labels_keep_series_apart(
             input,
             source_tags,
@@ -3224,25 +2470,12 @@ pub fn unifies_its_own_contributions(
         } => {
             if evaluated_vector(&left.output).is_some() && evaluated_vector(&right.output).is_some()
             {
-                // Two vectors are matched by the kernel, which files its rows by the label set a
-                // sample ends under and emits one series per set.
                 Some(true)
             } else if broadcast_drops_labels(matching) {
-                // A broadcast whose operation drops the metric name can give two series of its
-                // vector side one label set.
                 Some(false)
             } else {
-                // A filtering comparison keeps the label set it read, so the side that carries
-                // series answers for this node. Which side that is follows the rule the runtime's
-                // broadcast matches on: an evaluated vector carries them, and with two scalars the
-                // carrier is the side that is not a bound constant (`broadcast_runtime`'s
-                // `literal(left).is_none()`), which is what the second test below reads.
-                //
-                // The two selection rules agree wherever it is observable: every scalar node kind
-                // answers `Some(true)` (`Scalar`, `EvalTime`, `VectorOf`), so a scalar-scalar pair
-                // answers `Some(true)` whichever side is named and a consumer collects nothing
-                // either way. The constant check is still what keeps the two readers describing
-                // the same node rather than coinciding by accident.
+                // A filtering comparison answers for the side that carries series, picked as
+                // `broadcast_runtime` picks it: the vector, or the non-literal of two scalars.
                 let carries_series = |node: &NativeNode| {
                     if node.output.samples().is_some() {
                         return true;
@@ -3253,21 +2486,11 @@ pub fn unifies_its_own_contributions(
                 unifies_its_own_contributions(vector, source_tags, source_metrics)
             }
         }
-        // A set operation keeps each side's samples and files them by label set, one series per
-        // set.
         NativeExpr::Set { .. } => Some(true),
-        // `info` indexes the info side by identifying labels and merges the results that share a
-        // label set.
         NativeExpr::Info { .. } => Some(true),
-        // A finished aggregate emits one series per group, and two groups are two label sets.
-        // `Partial` state is not a series at all, which is not several either. A per-point parameter
-        // does not change that: the labels a group is filed under are its grouping's.
         NativeExpr::Aggregate { .. } | NativeExpr::ParameterizedAggregate { .. } => Some(true),
-        // `topk`, `limit_ratio` and `sort` hand back the series they read with their labels, so the
-        // input's answer is theirs. The four that read the whole vector - `limitk`, `absent`,
-        // `histogram_*` and `count_values` - emit one series per label set: `limitk` counts series
-        // in input order, so its input carries the merge the runtime performs when that input reports fragments, and the other three group their rows
-        // by label set themselves.
+        // `limitk` collects its input's fragments at run time; `absent`, `histogram_*` and
+        // `count_values` group by label set themselves.
         NativeExpr::Vector { input, op } => {
             let whole = matches!(
                 op,
@@ -3285,25 +2508,13 @@ pub fn unifies_its_own_contributions(
     }
 }
 
-/// The schema and grid of an evaluated vector, or `None` when `ty` is raw samples, a scalar or
-/// state.
-///
-/// An operation over values needs both halves: that its input is samples at all, which rules out
-/// a scalar, and that those samples are stamped onto a grid, which rules out raw samples. The
-/// schema comes back with the grid because a consumer that needs the grid also declares a field
-/// layout for the fields the schema carries.
+/// The schema and grid of an evaluated vector, or `None` for raw samples, a scalar or state.
 fn evaluated_vector(ty: &NativeType) -> Option<(&Arc<SeriesSchema>, &Arc<EvalGrid>)> {
     let schema = ty.samples().filter(|schema| schema.eval_grid.is_some())?;
     Some((schema, schema.eval_grid.as_ref()?))
 }
 
-/// Checks that a node declares the field layout its input produces.
-///
-/// A window, a map, an instant selection and a complete aggregate all report one value per input
-/// field, so they keep the layout of their input. A node that declares a different number of
-/// fields than it consumes describes a computation this model has no meaning for, and letting it
-/// through would only surface at run time as a field count mismatch against a schema the tree was
-/// supposed to have validated.
+/// Checks that a node declares as many fields as its input produces.
 fn ensure_same_fields(input: &NativeType, output: &NativeType, what: &str) -> Result<()> {
     let (NativeType::Samples(input), NativeType::Samples(output)) = (input, output) else {
         return Ok(());
@@ -3311,12 +2522,6 @@ fn ensure_same_fields(input: &NativeType, output: &NativeType, what: &str) -> Re
     ensure_field_count(output.fields.len(), input.fields.len(), what)
 }
 
-/// Checks that a node declares `declared` fields where its input provides `expected`.
-///
-/// Some nodes compute their layout instead of keeping their input's: a final aggregate produces one
-/// value per accumulator the state holds, and a vector-vector binary operation produces one field
-/// per matched pair, which is the shorter side's count. Both are checked against the count the
-/// kernel produces, so the message names the node and both numbers.
 fn ensure_field_count(declared: usize, expected: usize, what: &str) -> Result<()> {
     if declared != expected {
         return Err(invalid(&format!(
@@ -3326,17 +2531,12 @@ fn ensure_field_count(declared: usize, expected: usize, what: &str) -> Result<()
     Ok(())
 }
 
-/// Checks that `ty` produces samples and returns them.
 fn ensure_samples<'a>(ty: &'a NativeType, what: &str) -> Result<&'a Arc<SeriesSchema>> {
     ty.samples()
         .ok_or_else(|| invalid(&format!("{what} does not produce samples")))
 }
 
-/// Checks that `ty` is evaluated on the grid `expected` describes.
-///
-/// The comparison is by [`EvalGrid::spec`], not by allocation: that is the rule the kernels apply
-/// (`vector_match::same_grid`), so a compiler that allocates one grid per window but binds equal
-/// specs produces a tree the kernel runs correctly.
+/// Grids compare by [`EvalGrid::spec`], as the kernels do (`vector_match::same_grid`).
 fn ensure_grid(ty: &NativeType, expected: &Arc<EvalGrid>, what: &str) -> Result<()> {
     match ty.grid() {
         Some(actual) if actual.spec() == expected.spec() => Ok(()),
@@ -3347,13 +2547,8 @@ fn ensure_grid(ty: &NativeType, expected: &Arc<EvalGrid>, what: &str) -> Result<
     }
 }
 
-/// Checks that `input`, when it is a [`NativeExpr::Input`], does not declare interleaved series.
-///
-/// A native evaluation reads one series to its last chunk before the next: a range evaluator folds
-/// a series completely before it starts another, and an instant selection's consumer collects one
-/// series' chunks into one buffer. Neither can be handed chunks of different series that
-/// interleave, which is the one rule both consumers state. Only an input node carries an ordering,
-/// so only there is there one to check.
+/// Instant selections and windows read one series to its last chunk before the next, so an input
+/// leaf under them must not interleave.
 fn ensure_not_interleaved(input: &NativeNode) -> Result<()> {
     if let NativeExpr::Input(binding) = &input.expr
         && binding.ordering == SeriesOrdering::Interleaved
@@ -3367,13 +2562,10 @@ fn ensure_not_interleaved(input: &NativeNode) -> Result<()> {
 }
 
 fn invalid(reason: &str) -> DataFusionError {
-    // A rejected tree is a compiler defect, not a query error: the compiler only builds a node
-    // after deciding that this combination is supported. `Internal` keeps that meaning on the wire
-    // instead of reporting a mistake in the client's statement, which `Plan` would.
+    // A rejected tree is a compiler defect, not a mistake in the client's statement.
     DataFusionError::Internal(reason.to_string())
 }
 
-// Tests for native plan validation and execution contracts.
 #[cfg(test)]
 pub(crate) mod tests;
 

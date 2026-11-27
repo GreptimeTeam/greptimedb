@@ -111,7 +111,7 @@ fn replacements_expand_like_go() {
     }
 }
 
-/// F: a label function over a series of several runs rewrites the labels and leaves the rows and
+/// A label function over a series of several runs rewrites the labels and leaves the rows and
 /// their positions untouched.
 ///
 /// A label function has no kernel at all, so the only thing that can go wrong is the axis: it must

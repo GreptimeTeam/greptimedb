@@ -209,7 +209,7 @@ fn comparisons_reject_raw_axes_and_drop_histogram_positions() {
     }
 }
 
-/// F: a filter over a series of several runs keeps a scattered subset, and the result is a
+/// A filter over a series of several runs keeps a scattered subset, and the result is a
 /// fragmented axis of exactly the kept runs -- not a padded envelope from the first kept position
 /// to the last.
 ///
@@ -323,7 +323,7 @@ fn a_filter_over_runs_keeps_exactly_the_runs_that_pass() {
     );
 }
 
-/// F: a bool comparison keeps every position the input carries, so the output is the input's axis
+/// A bool comparison keeps every position the input carries, so the output is the input's axis
 /// again -- and a comparison against NaN is false everywhere but `!=`.
 #[test]
 fn a_bool_comparison_keeps_the_axis_of_a_sparse_input() {

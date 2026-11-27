@@ -319,8 +319,8 @@ impl SeriesScan {
                 .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
     }
 
-    /// Whether every selected *field* is a `Float64`, which is all the columnar prepared reader
-    /// serves.
+    /// Whether every selected *field* is a `Float64` or a native histogram struct, which is all the
+    /// columnar prepared reader serves.
     ///
     /// Only field columns count: the projection also carries tags and the time index, and those are
     /// no part of the samples the prepared reader hands over. Checking them here would send an
@@ -337,7 +337,10 @@ impl SeriesScan {
                         && column.semantic_type == SemanticType::Field
                 })
             })
-            .all(|output| output.data_type == ConcreteDataType::float64_datatype())
+            .all(|output| {
+                output.data_type == ConcreteDataType::float64_datatype()
+                    || is_native_histogram_value_type(&output.data_type)
+            })
     }
 
     /// Returns whether raw series come from the columnar prepared source.
@@ -474,11 +477,11 @@ impl SeriesScan {
         let selected = input.mapper.output_schema();
         let mut fields = Vec::new();
         let mut specs = Vec::new();
-        // The columnar prepared reader serves `Float64` fields only. A selection carrying another
-        // kind the raw path supports - a native histogram struct, today - is read by the ordinary
-        // scan instead: the columnar samples are an artifact beside the SST rows, so the same
-        // sources are still reachable, and the frame schema and ordering follow the reader that
-        // actually answers.
+        // The columnar prepared reader serves `Float64` and native histogram fields. A selection
+        // carrying another kind the raw path supports - a numeric field it casts - is read by the
+        // ordinary scan instead: the columnar samples are an artifact beside the SST rows, so the
+        // same sources are still reachable, and the frame schema and ordering follow the reader
+        // that actually answers.
         let columnar_fields_supported = self.columnar_fields_supported();
         for output in selected.column_schemas() {
             let Some(column) = metadata.column_metadatas.iter().find(|column| {
