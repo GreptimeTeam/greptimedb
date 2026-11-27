@@ -18219,3 +18219,446 @@ async fn native_promql_matrix_root_matches_legacy() {
     let legacy = run(&instance, &observer, sql, false).await;
     assert_eq!(native, legacy);
 }
+
+/// Native histograms in a Narthex physical table, and in a Parquet one served by a columnar
+/// series-index sidecar, answer what the same samples answer in a plain Parquet table: PromQL on
+/// both routes and remote read, from the memtable, after flushes, after a compaction and after a
+/// reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn narthex_native_histograms_match_parquet() {
+    use api::helper::ColumnDataTypeWrapper;
+    use api::v1::greptime_request::Request;
+    use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, DdlRequest, SemanticType};
+    use common_query::native_histogram::{native_histogram_value_type, read_histogram};
+    use common_query::prelude::{greptime_native_histogram, greptime_timestamp};
+    use servers::query_handler::grpc::GrpcQueryHandler;
+
+    use super::test_util::{MockInstanceBuilder, RebuildableMockInstance, TestContext};
+
+    common_telemetry::init_default_ut_logging();
+    // A plan observer plugin cannot survive the rebuild below, so `TQL ANALYZE` shows the route.
+    let builder = GreptimeDbStandaloneBuilder::new("narthex_native_histograms")
+        .with_mito_config(mito2::config::MitoConfig {
+            experimental_series_scan_v2: true,
+            experimental_enable_series_index: true,
+            experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+            // Only the manual build below publishes a sidecar, so the plain Parquet table never
+            // gets one.
+            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        });
+    let mut context = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
+    let instance = context.frontend();
+
+    // Remote write creates physical tables with a float value field, so each histogram-only
+    // physical table is created up front.
+    let (data_type, datatype_extension) =
+        ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
+            .unwrap()
+            .into_parts();
+    // The plain Parquet table at index 1 is the baseline the others are compared against.
+    let tables = [
+        ("narthex_hist", "narthex_phy"),
+        ("parquet_hist", "parquet_phy"),
+        ("sidecar_hist", "sidecar_phy"),
+    ];
+    for (format, (_, physical)) in ["narthex", "flat", "flat"].into_iter().zip(tables) {
+        let expr = CreateTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: physical.to_string(),
+            column_defs: vec![
+                ColumnDef {
+                    name: greptime_timestamp().to_string(),
+                    data_type: ColumnDataType::TimestampMillisecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnDef {
+                    name: greptime_native_histogram().to_string(),
+                    data_type: data_type as i32,
+                    is_nullable: true,
+                    semantic_type: SemanticType::Field as i32,
+                    datatype_extension: datatype_extension.clone(),
+                    ..Default::default()
+                },
+            ],
+            time_index: greptime_timestamp().to_string(),
+            table_options: [
+                ("physical_metric_table".to_string(), "true".to_string()),
+                ("sst_format".to_string(), format.to_string()),
+            ]
+            .into(),
+            engine: "metric".to_string(),
+            ..Default::default()
+        };
+        GrpcQueryHandler::do_query(
+            instance.as_ref(),
+            Request::Ddl(DdlRequest {
+                expr: Some(api::v1::ddl_request::Expr::CreateTable(expr)),
+            }),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Steps 0..=5 go in before the first flush and 6..=10 after it, so the compaction merges two
+    // files of each table.
+    write_histograms(&instance, &tables, 0..=5).await;
+    assert_histograms_match(&instance, &tables, "memtable").await;
+    for (_, physical) in tables {
+        run_sql(&instance, &format!("ADMIN FLUSH_TABLE('{physical}')")).await;
+    }
+    write_histograms(&instance, &tables, 6..=10).await;
+    assert_histograms_match(&instance, &tables, "flushed and memtable").await;
+    for (_, physical) in tables {
+        run_sql(&instance, &format!("ADMIN FLUSH_TABLE('{physical}')")).await;
+        run_sql(&instance, &format!("ADMIN COMPACT_TABLE('{physical}')")).await;
+    }
+    run_sql(&instance, "ADMIN BUILD_SERIES_INDEX('sidecar_phy')").await;
+    assert_histograms_match(&instance, &tables, "compacted").await;
+    // The sidecar's histogram samples answer a native read: the columnar reader decodes rows.
+    // Reopening rebuilds every region's sidecar, the plain table's included, so only this stage
+    // compares the sidecar against plain Parquet reads.
+    let decoded = columnar_decoded_rows();
+    let output = native_tql_output(
+        &instance,
+        "TQL EVAL (0, 600, '60s') histogram_count(rate(sidecar_hist[5m]))",
+        true,
+    )
+    .await;
+    assert!(!float_answer_rows(output).await.is_empty());
+    assert!(
+        columnar_decoded_rows() > decoded,
+        "the columnar sidecar did not serve the histogram read"
+    );
+    context.rebuild().await;
+    let instance = context.frontend();
+    assert_histograms_match(&instance, &tables, "reopened").await;
+
+    /// Rows the Mito columnar readers have decoded in this process.
+    fn columnar_decoded_rows() -> u64 {
+        common_telemetry::dump_metrics()
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.starts_with("greptime_mito_columnar_read_count{")
+                    && line.contains("type=\"decoded_rows\"")
+            })
+            .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+            .sum::<f64>() as u64
+    }
+
+    async fn run_sql(instance: &Arc<Instance>, sql: &str) {
+        SqlQueryHandler::do_query(instance.as_ref(), sql, QueryContext::arc())
+            .await
+            .remove(0)
+            .unwrap();
+    }
+
+    /// Writes the same histograms under each metric. `api` carries integer deltas whose bucket
+    /// layout changes between samples; `web` carries float counts over custom buckets.
+    async fn write_histograms(
+        instance: &Arc<Instance>,
+        tables: &[(&str, &str)],
+        steps: std::ops::RangeInclusive<i64>,
+    ) {
+        use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+        use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+        use axum::body::{Body, to_bytes};
+        use http::Request;
+        use prost::Message;
+        use servers::prom_remote_write::v2::test_util as remote_write_v2;
+        use servers::prom_store::snappy_compress;
+        use tower::ServiceExt;
+
+        let span = |offset, length| BucketSpan { offset, length };
+        let server =
+            crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+        let router = server.build(server.make_app()).unwrap();
+        for (metric, physical) in tables {
+            for job in ["api", "web"] {
+                let histograms = steps
+                    .clone()
+                    .map(|k| {
+                        let timestamp = k * 60_000;
+                        if job == "api" {
+                            let positive_spans = if k % 3 == 0 {
+                                vec![span(-1, 2), span(2, 1)]
+                            } else {
+                                vec![span(0, 3)]
+                            };
+                            Histogram {
+                                timestamp,
+                                schema: 1,
+                                zero_threshold: 0.001,
+                                count: Some(Count::CountInt(4 * k as u64 + 5)),
+                                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                                sum: 2.5 * k as f64,
+                                positive_spans,
+                                positive_deltas: vec![k + 1, 1, -1],
+                                negative_spans: vec![span(0, 1)],
+                                negative_deltas: vec![k],
+                                ..Default::default()
+                            }
+                        } else {
+                            let k = k as f64;
+                            Histogram {
+                                timestamp,
+                                schema: -53,
+                                custom_values: vec![0.1, 0.5, 1.0],
+                                count: Some(Count::CountFloat(4.0 * k + 1.0)),
+                                sum: 0.75 * k,
+                                positive_spans: vec![span(0, 4)],
+                                positive_counts: vec![k, 2.0 * k, k, 1.0],
+                                ..Default::default()
+                            }
+                        }
+                    })
+                    .collect();
+                let request = remote_write_v2::request_with_labels_and_histograms(
+                    vec![
+                        ("__name__", metric),
+                        ("job", job),
+                        ("__physical_table__", physical),
+                    ],
+                    histograms,
+                );
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::post("/v1/prometheus/write")
+                            .header("Content-Encoding", "snappy")
+                            .header(
+                                "Content-Type",
+                                "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                            )
+                            .body(Body::from(
+                                snappy_compress(&request.encode_to_vec()).unwrap(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    204,
+                    "{:?}",
+                    to_bytes(response.into_body(), usize::MAX).await.unwrap()
+                );
+            }
+        }
+    }
+
+    /// Asserts every metric answers the baseline's rows: PromQL on each route, and remote read.
+    async fn assert_histograms_match(
+        instance: &Arc<Instance>,
+        tables: &[(&str, &str)],
+        stage: &str,
+    ) {
+        use datatypes::arrow::array::StructArray;
+
+        let narthex = tables[0].0;
+        let metrics = tables.iter().map(|(metric, _)| *metric).collect::<Vec<_>>();
+        // The aggregates over histograms run on the existing route only: the native planner
+        // fails to plan their split state, whatever the storage.
+        for (query, routes) in [
+            ("histogram_quantile(0.9, rate({m}[5m]))", &[false, true][..]),
+            ("histogram_count(rate({m}[5m]))", &[false, true]),
+            ("histogram_sum({m})", &[false, true]),
+            (
+                "histogram_quantile(0.5, sum by (job) (rate({m}[5m])))",
+                &[false],
+            ),
+            ("histogram_count(sum by (job) (rate({m}[5m])))", &[false]),
+        ] {
+            for &native in routes {
+                let mut answers = Vec::new();
+                for metric in &metrics {
+                    let query = query.replace("{m}", metric);
+                    let sql = format!("TQL EVAL (0, 600, '60s') {query}");
+                    if native {
+                        let analyze = native_tql_output(
+                            instance,
+                            &format!("TQL ANALYZE (0, 600, '60s') {query}"),
+                            true,
+                        )
+                        .await;
+                        assert!(
+                            native_output_text(analyze)
+                                .await
+                                .contains("FusedSeriesExec"),
+                            "{stage}: {sql} did not run natively"
+                        );
+                    }
+                    let output = native_tql_output(instance, &sql, native).await;
+                    answers.push(float_answer_rows(output).await);
+                }
+                assert!(!answers[1].is_empty(), "{stage}: {query} answered nothing");
+                for (metric, answer) in metrics.iter().zip(&answers) {
+                    assert_eq!(
+                        answer, &answers[1],
+                        "{stage}: {query} (native: {native}) differs between {metric} and Parquet"
+                    );
+                }
+            }
+        }
+
+        let server =
+            crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+        let router = server.build(server.make_app()).unwrap();
+        let mut answers = Vec::new();
+        for metric in &metrics {
+            answers.push(remote_read_histograms(&router, metric).await);
+        }
+        assert_eq!(answers[1].len(), 2, "{stage}: remote read series");
+        for (metric, answer) in metrics.iter().zip(&answers) {
+            assert_eq!(
+                answer, &answers[1],
+                "{stage}: remote read differs between {metric} and Parquet"
+            );
+        }
+
+        // A raw histogram read back is the one written at step 5.
+        let output = native_tql_output(
+            instance,
+            &format!("TQL EVAL (300, 300, '60s') {narthex}{{job=\"web\"}}"),
+            true,
+        )
+        .await;
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("PromQL answers record batches"),
+        };
+        let histogram = batches
+            .iter()
+            .find_map(|batch| {
+                batch
+                    .df_record_batch()
+                    .columns()
+                    .iter()
+                    .find_map(|column| column.as_any().downcast_ref::<StructArray>().cloned())
+            })
+            .expect("a histogram column");
+        let histogram = read_histogram(&histogram, 0).unwrap().unwrap();
+        assert_eq!((histogram.count, histogram.sum), (21.0, 3.75), "{stage}");
+    }
+
+    /// Rows of a float PromQL answer as `(time, labels, value bits)`, sorted, without the metric
+    /// name that tells the two tables apart.
+    async fn float_answer_rows(output: Output) -> Vec<(i64, String, u64)> {
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("PromQL answers record batches"),
+        };
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let batch = batch.df_record_batch();
+            let schema = batch.schema();
+            let time = schema
+                .fields()
+                .iter()
+                .position(|f| matches!(f.data_type(), DataType::Timestamp(_, _)))
+                .unwrap();
+            let value = schema
+                .fields()
+                .iter()
+                .position(|f| f.data_type() == &DataType::Float64)
+                .unwrap();
+            let times = cast(batch.column(time), &DataType::Int64).unwrap();
+            let times = times.as_any().downcast_ref::<Int64Array>().unwrap();
+            let values = batch
+                .column(value)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let labels = schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, f)| *i != time && *i != value && f.name() != "__name__")
+                    .filter_map(|(i, f)| {
+                        let column = cast(batch.column(i), &DataType::Utf8).ok()?;
+                        let column = column.as_any().downcast_ref::<StringArray>()?;
+                        column
+                            .is_valid(row)
+                            .then(|| format!("{}={}", f.name(), column.value(row)))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if values.is_valid(row) {
+                    rows.push((times.value(row), labels, values.value(row).to_bits()));
+                }
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    /// Remote-read histograms per series, keyed by the labels other than the metric name.
+    async fn remote_read_histograms(
+        router: &axum::Router,
+        metric: &str,
+    ) -> Vec<(
+        Vec<(String, String)>,
+        Vec<api::prom_store::remote::Histogram>,
+    )> {
+        use api::prom_store::remote::{LabelMatcher, Query, ReadRequest, ReadResponse};
+        use axum::body::{Body, to_bytes};
+        use prost::Message;
+        use servers::prom_store::{snappy_compress, snappy_decompress};
+        use tower::ServiceExt;
+
+        let request = ReadRequest {
+            queries: vec![Query {
+                start_timestamp_ms: 0,
+                end_timestamp_ms: 700_000,
+                matchers: vec![LabelMatcher {
+                    name: "__name__".to_string(),
+                    value: metric.to_string(),
+                    r#type: 0,
+                }],
+                ..Default::default()
+            }],
+            accepted_response_types: vec![],
+        };
+        let response = router
+            .clone()
+            .oneshot(
+                http::Request::post("/v1/prometheus/read")
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response = ReadResponse::decode(snappy_decompress(&body).unwrap().as_slice()).unwrap();
+        let mut series = response.results[0]
+            .timeseries
+            .iter()
+            .map(|series| {
+                let mut labels = series
+                    .labels
+                    .iter()
+                    .filter(|label| label.name != "__name__")
+                    .map(|label| (label.name.clone(), label.value.clone()))
+                    .collect::<Vec<_>>();
+                labels.sort();
+                (labels, series.histograms.clone())
+            })
+            .collect::<Vec<_>>();
+        series.sort_by(|a, b| a.0.cmp(&b.0));
+        series
+    }
+}

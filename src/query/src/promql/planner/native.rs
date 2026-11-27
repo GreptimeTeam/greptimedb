@@ -459,10 +459,6 @@ impl PromPlanner {
         // scan casts every numeric field to `Float64`, so an integer or a `Float32` field it reads is a
         // float. That is the Prometheus data model, where every sample value is a `float64`, so the
         // answer publishes `Float64` even where the existing plan publishes the field's own type.
-        //
-        // `Float64` fields are answered by the columnar series-index reader when a region prepares one. A
-        // histogram field is not, since the logical plan cannot tell which reader a region will prepare, so
-        // such a selection falls back to the ordinary scan.
         let read_types = fields
             .iter()
             .map(|field| Self::field_column_type(input.schema(), field).map(read_field_type))
