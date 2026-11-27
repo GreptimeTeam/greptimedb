@@ -2425,8 +2425,9 @@ impl StreamContext {
                 let (start, end) = self.file.time_range();
                 write!(
                     f,
-                    r#"{{"file_id":"{}","time_range_start":"{}::{}","time_range_end":"{}::{}","rows":{},"size":{},"index_size":{}}}"#,
+                    r#"{{"file_id":"{}","level":{},"time_range_start":"{}::{}","time_range_end":"{}::{}","rows":{},"size":{},"index_size":{}}}"#,
                     self.file.file_id(),
+                    self.file.level(),
                     start.value(),
                     start.unit(),
                     end.value(),
