@@ -127,6 +127,7 @@ impl OpenCandidateRegion {
     /// - Unexpected instruction reply.
     /// - Another procedure is opening the candidate region.
     /// - The candidate is a follower of one of the migrated regions.
+    /// - The table route of a migrated region is not physical.
     ///
     /// Retry:
     /// - Failed to retrieve the metadata of table.
@@ -161,23 +162,30 @@ impl OpenCandidateRegion {
         // A follower can be added on the candidate after the submission checked the routes, so
         // every attempt checks them while it holds the candidate registrations.
         {
-            let region_ids = region_ids.iter().collect::<HashSet<_>>();
+            let region_id_set = region_ids.iter().collect::<HashSet<_>>();
             let table_routes = ctx.get_table_route_values().await?;
-            for region_route in table_routes
-                .values()
-                .filter_map(|table_route| table_route.region_routes().ok())
-                .flatten()
-                .filter(|region_route| region_ids.contains(&region_route.region.id))
-            {
-                ensure!(
-                    !utils::has_peer_conflict(region_route, candidate.id),
-                    error::MigrationAbortSnafu {
-                        reason: format!(
-                            "The candidate peer {} is already a follower of region {}",
-                            candidate.id, region_route.region.id
+            for (table_id, table_route) in &table_routes {
+                let region_routes = table_route.region_routes().with_context(|_| {
+                    error::UnexpectedLogicalRouteTableSnafu {
+                        err_msg: format!(
+                            "TableRoute({table_id:?}) is a non-physical TableRouteValue."
                         ),
                     }
-                );
+                })?;
+                for region_route in region_routes
+                    .iter()
+                    .filter(|region_route| region_id_set.contains(&region_route.region.id))
+                {
+                    ensure!(
+                        !utils::has_peer_conflict(region_route, candidate.id),
+                        error::MigrationAbortSnafu {
+                            reason: format!(
+                                "The candidate peer {} is already a follower of region {}",
+                                candidate.id, region_route.region.id
+                            ),
+                        }
+                    );
+                }
             }
         }
 

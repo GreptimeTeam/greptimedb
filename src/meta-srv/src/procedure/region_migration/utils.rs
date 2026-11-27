@@ -114,7 +114,7 @@ pub(crate) struct RegionMigrationAnalysis {
     pub(crate) pending: Vec<RegionId>,
 }
 
-/// Returns true if `to_peer` is already a follower of the region (conflict).
+/// Returns true if `to_peer_id` is already a follower of the region (conflict).
 pub(crate) fn has_peer_conflict(region_route: &RegionRoute, to_peer_id: u64) -> bool {
     region_route
         .follower_peers
