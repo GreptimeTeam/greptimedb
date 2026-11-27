@@ -17,9 +17,13 @@
 //! `CopyToSchema`, `DetectReset` and `Equals`, including zero bucket reconciliation, resolution
 //! reduction and the intersection of mismatched custom bounds.
 //!
-//! Each side is a list of `(bucket index, count)` sorted by index. Go splices span layouts in
-//! place; the bucket indices and the order of additions to each bucket do not depend on the
-//! layout, so the results are the same.
+//! Each side is a list of `(bucket index, count)` sorted by index. Consecutive indices may share
+//! a span. An explicitly represented zero can affect the order of compensated additions when
+//! several indices map to one bucket.
+
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::ops::Range;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::histogram::{
@@ -30,6 +34,187 @@ use crate::functions::kahan_inc;
 use crate::histogram_eval::native::{CUSTOM_BUCKETS_SCHEMA, bound};
 
 type Buckets = Vec<(i32, f64)>;
+// Only the signs are needed to restore the two zero operands bit for bit.
+type EmptySide = BTreeMap<i32, (bool, bool)>;
+
+/// Whether a fold keeps explicitly represented empty buckets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BucketLayout {
+    Preserve,
+    Compact,
+}
+
+/// Explicit zero pairs omitted from a range accumulator while a later sample can still rebin it.
+#[derive(Default)]
+pub(super) struct EmptyBuckets {
+    positive: EmptySide,
+    negative: EmptySide,
+}
+
+impl EmptyBuckets {
+    pub(super) fn take_from(
+        &mut self,
+        value: &mut FloatHistogram,
+        c: &mut FloatHistogram,
+        sample: &FloatHistogram,
+        all: bool,
+    ) {
+        for (empty, side, correction, incoming) in [
+            (
+                &mut self.positive,
+                &mut value.positive,
+                &mut c.positive,
+                &sample.positive,
+            ),
+            (
+                &mut self.negative,
+                &mut value.negative,
+                &mut c.negative,
+                &sample.negative,
+            ),
+        ] {
+            let range = if all {
+                0..side.len()
+            } else if let (Some(first), Some(last)) = (incoming.first(), incoming.last()) {
+                let first = target_index(first.0, sample.schema, value.schema);
+                let last = target_index(last.0, sample.schema, value.schema);
+                side.partition_point(|b| b.0 < first)..side.partition_point(|b| b.0 <= last)
+            } else {
+                continue;
+            };
+            compact_range(side, correction, range, |idx, count, residual| {
+                empty.insert(idx, (count.is_sign_negative(), residual.is_sign_negative()));
+            });
+        }
+    }
+
+    /// Restores the zeros needed for this addition and skips redundant zeros in the incoming sample.
+    /// Reducing the accumulator or widening its zero bucket visits the whole old layout.
+    pub(super) fn prepare_for_add(
+        &mut self,
+        value: &mut FloatHistogram,
+        c: &mut FloatHistogram,
+        sample: &mut FloatHistogram,
+    ) -> Result<()> {
+        if self.positive.is_empty() && self.negative.is_empty() {
+            return Ok(());
+        }
+        let restore_all = sample.schema < value.schema
+            || sample.zero_threshold > value.zero_threshold
+            || (sample.zero_threshold < value.zero_threshold
+                && sample
+                    .zero_count_for_larger_threshold(value.zero_threshold, None)?
+                    .1
+                    > value.zero_threshold);
+        let widen_input_to =
+            (sample.zero_threshold < value.zero_threshold).then_some(value.zero_threshold);
+        for (empty, side, correction, incoming) in [
+            (
+                &mut self.positive,
+                &mut value.positive,
+                &mut c.positive,
+                &mut sample.positive,
+            ),
+            (
+                &mut self.negative,
+                &mut value.negative,
+                &mut c.negative,
+                &mut sample.negative,
+            ),
+        ] {
+            if empty.is_empty() {
+                continue;
+            }
+            if restore_all {
+                merge_empty_buckets(side, correction, std::mem::take(empty).into_iter());
+                continue;
+            }
+            let original_len = incoming.len();
+            let restored =
+                take_touched_zeros(empty, incoming, sample.schema, value.schema, widen_input_to)?;
+            if incoming.len() != original_len {
+                sample.layout = None;
+                sample.start_timestamp = None;
+            }
+            merge_empty_buckets(side, correction, restored.into_iter());
+        }
+        Ok(())
+    }
+}
+
+/// Takes the deferred destinations needed for the add. Outside zero-bucket reconciliation, an
+/// all-zero source group can be omitted when it preserves the signs of the count and correction.
+fn take_touched_zeros(
+    empty: &mut EmptySide,
+    incoming: &mut Buckets,
+    schema: i32,
+    target_schema: i32,
+    mut widen_input_to: Option<f64>,
+) -> Result<Vec<(i32, (bool, bool))>> {
+    let mut restored = Vec::new();
+    let mut kept = 0;
+    let mut start = 0;
+    while start < incoming.len() {
+        let target = target_index(incoming[start].0, schema, target_schema);
+        let mut end = start + 1;
+        while end < incoming.len() && target_index(incoming[end].0, schema, target_schema) == target
+        {
+            end += 1;
+        }
+        if let Entry::Occupied(entry) = empty.entry(target) {
+            // From the first lower bound beyond the widened zero bucket, no later group is visited.
+            if let Some(threshold) = widen_input_to
+                && bound(incoming[start].0.saturating_sub(1), schema, &[])? >= threshold
+            {
+                widen_input_to = None;
+            }
+            let (negative_count, negative_correction) = *entry.get();
+            // A lone -0 preserves a -0 count. Reducing multiple buckets also adds their corrections.
+            let keeps_count_sign =
+                !negative_count || (end == start + 1 && incoming[start].1.is_sign_negative());
+            // A zero beside a nonzero can affect rounding when the source group is reduced.
+            if widen_input_to.is_none()
+                && !negative_correction
+                && keeps_count_sign
+                && incoming[start..end].iter().all(|&(_, count)| count == 0.0)
+            {
+                start = end;
+                continue;
+            }
+            restored.push(entry.remove_entry());
+        }
+        if kept != start {
+            incoming.copy_within(start..end, kept);
+        }
+        kept += end - start;
+        start = end;
+    }
+    incoming.truncate(kept);
+    Ok(restored)
+}
+
+fn merge_empty_buckets(
+    side: &mut Buckets,
+    correction: &mut Buckets,
+    restored: impl DoubleEndedIterator<Item = (i32, (bool, bool))> + ExactSizeIterator,
+) {
+    let mut live = side.len();
+    let mut dest = live + restored.len();
+    side.resize(dest, (0, 0.0));
+    correction.resize(dest, (0, 0.0));
+    // The two runs are ordered and disjoint. Filling from the end moves each live pair at most once.
+    for (idx, (negative_count, negative_residual)) in restored.rev() {
+        while live > 0 && side[live - 1].0 > idx {
+            live -= 1;
+            dest -= 1;
+            side[dest] = side[live];
+            correction[dest] = correction[live];
+        }
+        dest -= 1;
+        side[dest] = (idx, if negative_count { -0.0 } else { 0.0 });
+        correction[dest] = (idx, if negative_residual { -0.0 } else { 0.0 });
+    }
+}
 
 /// How often this thread built an owned histogram from a view, so a test can hold a path to the
 /// copies it should not make rather than to the shape of its arguments. Test-only: a copy and a
@@ -43,6 +228,7 @@ pub(crate) mod copies {
     thread_local! {
         /// Owned histograms [`super::FloatHistogram::try_from_view`] built on this thread.
         static MATERIALIZED: Cell<usize> = const { Cell::new(0) };
+        static CLONED_BUCKETS: Cell<usize> = const { Cell::new(0) };
     }
 
     /// Records one owned histogram built from a view.
@@ -54,6 +240,14 @@ pub(crate) mod copies {
     /// new count.
     pub(crate) fn take_materialized() -> usize {
         MATERIALIZED.with(|built| built.replace(0))
+    }
+
+    pub(super) fn record_cloned_buckets(count: usize) {
+        CLONED_BUCKETS.with(|total| total.set(total.get() + count));
+    }
+
+    pub(crate) fn take_cloned_buckets() -> usize {
+        CLONED_BUCKETS.replace(0)
     }
 }
 
@@ -102,6 +296,8 @@ pub(crate) struct AddOutcome {
 
 impl Clone for FloatHistogram {
     fn clone(&self) -> Self {
+        #[cfg(test)]
+        copies::record_cloned_buckets(self.positive.len() + self.negative.len());
         Self {
             reset_hint: self.reset_hint,
             start_timestamp: self.start_timestamp,
@@ -295,6 +491,14 @@ impl FloatHistogram {
         self.layout = None;
     }
 
+    /// Drops buckets whose value and correction are both zero, keeping the two lists aligned.
+    pub(super) fn compact_with_compensation(&mut self, c: &mut Self) {
+        compact_with(&mut self.positive, &mut c.positive);
+        if !self.uses_custom_buckets() {
+            compact_with(&mut self.negative, &mut c.negative);
+        }
+    }
+
     /// Go `CopyToSchema`; `target` must not exceed the schema.
     pub(crate) fn copy_to_schema(&self, target: i32) -> Result<Self> {
         if target == self.schema {
@@ -404,6 +608,17 @@ impl FloatHistogram {
         other: &Self,
         c: Option<Self>,
     ) -> Result<(Self, AddOutcome)> {
+        self.kahan_add_with_layout(other, c, BucketLayout::Preserve)
+    }
+
+    /// A compact range fold may discard empty pairs when both operands share a schema.
+    pub(super) fn kahan_add_with_layout(
+        &mut self,
+        other: &Self,
+        c: Option<Self>,
+        layout: BucketLayout,
+    ) -> Result<(Self, AddOutcome)> {
+        debug_assert!(layout == BucketLayout::Preserve || self.schema == other.schema);
         check_schemas(self, other)?;
         self.layout = None;
         // A result this operation derived, so it carries no start timestamp of its own.
@@ -426,7 +641,14 @@ impl FloatHistogram {
 
         if self.uses_custom_buckets() {
             if self.custom_values == other.custom_values {
-                add_buckets(self, &other.positive, 1.0, Some(&mut c), None, true)?;
+                add_buckets(
+                    self,
+                    &other.positive,
+                    1.0,
+                    Some((&mut c, layout)),
+                    None,
+                    true,
+                )?;
             } else {
                 outcome.custom_bounds_reconciled = true;
                 let bounds = intersect_custom_bounds(&self.custom_values, &other.custom_values);
@@ -480,12 +702,26 @@ impl FloatHistogram {
             Some((buckets, c)) => (buckets, Some(c)),
             None => (&other.positive, None),
         };
-        add_buckets(self, positive, 1.0, Some(&mut c), positive_c, true)?;
+        add_buckets(
+            self,
+            positive,
+            1.0,
+            Some((&mut c, layout)),
+            positive_c,
+            true,
+        )?;
         let (negative, negative_c) = match &other_negative {
             Some((buckets, c)) => (buckets, Some(c)),
             None => (&other.negative, None),
         };
-        add_buckets(self, negative, 1.0, Some(&mut c), negative_c, false)?;
+        add_buckets(
+            self,
+            negative,
+            1.0,
+            Some((&mut c, layout)),
+            negative_c,
+            false,
+        )?;
         c.schema = self.schema;
         c.zero_threshold = self.zero_threshold;
         Ok((c, outcome))
@@ -622,8 +858,7 @@ impl FloatHistogram {
                 for bucket in &mut c.negative[..trimmed_negative] {
                     bucket.1 = 0.0;
                 }
-                compact_with(&mut self.positive, &mut c.positive);
-                compact_with(&mut self.negative, &mut c.negative);
+                self.compact_with_compensation(c);
             }
             None => self.compact(),
         }
@@ -943,15 +1178,30 @@ fn zero_compensation(side: &Buckets) -> Buckets {
 
 /// Go `kahanCompact(0)`: drops the buckets whose count and compensation are both zero.
 fn compact_with(side: &mut Buckets, compensation: &mut Buckets) {
-    let keep: Vec<bool> = side
-        .iter()
-        .zip(compensation.iter())
-        .map(|(&(_, count), &(_, c))| count != 0.0 || c != 0.0)
-        .collect();
-    let mut flags = keep.iter();
-    side.retain(|_| *flags.next().unwrap());
-    let mut flags = keep.iter();
-    compensation.retain(|_| *flags.next().unwrap());
+    compact_range(side, compensation, 0..side.len(), |_, _, _| {});
+}
+
+fn compact_range(
+    side: &mut Buckets,
+    compensation: &mut Buckets,
+    range: Range<usize>,
+    mut on_empty: impl FnMut(i32, f64, f64),
+) {
+    let mut kept = range.start;
+    let end = range.end;
+    for i in range {
+        if side[i].1 != 0.0 || compensation[i].1 != 0.0 {
+            side[kept] = side[i];
+            compensation[kept] = compensation[i];
+            kept += 1;
+        } else {
+            on_empty(side[i].0, side[i].1, compensation[i].1);
+        }
+    }
+    if kept < end {
+        side.drain(kept..end);
+        compensation.drain(kept..end);
+    }
 }
 
 /// Go `addBuckets` and `kahanAddBuckets`: adds `sign * other` to one side of `h`, inserting the
@@ -960,7 +1210,7 @@ fn add_buckets(
     h: &mut FloatHistogram,
     other: &Buckets,
     sign: f64,
-    c: Option<&mut FloatHistogram>,
+    c: Option<(&mut FloatHistogram, BucketLayout)>,
     other_c: Option<&Buckets>,
     positive: bool,
 ) -> Result<()> {
@@ -972,6 +1222,8 @@ fn add_buckets(
     } else {
         &mut h.negative
     };
+    let (c, layout) = c.unzip();
+    let compact = layout == Some(BucketLayout::Compact);
     let mut side_c = c.map(|c| {
         if positive {
             &mut c.positive
@@ -981,6 +1233,7 @@ fn add_buckets(
     });
     let mut below_threshold = true;
     let mut position = 0;
+    let mut cancelled = false;
     for (k, &(idx, count)) in other.iter().enumerate() {
         if below_threshold && exponential && bound(idx, schema, &[])? <= threshold {
             continue;
@@ -988,6 +1241,9 @@ fn add_buckets(
         below_threshold = false;
         let value = count * sign;
         let value_c = other_c.map_or(0.0, |other_c| other_c[k].1) * sign;
+        if compact && value == 0.0 && value_c == 0.0 {
+            continue;
+        }
         while position < side.len() && side[position].0 < idx {
             position += 1;
         }
@@ -999,6 +1255,7 @@ fn add_buckets(
                     if value_c != 0.0 {
                         (*sum, *comp) = kahan_inc(value_c, *sum, *comp);
                     }
+                    cancelled |= compact && *sum == 0.0 && *comp == 0.0;
                 }
                 None => side[position].1 += value,
             }
@@ -1008,6 +1265,10 @@ fn add_buckets(
                 side_c.insert(position, (idx, value_c));
             }
         }
+    }
+    // Remove all cancellations together so a dense subtraction moves each surviving bucket once.
+    if cancelled && let Some(side_c) = side_c {
+        compact_with(side, side_c);
     }
     Ok(())
 }

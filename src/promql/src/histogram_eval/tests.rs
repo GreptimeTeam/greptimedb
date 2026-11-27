@@ -22,7 +22,7 @@ use datatypes::series::histogram::{
 use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
-use super::float_histogram::{AddOutcome, FloatHistogram};
+use super::float_histogram::{AddOutcome, BucketLayout, EmptyBuckets, FloatHistogram};
 use super::{
     HistogramFunction, HistogramParameters, NativeHistogramFunction, evaluate_histograms,
     evaluate_histograms_with_annotations, histogram_quantiles, histogram_string,
@@ -355,6 +355,146 @@ fn fingerprint(h: &FloatHistogram) -> String {
 
 fn histogram(text: &str) -> FloatHistogram {
     FloatHistogram::try_from_view(&OwnedHistogram::parse(text).view()).unwrap()
+}
+
+#[test]
+fn compact_kahan_add_keeps_only_live_buckets_between_samples() {
+    let mut sum = histogram("8/0/0/0/0/3/////");
+    let mut c = None;
+    for index in 1..=64 {
+        // One positive and one negative observation each move up one bucket in absolute value.
+        let mut delta = sum.empty_like();
+        delta.positive = vec![(index, -1.0), (index + 1, 1.0)];
+        delta.negative.clone_from(&delta.positive);
+        let (correction, _) = sum
+            .kahan_add_with_layout(&delta, c, BucketLayout::Compact)
+            .unwrap();
+        for side in [&sum.positive, &sum.negative] {
+            assert_eq!(side, &[(1, -1.0), (index + 1, 1.0)]);
+        }
+        for side in [&correction.positive, &correction.negative] {
+            assert_eq!(side, &[(1, 0.0), (index + 1, 0.0)]);
+        }
+        c = Some(correction);
+    }
+}
+
+#[test]
+fn restoring_empty_buckets_preserves_order_and_signed_compensation() {
+    let mut original = histogram("7/0/0/0/0/3/////");
+    original.positive = vec![
+        (-2, -0.0),
+        (-1, 3.0),
+        (0, 0.0),
+        (1, -0.0),
+        (2, 4.0),
+        (3, 0.0),
+    ];
+    original.negative.clone_from(&original.positive);
+    let mut original_c = original.new_compensation();
+    original_c.positive = vec![
+        (-2, 0.0),
+        (-1, 0.25),
+        (0, -0.0),
+        (1, -0.0),
+        (2, 0.5),
+        (3, 0.0),
+    ];
+    original_c.negative.clone_from(&original_c.positive);
+    let (mut value, mut c) = (original.clone(), original_c.clone());
+    let mut empty = EmptyBuckets::default();
+    empty.take_from(&mut value, &mut c, &original, true);
+
+    let mut sample = original.empty_like();
+    sample.schema += 1;
+    // The first two indices map to the same empty bucket in the accumulator.
+    sample.positive = vec![(-5, 1.0), (-4, 1.0), (0, 1.0), (6, 1.0)];
+    sample.negative = vec![(2, 1.0)];
+    empty
+        .prepare_for_add(&mut value, &mut c, &mut sample)
+        .unwrap();
+    for (actual, initial) in [(&value, &original), (&c, &original_c)] {
+        let mut expected = initial.clone();
+        expected.positive.retain(|(idx, _)| *idx != 1);
+        expected
+            .negative
+            .retain(|(idx, _)| [-1, 1, 2].contains(idx));
+        assert_eq!(fingerprint(actual), fingerprint(&expected));
+    }
+
+    sample.schema = original.schema - 1;
+    empty
+        .prepare_for_add(&mut value, &mut c, &mut sample)
+        .unwrap();
+    assert_eq!(fingerprint(&value), fingerprint(&original));
+    assert_eq!(fingerprint(&c), fingerprint(&original_c));
+}
+
+#[test]
+fn repeated_zero_adds_leave_empty_buckets_compact_until_a_downscale() {
+    let original = histogram("7/0/0/0/0/3/1_4/0,0,0,0/1_4/0,0,0,0/");
+    let finer = histogram("8/0/0/0/0/3/1_8/0,0,0,0,0,0,0,0/1_8/0,0,0,0,0,0,0,0/");
+    for (mut sample, retained_span) in [(original.clone(), (2, 3)), (finer, (3, 6))] {
+        sample.start_timestamp = Some(1000);
+        let mut value = original.clone();
+        let mut c = value.new_compensation();
+        for (incoming, side, correction) in [
+            (&mut sample.positive, &mut value.positive, &mut c.positive),
+            (&mut sample.negative, &mut value.negative, &mut c.negative),
+        ] {
+            incoming[0].1 = -0.0;
+            correction[1].1 = -0.0;
+            side[2].1 = -0.0;
+            incoming.last_mut().unwrap().1 = 1.0;
+        }
+        if sample.schema == value.schema {
+            value.negative[0].1 = -0.0;
+        }
+        let mut expected = value.clone();
+        let (expected_c, _) = expected.kahan_add(&sample, Some(c.clone())).unwrap();
+
+        let mut empty = EmptyBuckets::default();
+        empty.take_from(&mut value, &mut c, &sample, true);
+        empty
+            .prepare_for_add(&mut value, &mut c, &mut sample)
+            .unwrap();
+        assert_eq!(sample.spans(), [vec![retained_span], vec![retained_span]]);
+        assert_eq!(sample.start_timestamp, None);
+        let (mut c, _) = value.kahan_add(&sample, Some(c)).unwrap();
+        for side in [&value.positive, &value.negative, &c.positive, &c.negative] {
+            assert!(side.iter().all(|&(idx, _)| idx != 1));
+        }
+
+        let mut coarse = value.empty_like();
+        coarse.schema -= 1;
+        empty
+            .prepare_for_add(&mut value, &mut c, &mut coarse)
+            .unwrap();
+        assert!(value.equals(&expected));
+        assert!(c.equals(&expected_c));
+    }
+}
+
+#[test]
+fn widening_the_input_zero_bucket_preserves_only_the_zeros_it_can_visit() {
+    let mut sample = histogram("0/0/0/0/0/3/-1_4/0,0,0,0/-1_4/0,0,0,0/");
+    let mut value = sample.clone();
+    value.zero_threshold = 0.75;
+    let mut c = value.new_compensation();
+    let mut empty = EmptyBuckets::default();
+    empty.take_from(&mut value, &mut c, &sample, true);
+    empty
+        .prepare_for_add(&mut value, &mut c, &mut sample)
+        .unwrap();
+    // Index -1 ends at 0.5 and index 0 straddles the threshold. Both later buckets start above it.
+    for side in [
+        &sample.positive,
+        &sample.negative,
+        &value.positive,
+        &value.negative,
+    ] {
+        assert_eq!(side.as_slice(), &[(-1, 0.0), (0, 0.0)]);
+    }
 }
 
 #[test]

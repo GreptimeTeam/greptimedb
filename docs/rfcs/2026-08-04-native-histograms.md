@@ -309,16 +309,25 @@ reconciled according to their shared bounds. The only layout bypass is local to
 counter rate: when the first-to-second pair is a reset, the first sample's
 layout is irrelevant and the second sample starts the accumulated segment.
 
-`avg` and `avg_over_time` use a mergeable weighted running mean. This prevents a
-finite mean from becoming infinity solely because the intermediate sum
-overflowed. Native-histogram aggregates are not currently split into datanode
-partial aggregation and frontend state merging, so this state does not cross
-nodes or versions. If distributed stepping is added later, its state must be
-versioned before rolling upgrades can safely mix implementations.
+`sum` and `sum_over_time` add histogram counts, sums and buckets with Kahan
+compensation. `avg` and `avg_over_time` use the same compensated sum and switch
+to a running mean if the trial sum has an infinite count, sum, bucket count, or
+custom bound. For three one-observation histograms with a single custom bound of
+`0` and sums of `1e16`, `1`, and `-1e16`, the sum field of `sum_over_time` is
+`1` and the sum field of `avg_over_time` is `1/3`. With a custom bound of
+`-Inf`, the running mean gives a sum field of approximately `-1/6`.
 
-The rejected alternative is Prometheus's direct-sum/Kahan-compensation design
-with an overflow-triggered mode change. It offers closer rounding parity but
-requires additional state and substantially more merge logic.
+The range functions follow Prometheus v3.15.0 at floating-point limits. For
+110 identical histogram sums at the largest finite `f64`, the final correction
+in `avg_over_time` yields `+Inf`. When `sum_over_time` widens an exponential
+zero bucket in two passes, it carries the first pass's rounding correction into
+the second. At counts above `2^53`, the zero-bucket count can exceed the total
+even when all observations fall in the widened bucket.
+
+The native PromQL aggregate carries compensation in its partial state. The
+legacy aggregate folds the correction into its result before exporting each
+partial state. For example, a partition containing `1e16` and `1` exports
+`1e16`. Merging that partial sum with `-1e16` yields `0`.
 
 ## Equality, changes, and resets
 
@@ -378,7 +387,7 @@ boundary already recorded in
 Compatibility coverage includes protocol rejection, OTLP scale conversion and
 partial-success behavior, kind exclusivity,
 stale-marker selector semantics, synthetic-zero rates, incompatible empty
-layouts, overflow-safe averages, layout-sensitive equality, infinite custom
+layouts, average behavior at overflow, layout-sensitive equality, infinite custom
 midpoints, and exponential overflow indices for schemas `-4`, `0`, and `8`.
 Behavioral coverage also verifies frontend PromQL warning and info responses,
 sampled Remote Read before and after flush in standalone and distributed
@@ -401,8 +410,7 @@ a new configuration option; existing native-histogram data remains readable.
 - Start-timestamp overlap annotations.
 - Datanode-to-frontend PromQL annotation propagation.
 - Versioned two-phase native-histogram aggregation state.
-- Exact Prometheus summation compensation if measured precision differences
-  justify the extra aggregate state.
+- Preserve summation compensation across legacy aggregate partial-state merges.
 
 ## Configuration migration
 

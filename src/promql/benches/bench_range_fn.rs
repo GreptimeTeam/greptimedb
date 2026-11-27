@@ -16,6 +16,9 @@
 
 use std::sync::Arc;
 
+use common_query::native_histogram::{
+    GAUGE_RESET_HINT, NativeHistogram, Span, build_histogram_array, native_histogram_arrow_type,
+};
 use criterion::{BenchmarkId, Criterion, criterion_group};
 use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
@@ -27,8 +30,8 @@ use datatypes::arrow::datatypes::{DataType, Field};
 use promql::extension_plan::RangeManipulateStream;
 use promql::functions::{
     AbsentOverTime, Changes, CountOverTime, Delta, DoubleExponentialSmoothing, IDelta, Increase,
-    LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate,
-    Resets, SumOverTime,
+    LastOverTime, MaxOverTime, MinOverTime, NativeHistogramAvgOverTime, NativeHistogramSumOverTime,
+    PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
 
@@ -306,6 +309,10 @@ struct PreparedUdfCall {
 
 impl PreparedUdfCall {
     fn new(args: Vec<ColumnarValue>) -> Self {
+        Self::with_return_type(args, DataType::Float64)
+    }
+
+    fn with_return_type(args: Vec<ColumnarValue>, return_type: DataType) -> Self {
         let arg_fields = args
             .iter()
             .enumerate()
@@ -322,7 +329,7 @@ impl PreparedUdfCall {
             args,
             arg_fields,
             number_rows,
-            return_field: Arc::new(Field::new("out", DataType::Float64, true)),
+            return_field: Arc::new(Field::new("out", return_type, true)),
             config_options: Arc::new(ConfigOptions::default()),
         }
     }
@@ -344,6 +351,164 @@ fn invoke_prepared_output(
 
 fn invoke_prepared(udf: &datafusion::logical_expr::ScalarUDF, prepared: &PreparedUdfCall) {
     let _ = invoke_prepared_output(udf, prepared);
+}
+
+fn bench_sparse_histogram_ranges(c: &mut Criterion) {
+    let sample = NativeHistogram {
+        schema: 8,
+        zero_threshold: 0.0,
+        sum: 1.0,
+        reset_hint: GAUGE_RESET_HINT,
+        start_timestamp: None,
+        custom_values: vec![],
+        positive_spans: vec![
+            Span {
+                offset: 0,
+                length: 1,
+            },
+            Span {
+                offset: 1,
+                length: 1,
+            },
+        ],
+        negative_spans: vec![],
+        count: 1.0,
+        zero_count: 0.0,
+        positive_buckets: vec![1.0, 0.0],
+        negative_buckets: vec![],
+    };
+    for (name, udf) in [
+        (
+            "sparse_histogram_avg_over_time",
+            NativeHistogramAvgOverTime::scalar_udf(),
+        ),
+        (
+            "sparse_histogram_sum_over_time",
+            NativeHistogramSumOverTime::scalar_udf(),
+        ),
+    ] {
+        let mut group = c.benchmark_group(name);
+        let mut bench = |label: &str, values: Vec<Option<NativeHistogram>>| {
+            let length = u32::try_from(values.len()).unwrap();
+            let range = [(0, length)];
+            let ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+                (1..=length).map(|i| i64::from(i) * 1000),
+            ));
+            let ts = Arc::new(RangeArray::from_ranges(ts, range).unwrap().into_dict());
+            let values = RangeArray::from_ranges(build_histogram_array(&values), range).unwrap();
+            let call = PreparedUdfCall::with_return_type(
+                vec![
+                    ColumnarValue::Array(ts),
+                    ColumnarValue::Array(Arc::new(values.into_dict())),
+                ],
+                native_histogram_arrow_type(),
+            );
+            group.bench_with_input(BenchmarkId::new(label, length), &call, |b, call| {
+                b.iter(|| invoke_prepared(&udf, call));
+            });
+        };
+        // The same 128 observations at two resolutions, with each gap encoded as zero counts.
+        let packed = |schema, pattern: &[f64]| {
+            let buckets = pattern.repeat(128);
+            NativeHistogram {
+                schema,
+                positive_spans: vec![Span {
+                    offset: 1,
+                    length: buckets.len() as i32,
+                }],
+                positive_buckets: buckets,
+                count: 128.0,
+                sum: (1..=512)
+                    .step_by(4)
+                    .map(|idx| 2f64.powf(f64::from(idx) / 256.0))
+                    .sum(),
+                ..sample.clone()
+            }
+        };
+        let fine = packed(8, &[1.0, 0.0, 0.0, 0.0]);
+        let coarse = packed(7, &[1.0, 0.0]);
+        for (label, coarse_at) in [
+            ("packed_empty_buckets", None),
+            ("packed_empty_buckets_last_downscale", Some(511)),
+            ("packed_empty_buckets_finer_tail", Some(0)),
+        ] {
+            let mut values = vec![Some(fine.clone()); 512];
+            if let Some(index) = coarse_at {
+                values[index] = Some(coarse.clone());
+            }
+            bench(label, values);
+        }
+        for length in [4096, 8192] {
+            bench(
+                "fixed_empty_bucket",
+                vec![Some(sample.clone()); length as usize],
+            );
+            let mut moving = |label, schema: &dyn Fn(u32) -> i32| {
+                let values = (0..length).map(|i| {
+                    let mut h = sample.clone();
+                    h.schema = schema(i);
+                    h.positive_spans[1].offset = i as i32 + 1;
+                    Some(h)
+                });
+                bench(label, values.collect());
+            };
+            for (label, fine_prefix) in [
+                ("moving_empty_bucket", length),
+                ("moving_empty_bucket_after_downscale", 1),
+                ("moving_empty_bucket_middle_downscale", length / 2),
+                ("moving_empty_bucket_last_downscale", length - 1),
+            ] {
+                moving(label, &|i| if i < fine_prefix { 8 } else { 7 });
+            }
+            moving("moving_empty_bucket_alternating_schema", &|i| {
+                8 - (i % 2) as i32
+            });
+
+            // Revisit an interior zero of a populated accumulator before a final downscale.
+            let width = 512;
+            let gap = width / 2;
+            let mut first = NativeHistogram {
+                positive_spans: vec![Span {
+                    offset: 0,
+                    length: width,
+                }],
+                positive_buckets: vec![1.0; width as usize],
+                count: f64::from(width - 1),
+                sum: (0..width)
+                    .filter(|&idx| idx != gap)
+                    .map(|idx| 2f64.powf(f64::from(idx) / 256.0))
+                    .sum(),
+                ..sample.clone()
+            };
+            first.positive_buckets[gap as usize] = 0.0;
+            let mut sparse = sample.clone();
+            sparse.positive_spans[1].offset = gap - 1;
+            let last = NativeHistogram {
+                schema: 7,
+                ..sparse.clone()
+            };
+            let values = std::iter::once(Some(first))
+                .chain(std::iter::repeat_n(Some(sparse), length as usize - 2))
+                .chain([Some(last)]);
+            bench("populated_with_interior_empty_bucket", values.collect());
+
+            // idelta of one observation moving to the next exponential bucket at each step.
+            let deltas = (0..length).map(|i| {
+                Some(NativeHistogram {
+                    sum: 2f64.powf(f64::from(i + 1) / 256.0) - 2f64.powf(f64::from(i) / 256.0),
+                    count: 0.0,
+                    positive_spans: vec![Span {
+                        offset: i as i32,
+                        length: 2,
+                    }],
+                    positive_buckets: vec![-1.0, 1.0],
+                    ..sample.clone()
+                })
+            });
+            bench("moving_idelta", deltas.collect());
+        }
+        group.finish();
+    }
 }
 
 fn edge_count_oracle(
@@ -1251,6 +1416,7 @@ fn bench_cursor_scan_carriers(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_range_functions,
+    bench_sparse_histogram_ranges,
     bench_presence_range_functions,
     bench_delta_rate_comparison,
     bench_rate_window_steps,
