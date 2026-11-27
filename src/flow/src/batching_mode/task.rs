@@ -1576,7 +1576,22 @@ impl BatchingTask {
         let (affected_rows, _) = res.output.extract_rows_and_cost();
         let decision = {
             let mut state = self.state.write().unwrap();
-            Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage)
+            match self.refuse_substituted_delta(&mut state, &res, elapsed, coverage) {
+                Ok(Some(decision)) => decision,
+                Ok(None) => Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage),
+                Err(err) => {
+                    // The delta's DML already ran, so a scan that hid rows cannot be settled
+                    // additively and there is no fence to recompute the affected windows
+                    // under. Fail the round with the cursor untouched: the caller restores
+                    // the consumed dirty signal, and the next round replays the same delta
+                    // instead of advancing past rows no window received.
+                    drop(state);
+                    warn!(
+                        "Flow {flow_id} refused to settle an incremental delta that hid rows: {err}"
+                    );
+                    return Err(err);
+                }
+            }
         };
         Self::record_checkpoint_decision(flow_id, decision);
         Ok(Some((affected_rows, elapsed)))
