@@ -20,8 +20,9 @@
 //! aggregate, is split instead: its per-series prefix and a `Partial` aggregate run in a `FusedSeries`
 //! producer, a `SeriesRepartitionExec` routes that state, and a second `FusedSeries` runs the `Final`
 //! aggregate over it, because a region holds only part of a group. Declining is the normal answer: every
-//! shape the compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps
-//! the plan the existing planner builds.
+//! shape the compiler does not accept, and every query this route cannot bind to a scan faithfully,
+//! records the cause of its refusal, which the offer's caller reports - a query that asked for this route
+//! is answered with that error, and a query that did not keeps the plan the existing planner builds.
 //!
 //! The node is built from the raw series schema the tree's input was compiled against, the statement's
 //! evaluation grid, and output tag names derived from the native tree. The output schema has the shape the
@@ -274,6 +275,9 @@ thread_local! {
 /// The cause reported when a refusal was answered without recording one.
 const NATIVE_DECLINE_UNRECORDED: &str = "cause_not_recorded";
 
+/// The cause reported when a caller asks for the refusal behind an offer that recorded none.
+const NATIVE_DECLINE_UNSPECIFIED: &str = "unspecified";
+
 /// The reason a statement's metadata drop is not proved: the scan that answers it keys its series by
 /// a column that can hold `NULL` in one series and `''` in another, so the labels alone cannot prove
 /// the drop tells two of its series apart. Nothing is collected for that pair, which is exactly what
@@ -293,6 +297,17 @@ fn declined<T>(reason: &'static str) -> Option<T> {
 /// Takes the cause the last refusal recorded, if it recorded one.
 fn take_native_decline() -> Option<&'static str> {
     NATIVE_DECLINE.with(|record| record.replace(None))
+}
+
+/// Takes the cause the refusal behind the offer that just returned `None` recorded.
+///
+/// An offer made with the route on leaves the cause its refusal recorded in place (see
+/// [`PromPlanner::try_plan_native_fused`]), so the caller that answers the query reads it here: a
+/// query that asked for this route is answered with an error naming this cause instead of with a
+/// plan from the existing planner. A refusal that recorded no cause, and a caller with no offer
+/// behind it, get [`NATIVE_DECLINE_UNSPECIFIED`].
+pub(crate) fn take_decline_reason() -> &'static str {
+    take_native_decline().unwrap_or(NATIVE_DECLINE_UNSPECIFIED)
 }
 
 /// Clears the attempt count and answers how many attempts this thread made since the last call.
@@ -526,6 +541,12 @@ impl PromPlanner {
         )))
     }
 
+    /// Offers `prom_expr` to the native route, or answers `None` with the cause of its refusal.
+    ///
+    /// `None` is only answered when the route was asked for (see [`Self::native_fused`]): with the
+    /// route off the method reads nothing and records nothing. A refusal reports itself once
+    /// (a log line and a counter) and leaves its cause recorded, so the caller that answers the
+    /// query can name it with [`take_decline_reason`] instead of planning the query some other way.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
@@ -558,10 +579,9 @@ impl PromPlanner {
                 Ok(Some(plan))
             }
             _ => {
-                // A declined expression is planned by the existing path and answers the same rows,
-                // so without this record a route that never ran would only be visible as a slower
-                // query. The cause is the refusal that decided the answer; a refusal from a walk
-                // that records nothing reports the generic cause rather than staying silent.
+                // Without this record a route that never ran would only be visible in the caller's
+                // answer. The cause is the refusal that decided it; a refusal from a walk that
+                // records nothing reports the generic cause rather than staying silent.
                 let reason = take_native_decline().unwrap_or(NATIVE_DECLINE_UNRECORDED);
                 debug!(
                     "Native PromQL route declined this expression ({reason}); \
@@ -572,6 +592,9 @@ impl PromPlanner {
                     .inc();
                 #[cfg(test)]
                 REPORTED_DECLINE.with(|reported| reported.set(Some(reason)));
+                // The cause stays recorded, so the offer's caller can name it: an answer to a query
+                // that asked for this route is that error, not a plan from the existing planner.
+                NATIVE_DECLINE.with(|record| record.set(Some(reason)));
                 Ok(None)
             }
         }
@@ -634,7 +657,7 @@ impl PromPlanner {
     /// Each operand is planned the way the whole expression is and bound as one evaluated series frame.
     /// What admits the pair is the composition itself: the two grids must agree, and the matching, its
     /// cardinality, its fill values and the output column's kind must all be ones the kernels answer. A
-    /// shape they refuse declines to the existing plan rather than to an error.
+    /// shape they refuse declines with the cause it records, which the offer's caller reports.
     ///
     /// Only a binary expression composes, and only its own two operands are offered below.
     async fn try_plan_native_composed_binary(
@@ -815,8 +838,8 @@ impl PromPlanner {
     /// the planner's resolved selector context, which is the raw series schema the tree's input is
     /// compiled against. Selectors with a `__field__` matcher keep legacy planning.
     ///
-    /// `None` is not a failure: the caller plans the query with the existing planner as if this method did
-    /// not exist.
+    /// `None` records the cause of the refusal; the offer's caller reports it rather than planning the
+    /// query some other way (see [`PromPlanner::try_plan_native_fused`]).
     async fn try_plan_native_fused_with_context(
         &mut self,
         prom_expr: &PromExpr,

@@ -58,6 +58,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("the native PromQL route does not answer this shape ({reason})"))]
+    NativeRouteDeclined {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "duplicate native PromQL output column name(s): {names}; time index, value and tag columns must have distinct names"
     ))]
@@ -297,7 +304,7 @@ impl ErrorExt for Error {
 
             PromqlPlanNode { source, .. } => source.status_code(),
 
-            DataFusionPlanning { .. } => StatusCode::PlanQuery,
+            DataFusionPlanning { .. } | NativeRouteDeclined { .. } => StatusCode::PlanQuery,
 
             TableNameNotFound { .. } => StatusCode::TableNotFound,
 

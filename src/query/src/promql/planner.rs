@@ -109,13 +109,14 @@ use crate::parser::{
     EXPLAIN_VERBOSE_NODE_NAME,
 };
 use crate::promql::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, Error, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, RangeVectorInRangeQuerySnafu, Result,
-    SubqueryTimestampOutOfRangeSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu, ZeroSubqueryStepSnafu,
+    MultipleVectorSnafu, NativeRouteDeclinedSnafu, NoMetricMatcherSnafu,
+    RangeVectorInRangeQuerySnafu, Result, SubqueryTimestampOutOfRangeSnafu, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ZeroSubqueryStepSnafu,
 };
 use crate::promql::label_values::signed_millis_since_epoch;
 use crate::query_engine::QueryEngineState;
@@ -351,12 +352,25 @@ pub struct PromPlanner {
     /// An offer compiles a whole tree, so it is made where it covers the most: the statement root,
     /// and the topmost binary below a node this route does not answer. Once a binary node has spent
     /// the offer, the operands below it are planned by the existing path without offering
-    /// themselves again - re-offering each operand of a refused chain of n operators compiles its
-    /// subtrees again and costs O(n^2) passes instead of O(n).
+    /// themselves again: a refused offer is reported, so a chain of n operators never reaches the
+    /// O(n^2) passes that re-offering every operand would cost.
     native_binary_offer: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
+
+/// The answer to a statement the native route was asked to plan and does not answer.
+///
+/// A query that asks for the native route gets that route or the cause of its refusal: the existing
+/// planner's answer for the same statement is a different plan, so it is not a quiet substitute for
+/// one. The cause is the one the refusal recorded (see
+/// [`native::take_decline_reason`](crate::promql::planner::native::take_decline_reason)).
+fn native_declined() -> Error {
+    NativeRouteDeclinedSnafu {
+        reason: native::take_decline_reason().to_string(),
+    }
+    .build()
+}
 
 impl PromPlanner {
     pub async fn stmt_to_plan(
@@ -371,8 +385,9 @@ impl PromPlanner {
     /// Plans a PromQL statement and passes the optional collector to histogram UDFs.
     ///
     /// `native_fused` enables the native fused-series route: the statement is offered to
-    /// [`compile`](crate::promql::native_compile::compile) first, and whatever that compiler does
-    /// not accept is planned by the existing path, unchanged. See
+    /// [`compile`](crate::promql::native_compile::compile) first, and a shape that compiler does not
+    /// accept is reported as [`Error::NativeRouteDeclined`] naming the refusal's cause. With it off
+    /// the statement is planned by the existing path unchanged. See
     /// [`Self::try_plan_native_fused`].
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
@@ -393,13 +408,24 @@ impl PromPlanner {
 
         // The whole statement is offered to the native compiler first, because that compiler folds
         // a range function and the math functions over it into one tree: offered any later, the
-        // expression has already been split into the nodes those functions would have shared. A
-        // shape it does not accept is planned by the existing path exactly as if it were not here.
-        if let Some(plan) = planner
-            .try_plan_native_fused(&stmt.expr, query_engine_state)
-            .await?
-        {
-            return planner.strip_tsid_column(plan);
+        // expression has already been split into the nodes those functions would have shared.
+        //
+        // A root wrapper - `EXPLAIN`, `ANALYZE`, an alias - is not a shape of its own: what it wraps
+        // is the expression this route answers, and `prom_ext_expr_to_plan` offers that one instead
+        // of the wrapper. Offering the wrapper here would refuse the statement for a cause that is
+        // not the query's, so those roots go straight to the walk that dispatches them.
+        if !matches!(stmt.expr, PromExpr::Extension(_)) {
+            if let Some(plan) = planner
+                .try_plan_native_fused(&stmt.expr, query_engine_state)
+                .await?
+            {
+                return planner.strip_tsid_column(plan);
+            }
+            // The query asked for this route and the route does not answer this shape: the cause of
+            // that refusal is the answer, not the existing planner's plan for the same statement.
+            if planner.native_fused {
+                return Err(native_declined());
+            }
         }
         let plan = planner
             .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
@@ -1296,7 +1322,8 @@ impl PromPlanner {
         }
 
         // The same whole native binary the statement root was offered can sit below a
-        // legacy-only wrapper. A nested retry is valid only on the statement's own grid.
+        // wrapper that route does not answer itself. A nested retry is valid only on the
+        // statement's own grid.
         if self.native_fused
             && offer
             && self.ctx.start == self.ctx.stmt_start
@@ -1307,26 +1334,29 @@ impl PromPlanner {
                 .try_plan_native_fused(&PromExpr::Binary(binary_expr.clone()), query_engine_state)
                 .await;
             self.ctx = saved;
-            if let Some(plan) = native? {
-                let mut fields = plan.schema().fields().iter();
-                if let Some(time) = fields.next().map(|field| field.name().clone()) {
-                    let values = fields
-                        .clone()
-                        .filter(|field| field.data_type() != &ArrowDataType::Utf8)
-                        .map(|field| field.name().clone())
-                        .collect();
-                    let tags = fields
-                        .filter(|field| field.data_type() == &ArrowDataType::Utf8)
-                        .map(|field| field.name().clone())
-                        .collect();
-                    self.ctx.reset();
-                    self.ctx.reset_table_name_and_schema();
-                    self.ctx.aggregation_field_labels.clear();
-                    self.ctx.time_index_column = Some(time);
-                    self.ctx.field_columns = values;
-                    self.ctx.tag_columns = tags;
-                    return Ok(plan);
-                }
+            let Some(plan) = native? else {
+                // The query asked for this route and the route does not answer this binary: the
+                // cause of that refusal is the answer, not a plan from the existing path below.
+                return Err(native_declined());
+            };
+            let mut fields = plan.schema().fields().iter();
+            if let Some(time) = fields.next().map(|field| field.name().clone()) {
+                let values = fields
+                    .clone()
+                    .filter(|field| field.data_type() != &ArrowDataType::Utf8)
+                    .map(|field| field.name().clone())
+                    .collect();
+                let tags = fields
+                    .filter(|field| field.data_type() == &ArrowDataType::Utf8)
+                    .map(|field| field.name().clone())
+                    .collect();
+                self.ctx.reset();
+                self.ctx.reset_table_name_and_schema();
+                self.ctx.aggregation_field_labels.clear();
+                self.ctx.time_index_column = Some(time);
+                self.ctx.field_columns = values;
+                self.ctx.tag_columns = tags;
+                return Ok(plan);
             }
         }
 
@@ -2598,19 +2628,30 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        let native_plan = match expr.name() {
+        // `EXPLAIN` and `ANALYZE` publish a plan of the expression they wrap, so the expression is
+        // what this route is offered: every other wrapper is the existing planner's to answer.
+        let publishes_a_plan = matches!(
+            expr.name(),
             ANALYZE_NODE_NAME
-            | ANALYZE_VERBOSE_NODE_NAME
-            | EXPLAIN_NODE_NAME
-            | EXPLAIN_VERBOSE_NODE_NAME => {
-                self.try_plan_native_fused(&children[0], query_engine_state)
-                    .await?
-            }
-            _ => None,
+                | ANALYZE_VERBOSE_NODE_NAME
+                | EXPLAIN_NODE_NAME
+                | EXPLAIN_VERBOSE_NODE_NAME
+        );
+        let native_plan = if publishes_a_plan {
+            self.try_plan_native_fused(&children[0], query_engine_state)
+                .await?
+        } else {
+            None
         };
         let plan = match native_plan {
             Some(plan) => plan,
             None => {
+                // The query asked for this route and the route does not answer what the wrapper
+                // publishes: the cause of that refusal is the answer, not a plan of the existing
+                // path published under the same `EXPLAIN`/`ANALYZE`.
+                if publishes_a_plan && self.native_fused {
+                    return Err(native_declined());
+                }
                 self.prom_root_expr_to_plan(&children[0], query_engine_state)
                     .await?
             }

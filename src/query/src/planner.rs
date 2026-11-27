@@ -41,7 +41,7 @@ use datafusion_sql::planner::{IdentNormalizer, ParserOptions, SqlToRel};
 use log_query::LogQuery;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
-use snafu::{ResultExt, ensure};
+use snafu::{IntoError, ResultExt, ensure};
 use sql::CteContent;
 use sql::ast::Expr as SqlExpr;
 use sql::statements::explain::ExplainStatement;
@@ -61,7 +61,9 @@ use crate::log_query::planner::LogQueryPlanner;
 use crate::optimizer::expr_depth;
 use crate::options::{NativePromqlExtension, ScheduledTimeExtension};
 use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
+use crate::promql::error::NativeRouteDeclinedSnafu;
 use crate::promql::planner::PromPlanner;
+use crate::promql::planner::native::take_decline_reason;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 use crate::range_select::plan_rewrite::RangePlanRewriter;
 use crate::{DfContextProviderAdapter, QueryEngineContext};
@@ -212,6 +214,22 @@ fn strips_only_tsid(plan: &LogicalPlan, inner: &LogicalPlan) -> bool {
         .map(|field| field.name())
         .collect::<Vec<_>>();
     projected == stripped && projected.len() + 1 == inner.schema().fields().len()
+}
+
+/// The error a statement that asked for the native route is answered with when the route does not
+/// answer its shape.
+///
+/// The cause it names is the one the refusal recorded (see
+/// [`take_decline_reason`](crate::promql::planner::native::take_decline_reason)), so the answer
+/// says which shape of this statement the route does not serve rather than leaving the reader to
+/// infer it from a different plan. Planning reports it as a plan failure, like every other error it
+/// raises while planning.
+fn native_declined() -> crate::error::Error {
+    let declined = NativeRouteDeclinedSnafu {
+        reason: take_decline_reason().to_string(),
+    }
+    .build();
+    QueryPlanSnafu.into_error(BoxedError::new(declined))
 }
 
 /// Whether `plan` runs on the native fused-series route.
@@ -704,18 +722,36 @@ impl DfLogicalPlanner {
     /// Plans a PromQL statement, offering it to the native fused-series route when the statement
     /// may take it and the query options it is planned with ask for it.
     ///
-    /// `native_route_allowed` states whether the statement may take the route at all: a PromQL
-    /// statement embedded in a CTE may not (see [`Self::tql_to_logical_plan`]), every other one
-    /// may. Everything else the route depends on is read from the query options snapshot the
-    /// statement is planned with, where every option is already resolved as request > session
-    /// `SET` > engine default.
-    #[tracing::instrument(skip_all)]
+    /// `native_route_allowed` states whether the statement may take the route at all, and the rest
+    /// of what the route depends on is read from the query options snapshot the statement is
+    /// planned with, where every option is already resolved as request > session `SET` > engine
+    /// default. See [`Self::plan_pql_with_route`] for the same plan beside whether the route had
+    /// its say.
     async fn plan_pql(
         &self,
         stmt: &EvalStmt,
         query_ctx: QueryContextRef,
         native_route_allowed: bool,
     ) -> Result<LogicalPlan> {
+        self.plan_pql_with_route(stmt, query_ctx, native_route_allowed)
+            .await
+            .map(|(plan, _)| plan)
+    }
+
+    /// Plans a PromQL statement and answers whether it was offered to the native fused-series
+    /// route.
+    ///
+    /// A caller that publishes this plan as something else - a hybrid CTE registers it as a table
+    /// the outer SQL query reads - needs that second answer: a route that was not offered is not a
+    /// route that refused, so a plan this statement did not get from the native route is only a
+    /// failure when the query asked for that route.
+    #[tracing::instrument(skip_all)]
+    async fn plan_pql_with_route(
+        &self,
+        stmt: &EvalStmt,
+        query_ctx: QueryContextRef,
+        native_route_allowed: bool,
+    ) -> Result<(LogicalPlan, bool)> {
         let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
         let query_ctx = engine_context.query_ctx();
         let mut scheduled_state = engine_context.state().clone();
@@ -800,9 +836,10 @@ impl DfLogicalPlanner {
             plan
         };
         let context = QueryEngineContext::new(scheduled_state, query_ctx);
-        Ok(self
+        let plan = self
             .engine_state
-            .optimize_by_extension_rules(plan, &context)?)
+            .optimize_by_extension_rules(plan, &context)?;
+        Ok((plan, native_requested))
     }
 
     #[tracing::instrument(skip_all)]
@@ -921,20 +958,33 @@ impl DfLogicalPlanner {
                 let QueryStatement::Promql(eval, _alias) = &stmt else {
                     unreachable!("a TQL eval parses to a PromQL statement");
                 };
-                let plan = self.plan_pql(eval, query_ctx.clone(), true).await?;
-                if !contains_native_fused(&plan) {
-                    // The route was not taken - it is off for this query, or it declined this
-                    // shape - so this is the existing plan, which already publishes what a CTE has
-                    // always published.
+                let (plan, native_offered) = self
+                    .plan_pql_with_route(eval, query_ctx.clone(), true)
+                    .await?;
+                if !native_offered {
+                    // This query did not ask for the native route, so the route never had this
+                    // statement to refuse: this is the existing plan, which already publishes what
+                    // a CTE has always published.
                     return Ok(plan);
+                }
+                if !contains_native_fused(&plan) {
+                    // The query asked for the route and this answer is not the route's: report the
+                    // reason it recorded instead of publishing a different plan under the CTE's
+                    // name. A plan the route did answer carries its node, so an answer without one
+                    // is a statement this CTE cannot be given by the route at all.
+                    return Err(native_declined());
                 }
                 // What the CTE publishes is SQL-visible, and this route names and orders its output
                 // its own way, so its own schema cannot stand in for the existing planner's: plan
-                // the statement for that schema and publish it over the native answer. A statement
-                // whose columns that projection cannot fill faithfully keeps the existing plan
-                // instead of changing the schema the CTE exposes.
+                // the statement for that schema and publish it over the native answer. The existing
+                // plan is read for its columns only - it is not an answer for this statement - so a
+                // statement whose columns that projection cannot fill faithfully is reported
+                // instead of being replaced by it.
                 let existing = self.plan_pql(eval, query_ctx, false).await?;
-                Ok(publish_legacy_schema(plan, &existing).unwrap_or(existing))
+                match publish_legacy_schema(plan, &existing) {
+                    Some(published) => Ok(published),
+                    None => Err(native_declined()),
+                }
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
