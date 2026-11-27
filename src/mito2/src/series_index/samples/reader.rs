@@ -340,12 +340,27 @@ impl SamplesFormatReader for SamplesReader {
                     tsid: u64::MAX,
                 })
             });
-            let first_page = directory.first_page(first_id).await?;
+            let mut number = directory.first_page(0, first_id).await?;
             let mut totals = vec![(0u64, 0u64); manifest.files.len()];
             let mut previous_leaf = None;
             let mut payload_boundary = None;
-            'pages: for number in first_page..directory.page_count() {
+            'pages: while number < directory.page_count() {
                 let entries = directory.page(number).await?;
+                // Seek over gaps between selected series. Scan sequentially while a long
+                // series continues onto the next directory page.
+                if let (Some(ids), Some(first), Some(last)) =
+                    (ids.as_ref(), entries.first(), entries.last())
+                {
+                    let Some(next) = ids.range(first.page.bounds.first..).next().copied() else {
+                        break;
+                    };
+                    if next > last.page.bounds.last {
+                        adjacent = false;
+                        previous_leaf = None;
+                        number = directory.first_page(number + 1, Some(next)).await?;
+                        continue;
+                    }
+                }
                 for (i, entry) in entries.iter().enumerate() {
                     if last_id.is_some_and(|last| entry.page.bounds.first > last) {
                         break 'pages;
@@ -589,6 +604,7 @@ impl SamplesFormatReader for SamplesReader {
                         )?;
                     }
                 }
+                number += 1;
             }
             if complete {
                 for ((rows, blocks), part) in totals.into_iter().zip(&manifest.files) {
@@ -645,11 +661,10 @@ impl Directory<'_> {
 
     /// Locate the earliest directory page which can contain the requested identifier.
     /// A series may span several pages, so equality must retain the earlier page.
-    async fn first_page(&self, first: Option<MetricSeriesId>) -> Result<u64> {
+    async fn first_page(&self, mut lo: u64, first: Option<MetricSeriesId>) -> Result<u64> {
         let Some(first) = first else {
-            return Ok(0);
+            return Ok(lo);
         };
-        let mut lo = 0;
         let mut hi = self.page_count();
         while hi.saturating_sub(lo) > 1 {
             let mid = lo + (hi - lo) / 2;
