@@ -84,9 +84,6 @@ fn floats(samples: &[Option<f64>]) -> Samples {
 }
 
 /// The `(start, len)` of every run of a mapped result, in grid order.
-///
-/// A mapped result is one series whose axis names the runs of consecutive positions that hold a
-/// value, so this is what the assertions here compare: the positions between two runs hold no row.
 fn run_ranges(result: &Series) -> Vec<(usize, usize)> {
     if result.time.grid().is_none() {
         panic!("lost grid axis: {:?}", result.time);
@@ -691,13 +688,8 @@ fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
     assert_eq!(names, ["__other__", "host"]);
 }
 
-/// Time-varying scalars pair by absolute position; a point either one lacks has no result.
-///
-/// `max_of(a, b)` and `min_of(a, b)` are functions of two scalars, so the compiler binds the call's
-/// first operand as the map's input and the second as its one parameter: this is that kernel, with
-/// two scalars that overlap in three positions, against the values it has to answer there. The
-/// fixture is not reachable from a compiled tree -- every scalar a tree produces covers its whole
-/// grid -- so what is pinned here is the kernel's own pairing rather than a query's shape.
+/// Time-varying scalars pair by absolute position; a point either one lacks has no result. Not
+/// reachable from a compiled tree, whose scalars cover the whole grid.
 #[test]
 fn scalar_functions_pair_scalars_by_position() {
     let schema = Arc::new(schema(&["scalar"]));

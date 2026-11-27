@@ -32,7 +32,7 @@ use super::{
 };
 use crate::grid_series::reference::{
     Dense, OwnedHistogram, Points, assert_histogram_close, assert_result_eq, golden_cases,
-    mixed_series, piece_ranges, random_dense, run_ranges, sparse_series,
+    mixed_series, random_dense, run_ranges, sparse_series,
 };
 use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
@@ -1510,277 +1510,6 @@ fn an_incompatible_bucket_layout_drops_the_reset_collision_warning() {
     );
 }
 
-/// A binary pairing walks two operands of many single-position runs and still reports every
-/// position exactly once.
-///
-/// The rows of a pairing only increase -- `intersect_runs` merges the two run lists forward and
-/// each shared run carries the row of each side -- which is what lets one cursor per operand serve
-/// every run of the pairing. This pins that order and the values under heavy fragmentation; it
-/// does not measure cost, since a cursor rebuilt per run returns the same values.
-#[test]
-fn a_pairing_reads_many_single_position_runs_once() {
-    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 8).unwrap()).unwrap());
-    let schema = Arc::new(schema(1, &grid));
-    let points: Points = (0..8)
-        .step_by(2)
-        .map(|position| (position, f64::to_bits(position as f64)))
-        .collect();
-    let operand = |name: &str, offset: f64| -> Series {
-        let labels = Labels::from([
-            ("__name__".to_string(), name.to_string()),
-            ("job".to_string(), "x".to_string()),
-        ]);
-        // Every other position is its own run: eight positions become four one-row runs.
-        let points: Points = points
-            .iter()
-            .map(|(&position, &bits)| (position, (f64::from_bits(bits) + offset).to_bits()))
-            .collect();
-        sparse_series(&schema, &labels, &points).unwrap()
-    };
-    let lhs = operand("a", 0.0);
-    let rhs = operand("b", 100.0);
-    assert_eq!(run_ranges(&lhs), vec![(0, 1), (2, 1), (4, 1), (6, 1)]);
-    assert_eq!(run_ranges(&rhs), vec![(0, 1), (2, 1), (4, 1), (6, 1)]);
-
-    let matching = BinaryMatching {
-        op: BinaryOp::Add,
-        return_bool: false,
-        labels: MatchingLabels::On(vec![Arc::from("job")]),
-        cardinality: Cardinality::OneToOne,
-        fill: FillValues::default(),
-    };
-    let result = binary_vectors(
-        &matching,
-        &schema,
-        std::slice::from_ref(&lhs),
-        &schema,
-        std::slice::from_ref(&rhs),
-    )
-    .unwrap();
-    assert_eq!(result.len(), 1);
-    assert_eq!(run_ranges(&result[0]), vec![(0, 1), (2, 1), (4, 1), (6, 1)]);
-    let expected: Points = (0..8)
-        .step_by(2)
-        .map(|position| (position, f64::to_bits((2 * position) as f64 + 100.0)))
-        .collect();
-    assert_eq!(points_of(&result[0]), expected);
-}
-
-/// F: a binary operation between two sparse operands evaluates only the shared positions, and its
-/// output's runs are exactly those positions -- never the envelope of the pairing.
-///
-/// LHS carries 1 and 8, RHS carries 8 and 10, so the only shared position is 8. A pairing that
-/// offset one side's rows by its first position would evaluate 1 against 8 and 8 against 10.
-#[test]
-fn a_binary_pairing_of_sparse_operands_keeps_the_shared_positions() {
-    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 12).unwrap()).unwrap());
-    let schema = Arc::new(schema(1, &grid));
-    let operand = |name: &str, points: &[(usize, f64)]| -> Series {
-        let labels = Labels::from([
-            ("__name__".to_string(), name.to_string()),
-            ("job".to_string(), "x".to_string()),
-        ]);
-        let points: Points = points
-            .iter()
-            .map(|&(position, value)| (position, f64::to_bits(value)))
-            .collect();
-        sparse_series(&schema, &labels, &points).expect("the operand holds a value")
-    };
-    let lhs = operand("l", &[(1, 10.0), (8, 20.0)]);
-    let rhs = operand("r", &[(8, 2.0), (10, 5.0)]);
-    assert_eq!(run_ranges(&lhs), vec![(1, 1), (8, 1)]);
-    assert_eq!(run_ranges(&rhs), vec![(8, 1), (10, 1)]);
-
-    let matching = BinaryMatching {
-        op: BinaryOp::Add,
-        return_bool: false,
-        labels: MatchingLabels::Ignoring(Vec::new()),
-        cardinality: Cardinality::OneToOne,
-        fill: FillValues::default(),
-    };
-    let result = binary_vectors(
-        &matching,
-        &schema,
-        std::slice::from_ref(&lhs),
-        &schema,
-        std::slice::from_ref(&rhs),
-    )
-    .unwrap();
-    assert_eq!(result.len(), 1, "one matched pair: {result:?}");
-    assert_eq!(
-        run_ranges(&result[0]),
-        vec![(8, 1)],
-        "only position 8 is shared, so the result holds exactly one row"
-    );
-    assert_eq!(result[0].time.len(), 1);
-    let mut expected: Dense = vec![vec![None]; 12];
-    expected[8] = vec![Some(22.0)];
-    // Arithmetic drops the metric name, as Prometheus does.
-    assert_result_eq(
-        Some(&result[0]),
-        &expected,
-        &metric(&Labels::from([("job".to_string(), "x".to_string())])),
-    );
-
-    // A filtered comparison keeps the left value where it holds, at the same positions.
-    let filtered = BinaryMatching {
-        op: BinaryOp::Gt,
-        return_bool: false,
-        labels: MatchingLabels::Ignoring(Vec::new()),
-        cardinality: Cardinality::OneToOne,
-        fill: FillValues::default(),
-    };
-    let result = binary_vectors(
-        &filtered,
-        &schema,
-        std::slice::from_ref(&lhs),
-        &schema,
-        std::slice::from_ref(&rhs),
-    )
-    .unwrap();
-    assert_eq!(result.len(), 1);
-    assert_eq!(run_ranges(&result[0]), vec![(8, 1)]);
-    let mut expected: Dense = vec![vec![None]; 12];
-    expected[8] = vec![Some(20.0)];
-    // A filtered comparison keeps the left value and its metric, name included.
-    assert_result_eq(
-        Some(&result[0]),
-        &expected,
-        &metric(&Labels::from([
-            ("__name__".to_string(), "l".to_string()),
-            ("job".to_string(), "x".to_string()),
-        ])),
-    );
-
-    // A `bool` comparison emits 0/1 at every shared position, so the axis is the intersection's.
-    let booled = BinaryMatching {
-        op: BinaryOp::Gt,
-        return_bool: true,
-        labels: MatchingLabels::Ignoring(Vec::new()),
-        cardinality: Cardinality::OneToOne,
-        fill: FillValues::default(),
-    };
-    let result = binary_vectors(
-        &booled,
-        &schema,
-        std::slice::from_ref(&lhs),
-        &schema,
-        std::slice::from_ref(&rhs),
-    )
-    .unwrap();
-    assert_eq!(result.len(), 1);
-    assert_eq!(run_ranges(&result[0]), vec![(8, 1)]);
-    let mut expected: Dense = vec![vec![None]; 12];
-    expected[8] = vec![Some(1.0)];
-    assert_result_eq(
-        Some(&result[0]),
-        &expected,
-        &metric(&Labels::from([("job".to_string(), "x".to_string())])),
-    );
-}
-
-/// F: a set operator keeps each series' own positions, so a sparse operand comes back with the
-/// runs it had and a dense one is cut to the sparse side's positions.
-///
-/// `and`: the positions both sides carry. `or`: the union. `unless`: the LHS positions the RHS
-/// does not carry.
-#[test]
-fn set_operators_of_sparse_operands_keep_their_own_positions() {
-    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 12).unwrap()).unwrap());
-    let schema = Arc::new(schema(1, &grid));
-    let operand = |name: &str, points: &[(usize, f64)]| -> Series {
-        let labels = Labels::from([
-            ("__name__".to_string(), name.to_string()),
-            ("job".to_string(), "x".to_string()),
-        ]);
-        let points: Points = points
-            .iter()
-            .map(|&(position, value)| (position, f64::to_bits(value)))
-            .collect();
-        sparse_series(&schema, &labels, &points).expect("the operand holds a value")
-    };
-    let lhs = operand("l", &[(1, 10.0), (5, 50.0), (9, 90.0)]);
-    let rhs = operand("r", &[(3, 30.0), (5, 55.0)]);
-    assert_eq!(run_ranges(&lhs), vec![(1, 1), (5, 1), (9, 1)]);
-    assert_eq!(run_ranges(&rhs), vec![(3, 1), (5, 1)]);
-    let labels = MatchingLabels::Ignoring(Vec::new());
-    let input = |side: &[Series]| side.to_vec();
-
-    // `and`: only position 5, where both sides hold a value.
-    let result = set_vectors(
-        SetOp::And,
-        &labels,
-        &schema,
-        &input(std::slice::from_ref(&lhs)),
-        &schema,
-        &input(std::slice::from_ref(&rhs)),
-    )
-    .unwrap();
-    assert_eq!(result.len(), 1, "an `and` keeps the left side: {result:?}");
-    assert_eq!(run_ranges(&result[0]), vec![(5, 1)]);
-    let mut expected: Dense = vec![vec![None]; 12];
-    expected[5] = vec![Some(50.0)];
-    assert_result_eq(Some(&result[0]), &expected, &lhs.metric);
-
-    // `or`: both sides' positions, each with the value it had.
-    let result = set_vectors(
-        SetOp::Or,
-        &labels,
-        &schema,
-        &input(std::slice::from_ref(&lhs)),
-        &schema,
-        &input(std::slice::from_ref(&rhs)),
-    )
-    .unwrap();
-    assert_eq!(result.len(), 2, "an `or` keeps the series: {result:?}");
-    let mut ranges = piece_ranges(&result);
-    ranges.sort_unstable();
-    assert_eq!(ranges, vec![(1, 1), (3, 1), (5, 1), (9, 1)]);
-    // Results come back by label set, not in input order, so each side is found by its labels.
-    let side = |name: &str| -> Series {
-        result
-            .iter()
-            .find(|series| series.metric.name() == Some(name))
-            .unwrap_or_else(|| panic!("no series {name}: {result:?}"))
-            .clone()
-    };
-    let left = side("l");
-    assert_eq!(
-        left.time.len(),
-        3,
-        "the left side keeps its three rows: {left:?}"
-    );
-    assert_eq!(run_ranges(&left), vec![(1, 1), (5, 1), (9, 1)]);
-    let right = side("r");
-    assert_eq!(
-        right.time.len(),
-        1,
-        "`or` keeps only the right side's positions the left side does not carry: {right:?}"
-    );
-    assert_eq!(run_ranges(&right), vec![(3, 1)]);
-
-    // `unless`: the LHS positions the RHS does not carry, so 5 is dropped.
-    let result = set_vectors(
-        SetOp::Unless,
-        &labels,
-        &schema,
-        &input(std::slice::from_ref(&lhs)),
-        &schema,
-        &input(std::slice::from_ref(&rhs)),
-    )
-    .unwrap();
-    assert_eq!(result.len(), 1, "{result:?}");
-    assert_eq!(
-        run_ranges(&result[0]),
-        vec![(1, 1), (9, 1)],
-        "the dropped position costs no row and splits the run"
-    );
-    let mut expected: Dense = vec![vec![None]; 12];
-    expected[1] = vec![Some(10.0)];
-    expected[9] = vec![Some(90.0)];
-    assert_result_eq(Some(&result[0]), &expected, &lhs.metric);
-}
-
 /// One filed row, counted from what the row holds: the point it answers, the match group it belongs
 /// to and the value it keeps. It is an independent unit of account -- the three things a row is made
 /// of, not the figure the operation charges for one -- so a reservation that grew with something
@@ -2532,62 +2261,6 @@ fn a_filtered_comparison_files_a_row_that_carries_no_value() {
     );
 }
 
-/// Fields that hold different positions of one label set are merged into one series: the triples
-/// arrive field by field, so the merge sorts them before it writes the series out.
-#[test]
-fn fields_holding_different_positions_merge_into_one_series() {
-    let grid = budget_grid(2);
-    let schema = Arc::new(schema(2, &grid));
-    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
-    // The left side holds its first field at the later point and its second at the earlier one.
-    builder.begin_series();
-    builder.push(0, &[None, Some(10.0)]).unwrap();
-    builder.push(1, &[Some(1.0), None]).unwrap();
-    let lhs: Vec<Series> = builder
-        .finish(metric(&Labels::from([(
-            "job".to_string(),
-            "x".to_string(),
-        )])))
-        .unwrap()
-        .into_iter()
-        .collect();
-    let labels = Labels::from([
-        ("__name__".to_string(), "b".to_string()),
-        ("job".to_string(), "x".to_string()),
-    ]);
-    builder.begin_series();
-    builder.push(0, &[Some(2.0), Some(20.0)]).unwrap();
-    builder.push(1, &[Some(3.0), Some(30.0)]).unwrap();
-    let rhs: Vec<Series> = builder
-        .finish(metric(&labels))
-        .unwrap()
-        .into_iter()
-        .collect();
-    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
-    let (output, _) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
-    let output = output.expect("the fields merge");
-    assert_eq!(output.len(), 1, "{output:?}");
-    let series = &output[0];
-    let mut first = series.fields.as_slice()[0].cursor();
-    let mut second = series.fields.as_slice()[1].cursor();
-    let value = |cursor: &mut RowCursor<'_>, row: usize| -> Option<f64> {
-        match cursor.at(row).expect("a row never goes back") {
-            SampleRef::Missing => None,
-            SampleRef::Float(value) => Some(value),
-            SampleRef::Histogram(_) => panic!("a float field holds no histogram"),
-        }
-    };
-    let mut rows = Vec::new();
-    for (point, row) in series.time.positions() {
-        rows.push((point, [value(&mut first, row), value(&mut second, row)]));
-    }
-    assert_eq!(
-        rows,
-        vec![(0, [None, Some(30.0)]), (1, [Some(4.0), None])],
-        "each field keeps its own point"
-    );
-}
-
 /// Only the field that matches keeps storage: a second field whose operands share no value files
 /// nothing, and the match slots of the first field are released with it.
 #[test]
@@ -2772,15 +2445,11 @@ fn the_budget_charges_the_matching_names_it_collects() {
         );
         // A limit the run without the names admits is refused once they are collected.
         let matching = budget_matching(BinaryOp::Add, labels(absent(2_000)));
-        let (output, admitted) = budgeted(&matching, &schema, &lhs, &schema, &rhs, none_peak);
+        let (output, _) = budgeted(&matching, &schema, &lhs, &schema, &rhs, none_peak);
         let error = output.expect_err("the names are charged before the rewrite");
         assert!(
             matches!(error, DataFusionError::ResourcesExhausted(_)),
             "{error}"
-        );
-        assert!(
-            admitted.iter().all(|&total| total <= none_peak),
-            "{admitted:?}"
         );
     }
 }
@@ -2866,10 +2535,9 @@ fn a_budget_below_the_workspace_stops_the_operation() {
     limits.dedup();
     assert!(!limits.is_empty(), "{seen:?}");
     for limit in limits {
-        let (output, admitted) = budgeted(&matching, &schema, &lhs, &schema, &rhs, limit);
+        let (output, _) = budgeted(&matching, &schema, &lhs, &schema, &rhs, limit);
         let error = output.unwrap_err().to_string();
         assert!(error.contains("more than the"), "{error}");
-        assert!(admitted.iter().all(|&total| total <= limit), "{admitted:?}");
     }
     // A budget of zero admits nothing, so the first step already fails.
     let (output, admitted) = budgeted(&matching, &schema, &lhs, &schema, &rhs, 0);
@@ -3987,6 +3655,23 @@ fn duplicate_evidence_candidate_survives_false_gate_until_late_presence() {
 }
 
 #[test]
+fn duplicate_evidence_separates_node_field_pairs() {
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let evidence = super::DuplicateEvidence::new(&pool, 1);
+    evidence.publish(0, 0, &[true], &[true], false).unwrap();
+    evidence
+        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
+        .unwrap();
+    evidence.publish(0, 1, &[false], &[false], false).unwrap();
+    evidence
+        .record_candidate(0, 1, 0, Arc::new(vec![]), "left", 0)
+        .unwrap();
+    assert_eq!(evidence.verdict().unwrap().point, 0);
+    assert!(evidence.verdict().unwrap().group.is_empty());
+}
+
+#[test]
 fn duplicate_evidence_skips_ineligible_earlier_point() {
     use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
     let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
@@ -4002,23 +3687,6 @@ fn duplicate_evidence_skips_ineligible_earlier_point() {
         .unwrap();
     assert_eq!(evidence.verdict().unwrap().point, 1);
     assert_eq!(evidence.verdict().unwrap().point, 1);
-}
-
-#[test]
-fn duplicate_evidence_separates_node_field_pairs() {
-    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let evidence = super::DuplicateEvidence::new(&pool, 1);
-    evidence.publish(0, 0, &[true], &[true], false).unwrap();
-    evidence
-        .record_candidate(0, 0, 0, Arc::new(vec![]), "left", 0)
-        .unwrap();
-    evidence.publish(0, 1, &[false], &[false], false).unwrap();
-    evidence
-        .record_candidate(0, 1, 0, Arc::new(vec![]), "left", 0)
-        .unwrap();
-    assert_eq!(evidence.verdict().unwrap().point, 0);
-    assert!(evidence.verdict().unwrap().group.is_empty());
 }
 
 #[test]

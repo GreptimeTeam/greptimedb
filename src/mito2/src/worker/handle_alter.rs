@@ -33,7 +33,7 @@ use store_api::mito_engine_options::MAX_ROW_GROUP_ROW_COUNT_LIMIT;
 use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, RegionBusySnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
 use crate::memtable::ensure_json2_uses_flat_format;
@@ -76,6 +76,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Followers only accept skip-WAL changes, which are in-memory option changes and must
         // never enter the leader path that may flush memtables.
         if let Some(skip_wal) = follower_skip_wal {
+            // A catchup reads the region's skip_wal option outside the worker, when it decides
+            // whether to hand the region's WAL over, and a reload reopens the region with the
+            // options it read when it began.
+            if self.is_catching_up_or_reloading(&region) {
+                warn!(
+                    "Region {region_id} is in a catchup or reload, refusing to change its options"
+                );
+                sender.send(Err(RegionBusySnafu { region_id }.build()));
+                return;
+            }
             if let Err(e) = validate_skip_wal_change(&region, skip_wal) {
                 sender.send(Err(e).context(InvalidMetadataSnafu));
                 return;

@@ -46,7 +46,7 @@ use common_telemetry::logging::SlowQueryOptions;
 use common_test_util::find_workspace_path;
 use common_wal::config::DatanodeWalConfig;
 use datanode::datanode::{Datanode, DatanodeBuilder};
-use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
+use flow::{FlowDualEngineRef, FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
 use frontend::frontend::Frontend;
 use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
@@ -74,6 +74,10 @@ pub struct GreptimeDbStandalone {
     pub kv_backend: KvBackendRef,
     pub procedure_manager: ProcedureManagerRef,
     pub event_recorder_handle: EventRecorderHandle,
+    /// Its consistency-check task is not started: once started it holds the engine on the global
+    /// runtime until stopped, past this instance and any rebuild. A test that needs
+    /// `ADMIN FLUSH_FLOW` starts the task and stops it before returning.
+    pub flow_engine: FlowDualEngineRef,
 }
 
 impl GreptimeDbStandalone {
@@ -406,6 +410,7 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend,
             procedure_manager,
             event_recorder_handle,
+            flow_engine: flownode.flow_engine(),
         }
     }
 

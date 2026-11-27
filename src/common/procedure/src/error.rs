@@ -211,13 +211,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse segment key: {key}"))]
-    ParseSegmentKey {
-        #[snafu(implicit)]
-        location: Location,
+    #[snafu(display("Corrupt checkpoint {key}: {reason}"))]
+    CorruptCheckpoint {
         key: String,
-        #[snafu(source)]
-        error: std::num::ParseIntError,
+        /// Actual stored keys, including surviving segments when the base key is missing.
+        keys: Vec<String>,
+        reason: String,
     },
 
     #[snafu(display("Unexpected: {err_msg}"))]
@@ -281,7 +280,7 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::ProcedurePanic { .. }
-            | Error::ParseSegmentKey { .. }
+            | Error::CorruptCheckpoint { .. }
             | Error::Unexpected { .. }
             | &Error::ProcedureNotFound { .. }
             | Error::PoisonKeyNotDefined { .. } => StatusCode::Unexpected,

@@ -307,7 +307,7 @@ fn time_varying_scalar_preflight_rejects_unsupported_data_even_outside_overlap()
     }
 }
 
-/// F: a vector–scalar operation between two sparse operands aligns by shared runs, not by
+/// A vector–scalar operation between two sparse operands aligns by shared runs, not by
 /// subtracting first positions, and reports the surviving positions as their own runs.
 ///
 /// Vector positions 1, 5 and 9; scalar positions 5 and 9. Only 5 and 9 are evaluated, and the

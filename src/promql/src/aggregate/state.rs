@@ -15,15 +15,14 @@
 //! Partial aggregation: the state one execution partition folds its series into, and the merge
 //! of such states into the final result.
 //!
-//! A merge regroups the operations of a serial fold, so floating-point results differ from
-//! [`aggregate_float`](crate::aggregate::aggregate_float) by rounding. The same reassociation can
-//! also move an overflow of finite values: a serial `sum` of `[1e308, 1e308, -1e308]` is `+Inf`,
-//! while the merge of `[1e308]` and `[1e308, -1e308]` is finite. `stddev` and `stdvar` differ
-//! more where the samples differ by little more than the rounding of their mean: Prometheus'
-//! uncompensated Welford update rounds the mean on every sample, and no pairwise merge reproduces
-//! those roundings. For `[1e16]` and `[1e16 + 2]` Prometheus gives a variance of 2 and the merge
-//! gives the exact 1. Explicit NaN and infinite inputs follow the same rules as the serial fold. Where the serial fold keeps the first of two equal
-//! values, as `min` and `max` do for `0` and `-0`, a merge keeps the one merged first.
+//! A merge reassociates a serial fold, so results can differ from
+//! [`aggregate_float`](crate::aggregate::aggregate_float) by rounding, and an overflow of finite
+//! values can move: a serial `sum` of `[1e308, 1e308, -1e308]` is `+Inf`, while the merge of
+//! `[1e308]` and `[1e308, -1e308]` is finite. `stddev`/`stdvar` differ more for nearly equal
+//! samples, since Prometheus' uncompensated Welford update rounds the mean on every sample: for
+//! `[1e16]` and `[1e16 + 2]` Prometheus gives a variance of 2 and the merge the exact 1. Where the
+//! serial fold keeps the first of two equal values (`min`/`max` on `0` and `-0`), a merge keeps
+//! the one merged first.
 
 use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::hash_map::Entry;
@@ -65,8 +64,8 @@ pub enum StateField {
 }
 
 impl AggregateOp {
-    /// The components the state of this aggregation carries; the others are unused and need not
-    /// be stored. `group` has none: a state that exists has a value of 1.
+    /// The components the state of this aggregation carries. `group` has none: a present state
+    /// means 1.
     pub fn state_fields(self) -> &'static [StateField] {
         use StateField::*;
         match self {
@@ -81,16 +80,9 @@ impl AggregateOp {
 }
 
 /// The state of one field of one group at one grid point.
-///
-/// The fold and the frame carry the same five components, so they share one type: the frame's own
-/// [`AggregateStateValues`] is the definition, and this is the name the aggregate side reads it by.
 pub use datatypes::series::aggregate_state::AggregateStateValues as AccumulatorState;
 
 /// The state of one execution partition, with its groups in the order they first appeared.
-///
-/// A group is the frame's own [`StateSeries`]: field-major states addressed on that group's sparse
-/// absolute grid positions. Exporting therefore hands the same representation over instead of
-/// transposing a second one into it.
 #[derive(Clone, Debug)]
 pub struct PartialAggregate {
     pub op: AggregateOp,
@@ -107,14 +99,12 @@ pub struct StateRow {
 }
 
 impl FloatAggregator {
-    /// The state folded so far, for a merge with the state of other partitions.
+    /// The state folded so far, for merging with other partitions.
     pub fn finish_partial(self) -> Result<PartialAggregate> {
         self.finish_partial_inner()
     }
 
-    /// [`Self::finish_partial`] that admits what it builds first: the fold state and the groups it
-    /// is exported as, at the exact capacity [`Self::finish_partial_inner`] gives them. A refusal
-    /// consumes the aggregator, so the caller drops the execution.
+    /// [`Self::finish_partial`], admitting the exported groups before building them.
     pub(crate) fn finish_partial_budgeted(
         self,
         mut budget: impl FnMut(usize) -> Result<()>,
@@ -122,10 +112,6 @@ impl FloatAggregator {
         let width = self.schema.fields.len();
         let mut partial_bytes = self.groups.len().saturating_mul(size_of::<StateSeries>());
         for group in &self.groups {
-            // A group that folded histograms keeps them in its own map instead of the blocks, so
-            // the points it exports and what each of their payloads builds come from there: the
-            // export builds two one-row Arrow batches per point, which the chunk they are handed
-            // to is charged for only once that chunk exists.
             let (points, payloads) = if group.histograms.is_empty() {
                 (seen_points(group, width, self.op), 0)
             } else {
@@ -154,11 +140,7 @@ impl FloatAggregator {
         self.finish_partial_inner()
     }
 
-    /// Turns the fold into the frame's own groups: field-major states on sparse absolute positions.
-    ///
-    /// The blocks are walked once, in ascending position order, so a position's states are appended
-    /// to every field at the same time and adjacent positions coalesce into one span as they come.
-    /// What comes out is the representation the frame writes; no per-point vector is built.
+    /// Turns the fold into field-major states on sparse absolute positions, in one ascending walk.
     fn finish_partial_inner(self) -> Result<PartialAggregate> {
         let width = self.schema.fields.len();
         let grid = self.schema.eval_grid.as_ref().ok_or_else(|| {
@@ -173,8 +155,7 @@ impl FloatAggregator {
             let points = if group.histograms.is_empty() {
                 seen_points(&group, width, op)
             } else {
-                // A field's state is one family, so a group that kept histogram payloads exports
-                // those: a float state beside them would be one column carrying two kinds.
+                // Same per-group rule as `finish_histogram_group`.
                 if group.blocks.values().any(|states| {
                     states
                         .chunks_exact(op.state_words())
@@ -190,8 +171,6 @@ impl FloatAggregator {
             let mut states: Vec<Vec<Option<StatePayload>>> =
                 (0..width).map(|_| Vec::with_capacity(points)).collect();
             if !group.histograms.is_empty() {
-                // The histogram fold is keyed by absolute position, and its keys are ordered, so one
-                // pass visits each carried position once with its fields' payloads.
                 let mut position = None;
                 for (&(point, field), accumulator) in &group.histograms {
                     if position != Some(point) {
@@ -206,11 +185,7 @@ impl FloatAggregator {
                         }
                         position = Some(point);
                     }
-                    // The row just opened is the one this position's payloads belong to. It is the
-                    // row the field's states just grew, not the one the span *count* names: adjacent
-                    // points share one span while each of them still opens its own row, so a run
-                    // index would write every point of the run into the run's first row, leave the
-                    // rest empty, and the frame would drop them.
+                    // The row just pushed, not the span index: adjacent points share a span.
                     let row = states[field].len() - 1;
                     states[field][row] = Some(accumulator.payload(self.op)?);
                 }
@@ -255,7 +230,6 @@ impl FloatAggregator {
     }
 }
 
-/// Appends `position` to `spans`, extending the last run when it continues.
 fn extend_spans(spans: &mut Vec<GridSpan>, position: usize) {
     match spans.last_mut() {
         Some(span) if span.start() + span.len() == position => {
@@ -265,25 +239,14 @@ fn extend_spans(spans: &mut Vec<GridSpan>, position: usize) {
     }
 }
 
-/// Bytes one one-row batch of the frame's histogram layout costs before its bucket data.
-///
-/// Every column of the layout owns an Arrow array node with its own buffers, and that cost does not
-/// shrink for a histogram with one bucket: one row measures 2.6 KB whatever the bucket count, which
-/// is what a payload reports once the batch exists to be measured. It is rounded up here, so a batch
-/// whose bucket lists land at the top of their buffer capacity is covered too.
+/// Bytes a one-row histogram batch costs before its bucket data: about 2.6 KB measured regardless
+/// of bucket count, rounded up to cover buffer capacity slack.
 pub(super) const HISTOGRAM_LAYOUT_ROW_BYTES: usize = 3 * 1024;
 
-/// Bytes one exported point's payload builds: the boxed state and the two one-row batches
-/// [`HistogramAccumulator::payload`] makes from the accumulator's live histogram and its
-/// compensation.
-///
-/// It is counted from the histograms the payload is built from rather than from the batches, which
-/// is the point: this is what the export admits before those batches exist. The bucket data a batch
-/// writes is charged at the width of the padded Rust pair, which bounds the `f64` each bucket costs,
-/// and the layout is charged per batch.
+/// Bytes [`HistogramAccumulator::payload`] builds for one point, estimated from the accumulator
+/// so the export can admit it before the two batches exist.
 pub(super) fn exported_payload_bytes(accumulator: &HistogramAccumulator) -> usize {
-    // The batch the payload builds from the live value is the mean once an average switched, and
-    // the other one is the compensation paired with it: the widest of the three bounds both.
+    // The widest of the three bounds both exported histograms.
     let widest = [
         Some(&accumulator.value),
         accumulator.mean.as_ref(),
@@ -301,7 +264,7 @@ pub(super) fn exported_payload_bytes(accumulator: &HistogramAccumulator) -> usiz
     )
 }
 
-/// The points of `group` that carry a state: the ones a partial of it holds.
+/// The number of points of `group` that carry a float state.
 fn seen_points(group: &Group, width: usize, op: AggregateOp) -> usize {
     let words = op.state_words();
     let point_words = width.saturating_mul(words);
@@ -315,9 +278,8 @@ fn seen_points(group: &Group, width: usize, op: AggregateOp) -> usize {
     })
 }
 
-/// Bytes a group's label key holds: a pair per capacity slot, and the `__name__` entry, whose
-/// label and value `label_key` copies, each with its own `Arc` header. The other label strings are
-/// the metric's, already counted with it.
+/// Bytes a group's label key holds beyond the metric: its slots and the `__name__` strings
+/// `label_key` copies.
 fn key_bytes(key: &LabelKey) -> usize {
     let name = key
         .iter()
@@ -333,8 +295,7 @@ fn key_bytes(key: &LabelKey) -> usize {
         .saturating_add(name)
 }
 
-/// Coarse bytes the key of `metric` holds while it is built: a pair per slot, the `__name__` label
-/// and a copy of the metric name, each with its `Arc` header.
+/// Bytes the key of `metric` takes while it is built.
 fn key_workspace_bytes(metric: &SeriesLabels) -> usize {
     metric
         .tags()
@@ -347,8 +308,8 @@ fn key_workspace_bytes(metric: &SeriesLabels) -> usize {
         .saturating_add(size_of::<LabelKey>())
 }
 
-/// Merges the partial states of one aggregation into its result. Groups are identified by their
-/// full label set, already grouped by the partitions, and keep the order they first arrive in.
+/// Merges the partial states of one aggregation into its result. Groups are keyed by their full
+/// label set and keep their first-arrival order.
 pub struct FloatMerger {
     schema: Arc<SeriesSchema>,
     op: AggregateOp,
@@ -373,13 +334,11 @@ impl FloatMerger {
         })
     }
 
-    /// Bytes this merge keeps: groups, labels, blocks, B-tree nodes, index table and its keys. Added
-    /// to by the allocations that change it, never recounted.
+    /// Bytes admitted for this merge, maintained incrementally.
     pub(crate) fn state_bytes(&self) -> usize {
         self.retained
     }
 
-    /// What the merged inputs recorded about their points.
     pub(crate) fn evidence_summary(&self) -> HistogramEvidence {
         evidence_summary(&self.groups)
     }
@@ -475,12 +434,8 @@ impl FloatMerger {
         Ok(())
     }
 
-    /// Merges one Arrow-backed histogram state row: every present field's payload is merged into
-    /// that position's own state.
-    ///
-    /// A histogram state is sparse in both directions - a position is carried when any field has a
-    /// contribution there, and a field may be absent at a carried position - so the row is walked
-    /// position by position and each present component is merged where it belongs.
+    /// Merges one histogram state row. A carried position may lack some fields; each carried
+    /// position must have at least one.
     fn merge_histogram_row(
         &mut self,
         row: &StateRow,
@@ -537,7 +492,7 @@ impl FloatMerger {
         Ok(())
     }
 
-    /// The group this row's labels name, opening it (and its key) on first sight.
+    /// The group `metric` names, opened on first sight.
     fn open_row_group(
         &mut self,
         metric: &SeriesLabels,
@@ -576,8 +531,6 @@ impl FloatMerger {
             0
         };
         if vacant {
-            // Admit the state this position is about to hold before allocating it: both histograms
-            // the payload carries and the map node that holds them.
             let incoming = payload.value.as_arrow().get_array_memory_size()
                 + payload.compensation.as_arrow().get_array_memory_size();
             budget(
@@ -631,8 +584,7 @@ impl FloatMerger {
         };
         let key_live = key_bytes(&key);
         let metric_live = metric_bytes(&metric);
-        // A realloc that cannot grow in place keeps both buffers alive while it copies, so a
-        // growing step admits the new buffer beside the old one, which `retained` already holds.
+        // A realloc keeps both buffers alive while it copies.
         budget(
             self.retained
                 .saturating_add(live)
@@ -727,8 +679,7 @@ impl FloatMerger {
         finish_groups(self.schema, self.op, self.groups)
     }
 
-    /// [`Self::finish`] that admits the result it builds, on top of what the merge still holds. The
-    /// merge is consumed either way, so a caller that budgets drops it on a refusal.
+    /// [`Self::finish`], admitting the result on top of what the merge still holds.
     pub(crate) fn finish_budgeted(
         self,
         budget: impl FnMut(usize) -> Result<()>,
@@ -737,10 +688,8 @@ impl FloatMerger {
     }
 }
 
-/// One present field's histogram state at one position, read from the row's component arrays.
-///
-/// The two payload components are decoded into the kernel's own histograms, and the components a
-/// kind may omit - an average's count and mode flag - default to what the merge would fold from.
+/// One field's histogram state at one position, or `None` if absent. An average's count and mode
+/// flag default when the kind omits them.
 fn histogram_state_at(
     fields: &StateFieldsBatch,
     field: usize,
@@ -847,10 +796,8 @@ fn missing_payload_component() -> DataFusionError {
     DataFusionError::Execution("present aggregate state has a missing component".into())
 }
 
-/// One present field's state at one position, read from the row's component arrays.
-///
-/// The components come from the row's own declaration; the native aggregate caller checks
-/// compatibility before this runs, so a component list that disagrees is caught before this runs.
+/// One field's float state at one position, or `None` if absent. The caller has checked the
+/// component list against the op.
 fn state_at(
     fields: &StateFieldsBatch,
     field: usize,
@@ -876,11 +823,7 @@ fn state_at(
                         )
                     })?;
             }
-            // A histogram state's payload is not numeric components, so this merge cannot read one:
-            // [`FloatMerger::merge_row`] sends a histogram row to `merge_histogram_row`, so a
-            // histogram component reaching here is a row whose kind says numeric and whose payload
-            // says otherwise. Refusing is what keeps a histogram from being folded as the numeric
-            // state it is not.
+            // `merge_row` routes histogram rows elsewhere, so these mean a malformed row.
             StateComponent::HistogramValue
             | StateComponent::HistogramCompensation
             | StateComponent::Poisoned
@@ -915,22 +858,18 @@ fn state_at(
     Ok(Some(state))
 }
 
-/// The exported form of the state in `words`, or `None` if it has seen no sample.
-///
-/// Only the components the op keeps are filled in; the rest stay at their defaults, exactly as the
-/// frame that carries them leaves them out.
+/// The exported form of the state in `words`, or `None` if it has seen no sample. Components the
+/// op does not keep stay at their defaults.
 fn state_partial(words: &[f64], op: AggregateOp) -> Option<AccumulatorState> {
     if !state_seen(words, op) {
         return None;
     }
     Some(match op {
-        // `value`, its compensation, then the presence flag.
         AggregateOp::Sum => AccumulatorState {
             value: words[0],
             compensation: words[1],
             ..Default::default()
         },
-        // `value`, `compensation`, `mean`, the incremental flag, then the count.
         AggregateOp::Avg => AccumulatorState {
             value: words[0],
             compensation: words[1],
@@ -947,7 +886,6 @@ fn state_partial(words: &[f64], op: AggregateOp) -> Option<AccumulatorState> {
             ..Default::default()
         },
         AggregateOp::Group => AccumulatorState::default(),
-        // `value`, `mean`, then the count.
         AggregateOp::Stddev | AggregateOp::Stdvar => AccumulatorState {
             value: words[0],
             mean: words[1],
@@ -963,7 +901,6 @@ impl<'a> FloatState<'a> {
         let (op, words) = (self.op, self.words);
         match op {
             AggregateOp::Count => words[0] = other.count,
-            // Presence alone, whatever the other side keeps: `group` answers 1 either way.
             AggregateOp::Group => words[0] = 1.0,
             AggregateOp::Min | AggregateOp::Max => {
                 words[0] = other.value;
@@ -989,7 +926,6 @@ impl<'a> FloatState<'a> {
         }
     }
 
-    /// Folds the state of another partition into this one.
     fn merge_partial(self, other: &AccumulatorState) {
         if !state_seen(self.words, self.op) {
             self.store_partial(other);
@@ -1029,10 +965,8 @@ impl<'a> FloatState<'a> {
     }
 }
 
-/// Adds the sums while they stay finite, and otherwise continues with the count-weighted mean, as
-/// the serial update switches to an incremental mean once its sum overflows.
-///
-/// The state words are `value`, `compensation`, `mean`, the incremental flag and the count.
+/// Adds the sums while they stay finite, otherwise continues with the count-weighted mean, as the
+/// serial update switches once its sum overflows.
 fn merge_avg(words: &mut [f64], other: &AccumulatorState) {
     let count = words[4] + other.count;
     if words[3] == 0.0 && !other.incremental_mean {
@@ -1063,7 +997,7 @@ fn merge_avg(words: &mut [f64], other: &AccumulatorState) {
     words[4] = count;
 }
 
-/// The mean and its compensation, converting a sum as the serial update does on switching.
+/// The mean and its compensation, converting a sum as the serial update does when switching.
 fn mean_form(
     value: f64,
     compensation: f64,
@@ -1078,18 +1012,16 @@ fn mean_form(
     }
 }
 
-/// The compensated sum of two partial sums. Both the other sum and its compensation are added as
-/// Kahan addends: adding the compensation plainly would drop what the compensation already
-/// holds once later partials cancel the sums, as merging `[1e100, 1]`, `[-1e100, 1e84]` and
-/// `[-1e84]` would lose the `1`.
+/// The compensated sum of two partial sums. The other compensation is a Kahan addend too: adding
+/// it plainly loses precision once later partials cancel, as merging `[1e100, 1]`,
+/// `[-1e100, 1e84]` and `[-1e84]` would lose the `1`.
 fn add_compensated(this: (f64, f64), other: (f64, f64)) -> (f64, f64) {
     let (value, compensation) = kahan_inc(other.0, this.0, this.1);
     kahan_inc(other.1, value, compensation)
 }
 
-/// Merges `count_values` results of several partitions. Each partial already carries its full
-/// output label set, value label included, so series with one label set add their counts point
-/// by point and field by field.
+/// Merges `count_values` results of several partitions: series with one label set (value label
+/// included) add their counts per point and field.
 pub fn merge_count_values(
     schema: &Arc<SeriesSchema>,
     partials: impl IntoIterator<Item = Series>,

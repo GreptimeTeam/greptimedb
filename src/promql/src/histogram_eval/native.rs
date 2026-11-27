@@ -447,8 +447,6 @@ pub(super) fn variance(h: &HistogramView<'_>, buckets: &mut Vec<NativeBucket>) -
 
 #[cfg(test)]
 mod tests {
-    /// The last bucket of finite values ends at `f64::MAX`; only the next one, which counts
-    /// infinite observations, ends at +Inf.
     #[test]
     fn last_finite_bucket_ends_at_max() {
         for schema in [-4, 0, 3, 8] {

@@ -1072,6 +1072,11 @@ impl RegionWorker {
     pub(crate) fn catchup_regions(&self) -> &CatchupRegionsRef {
         &self.catchup_regions
     }
+
+    #[cfg(test)]
+    pub(crate) fn regions(&self) -> &RegionMapRef {
+        &self.regions
+    }
 }
 
 impl Drop for RegionWorker {
@@ -1898,6 +1903,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CaughtUpAgain(caught_up) => {
                 self.handle_caught_up_again(region_id, caught_up).await
+            }
+            BackgroundNotify::HandedOver(handed_over) => {
+                self.handle_handed_over(region_id, handed_over)
             }
             // The sweep after the batch runs the region's deferred work.
             BackgroundNotify::RegionBecameWritable => {

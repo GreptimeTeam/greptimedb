@@ -58,6 +58,7 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
                 "tests/perf/query_cases/prom_remote_write_7913/case.toml",
                 "tests/perf/query_cases/promql_constant_tag_concat_ms_10k/case.toml",
                 "tests/perf/query_cases/promql_constant_tag_concat_ms_100k/case.toml",
+                "tests/perf/query_cases/many_short_series/case.toml",
             ],
         )
 
