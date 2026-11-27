@@ -441,7 +441,7 @@ fn collect_foreign_files(
         // Exact match, including the case where the region serves an expression and the file
         // records none: such a file may hold rows either child of an earlier split wrote, so it
         // is not evidence that this region produced it.
-        if file_meta.partition_expr.as_deref() != region_expr.as_ref() {
+        if file_meta.partition_expr.as_ref() != region_expr.as_ref() {
             offenders.push((region_id, *file_id));
         }
     }
