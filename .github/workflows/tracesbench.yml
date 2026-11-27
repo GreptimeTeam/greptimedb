@@ -27,6 +27,16 @@ on:
         type: boolean
         default: false
         required: false
+      baseline_greptimedb_image:
+        description: Full baseline image reference; overrides baseline_greptimedb_tag
+        type: string
+        default: ''
+        required: false
+      greptimedb_image:
+        description: Full candidate image reference; overrides greptimedb_tag
+        type: string
+        default: ''
+        required: false
       baseline_greptimedb_tag:
         description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
         type: string
@@ -118,6 +128,8 @@ env:
   RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
   RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
   COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+  BASELINE_GREPTIMEDB_IMAGE_REF: ${{ inputs.baseline_greptimedb_image || format('greptime/greptimedb:{0}', inputs.baseline_greptimedb_tag) }}
+  GREPTIMEDB_IMAGE_REF: ${{ inputs.greptimedb_image || format('greptime/greptimedb:{0}', inputs.greptimedb_tag) }}
   BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   DATASET: ${{ inputs.dataset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
@@ -169,7 +181,7 @@ jobs:
         done
         [[ -n "$selected" ]] || { echo 'Select at least one database' >&2; exit 1; }
         if [[ "$greptimedb" == true ]]; then
-          [[ "$GREPTIMEDB_TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || { echo 'Invalid GreptimeDB image tag' >&2; exit 1; }
+          # Full GreptimeDB image references are validated by the shared comparison helper.
         fi
         printf 'targets=%s\n' "$selected" >> "$GITHUB_OUTPUT"
     - name: Validate GreptimeDB storage
@@ -378,7 +390,7 @@ jobs:
         IFS=, read -ra targets <<< "$TARGETS"
         for target in "${targets[@]}"; do
           if [[ "$target" == greptimedb ]]; then
-            image="greptime/greptimedb:$GREPTIMEDB_TAG"
+            image="$GREPTIMEDB_IMAGE_REF"
           else
             image=$(jq -er '.target_identity.image | select(test("@sha256:[a-f0-9]{64}$"))' \
               "o11ybench/workloads/tracesbench/catalogs/$target.json")
@@ -391,7 +403,7 @@ jobs:
           fi
         done
         if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
-          image="greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG"
+          image="$BASELINE_GREPTIMEDB_IMAGE_REF"
           bash greptimedb/.github/scripts/pull-benchmark-image.sh "$image"
           docker image inspect "$image" > "$METADATA_ROOT/greptimedb-baseline-image.json"
           resolved=$(jq -er '.[0].RepoDigests[0] | select(test("@sha256:[a-f0-9]{64}$"))' "$METADATA_ROOT/greptimedb-baseline-image.json")

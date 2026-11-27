@@ -35,6 +35,16 @@ on:
         type: boolean
         default: false
         required: false
+      baseline_greptimedb_image:
+        description: Full baseline image reference; overrides baseline_greptimedb_tag
+        type: string
+        default: ''
+        required: false
+      greptimedb_image:
+        description: Full candidate image reference; overrides greptimedb_tag
+        type: string
+        default: ''
+        required: false
       baseline_greptimedb_tag:
         description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
         type: string
@@ -110,6 +120,8 @@ env:
   RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
   RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
   COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+  BASELINE_GREPTIMEDB_IMAGE_REF: ${{ inputs.baseline_greptimedb_image || format('greptime/greptimedb:{0}', inputs.baseline_greptimedb_tag) }}
+  GREPTIMEDB_IMAGE_REF: ${{ inputs.greptimedb_image || format('greptime/greptimedb:{0}', inputs.greptimedb_tag) }}
   BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
   RANGE_PRESET: ${{ inputs.range_preset }}
@@ -203,7 +215,7 @@ jobs:
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           --run-classification controlled_server_benchmark --no-open-browser)
         if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
-          args+=(--target "greptimedb:name=greptimedb-baseline,image=greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG,url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range")
+          args+=(--target "greptimedb:name=greptimedb-baseline,image=$BASELINE_GREPTIMEDB_IMAGE_REF,url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range")
         fi
         # Tags become target-spec fields; reject separators before passing them to the planner.
         for target in greptimedb victoriametrics prometheus; do
@@ -213,8 +225,13 @@ jobs:
             prometheus) enabled=$RUN_PROMETHEUS; tag=$PROMETHEUS_TAG; repo=prom/prometheus; url=http://127.0.0.1:19090/api/v1/query_range ;;
           esac
           [[ "$enabled" == true ]] || continue
-          [[ "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
-          args+=(--target "$target:name=$target,image=$repo:$tag,url=$url")
+          if [[ "$target" == greptimedb ]]; then
+            image=$GREPTIMEDB_IMAGE_REF
+          else
+            [[ "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
+            image=$repo:$tag
+          fi
+          args+=(--target "$target:name=$target,image=$image,url=$url")
         done
         # The packaged planner owns profile, target and resource-limit validation.
         mkdir -p "$RUNNER_TEMP/vmbench-plans"

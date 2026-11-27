@@ -27,19 +27,38 @@ def read(path):
     return json.loads(path.read_text()) if path.is_file() else {}
 
 
+def image_reference(env, baseline=False):
+    prefix = 'BASELINE_GREPTIMEDB' if baseline else 'GREPTIMEDB'
+    image = env.get(prefix + '_IMAGE_REF', '')
+    if not image:
+        tag = env.get(prefix + '_TAG', '')
+        if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?', tag):
+            raise ValueError(f'Invalid {prefix}_TAG')
+        image = 'greptime/greptimedb:' + tag
+    # Require an explicit tag or digest and reject target-spec separators.
+    if not re.fullmatch(
+            r'[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?'
+            r'(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+'
+            r'(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127})?'
+            r'(?:@sha256:[0-9a-f]{64})?', image):
+        raise ValueError(f'Invalid {prefix} image reference')
+    if ':' not in image.rsplit('/', 1)[-1]:
+        raise ValueError('Image reference requires a tag or digest')
+    return image
+
+
 def validate(env):
     enabled = env.get('COMPARE_GREPTIMEDB', 'false')
     if enabled not in ('true', 'false'):
         raise ValueError('COMPARE_GREPTIMEDB must be true or false')
+    if env.get('RUN_GREPTIMEDB') == 'true':
+        image_reference(env)
     if enabled == 'false':
         return
     if env.get('RUN_GREPTIMEDB') != 'true':
         raise ValueError('Version comparison requires Run GreptimeDB')
-    for key in ('BASELINE_GREPTIMEDB_TAG', 'GREPTIMEDB_TAG'):
-        if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?', env.get(key, '')):
-            raise ValueError(f'Invalid {key}')
-    if env['BASELINE_GREPTIMEDB_TAG'] == env['GREPTIMEDB_TAG']:
-        raise ValueError('Baseline and candidate must have different image tags')
+    if image_reference(env, baseline=True) == image_reference(env):
+        raise ValueError('Baseline and candidate must have different images')
 
 
 def same(a, b, fields):
@@ -154,7 +173,7 @@ def render(document):
             return f'{v:.3f}'
         return f'{v / 1000:.2f} s' if v >= 1000 else f'{v:.2f} ms'
     lines = ['# GreptimeDB version comparison', '',
-             f'Baseline: `{cell(document["baseline_tag"])}` → candidate: `{cell(document["candidate_tag"])}`.', '',
+             f'Baseline: `{cell(document.get("baseline_image") or document["baseline_tag"])}` → candidate: `{cell(document.get("candidate_image") or document["candidate_tag"])}`.', '',
              'Same-host sequential runs with fresh databases and shared input data. Positive = improvement; '
              'latency: (baseline − candidate) / baseline; QPS: (candidate − baseline) / baseline. '
              'Single runs are diagnostic, not a statistically established regression. No performance threshold gates CI.', '',
@@ -184,6 +203,8 @@ def main():
         parser.error('report requires --root and --kind')
     document = {'kind': args.kind, 'baseline_tag': os.environ.get('BASELINE_GREPTIMEDB_TAG', ''),
                 'candidate_tag': os.environ.get('GREPTIMEDB_TAG', ''),
+                'baseline_image': os.environ.get('BASELINE_GREPTIMEDB_IMAGE_REF', ''),
+                'candidate_image': os.environ.get('GREPTIMEDB_IMAGE_REF', ''),
                 'rows': []}
     mode = os.environ.get('GREPTIMEDB_STORAGE', 'file')
     for storage in (['file', 's3'] if mode == 'both' else [mode]):

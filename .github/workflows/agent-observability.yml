@@ -36,6 +36,16 @@ on:
         type: boolean
         default: false
         required: false
+      baseline_greptimedb_image:
+        description: Full baseline image reference; overrides baseline_greptimedb_tag
+        type: string
+        default: ''
+        required: false
+      greptimedb_image:
+        description: Full candidate image reference; overrides greptimedb_tag
+        type: string
+        default: ''
+        required: false
       baseline_greptimedb_tag:
         description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
         type: string
@@ -110,6 +120,8 @@ env:
   RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
   RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
   COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+  BASELINE_GREPTIMEDB_IMAGE_REF: ${{ inputs.baseline_greptimedb_image || format('greptime/greptimedb:{0}', inputs.baseline_greptimedb_tag) }}
+  GREPTIMEDB_IMAGE_REF: ${{ inputs.greptimedb_image || format('greptime/greptimedb:{0}', inputs.greptimedb_tag) }}
   BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   PROFILE: ${{ inputs.dataset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
@@ -353,13 +365,13 @@ jobs:
           for target in greptimedb clickhouse victorialogs; do
             [[ "$TARGETS" == all || ",$TARGETS," == *",$target,"* ]] || continue
             case "$target" in
-              greptimedb) resolve_image "$target" "greptime/greptimedb:$GREPTIMEDB_TAG" GREPTIMEDB_IMAGE ;;
+              greptimedb) resolve_image "$target" "$GREPTIMEDB_IMAGE_REF" GREPTIMEDB_IMAGE ;;
               clickhouse) resolve_image "$target" "clickhouse/clickhouse-server:$CLICKHOUSE_TAG" CLICKHOUSE_IMAGE ;;
               victorialogs) resolve_image "$target" "victoriametrics/victoria-logs:$VICTORIALOGS_TAG" VICTORIALOGS_IMAGE ;;
             esac
           done
           if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
-            resolve_image greptimedb-baseline "greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG" BASELINE_GREPTIMEDB_IMAGE
+            resolve_image greptimedb-baseline "$BASELINE_GREPTIMEDB_IMAGE_REF" BASELINE_GREPTIMEDB_IMAGE
           fi
           jq -n --arg sha "$actual" --arg targets "$TARGETS" --arg profile "$PROFILE" \
             --arg cpus "$DB_CPUS" --arg memory "$DB_MEMORY" --argjson images "$images" \

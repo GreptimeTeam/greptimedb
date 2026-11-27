@@ -44,6 +44,24 @@ class VersionComparison(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 comparison.validate(good | {key: value})
 
+    def test_full_image_references(self):
+        base = 'greptime/greptimedb@sha256:' + 'a' * 64
+        candidate = 'greptime/greptimedb-dev@sha256:' + 'b' * 64
+        env = dict(COMPARE_GREPTIMEDB='true', RUN_GREPTIMEDB='true',
+                   BASELINE_GREPTIMEDB_IMAGE_REF=base, GREPTIMEDB_IMAGE_REF=candidate)
+        comparison.validate(env)
+        self.assertEqual(comparison.image_reference(env), candidate)
+        comparison.validate(env | {'GREPTIMEDB_TAG': 'ignored'})
+        comparison.validate(env | {'COMPARE_GREPTIMEDB': 'false'})
+        for value in [base, 'greptime/greptimedb', candidate + ',url=other',
+                      candidate + '\n', 'https://example.com/image:tag',
+                      'greptime/greptimedb@sha256:bad']:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                comparison.validate(env | {'GREPTIMEDB_IMAGE_REF': value})
+        with self.assertRaises(ValueError):
+            comparison.validate(env | {'COMPARE_GREPTIMEDB': 'false',
+                                       'GREPTIMEDB_IMAGE_REF': 'bad'})
+
     def test_improvement_direction(self):
         self.assertAlmostEqual(comparison.improvement(100, 80), 20)
         self.assertAlmostEqual(comparison.improvement(100, 120), -20)
