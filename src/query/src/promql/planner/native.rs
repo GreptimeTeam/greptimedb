@@ -2375,18 +2375,8 @@ fn plan_split_aggregate(
     value_schema: DFSchemaRef,
     format: FusedOutputFormat,
 ) -> Result<FusedSeries> {
-    // The kind a value column carries is the state's own: a numeric fold publishes `Float64`, a
-    // native-histogram fold publishes the histogram value type. Reading it here keeps the layout and
-    // the schema it is checked against in one place.
-    let (state_accumulators, value_type) = match &partial.root().output {
-        NativeType::AggregateState(state) => (
-            state.accumulators.len(),
-            if state.kind.is_histogram() {
-                native_histogram_value_type().as_arrow_type()
-            } else {
-                ArrowDataType::Float64
-            },
-        ),
+    let state_accumulators = match &partial.root().output {
+        NativeType::AggregateState(state) => state.accumulators.len(),
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "the partial tree for `{promql}` does not produce aggregate state"
@@ -2394,10 +2384,16 @@ fn plan_split_aggregate(
             .context(DataFusionPlanningSnafu);
         }
     };
+    // The value columns carry the kind the statement's root answers, which need not be the state's:
+    // `histogram_count` or `histogram_quantile` above the cut turns a merged histogram state into
+    // floats. The layout declares one kind for all of them, so either value type identifies them.
+    let histogram_type = native_histogram_value_type().as_arrow_type();
     let values = value_schema
         .fields()
         .iter()
-        .filter(|field| field.data_type() == &value_type)
+        .filter(|field| {
+            field.data_type() == &ArrowDataType::Float64 || field.data_type() == &histogram_type
+        })
         .count();
     if values != state_accumulators {
         return Err(DataFusionError::Plan(format!(

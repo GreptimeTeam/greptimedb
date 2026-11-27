@@ -69,8 +69,9 @@ use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    PathType, RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionPutRequest, RegionRequest,
+    AlterKind, PathType, RegionAlterRequest, RegionCloseRequest, RegionCreateRequest,
+    RegionDeleteRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+    SetRegionOption,
 };
 use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Notify;
@@ -158,8 +159,9 @@ impl CheckpointTaskBlocker {
         self.release.notify_one();
     }
 
-    pub(crate) fn arm_next_close(&self) {
-        self.armed.store(true, Ordering::Release);
+    /// Arms or disarms the blocker for the next write or cleanup it blocks.
+    pub(crate) fn set_armed(&self, armed: bool) {
+        self.armed.store(armed, Ordering::Release);
     }
 
     fn block_write(file_name: String, at_close: bool) -> (Self, MockLayer) {
@@ -1752,6 +1754,18 @@ pub async fn reopen_region(
     writable: bool,
     options: HashMap<String, String>,
 ) {
+    reopen_region_with(engine, region_id, table_dir, writable, options, false).await;
+}
+
+/// Reopens the region as [reopen_region] does, skipping the WAL replay if `skip_wal_replay`.
+pub(crate) async fn reopen_region_with(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    table_dir: String,
+    writable: bool,
+    options: HashMap<String, String>,
+    skip_wal_replay: bool,
+) {
     // Close the region.
     engine
         .handle_request(
@@ -1769,7 +1783,7 @@ pub async fn reopen_region(
                 engine: String::new(),
                 table_dir,
                 options,
-                skip_wal_replay: false,
+                skip_wal_replay,
                 path_type: PathType::Bare,
                 checkpoint: None,
                 requirements: Default::default(),
@@ -1783,6 +1797,14 @@ pub async fn reopen_region(
             .set_region_role(region_id, RegionRole::Leader)
             .unwrap();
     }
+}
+
+pub(crate) fn set_skip_wal_request(skip_wal: bool) -> RegionRequest {
+    RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(skip_wal)],
+        },
+    })
 }
 
 pub(crate) fn mock_schema_metadata_manager() -> (Arc<SchemaMetadataManager>, KvBackendRef) {

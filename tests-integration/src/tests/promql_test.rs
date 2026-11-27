@@ -4576,6 +4576,126 @@ async fn native_promql_kind_rules_match_legacy() {
     );
 }
 
+/// A float function above a split `sum` over native histograms runs natively and answers what the
+/// existing plan and Prometheus answer.
+///
+/// Both series put half of each sample in the schema-0 bucket `(0.5, 1]` and half in `(1, 2]`, and
+/// `a` grows twice as fast as `b`. `histogram_count(sum(h))` is the summed count, `6 * (i + 1)` at
+/// the `i`-th minute. The summed rate keeps the even split, so the 0.9 quantile is 80% into
+/// `(1, 2]` on Prometheus' logarithmic interpolation: `2^0.8`.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_float_function_over_split_histogram_sum_matches_legacy() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_float_function_over_split_histogram_sum",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    for (job, per_bucket) in [("a", 2_u64), ("b", 1_u64)] {
+        let request = remote_write_v2::request_with_labels_and_histograms(
+            vec![("__name__", "split_hist"), ("job", job)],
+            (0..=5_u64)
+                .map(|step| {
+                    let bucket = per_bucket * (step + 1);
+                    Histogram {
+                        timestamp: (step * 60_000) as i64,
+                        count: Some(Count::CountInt(2 * bucket)),
+                        sum: 3.0 * bucket as f64,
+                        schema: 0,
+                        positive_spans: vec![BucketSpan {
+                            offset: 0,
+                            length: 2,
+                        }],
+                        positive_deltas: vec![bucket as i64, 0],
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header(
+                        "Content-Type",
+                        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    )
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+
+    let quantile = 0.8_f64.exp2();
+    for (query, expected) in [
+        (
+            "histogram_count(sum(split_hist))",
+            vec![
+                (120_000, 18.0),
+                (180_000, 24.0),
+                (240_000, 30.0),
+                (300_000, 36.0),
+            ],
+        ),
+        (
+            "histogram_quantile(0.9, sum(rate(split_hist[2m])))",
+            vec![
+                (120_000, quantile),
+                (180_000, quantile),
+                (240_000, quantile),
+                (300_000, quantile),
+            ],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (120, 300, '60s') {query}");
+        observer.clear();
+        let native = native_timestamp_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = observer.root_plan();
+        assert!(
+            holds_split_merge(&root),
+            "{query} did not run as a native split: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        observer.clear();
+        let legacy = native_timestamp_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query} must keep the existing plan when the native route is off"
+        );
+        for rows in [&native, &legacy] {
+            assert_eq!(rows.len(), expected.len(), "{query}: {rows:?}");
+            for ((ts, value), (expected_ts, expected_value)) in rows.iter().zip(&expected) {
+                assert_eq!(ts, expected_ts, "{query}: {rows:?}");
+                assert!(
+                    (value - expected_value).abs() < 1e-9,
+                    "{query}: {rows:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+}
+
 /// How many rows `output` answers, whatever its columns hold.
 async fn answer_rows(output: Output) -> usize {
     let batches = match output.data {
