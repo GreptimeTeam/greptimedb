@@ -14,8 +14,11 @@
 
 //! Explicit sample framing and bounded two-level metadata pages.
 
+use std::sync::Arc;
+
 use crate::error::Result;
 use crate::series_index::samples::codec::{self, Cursor, put_u32, put_u64};
+use crate::series_index::samples::compact;
 use crate::series_index::samples::{
     Manifest, MetricSeriesId, VERSION, histogram, invalid, require, unsupported, valid_rows,
 };
@@ -45,7 +48,7 @@ pub(super) fn descriptor_bytes(columns: usize) -> usize {
     BLOCK_FIXED_BYTES + 44 * columns
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PayloadReference {
     pub offset: u64,
     pub stored: u32,
@@ -191,7 +194,7 @@ impl Bounds {
         Ok(result)
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PageReference {
     pub bounds: Bounds,
     pub payload: PayloadReference,
@@ -206,7 +209,9 @@ impl PageReference {
             bounds: Bounds::decode(c)?,
             payload: PayloadReference::decode(c)?,
         };
-        if reference.payload.encoding != 1 || reference.payload.compression > 1 {
+        if !matches!(reference.payload.encoding, 1 | compact::ENCODING)
+            || reference.payload.compression > 1
+        {
             return Err(unsupported("samples metadata codec"));
         }
         Ok(reference)
@@ -572,6 +577,11 @@ impl Block {
 pub(super) enum Page {
     Leaf(Vec<Block>),
     Internal(Vec<PageReference>),
+    /// A compact internal page, kept as the bytes it was decoded from.
+    ///
+    /// The page names thousands of children, so expanding it would cost more than the page itself:
+    /// it is validated once on load, cached, and searched in place.
+    Compact(Arc<compact::CompactPage>),
 }
 impl Page {
     pub(crate) fn retained_size(&self) -> usize {
@@ -589,6 +599,7 @@ impl Page {
                             .map(|block| block.columns.capacity() * std::mem::size_of::<Column>())
                             .sum::<usize>()
                 }
+                Self::Compact(page) => page.retained_size(),
             }
     }
 
@@ -596,6 +607,7 @@ impl Page {
         let bounds: Vec<_> = match self {
             Self::Leaf(v) => v.iter().map(Block::bounds).collect(),
             Self::Internal(v) => v.iter().map(|c| c.bounds).collect(),
+            Self::Compact(page) => return Ok(page.bounds()),
         };
         let mut result = *bounds.first().ok_or_else(|| invalid("empty sample page"))?;
         for bound in &bounds[1..] {
@@ -620,6 +632,8 @@ impl Page {
                     child.encode(&mut out);
                 }
             }
+            // The decoded form of a compact page is already its wire form.
+            Self::Compact(page) => return page.bytes().to_vec(),
         }
         out
     }
@@ -636,6 +650,14 @@ impl Page {
         manifest: &Manifest,
     ) -> Result<Self> {
         require(bytes.len() <= PAGE_LIMIT, "sample page exceeds limit")?;
+        if reference.payload.encoding == compact::ENCODING {
+            return Ok(Self::Compact(Arc::new(compact::CompactPage::decode(
+                bytes.to_vec(),
+                reference,
+                depth,
+                areas,
+            )?)));
+        }
         let mut c = Cursor::new(bytes);
         let kind = c.u32()?;
         let count = c.length()?;

@@ -60,9 +60,15 @@ exercised by the owning Mito Rust test:
 cargo nextest run -p mito2 frozen_suffix_samples_fixture_is_readable
 ```
 
+The fixture name carries both fields because they are independent: the manifest's `version`
+names the metadata layout and its `identity_encoding` names the key-area layout, so this fixture
+is the suffix identity at version 1 and the compact fixture below is the whole-key identity at
+version 2.
+
 The part is 1,115 bytes: two leaves under one depth-two root, three one-row
 blocks, and a 54-byte key area. Its manifest names
-`identity_encoding: exact-sparse-key-area-suffix`.
+`identity_encoding: exact-sparse-key-area-suffix` at `version: 1`, and its root is the fixed
+internal page: a version-1 artifact never holds a compact one.
 
 | Block | `(table_id, tsid)` | Labels | Rows | Stored key area entry |
 | --- | --- | --- | --- | --- |
@@ -107,3 +113,40 @@ listed source set and become ineligible if any source disappears.
 `sparse-daily-catalog-entry.json` freezes explicit populated-day coverage per source.
 Older daily catalogs decode with empty coverage and are rebuilt before reuse.
 The source Parquet files and sample payload encoding are unchanged.
+
+# Mito columnar samples version 2 with a compact internal page
+
+`compact-v2-manifest.json` and `compact-v2-part.hex` freeze the compact internal page
+(metadata encoding 2) introduced with manifest version 2. The manifest names the whole-key area,
+`exact-sparse-key-area`: version 2 permits a compact internal page and says nothing about how keys
+are stored, so this fixture is the whole-key half of the version-2 column. It is exercised by the
+owning Mito Rust test:
+
+```shell
+cargo nextest run -p mito2 -E 'test(compact_fixture_v2_reads)'
+```
+
+The part is 825 bytes, has depth 2, and its root is a compact page with two entries, one restart
+and one predicted from it. Both leaves hold one block of the same series
+`(table_id=7, tsid=42)`; the second block continues the first at timestamp 200 and ordinal 1. The
+key area holds one sparse-key copy of that series with its XXH64, and it was assembled from the
+sparse framing field by field, independently of the Rust writer.
+
+| Range | Content |
+| --- | --- |
+| 0..16 | Header |
+| 16..84 | Column chunks: constant-step time 100, sequence 9, one put, negative zero, then time 200, sequence 10, one put, 2.5 |
+| 84..144 | Key area: one sparse key and its checksum |
+| 144..388 | Leaf page: one block, four column references |
+| 388..632 | Leaf page: the series' second block |
+| 632..705 | Compact root: header, two entries, one restart offset |
+| 705..825 | Trailer with the root reference, depth 2, and `key_end` |
+
+A reader that only knows manifest version 1 refuses this artifact while opening the manifest, with
+no part read, which is why the version is part of the fixture. Do not regenerate these bytes to
+make a reader change pass; introduce another versioned fixture when the approved format changes.
+
+The fourth combination, the suffix key area under version 2, has no frozen fixture: it is the
+shape this writer produces for any part large enough to need a compact internal page, so
+`series_index::samples::tests::compact_page::suffix_key_area_with_a_compact_root_reads` writes it
+and reads it back instead of freezing bytes.

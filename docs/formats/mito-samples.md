@@ -19,10 +19,36 @@ order. Each part record contains its encoded `file_size` in bytes. The
 
 ## Wire specification
 
-This document specifies the version 1 on-disk layout, encodings, ordering rules,
-and validation limits for samples artifacts. The version number stays 1: the
-exact-identity change is enforced by the mandatory `identity_encoding` manifest
-discriminator, not by a version bump.
+This document specifies the on-disk layout, encodings, ordering rules, and validation
+limits for samples artifacts, at manifest versions 1 and 2. The exact-identity change
+kept the version number at 1: it is enforced by the mandatory `identity_encoding`
+manifest discriminator, not by a version bump.
+
+Version 2 differs from version 1 in one way: an internal page may use the compact metadata
+encoding below. Leaf pages, block descriptors, the key area, the 72-byte root reference, and the
+120-byte trailer are unchanged, so a version-1 artifact stays readable and byte-compatible, and a
+writer that emits no internal page still writes version 1. A reader that only knows version 1
+refuses a version-2 manifest while opening it, before it reads any part.
+
+### Version and identity encoding
+
+`version` and `identity_encoding` are orthogonal fields: `version` names the metadata layout, and
+`identity_encoding` names the [key area](#key-area) layout. A reader checks them separately, so
+every combination whose parts are structurally valid is readable:
+
+| `identity_encoding` | `version` 1 | `version` 2 |
+| --- | --- | --- |
+| `exact-sparse-key-area` (each copy is a whole key) | readable: fixed internal page only | readable: fixed or compact internal page |
+| `exact-sparse-key-area-suffix` (each copy is the key after its prefix) | readable: fixed internal page only | readable: fixed or compact internal page |
+| `exact-sparse-key` (keys inline in the block descriptors) | refused at open | refused at open |
+
+The writer emits the suffix identity at version 1 until a part needs a compact internal page, and
+version 2 from then on, so a small artifact stays byte-compatible with an earlier build of the same
+format. Version 2 therefore adds a permission rather than a layout: no version-1 structure changes.
+
+A compact internal page under version 1 is refused when the page is loaded, because a version-1
+artifact never holds one. A `version` above 2, or an `identity_encoding` a reader does not know, is
+refused when the manifest is opened, before any part is read.
 
 Every block names the exact series identity (the canonical sparse primary key), which
 the part stores once per series in its [key area](#key-area), followed by that copy's
@@ -49,8 +75,10 @@ and operation types in single-series blocks bounded by rows and decoded bytes.
 
 ## Artifact manifest
 
-The catalog identifier is `columnar-samples`. Its file and manifest version is 1,
-independent of the series format's version and both formats' codec identifiers.
+The catalog identifier is `columnar-samples`. Its manifest version is 1,
+independent of the series format's version and both formats' codec identifiers,
+except that an artifact holding a compact internal page is version 2 (see
+[version and identity encoding](#version-and-identity-encoding)).
 Existing `parquet` and `columnar-series` identifiers keep their meaning.
 
 An artifact is derived either from one immutable source SST (legacy) or from
@@ -90,8 +118,8 @@ generation is unique for each build. A manifest contains:
 | Field | Meaning |
 | --- | --- |
 | `format` | String `columnar-samples` |
-| `version` | Integer 1 |
-| `identity_encoding` | String `exact-sparse-key-area-suffix`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable. `exact-sparse-key-area` (whole keys in the key area) is the previous layout of this format and is still readable; `exact-sparse-key-area-suffix` is the only layout written |
+| `version` | Integer 1 or 2: 2 when any part holds a compact internal page, 1 otherwise |
+| `identity_encoding` | String `exact-sparse-key-area-suffix`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable. `exact-sparse-key-area` (whole keys in the key area) is the previous layout of this format and is still readable; `exact-sparse-key-area-suffix` is the only layout written. `version` is independent of it: see [version and identity encoding](#version-and-identity-encoding) |
 | `region_id` | Physical region ID, u64 |
 | `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
 | `generation` | `FileId` matching the catalog artifact generation |
@@ -274,8 +302,8 @@ nothing else is lost. The stored bytes are therefore the encoded label sequence,
 is empty for a series whose labels are all null; that series' reference length is zero
 and its reconstructed key is the prefix alone.
 
-A key's length is bounded by the part, not by a page or a chunk. Version 1 puts no
-page inside the key area, so one key may be far longer than the 65,536-byte page
+A key's length is bounded by the part, not by a page or a chunk. Neither version puts
+a page inside the key area, so one key may be far longer than the 65,536-byte page
 limit; the `u32` length in a descriptor is validated against `key_end`, so a
 corrupt length can never address bytes outside the part.
 
@@ -322,8 +350,8 @@ new series at ordinal zero, so no ordering between the two series' ordinals is r
 ### Metadata pages
 
 A leaf describes blocks. An internal page references leaves. The root is either
-the only leaf (depth 1) or an internal page (depth 2). Other depths are unsupported
-in version 1; roll parts before a third level would be needed.
+the only leaf (depth 1) or an internal page (depth 2). Other depths are unsupported in
+both versions; roll parts before a third level would be needed.
 
 As in the series format, the entire page, including its kind and count, is encoded
 and independently compressed. The reference in the parent or trailer supplies
@@ -424,10 +452,65 @@ and time bounds against its reference. At depth 2 all children must be leaves;
 reject an internal child. Child byte ranges are ordered, disjoint, within the
 metadata area, and precede the parent. The root ends immediately before the trailer.
 
-An internal root has `12 + 72 * N` decoded bytes, so it holds at most
-`floor((65536 - 12) / 72) = 910` leaf references. The writer must account for the
-next descriptor's leaf placement before writing its block. If the descriptor
-would require a 911th leaf, finish this part and start the block in a new part.
+An internal page in the fixed layout (`12 + 72 * N` decoded bytes) holds at most
+`floor((65536 - 12) / 72) = 910` leaf references. Writers emit the compact layout below for every
+internal page instead; the fixed layout stays readable.
+
+#### Compact internal page (metadata encoding 2)
+
+An internal page whose payload reference carries metadata encoding 2 is
+`[16-byte header][entry stream][restart array]`, little-endian, with no padding:
+
+| Header field | Bytes | Value |
+| --- | ---: | --- |
+| Kind | 4 | 1 (internal) |
+| Entry count | 8 | `N > 0` |
+| Child metadata encoding | 2 | 1 leaf children, 2 compact internal children |
+| Restart interval | 1 | 32 |
+| Reserved | 1 | Zero |
+
+Version 1 has two levels, so a compact page is the depth-2 root and its child encoding is 1; the
+value 2 is reserved for a deeper tree this version does not write or read.
+
+Each entry describes one child, in child order. `U(x)` is the shortest unsigned LEB128 form of
+`x` and `Z(x)` is `U` of the ZigZag form of `x`; both reject a form a shorter encoding would
+produce, and neither appears in the fixed layout, whose decoding is unchanged.
+
+| Entry field | Bytes | Meaning |
+| --- | ---: | --- |
+| Control | 1 | bit 0 first table changed, bit 1 `last != first`, bit 2 last table changed, bit 3 nonzero offset gap, bit 4 Zstd; bits 5..7 zero |
+| First identifier | 12 or variable | At a restart: table ID `u32` and TSID `u64`. Otherwise against the previous entry's **last**: same table, `U(tsid delta)` (zero allowed); new table, `U(positive table delta)` then `U(absolute tsid)` |
+| Last identifier | 0 or variable | Zero bytes when equal to this entry's first, otherwise the same pair rule from this entry's **first** |
+| Minimum timestamp | 8 or variable | At a restart: `i64`. Otherwise `Z(min - previous min)`, a reversible wrapping predictor and not an ordering claim |
+| Span | variable | `U(max - min)`, widened so the full signed range is `u64::MAX` |
+| Child offset | 8 or variable | At a restart: absolute `u64`. Otherwise the previous child's end, plus `U(gap)` only when the gap flag is set |
+| Stored length | variable | `U(stored)`, positive |
+| Decoded length | 0 or variable | Absent for a raw child, `U(decoded)` for a Zstd child, positive and at most 65,536 |
+| Child checksum | 8 | XXH64 of the stored child bytes, seed zero |
+
+Entry 0 and every 32nd entry use the restart form, and the restart array holds
+`ceil(N / 32)` `u16` offsets relative to the entry stream: the first is zero, and each names an
+entry that starts with the restart form. Nothing at a restart depends on a predecessor, so the
+first-table-change and offset-gap flags are forbidden there, and so is the last-table-change flag
+when the endpoints are equal. A reader validates the whole page once when it loads it: the
+restart offsets, every field, the ordering of siblings (`previous.last <= next.first`, equality
+allowed), their byte ranges (ordered, disjoint, inside the metadata area, before the parent), the
+derived identifier and time bounds against the parent reference, and the decoded length against
+the page limit. The validated bytes are then cached and searched in place; a page is not expanded
+into one descriptor per child.
+
+To find a target identifier `q`, a reader lower-bounds the restart entries' first identifiers,
+starts one group earlier when one exists (otherwise the last group), scans forward skipping
+children whose last identifier is below `q`, and stops at the first whose first identifier is
+above `q`. A run of equal identifiers longer than a group is found by that forward scan. Several
+targets merge their candidate ranges, so a child is visited once per request; a scan that selects
+no identifier iterates the page, because child minimum timestamps are not ordered.
+
+The encoding costs about 21 bytes per child, so one 64 KiB page names roughly 3,000 to 3,150
+children instead of 910 (2,994 for one block per series, 3,137 for eight). A writer splits a page
+by encoded bytes rather than by a fixed count: the page is full when the next entry would take it,
+restart array included, past the limit. The fixed layout's byte budget bounds one descriptor per
+leaf and is unchanged.
 
 #### Navigation and equal-timestamp example
 
@@ -646,7 +729,8 @@ must also satisfy the decoded-block formula. Null output materialization remains
 subject to the same block bound even when chunks are omitted.
 
 Unknown file versions, depths, reserved fields, roles, or metadata codecs fail
-open/read explicitly. Column role must agree with its encoding: time 1/2,
+open/read explicitly. So does a compact internal page (encoding 2) in an artifact whose manifest
+is version 1: that artifact never contains one. Column role must agree with its encoding: time 1/2,
 sequence 3/4, Float64 5, native histogram 8, operation 6/7. A value chunk's known
 encoding must also be the one its manifest field type is stored with. An unknown
 column encoding or compression can be skipped if its chunk is not needed, but

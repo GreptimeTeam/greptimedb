@@ -1532,7 +1532,7 @@ async fn frozen_v1_samples_fixture_is_rejected() {
     assert!(message.contains("rebuild"), "{message}");
 }
 
-/// Fields this frozen v2 manifest records that a test has to install.
+/// Fields this frozen suffix fixture manifest records that a test has to install.
 #[derive(serde::Deserialize)]
 struct FrozenSuffixManifest {
     region_id: u64,
@@ -1543,10 +1543,11 @@ struct FrozenSuffixManifest {
 
 /// Installs the frozen v2 fixture - part and manifest - as one artifact in `store`.
 async fn frozen_suffix_handle(store: &ObjectStore) -> (SamplesFileHandle, FrozenSuffixManifest) {
-    let bytes =
-        include_str!("../../../../../tests/compatibility/wire/mito_columnar_samples/suffix-v1-part.hex")
-            .split_whitespace()
-            .collect::<String>();
+    let bytes = include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/suffix-v1-part.hex"
+    )
+    .split_whitespace()
+    .collect::<String>();
     let bytes = (0..bytes.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&bytes[i..i + 2], 16).unwrap())
@@ -1616,6 +1617,10 @@ async fn frozen_suffix_samples_fixture_is_readable() {
         IdentityEncoding::CURRENT_SAMPLES,
         manifest.identity_encoding,
         "the fixture must name the layout this build writes"
+    );
+    assert_eq!(
+        VERSION, manifest.version,
+        "the fixture predates compact internal pages"
     );
     assert_eq!(3, manifest.files[0].num_blocks);
     assert_eq!(3, manifest.files[0].num_rows);
@@ -3122,3 +3127,5 @@ async fn discovery_returns_reconstructed_labels_without_a_key_selection() {
         );
     }
 }
+
+mod compact_page;

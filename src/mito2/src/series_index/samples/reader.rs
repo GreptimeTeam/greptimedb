@@ -39,12 +39,13 @@ use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesRead
 use crate::series_index::identity::{
     ExactSeriesKey, IdentityEncoding, SERIES_KEY_PREFIX_LEN, series_key_bytes,
 };
+use crate::series_index::samples::compact;
 use crate::series_index::samples::metadata::{
     self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
 };
 use crate::series_index::samples::{
-    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, codec, histogram, invalid,
-    require, unsupported,
+    COMPACT_VERSION, MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, codec,
+    histogram, invalid, require, unsupported,
 };
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
@@ -138,7 +139,7 @@ impl SamplesReader {
                 .ok_or_else(|| invalid("invalid narthex manifest path"))?
                 .to_string(),
         );
-        if manifest.version != VERSION {
+        if !(VERSION..=COMPACT_VERSION).contains(&manifest.version) {
             return Err(unsupported("samples manifest version"));
         }
         // Old artifacts can be structurally valid and perfectly ordered, so identity
@@ -321,8 +322,20 @@ impl SamplesFormatReader for SamplesReader {
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
-                let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
-                let mut children = children.into_iter(); let mut row_count = 0u64; let mut block_count = 0u64;
+                let mut active = None;
+                let mut children = match root.as_ref() {
+                    Page::Leaf(_) => {
+                        active = Some(root.clone());
+                        None
+                    }
+                    Page::Internal(children) => Some(ChildCursor::Fixed(children.clone().into_iter())),
+                    Page::Compact(page) => Some(ChildCursor::Compact(CompactChildren::new(
+                        page.clone(),
+                        &request,
+                        ids.as_ref(),
+                    )?)),
+                };
+                let mut row_count = 0u64; let mut block_count = 0u64;
                 let mut payload_position = metadata::HEADER_SIZE;
                 // Exact keys live in the part's key area, outside every metadata page. Every
                 // block of one series references the same copy, so one load serves them all.
@@ -334,14 +347,20 @@ impl SamplesFormatReader for SamplesReader {
                 let mut key_offsets = mito_codec::row_converter::SparseOffsetsCache::new();
                 loop {
                     let page = if let Some(page) = active.take() { page } else {
-                        let Some(child) = children.next() else { break; };
+                        // A depth-one part has no children: its root is the only page.
+                        let Some(cursor) = children.as_mut() else { break };
+                        let Some((child, contiguous)) = cursor.next(&request, ids.as_ref())? else { break; };
+                        // A child that is not the immediate successor of the previous visited one
+                        // - pruned, or outside a candidate range - relaxes the adjacency checks
+                        // exactly as a skipped page does.
+                        if !contiguous { adjacent = false; }
                         if !matches(child.bounds, &request, ids.as_ref()) { adjacent = false; continue; }
                         let started = Instant::now();
                         let page = load_metadata_page(cache.as_ref(), reader, (&path, size), &child, 1, trailer.areas(), &manifest).await?;
                         metrics.add_elapsed("columnar_metadata_wall", started.elapsed());
                         page
                     };
-                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))? };
+                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, _ => Err(unsupported("internal child in sample depth-two tree"))? };
                     // One merged read for the keys of this page's selected blocks: a page can
                     // hold hundreds of short series, and one read per series would multiply
                     // this scan's I/O by the number of series it touches.
@@ -770,7 +789,7 @@ async fn load_page_keys(
 }
 
 /// Bounds-only pruning. Selection itself is exact and decided by [`owns`].
-fn matches(
+pub(super) fn matches(
     bounds: Bounds,
     request: &SamplesReadRequest,
     ids: Option<&BTreeSet<MetricSeriesId>>,
@@ -790,6 +809,115 @@ fn matches(
         });
     }
     first <= last && ids.is_none_or(|ids| ids.range(first..=last).next().is_some())
+}
+
+/// The children of one part's root internal page, in file order.
+enum ChildCursor {
+    /// A fixed-width page: every child is decoded, and this request prunes what it can.
+    Fixed(std::vec::IntoIter<PageReference>),
+    /// A compact page: only the candidates of this request are decoded.
+    Compact(CompactChildren),
+}
+
+impl ChildCursor {
+    /// The next child to visit, with whether it directly follows the previous visited one.
+    fn next(
+        &mut self,
+        request: &SamplesReadRequest,
+        ids: Option<&BTreeSet<MetricSeriesId>>,
+    ) -> Result<Option<(PageReference, bool)>> {
+        Ok(match self {
+            Self::Fixed(children) => children.next().map(|child| (child, true)),
+            Self::Compact(children) => children.next(request, ids)?,
+        })
+    }
+}
+
+/// Candidate traversal of one compact internal page.
+///
+/// The page is searched by identifier, so a request decodes only the entries its targets can
+/// occupy, and several targets are merged into one pass so no child is visited twice. A scan that
+/// selects no identifier iterates the page: a child's minimum timestamp is not ordered across
+/// children, so time alone cannot skip one.
+struct CompactChildren {
+    page: Arc<compact::CompactPage>,
+    windows: std::vec::IntoIter<std::ops::Range<u64>>,
+    active: Option<(compact::Entries, std::ops::Range<u64>)>,
+    /// Index of the last child this request visited.
+    last: Option<u64>,
+}
+
+impl CompactChildren {
+    fn new(
+        page: Arc<compact::CompactPage>,
+        request: &SamplesReadRequest,
+        ids: Option<&BTreeSet<MetricSeriesId>>,
+    ) -> Result<Self> {
+        let whole = |table_id: u32| {
+            (
+                MetricSeriesId { table_id, tsid: 0 },
+                MetricSeriesId {
+                    table_id,
+                    tsid: u64::MAX,
+                },
+            )
+        };
+        let windows = match (ids, request.table_id) {
+            // Identifiers are hash prefixes, not intervals: each one is its own target, and two
+            // distinct targets may share a child without it being visited twice.
+            (Some(ids), _) => page.windows(ids.iter().map(|id| (*id, *id)))?,
+            (None, Some(table_id)) => page.windows(std::iter::once(whole(table_id)))?,
+            // A scan that selects no identifier visits every child: a child's minimum timestamp is
+            // not ordered across children, so time alone cannot skip one.
+            (None, None) => page.windows(std::iter::once((
+                MetricSeriesId {
+                    table_id: 0,
+                    tsid: 0,
+                },
+                MetricSeriesId {
+                    table_id: u32::MAX,
+                    tsid: u64::MAX,
+                },
+            )))?,
+        };
+        Ok(Self {
+            page,
+            windows: windows.into_iter(),
+            active: None,
+            last: None,
+        })
+    }
+
+    fn next(
+        &mut self,
+        request: &SamplesReadRequest,
+        ids: Option<&BTreeSet<MetricSeriesId>>,
+    ) -> Result<Option<(PageReference, bool)>> {
+        loop {
+            let mut exhausted = false;
+            if let Some((entries, window)) = self.active.as_mut() {
+                while let Some((index, reference)) = entries.next()? {
+                    if index >= window.end {
+                        break;
+                    }
+                    if !matches(reference.bounds, request, ids) {
+                        continue;
+                    }
+                    let contiguous = self.last.map_or(index == 0, |last| last + 1 == index);
+                    self.last = Some(index);
+                    return Ok(Some((reference, contiguous)));
+                }
+                exhausted = true;
+            }
+            if exhausted {
+                self.active = None;
+            }
+            let Some(window) = self.windows.next() else {
+                return Ok(None);
+            };
+            self.active = Some((compact::Entries::start(&self.page, window.start)?, window));
+        }
+    }
 }
 async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Result<bytes::Bytes> {
     require(start <= end, "reversed sample byte range")?;
@@ -821,8 +949,15 @@ async fn load_metadata_page(
         format!("{path}/{size}/{reference:?}/{depth}/{}", areas.payload_end),
         Page::retained_size,
         async {
-            if reference.payload.encoding != 1 {
+            if !matches!(reference.payload.encoding, 1 | compact::ENCODING) {
                 return Err(unsupported("sample metadata codec"));
+            }
+            // A compact page is what the newer manifest version announces; a version-1 artifact
+            // never holds one, so its presence there is corrupt metadata rather than a layout this
+            // reader should interpret.
+            if reference.payload.encoding == compact::ENCODING && manifest.version < COMPACT_VERSION
+            {
+                return Err(unsupported("samples compact metadata page"));
             }
             let bytes =
                 read_part_range(reader, reference.payload.offset, reference.payload.end()?).await?;

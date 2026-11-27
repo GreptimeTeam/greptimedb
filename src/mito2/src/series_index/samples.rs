@@ -16,6 +16,7 @@
 
 pub(crate) mod bulk;
 mod codec;
+mod compact;
 mod histogram;
 mod metadata;
 #[cfg(test)]
@@ -117,7 +118,14 @@ pub(crate) fn check_histogram_batch(
         .try_for_each(histogram::check_array_sample_sizes)
 }
 
+/// Manifest version of an artifact whose parts hold only the fixed-width internal page.
 const VERSION: u32 = 1;
+/// Manifest version of an artifact that holds at least one compact internal page.
+///
+/// The layout of a leaf, a block, a key, the 72-byte root reference, and the 120-byte trailer is
+/// unchanged, so a version-1 artifact stays readable and byte-compatible. A reader that only knows
+/// version 1 refuses a version-2 manifest while opening it, before it reads any part.
+const COMPACT_VERSION: u32 = 2;
 const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 8192;
 const MAX_FIELDS: usize = 1024;
@@ -143,7 +151,9 @@ impl Default for ColumnarSamplesFormat {
             part_bytes: 512 * 1024 * 1024,
             metadata_bytes: 8 * 1024 * 1024,
             page_bytes: metadata::PAGE_LIMIT,
-            root_capacity: metadata::ROOT_CAPACITY,
+            // A compact internal page names thousands of children, so its default capacity is the
+            // most the encoding could hold: the encoded size splits the page, not this count.
+            root_capacity: compact::CAPACITY,
         }
     }
 }

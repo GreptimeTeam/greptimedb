@@ -39,14 +39,15 @@ use crate::series_index::format::FormatWriter;
 use crate::series_index::identity::{
     ExactSeriesKey, IdentityEncoding, decode_series_id, series_key_suffix,
 };
+use crate::series_index::samples::compact::{self, ChildEntry, LeafPlan};
 use crate::series_index::samples::histogram::ChunkBound;
 use crate::series_index::samples::metadata::{
     self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
 };
 use crate::series_index::samples::{
-    ColumnarSamplesFormat, FLOAT64_ENCODING, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part,
-    TimestampColumn, TimestampUnit, VERSION, ValueColumn, codec, histogram, invalid, require,
-    valid_rows,
+    COMPACT_VERSION, ColumnarSamplesFormat, FLOAT64_ENCODING, MANIFEST_LIMIT, Manifest,
+    MetricSeriesId, Part, TimestampColumn, TimestampUnit, VERSION, ValueColumn, codec, histogram,
+    invalid, require, valid_rows,
 };
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -132,6 +133,25 @@ struct PendingBlock {
     columns: Vec<Column>,
 }
 
+impl PendingBlock {
+    /// The bounds this block contributes to its leaf and to the internal page above it.
+    ///
+    /// A block names its series by table index, so the identifier comes from the part's table
+    /// rather than from a copy of the key: the same 22-byte prefix the finished descriptor
+    /// carries, which is what a leaf's bounds are made of.
+    fn bounds(&self, keys: &[ExactSeriesKey]) -> Result<metadata::Bounds> {
+        let key = keys
+            .get(self.key_id as usize)
+            .ok_or_else(|| invalid("sample block key outside its part"))?;
+        Ok(metadata::Bounds {
+            first: key.id(),
+            last: key.id(),
+            min: self.min,
+            max: self.max,
+        })
+    }
+}
+
 /// Turns one leaf's pending blocks into the descriptors its metadata page stores.
 ///
 /// Only the leaf being written is rendered: the part's other leaves stay pending, so a part never
@@ -192,6 +212,10 @@ pub(super) struct SamplesWriter {
     /// when the previous block of the part belongs to it: no key bytes are compared, and a part
     /// boundary clears the entry because the new part starts its own table.
     last_key_id: Option<u32>,
+    /// What the internal page knows about each leaf before the leaf page is encoded: its bounds
+    /// so far and its exact decoded length. The page is split by encoded bytes, so the writer has
+    /// to measure the candidates, not just count them.
+    leaf_plans: Vec<LeafPlan>,
     leaf_bytes: usize,
     descriptor_bytes: usize,
     position: u64,
@@ -203,6 +227,9 @@ pub(super) struct SamplesWriter {
     /// The last series whose key this part already counts, to charge one copy per series.
     part_last_key: Option<ExactSeriesKey>,
     manifest_bytes: usize,
+    /// Whether any part of this artifact holds a compact internal page, which the manifest
+    /// version records so a reader that predates it refuses the artifact at open.
+    compact_pages: bool,
     failed: bool,
 }
 impl SamplesWriter {
@@ -217,7 +244,7 @@ impl SamplesWriter {
         super::validate_narthex_metadata(&metadata)?;
         require(
             (1..=super::MAX_ROWS).contains(&options.block_rows)
-                && (1..=metadata::ROOT_CAPACITY).contains(&options.root_capacity)
+                && (1..=compact::CAPACITY).contains(&options.root_capacity)
                 && (188..=metadata::PAGE_LIMIT).contains(&options.page_bytes)
                 && options.part_bytes > 0
                 && options.metadata_bytes > 0,
@@ -278,6 +305,7 @@ impl SamplesWriter {
             leaves: Vec::new(),
             keys: Vec::new(),
             last_key_id: None,
+            leaf_plans: Vec::new(),
             leaf_bytes: 12,
             descriptor_bytes: 0,
             position: 0,
@@ -286,6 +314,7 @@ impl SamplesWriter {
             part_key_bytes: 0,
             part_last_key: None,
             manifest_bytes,
+            compact_pages: false,
             failed: false,
         })
     }
@@ -519,7 +548,7 @@ impl SamplesWriter {
         )?;
         if !self.leaves.is_empty()
             && self.leaf_bytes + size > self.options.page_bytes
-            && self.leaves.len() == self.options.root_capacity
+            && !self.root_admits_another_leaf()?
         {
             self.finish_part().await?;
         }
@@ -537,31 +566,48 @@ impl SamplesWriter {
             self.position = column.payload.end()?;
             self.output_buffer.write(&mut self.outputs, &chunk).await?;
         }
+        // The key table belongs to the part, and the rollover above emptied it: a series that
+        // starts a new part names its key in that part's table instead of the one just closed.
+        let key_id = self.intern_key()?;
+        let block = PendingBlock {
+            min,
+            max,
+            ordinal,
+            key_id,
+            rows: rows.len() as u32,
+            columns,
+        };
+        // The leaf plan and the pending list below must agree on the leaf this block joins and on
+        // what it charges: the plan is the leaf's entry in the internal page's byte estimate.
+        let bounds = block.bounds(&self.keys)?;
         if self.leaves.is_empty() || self.leaf_bytes + size > self.options.page_bytes {
             self.leaves.push(Vec::new());
+            self.leaf_plans.push(LeafPlan {
+                bounds,
+                decoded: 12,
+            });
             self.leaf_bytes = 12;
         }
         self.leaf_bytes += size;
         self.descriptor_bytes += size;
+        let plan = self
+            .leaf_plans
+            .last_mut()
+            .ok_or_else(|| invalid("missing sample leaf plan"))?;
+        plan.bounds.extend(bounds);
+        plan.decoded = plan
+            .decoded
+            .checked_add(size)
+            .ok_or_else(|| invalid("sample leaf plan overflow"))?;
         self.part_rows = self
             .part_rows
             .checked_add(rows.len() as u64)
             .ok_or_else(|| invalid("sample row count overflow"))?;
         self.part_blocks += 1;
-        // The key table belongs to the part, and the rollover above emptied it: a series that
-        // starts a new part names its key in that part's table instead of the one just closed.
-        let key_id = self.intern_key()?;
         self.leaves
             .last_mut()
             .ok_or_else(|| invalid("missing sample leaf"))?
-            .push(PendingBlock {
-                min,
-                max,
-                ordinal,
-                key_id,
-                rows: rows.len() as u32,
-                columns,
-            });
+            .push(block);
         // Keys live in their own area but are still bytes of this part: count one copy per
         // series so the part target covers them too, and a key-heavy part still rolls over.
         // This is decided after the rollover above, which cleared the part's accounting: a series
@@ -650,7 +696,7 @@ impl SamplesWriter {
         let root = if depth == 1 {
             children.remove(0)
         } else {
-            self.write_page(Page::Internal(children)).await?
+            self.write_compact_page(&children).await?
         };
         let bounds = root.bounds;
         let file_length = self
@@ -696,13 +742,58 @@ impl SamplesWriter {
         self.part_key_bytes = 0;
         self.part_last_key = None;
         self.descriptor_bytes = 0;
+        self.leaf_plans.clear();
         self.leaf_bytes = 12;
         Ok(())
+    }
+    /// Whether the internal page could reference one more leaf page.
+    ///
+    /// The page is split by encoded bytes rather than by a fixed count: an entry's width depends on
+    /// the identifiers, time bounds, and lengths it names, so a page of short series holds several
+    /// times the children a 72-byte descriptor count would. Everything the estimate needs is known
+    /// before the leaf page is written - its decoded length is exact and its stored length cannot
+    /// exceed it - and the pages are emitted back to back, so no offset gap can appear. The leaf
+    /// this block would open is charged its worst case, which the finished part is then checked
+    /// against exactly.
+    fn root_admits_another_leaf(&self) -> Result<bool> {
+        if self.leaves.len() >= self.options.root_capacity {
+            return Ok(false);
+        }
+        Ok(
+            compact::planned_bytes(&self.leaf_plans, compact::MAX_ENTRY_BYTES)?
+                <= self.options.page_bytes,
+        )
+    }
+    /// Writes the internal page that references `children` in the compact encoding.
+    async fn write_compact_page(&mut self, children: &[PageReference]) -> Result<PageReference> {
+        let entries = children.iter().map(ChildEntry::from).collect::<Vec<_>>();
+        let mut bounds = children
+            .first()
+            .ok_or_else(|| invalid("empty sample internal page"))?
+            .bounds;
+        for child in &children[1..] {
+            bounds.extend(child.bounds);
+        }
+        let bytes = compact::encode(&entries, compact::CHILD_LEAF)?;
+        require(
+            bytes.len() <= self.options.page_bytes,
+            "sample compact page exceeds limit",
+        )?;
+        let (payload, stored) = pack(&bytes, self.position, compact::ENCODING, true)?;
+        self.position = payload.end()?;
+        self.output_buffer.write(&mut self.outputs, &stored).await?;
+        self.compact_pages = true;
+        Ok(PageReference { bounds, payload })
     }
     async fn complete(&mut self) -> Result<ArtifactMetadata> {
         require(!self.failed, "sample writer failed previously")?;
         self.flush_block().await?;
         self.finish_part().await?;
+        // A compact internal page changes what a reader has to understand, while every other
+        // artifact stays on version 1 and byte-compatible with what earlier builds wrote.
+        if self.compact_pages {
+            self.manifest.version = COMPACT_VERSION;
+        }
         let bytes = serde_json::to_vec(&self.manifest).context(SerdeJsonSnafu)?;
         require(
             bytes.len() <= MANIFEST_LIMIT,
