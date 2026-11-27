@@ -1157,11 +1157,30 @@ pub struct CacheManager {
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
+/// Internal override, read once when the engine starts its native admission pool.
+const NATIVE_ADMISSION_WORKERS_ENV: &str = "GREPTIME_NATIVE_CACHE_ADMISSION_WORKERS";
+
+fn native_admission_workers(value: Option<&str>) -> NonZeroUsize {
+    if let Some(value) = value {
+        if let Ok(workers) = value.parse::<NonZeroUsize>()
+            && workers.get() <= tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return workers;
+        }
+        warn!("Invalid {NATIVE_ADMISSION_WORKERS_ENV}={value:?}; using the CPU-based default");
+    }
+    NonZeroUsize::new(crate::config::divide_num_cpus(2)).unwrap_or(NonZeroUsize::MIN)
+}
+
 impl CacheManager {
     fn native_admissions(&self) -> &common_cache::AdmissionPool {
-        const WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
-        self.native_admissions
-            .get_or_init(|| common_cache::AdmissionPool::new(WORKERS, common_runtime::spawn_global))
+        self.native_admissions.get_or_init(|| {
+            let value = std::env::var(NATIVE_ADMISSION_WORKERS_ENV).ok();
+            common_cache::AdmissionPool::new(
+                native_admission_workers(value.as_deref()),
+                common_runtime::spawn_global,
+            )
+        })
     }
 
     /// Returns a builder to build the cache.
@@ -2070,6 +2089,16 @@ mod tests {
     use crate::read::range_cache::{RangeScanCacheKey, ScanRequestFingerprintBuilder};
     use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::row_selection::RowGroupSelection;
+
+    #[test]
+    fn test_native_admission_workers() {
+        let default = crate::config::divide_num_cpus(2).max(1);
+        assert_eq!(native_admission_workers(None).get(), default);
+        assert_eq!(native_admission_workers(Some("3")).get(), 3);
+        for invalid in ["0", "-1", "many", &usize::MAX.to_string()] {
+            assert_eq!(native_admission_workers(Some(invalid)).get(), default);
+        }
+    }
 
     #[test]
     fn test_find_shared_page_source() {

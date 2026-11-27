@@ -223,6 +223,10 @@ where
     /// Only pool workers enter Moka admission, so a backpressured reader never
     /// holds a per-key waiter while waiting for queue space or its result.
     pub async fn get_or_insert(&self, pool: &AdmissionPool, key: K, value: V) -> V {
+        // Another reader may have published the value while this reader was loading it.
+        if let Some(resident) = self.get(&key).await {
+            return resident;
+        }
         let Some(slot) = pool.reserve().await else {
             // The worker runtime has shut down. The caller already has the value.
             return value;
@@ -385,6 +389,8 @@ mod tests {
         let release = Arc::new(Notify::new());
         let (started, mut admissions) = mpsc::unbounded_channel();
         let cache = gated_admission_cache(release.clone(), started);
+        let resident = Arc::new(0);
+        cache.insert("warm", resident.clone()).await;
         let keys = ["a", "b", "c", "d", "e", "f"];
         for key in keys {
             cache.insert(key, Arc::new(0)).await;
@@ -409,6 +415,14 @@ mod tests {
         assert!(futures::poll!(&mut loads).is_pending());
         assert_eq!(pool.jobs.capacity(), 0);
         assert!(admissions.try_recv().is_err());
+        // A resident value is available even with all workers and queue slots occupied.
+        let hit = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.get_or_insert(&pool, "warm", Arc::new(1)),
+        )
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(&hit, &resident));
         let mut cancelled = Box::pin(cache.get_or_insert(&pool, "cancelled", Arc::new(1)));
         assert!(futures::poll!(&mut cancelled).is_pending());
         drop(cancelled);
