@@ -19,17 +19,17 @@ order. Each part record contains its encoded `file_size` in bytes. The
 
 ## Wire specification
 
-Version 2 stores ordered groups of single-series blocks in each sample part.
+The samples format stores ordered groups of single-series blocks in each sample part.
 Every group owns its column chunks, exact sparse primary keys, and descriptor
 pages. The part directory locates the groups and records their ID and time bounds.
-Readers require version 2 in the manifest and part header.
+The manifest and part header both retain version 1. Existing embedded-layout artifacts must be rebuilt.
 
 Samples store nullable Float64 and native histogram fields, timestamps, sequences,
 and operation types in single-series blocks bounded by rows and decoded bytes.
 
 ## Artifact manifest
 
-The catalog identifier is `columnar-samples`. Its file and manifest version is 2,
+The catalog identifier is `columnar-samples`. Its file and manifest version is 1,
 independent of the series format's version and both formats' codec identifiers.
 Existing `parquet` and `columnar-series` identifiers keep their meaning.
 
@@ -70,7 +70,7 @@ generation is unique for each build. A manifest contains:
 | Field | Meaning |
 | --- | --- |
 | `format` | String `columnar-samples` |
-| `version` | Integer 2 |
+| `version` | Integer 1 |
 | `identity_encoding` | String `exact-sparse-key-area`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable |
 | `region_id` | Physical region ID, u64 |
 | `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
@@ -150,7 +150,7 @@ Reserved fields must be zero, and decoded structures must have no trailing bytes
 | Field | Bytes | Value |
 | --- | ---: | --- |
 | Magic | 8 | ASCII `GTSAMPLE` |
-| File version | 4 | 2 |
+| File version | 4 | 1 |
 | Reserved | 4 | Zero |
 
 ### Column payloads and row semantics
@@ -182,7 +182,7 @@ are checked for byte order and continuation.
 
 Blocks split on an identity change or before the next row would exceed a packing
 limit. There is no hourly split and no padding of short blocks. The default row
-limit is 8,192, also the version-2 reader maximum; a writer may choose a smaller
+limit is 8,192, also the version-1 reader maximum; a writer may choose a smaller
 positive limit without changing the version. With `F` manifest fields and `N`
 rows, the decoded accounting size is:
 
@@ -239,7 +239,7 @@ series of the group, ordered by exact key. A descriptor's key reference is uniqu
 series, ordered, and disjoint from every other series' copy, which is why an equal
 reference means "the same exact series" without reading the bytes.
 
-A key's length is bounded by the part, not by a page or a chunk. Version 2 puts no
+A key's length is bounded by the part, not by a page or a chunk. Version 1 puts no
 page inside the key area, so one key may be far longer than the 65,536-byte page
 limit; the `u32` length in a descriptor is validated against `key_end`, so a
 corrupt length can never address bytes outside the part.
@@ -283,7 +283,7 @@ new series at ordinal zero, so no ordering between the two series' ordinals is r
 
 A leaf describes blocks. An internal page references leaves. The root is either
 the only leaf (depth 1) or an internal page (depth 2). Other depths are unsupported
-in version 2; finish the current group before a third level would be needed.
+in version 1; finish the current group before a third level would be needed.
 
 As in the series format, the entire page, including its kind and count, is encoded
 and independently compressed. The reference in the parent or group directory entry supplies

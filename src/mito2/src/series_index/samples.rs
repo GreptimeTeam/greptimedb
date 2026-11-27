@@ -117,7 +117,7 @@ pub(crate) fn check_histogram_batch(
         .try_for_each(histogram::check_array_sample_sizes)
 }
 
-const VERSION: u32 = 2;
+const VERSION: u32 = 1;
 const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 8192;
 const MAX_FIELDS: usize = 1024;
