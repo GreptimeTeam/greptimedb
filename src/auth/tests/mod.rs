@@ -51,6 +51,7 @@ impl PermissionChecker for DummyPermissionChecker {
         user_info: UserInfoRef,
         req: PermissionReq,
         _targets: PermissionTableTargets,
+        _current_schema: Option<&str>,
     ) -> auth::error::Result<PermissionResp> {
         self.check_permission(user_info, req)
     }

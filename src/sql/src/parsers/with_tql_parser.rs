@@ -168,7 +168,11 @@ impl ParserContext<'_> {
     fn parse_hybrid_cte(&mut self, require_now_expr: bool) -> Result<HybridCte> {
         // Parse CTE name
         let name = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
-        let name = Self::canonicalize_identifier(name);
+        let name = if name.quote_style.is_some() {
+            name
+        } else {
+            Ident::new(name.value.to_ascii_lowercase())
+        };
 
         // Parse optional column list
         let columns = self

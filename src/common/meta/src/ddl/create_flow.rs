@@ -482,6 +482,11 @@ pub const INTERNAL_EVAL_OFFSET_KEY: &str = "__greptime_internal_eval_offset_secs
 /// field in the flow create request.
 pub const INTERNAL_EVAL_SCHEDULE_KEY: &str = "__greptime_internal_eval_schedule";
 
+/// Internal transient key used to pass `CreateFlowTask.allow_sink_create`
+/// between frontend, meta, and flownode without persisting it in
+/// `FlowInfoValue.options`.
+pub const INTERNAL_ALLOW_SINK_CREATE_KEY: &str = "__greptime_internal_allow_sink_create";
+
 const FLOW_SCHEDULED_TIME_MILLIS_EXTENSION_KEY: &str = "flow.scheduled_time_millis";
 
 fn without_scheduled_time_extension(mut query_context: QueryContext) -> QueryContext {
@@ -524,7 +529,11 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         .fail();
     }
 
-    for key in [INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY] {
+    for key in [
+        INTERNAL_EVAL_OFFSET_KEY,
+        INTERNAL_EVAL_SCHEDULE_KEY,
+        INTERNAL_ALLOW_SINK_CREATE_KEY,
+    ] {
         if flow_task.flow_options.contains_key(key) {
             return UnexpectedSnafu {
                 err_msg: format!("flow option '{key}' is reserved for internal use"),
@@ -757,6 +766,7 @@ fn user_runtime_flow_options(options: &HashMap<String, String>) -> HashMap<Strin
     options.remove(DEFER_ON_MISSING_SOURCE_KEY);
     options.remove(INTERNAL_EVAL_SCHEDULE_KEY);
     options.remove(INTERNAL_EVAL_OFFSET_KEY);
+    options.remove(INTERNAL_ALLOW_SINK_CREATE_KEY);
     options
 }
 
@@ -873,6 +883,12 @@ impl From<&CreateFlowData> for CreateRequest {
             req.flow_options
                 .insert(INTERNAL_EVAL_SCHEDULE_KEY.to_string(), json);
         }
+        if !value.task.allow_sink_create {
+            req.flow_options.insert(
+                INTERNAL_ALLOW_SINK_CREATE_KEY.to_string(),
+                "false".to_string(),
+            );
+        }
 
         req
     }
@@ -897,7 +913,12 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             .flow_options
             .iter()
             .filter(|(k, _)| {
-                k.as_str() != INTERNAL_EVAL_SCHEDULE_KEY && k.as_str() != INTERNAL_EVAL_OFFSET_KEY
+                !matches!(
+                    k.as_str(),
+                    INTERNAL_EVAL_SCHEDULE_KEY
+                        | INTERNAL_EVAL_OFFSET_KEY
+                        | INTERNAL_ALLOW_SINK_CREATE_KEY
+                )
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -953,6 +974,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             created_time: create_time,
             updated_time: chrono::Utc::now(),
             eval_schedule: eval_schedule.clone(),
+            allow_sink_create: value.task.allow_sink_create,
         };
 
         (flow_info, flow_routes)

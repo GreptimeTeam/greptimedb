@@ -257,8 +257,28 @@ impl GrpcQueryHandler for Instance {
                                 .await?
                         }
                         DdlExpr::CreateFlow(expr) => {
+                            let allow_sink_create = if let Some(sink) = expr.sink_table_name.as_ref()
+                            {
+                                self.can_create_flow_sinks(
+                                    &ctx,
+                                    sink.catalog_name.clone(),
+                                    sink.schema_name.clone(),
+                                    sink.table_name.clone(),
+                                    expr.flow_options.get("incremental").map(String::as_str),
+                                    expr.flow_options
+                                        .get("incremental_result_view")
+                                        .map(String::as_str),
+                                )
+                                .await?
+                            } else {
+                                true
+                            };
                             self.statement_executor
-                                .create_flow_inner(expr, ctx.clone())
+                                .create_flow_inner_with_sink_create_permission(
+                                    expr,
+                                    allow_sink_create,
+                                    ctx.clone(),
+                                )
                                 .await?
                         }
                         DdlExpr::DropFlow(DropFlowExpr {
@@ -335,7 +355,7 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
                 $expr.catalog_name = catalog.to_string();
             }
             if $expr.schema_name.is_empty() {
-                $expr.schema_name = schema.to_string();
+                $expr.schema_name = schema.clone();
             }
         };
     }
@@ -357,6 +377,9 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
         Expr::CreateFlow(expr) => {
             if expr.catalog_name.is_empty() {
                 expr.catalog_name = catalog.to_string();
+            }
+            if let Some(sink) = expr.sink_table_name.as_mut() {
+                check_and_fill!(sink);
             }
         }
         Expr::DropFlow(expr) => {
@@ -386,7 +409,12 @@ impl Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission_with_table_targets(ctx.current_user(), req, targets)
+            .check_permission_with_table_targets(
+                ctx.current_user(),
+                req,
+                targets,
+                Some(&ctx.current_schema()),
+            )
     }
 
     /// Checks every logical table targeted by normalized row inserts.
@@ -471,6 +499,7 @@ impl Instance {
                                 table: &table_name.table_name,
                             },
                             PermissionTableTargets::resolved(vec![target]),
+                            Some(&ctx.current_schema()),
                         ).context(PermissionSnafu)?;
 
                     // Check permissions for the table

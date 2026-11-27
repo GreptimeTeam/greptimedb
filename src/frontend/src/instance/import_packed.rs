@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use auth::{PermissionReq, PermissionTableTarget, PermissionTableTargets};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -30,6 +33,15 @@ impl Instance {
         stmt: &Statement,
         ctx: QueryContextRef,
     ) -> Result<Output> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission_with_context(
+                ctx.current_user(),
+                PermissionReq::SqlStatement(stmt),
+                Some(&ctx.current_schema()),
+            )
+            .context(PermissionSnafu)?;
         let req = operator::statement::to_copy_database_request(arg, &ctx)?;
         let plan = self
             .statement_executor

@@ -3441,6 +3441,7 @@ WITH(
                 _user_info: auth::UserInfoRef,
                 req: auth::PermissionReq,
                 targets: auth::PermissionTableTargets,
+                _current_schema: Option<&str>,
             ) -> auth::error::Result<auth::PermissionResp> {
                 if matches!(req, auth::PermissionReq::Action(auth::OTLP_WRITE)) {
                     let auth::PermissionTableTargets::Resolved(targets) = targets else {

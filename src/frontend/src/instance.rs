@@ -453,6 +453,29 @@ impl Instance {
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy)) = &stmt {
                     return self.copy_database(copy.clone(), &stmt, query_ctx).await;
                 }
+                if let Statement::CreateFlow(stmt) = stmt {
+                    let (catalog, schema, table) = session::table_name::table_idents_to_full_name(
+                        &stmt.sink_table_name,
+                        &query_ctx,
+                    )
+                    .map_err(BoxedError::new)
+                    .context(crate::error::ExternalSnafu)?;
+                    let allow_sink_create = self
+                        .can_create_flow_sinks(
+                            &query_ctx,
+                            catalog,
+                            schema,
+                            table,
+                            stmt.flow_options.get("incremental"),
+                            stmt.flow_options.get("incremental_result_view"),
+                        )
+                        .await?;
+                    return self
+                        .statement_executor
+                        .create_flow_with_sink_create_permission(stmt, allow_sink_create, query_ctx)
+                        .await
+                        .context(TableOperationSnafu);
+                }
                 self.statement_executor
                     .execute_sql(stmt, query_ctx)
                     .await
@@ -603,6 +626,15 @@ impl Instance {
         stmt: &Statement,
         ctx: QueryContextRef,
     ) -> Result<Output> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission_with_context(
+                ctx.current_user(),
+                PermissionReq::SqlStatement(stmt),
+                Some(&ctx.current_schema()),
+            )
+            .context(PermissionSnafu)?;
         match copy {
             CopyDatabase::To(arg) => {
                 let req = operator::statement::to_copy_database_request(arg, &ctx)?;
@@ -1374,6 +1406,73 @@ impl Instance {
             .await
     }
 
+    pub(crate) async fn can_create_flow_sink(
+        &self,
+        ctx: &QueryContextRef,
+        catalog: String,
+        schema: String,
+        table: String,
+    ) -> Result<bool> {
+        let req = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateTable(
+                api::v1::CreateTableExpr {
+                    catalog_name: catalog.clone(),
+                    schema_name: schema.clone(),
+                    table_name: table.clone(),
+                    ..Default::default()
+                },
+            )),
+        });
+        let targets = PermissionTableTargets::Resolved(vec![PermissionTableTarget {
+            catalog,
+            schema,
+            table,
+            is_physical_metric_table: false,
+        }]);
+        match self
+            .check_resolved_table_permission(ctx, PermissionReq::GrpcRequest(&req), targets)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(Error::Permission { source, .. })
+                if source.status_code()
+                    == common_error::status_code::StatusCode::PermissionDenied =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(crate) async fn can_create_flow_sinks(
+        &self,
+        ctx: &QueryContextRef,
+        catalog: String,
+        schema: String,
+        sink_table: String,
+        incremental_flag: Option<&str>,
+        incremental_result_view: Option<&str>,
+    ) -> Result<bool> {
+        if !self
+            .can_create_flow_sink(ctx, catalog.clone(), schema.clone(), sink_table.clone())
+            .await?
+        {
+            return Ok(false);
+        }
+        let is_incremental =
+            incremental_flag.is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+        if !is_incremental {
+            return Ok(true);
+        }
+        let result_view = incremental_result_view
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("{sink_table}_result"));
+        self.can_create_flow_sink(ctx, catalog, schema, result_view)
+            .await
+    }
+
     async fn check_resolved_table_permissions<const N: usize>(
         &self,
         ctx: &QueryContextRef,
@@ -1392,16 +1491,27 @@ impl Instance {
         };
 
         let user = ctx.current_user();
+        let current_schema = ctx.current_schema();
         let check = |req, targets| {
             checker
-                .check_permission_with_table_targets(user.clone(), req, targets)
+                .check_permission_with_table_targets(
+                    user.clone(),
+                    req,
+                    targets,
+                    Some(current_schema.as_str()),
+                )
                 .map(|_| ())
                 .context(PermissionSnafu)
         };
         let mut looked_up = HashSet::new();
         for (i, req) in requests.into_iter().enumerate() {
             match checker
-                .precheck_table_targets(user.clone(), req.clone(), &targets)
+                .precheck_table_targets(
+                    user.clone(),
+                    req.clone(),
+                    &targets,
+                    Some(current_schema.as_str()),
+                )
                 .context(PermissionSnafu)?
             {
                 TableTargetPrecheck::Allow => continue,
@@ -1692,6 +1802,7 @@ impl Instance {
                         query_ctx.current_user(),
                         PermissionReq::Action(PROMQL_QUERY),
                         PermissionTableTargets::resolved(vec![target.clone()]),
+                        Some(schema.as_str()),
                     )
                     .context(AuthSnafu)
                 {
@@ -1950,6 +2061,7 @@ impl PrometheusHandler for Instance {
                     query_ctx.current_user(),
                     PermissionReq::Action(PROMQL_QUERY),
                     PermissionTableTargets::resolved(vec![target]),
+                    Some(schema),
                 )
                 .context(AuthSnafu);
             return match result {
@@ -1974,6 +2086,7 @@ impl PrometheusHandler for Instance {
                     query_ctx.current_user(),
                     PermissionReq::Action(PROMQL_QUERY),
                     PermissionTableTargets::resolved(vec![target]),
+                    Some(schema),
                 )
                 .context(AuthSnafu)
             {
@@ -2651,6 +2764,7 @@ mod tests {
             _user_info: UserInfoRef,
             _req: PermissionReq,
             _targets: PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> auth::error::Result<PermissionResp> {
             self.table_target_checks
                 .fetch_add(1, atomic::Ordering::Relaxed);
@@ -2678,6 +2792,7 @@ mod tests {
             _user_info: UserInfoRef,
             _req: PermissionReq,
             targets: PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> auth::error::Result<PermissionResp> {
             let reject = match targets {
                 PermissionTableTargets::Unresolved => true,
@@ -2741,6 +2856,7 @@ mod tests {
             _user_info: UserInfoRef,
             req: PermissionReq,
             targets: PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> auth::error::Result<PermissionResp> {
             Ok(match req {
                 PermissionReq::Action(action) => self.reject(action, Some(targets)),
@@ -2769,6 +2885,7 @@ mod tests {
             user_info: UserInfoRef,
             req: PermissionReq,
             _targets: PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> auth::error::Result<PermissionResp> {
             self.check_permission(user_info, req)
         }
@@ -2798,6 +2915,7 @@ mod tests {
             user_info: UserInfoRef,
             req: PermissionReq,
             _targets: PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> auth::error::Result<PermissionResp> {
             self.check_permission(user_info, req)
         }
@@ -3116,6 +3234,7 @@ mod tests {
                         .context(common_meta::error::ExternalSnafu)?;
                     Ok(SubmitDdlTaskResponse::default())
                 }
+                DdlTask::CreateFlow(_) => Ok(SubmitDdlTaskResponse::default()),
                 other => common_meta::error::UnsupportedSnafu {
                     operation: format!("mock submit_ddl_task: {other:?}"),
                 }
@@ -3335,6 +3454,7 @@ mod tests {
                 _: UserInfoRef,
                 req: PermissionReq,
                 targets: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 let applies = match req {
                     PermissionReq::Action(action) => action == COPY_TO && self.reject_read,
@@ -3680,6 +3800,7 @@ mod tests {
                 _: UserInfoRef,
                 req: PermissionReq,
                 targets: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 self.0.lock().unwrap().push(targets.clone());
                 let PermissionTableTargets::Resolved(tables) = targets else {
@@ -4752,6 +4873,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 targets: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 self.0.lock().unwrap().push(targets);
                 Ok(PermissionResp::Allow)
@@ -4846,6 +4968,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 targets: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 let PermissionTableTargets::Resolved(targets) = targets else {
                     panic!("physical target must retain its identity")
@@ -5104,6 +5227,7 @@ mod tests {
                 _user_info: UserInfoRef,
                 _req: PermissionReq,
                 targets: PermissionTableTargets,
+                _current_schema: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 let reject = match targets {
                     PermissionTableTargets::Unresolved => true,
@@ -6681,6 +6805,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: &PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<TableTargetPrecheck> {
                 Ok(TableTargetPrecheck::Allow)
             }
@@ -6690,6 +6815,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 panic!("check_permission_with_table_targets should be skipped on precheck Allow")
             }
@@ -6735,6 +6861,7 @@ mod tests {
                 _: UserInfoRef,
                 req: PermissionReq,
                 targets: &PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<TableTargetPrecheck> {
                 Ok(match (req, targets) {
                     (PermissionReq::Action(COPY_TO), PermissionTableTargets::Resolved(_)) => {
@@ -6749,6 +6876,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 panic!("check_permission_with_table_targets should be skipped on precheck Reject")
             }
@@ -6816,6 +6944,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 targets: &PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<TableTargetPrecheck> {
                 let PermissionTableTargets::Resolved(targets) = targets else {
                     return Ok(TableTargetPrecheck::Reject);
@@ -6832,6 +6961,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 targets: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 self.0.lock().unwrap().push(targets);
                 Ok(PermissionResp::Allow)
@@ -6904,6 +7034,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 targets: &PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<TableTargetPrecheck> {
                 self.precheck_calls.lock().unwrap().push(targets.clone());
                 let PermissionTableTargets::Resolved(targets) = targets else {
@@ -6919,6 +7050,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 targets: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 self.final_calls.lock().unwrap().push(targets);
                 Ok(PermissionResp::Allow)
@@ -7012,6 +7144,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 self.target_hook_calls
                     .fetch_add(1, atomic::Ordering::Relaxed);
@@ -7064,6 +7197,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: &PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<TableTargetPrecheck> {
                 Ok(TableTargetPrecheck::NeedsPhysicalResolution(vec![99]))
             }
@@ -7073,6 +7207,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: PermissionTableTargets,
+                _: Option<&str>,
             ) -> auth::error::Result<PermissionResp> {
                 unreachable!("must fail before check_permission_with_table_targets")
             }
@@ -7102,6 +7237,525 @@ mod tests {
             assert_eq!(StatusCode::Unexpected, err.status_code());
             assert_eq!(0, counting_catalog.total_table_lookups());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_check_sql_permission_normalizes_unquoted_and_preserves_quoted() -> TestResult<()>
+    {
+        struct RecordingPhysicalChecker {
+            resolved_targets: std::sync::Mutex<Vec<PermissionTableTargets>>,
+        }
+
+        impl PermissionChecker for RecordingPhysicalChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn precheck_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: &PermissionTableTargets,
+                _: Option<&str>,
+            ) -> auth::error::Result<TableTargetPrecheck> {
+                let PermissionTableTargets::Resolved(targets) = targets else {
+                    return Ok(TableTargetPrecheck::Reject);
+                };
+                Ok(TableTargetPrecheck::NeedsPhysicalResolution(
+                    (0..targets.len()).collect(),
+                ))
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+                targets: PermissionTableTargets,
+                _: Option<&str>,
+            ) -> auth::error::Result<PermissionResp> {
+                let denied = matches!(
+                    &targets,
+                    PermissionTableTargets::Resolved(list)
+                        if list.iter().any(|t| t.schema == "public" && t.table == "readings")
+                );
+                self.resolved_targets.lock().unwrap().push(targets);
+                Ok(if denied {
+                    PermissionResp::Reject
+                } else {
+                    PermissionResp::Allow
+                })
+            }
+        }
+
+        let checker = Arc::new(RecordingPhysicalChecker {
+            resolved_targets: Default::default(),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+
+        let catalog = catalog::memory::MemoryCatalogManager::new_with_table(test_physical_table(
+            1024, "readings",
+        )?);
+        catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "Readings".to_string(),
+                table_id: 1025,
+                table: test_table(1025, "Readings")?,
+            })
+            .with_context(|_| RegisterTableSnafu {
+                table_name: "Readings".to_string(),
+            })?;
+        let counting_catalog = Arc::new(CountingCatalogManager::new(catalog));
+        let instance = test_instance_with_counting_catalog(counting_catalog, plugins).await?;
+        let ctx = test_query_ctx(1);
+
+        // Both unquoted spellings resolve to `readings`, look up the physical table `readings`,
+        // and receive the same PermissionDenied decision.
+        for sql in [
+            "SELECT * FROM readings",
+            "SELECT * FROM Readings",
+            "SELECT * FROM Public.Readings",
+        ] {
+            let err = instance
+                .check_sql_permission(&parse_one_sql(sql), &ctx)
+                .await
+                .unwrap_err();
+            assert_eq!(StatusCode::PermissionDenied, err.status_code(), "{sql}");
+        }
+
+        // Quoted `"Readings"` preserves case, looks up non-physical `"Readings"`, and is allowed.
+        instance
+            .check_sql_permission(&parse_one_sql(r#"SELECT * FROM "Readings""#), &ctx)
+            .await
+            .unwrap();
+
+        // TQL metric names stay case-sensitive.
+        instance
+            .check_sql_permission(&parse_one_sql("TQL EVAL (0, 10, '5s') Readings"), &ctx)
+            .await
+            .unwrap();
+
+        let recorded = checker.resolved_targets.lock().unwrap();
+        assert_eq!(
+            *recorded,
+            vec![
+                PermissionTableTargets::Resolved(vec![
+                    PermissionTableTarget::new("greptime", "public", "readings")
+                        .with_physical_metric_table(true),
+                ]),
+                PermissionTableTargets::Resolved(vec![
+                    PermissionTableTarget::new("greptime", "public", "readings")
+                        .with_physical_metric_table(true),
+                ]),
+                PermissionTableTargets::Resolved(vec![
+                    PermissionTableTarget::new("greptime", "public", "readings")
+                        .with_physical_metric_table(true),
+                ]),
+                PermissionTableTargets::Resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "Readings"
+                )]),
+                PermissionTableTargets::Resolved(vec![PermissionTableTarget::new(
+                    "greptime", "public", "Readings"
+                )]),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_flow_sink_permission_preserves_checker_errors() -> TestResult<()> {
+        #[derive(Clone)]
+        enum SinkCreateMode {
+            Deny,
+            InternalError,
+            BackendError,
+            DenyOnResultView,
+            ErrorOnResultView,
+        }
+
+        struct FlowSinkChecker {
+            mode: std::sync::Mutex<SinkCreateMode>,
+        }
+
+        impl PermissionChecker for FlowSinkChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn grpc_table_targets(
+                &self,
+                request: &Request,
+                _catalog: &str,
+                _schema: &str,
+            ) -> PermissionTableTargets {
+                match request {
+                    Request::Ddl(ddl)
+                        if matches!(ddl.expr, Some(api::v1::ddl_request::Expr::CreateFlow(_))) =>
+                    {
+                        PermissionTableTargets::resolved(vec![])
+                    }
+                    _ => PermissionTableTargets::Unresolved,
+                }
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+                _: Option<&str>,
+            ) -> auth::error::Result<PermissionResp> {
+                let PermissionReq::GrpcRequest(Request::Ddl(ddl)) = req else {
+                    return Ok(PermissionResp::Allow);
+                };
+                let Some(api::v1::ddl_request::Expr::CreateTable(create_table)) = &ddl.expr else {
+                    return Ok(PermissionResp::Allow);
+                };
+                let _ = targets;
+                match self.mode.lock().unwrap().clone() {
+                    SinkCreateMode::Deny => Ok(PermissionResp::Reject),
+                    SinkCreateMode::InternalError => auth::error::InternalStateSnafu {
+                        msg: "checker internal failure",
+                    }
+                    .fail(),
+                    SinkCreateMode::BackendError => {
+                        Err::<PermissionResp, _>(BoxedError::new(PlainError::new(
+                            "auth backend unavailable".to_string(),
+                            StatusCode::StorageUnavailable,
+                        )))
+                        .context(auth::error::AuthBackendSnafu)
+                    }
+                    SinkCreateMode::DenyOnResultView => {
+                        if create_table.table_name.ends_with("_result") {
+                            Ok(PermissionResp::Reject)
+                        } else {
+                            Ok(PermissionResp::Allow)
+                        }
+                    }
+                    SinkCreateMode::ErrorOnResultView => {
+                        if create_table.table_name.ends_with("_result") {
+                            auth::error::InternalStateSnafu {
+                                msg: "result view check failed",
+                            }
+                            .fail()
+                        } else {
+                            Ok(PermissionResp::Allow)
+                        }
+                    }
+                }
+            }
+        }
+
+        let checker = Arc::new(FlowSinkChecker {
+            mode: std::sync::Mutex::new(SinkCreateMode::Deny),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let executor = Arc::new(MockProcedureExecutor::new(catalog.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog,
+            test_table(1025, "target")?,
+            plugins,
+            None,
+            executor.clone(),
+        )
+        .await?;
+        let ctx = test_query_ctx(1);
+
+        let grpc_create_flow = |name: &str, incremental: bool| {
+            let mut flow_options = std::collections::HashMap::new();
+            if incremental {
+                flow_options.insert("incremental".to_string(), "true".to_string());
+            }
+            Request::Ddl(api::v1::DdlRequest {
+                expr: Some(api::v1::ddl_request::Expr::CreateFlow(
+                    api::v1::CreateFlowExpr {
+                        flow_name: name.to_string(),
+                        source_table_names: vec![api::v1::TableName {
+                            catalog_name: "greptime".to_string(),
+                            schema_name: "public".to_string(),
+                            table_name: "source".to_string(),
+                        }],
+                        sink_table_name: Some(api::v1::TableName {
+                            catalog_name: "greptime".to_string(),
+                            schema_name: "public".to_string(),
+                            table_name: "target".to_string(),
+                        }),
+                        eval_interval: Some(api::v1::EvalInterval { seconds: 10 }),
+                        sql: "SELECT id, ts FROM source".to_string(),
+                        flow_options,
+                        ..Default::default()
+                    },
+                )),
+            })
+        };
+
+        // Denied `table.create` via SQL still submits the flow with `allow_sink_create = false`.
+        execute_one_sql(
+            &instance,
+            "CREATE FLOW sql_denied_sink SINK TO target EVAL INTERVAL '10s' AS SELECT id, ts FROM source",
+            ctx.clone(),
+        )
+        .await?;
+        // Denied `table.create` via gRPC still submits the flow with `allow_sink_create = false`.
+        servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            grpc_create_flow("grpc_denied_sink", false),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Incremental result view denial returns `Ok(false)` instead of `Ok(true)`.
+        *checker.mode.lock().unwrap() = SinkCreateMode::DenyOnResultView;
+        assert!(
+            !instance
+                .can_create_flow_sinks(
+                    &ctx,
+                    "greptime".to_string(),
+                    "public".to_string(),
+                    "target".to_string(),
+                    Some("true"),
+                    None,
+                )
+                .await
+                .unwrap()
+        );
+
+        {
+            let mut submitted = executor.submitted.lock().unwrap();
+            assert_eq!(2, submitted.len());
+            for task in submitted.drain(..) {
+                let DdlTask::CreateFlow(flow_task) = task else {
+                    panic!("expected CreateFlow task");
+                };
+                assert!(!flow_task.allow_sink_create);
+            }
+        }
+
+        // Non-PermissionDenied checker errors must propagate unchanged and submit no DDL task.
+        for (mode, expected_status) in [
+            (SinkCreateMode::InternalError, StatusCode::Unexpected),
+            (SinkCreateMode::BackendError, StatusCode::StorageUnavailable),
+        ] {
+            *checker.mode.lock().unwrap() = mode;
+            let sql_err = instance
+                .do_query_inner(
+                    "CREATE FLOW sql_err_sink SINK TO target EVAL INTERVAL '10s' AS SELECT id, ts FROM source",
+                    ctx.clone(),
+                )
+                .await
+                .remove(0)
+                .unwrap_err();
+            assert_eq!(expected_status, sql_err.status_code());
+
+            let grpc_err = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+                &instance,
+                grpc_create_flow("grpc_err_sink", false),
+                ctx.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(expected_status, grpc_err.status_code());
+            assert!(executor.submitted.lock().unwrap().is_empty());
+        }
+
+        // Incremental flow where the second sink probe (`_result` view) fails with a checker error
+        // also propagates the original error and submits no DDL task.
+        *checker.mode.lock().unwrap() = SinkCreateMode::ErrorOnResultView;
+        let probe_err = instance
+            .can_create_flow_sinks(
+                &ctx,
+                "greptime".to_string(),
+                "public".to_string(),
+                "target".to_string(),
+                Some("true"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, probe_err.status_code());
+
+        let grpc_err = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            grpc_create_flow("grpc_err_result", true),
+            ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, grpc_err.status_code());
+        assert!(executor.submitted.lock().unwrap().is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_grpc_create_flow_qualifies_sink_once() -> TestResult<()> {
+        struct RecordingSinkChecker {
+            checked_sinks: std::sync::Mutex<Vec<(String, String, String)>>,
+        }
+
+        impl PermissionChecker for RecordingSinkChecker {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn grpc_table_targets(
+                &self,
+                request: &Request,
+                _catalog: &str,
+                _schema: &str,
+            ) -> PermissionTableTargets {
+                match request {
+                    Request::Ddl(ddl)
+                        if matches!(ddl.expr, Some(api::v1::ddl_request::Expr::CreateFlow(_))) =>
+                    {
+                        PermissionTableTargets::resolved(vec![])
+                    }
+                    _ => PermissionTableTargets::Unresolved,
+                }
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+                _: Option<&str>,
+            ) -> auth::error::Result<PermissionResp> {
+                if let PermissionReq::GrpcRequest(Request::Ddl(ddl)) = req
+                    && let Some(api::v1::ddl_request::Expr::CreateTable(create_table)) = &ddl.expr
+                {
+                    let PermissionTableTargets::Resolved(resolved) = &targets else {
+                        panic!("expected resolved sink target");
+                    };
+                    assert_eq!(1, resolved.len());
+                    assert_eq!(resolved[0].catalog, create_table.catalog_name);
+                    assert_eq!(resolved[0].schema, create_table.schema_name);
+                    assert_eq!(resolved[0].table, create_table.table_name);
+                    self.checked_sinks.lock().unwrap().push((
+                        create_table.catalog_name.clone(),
+                        create_table.schema_name.clone(),
+                        create_table.table_name.clone(),
+                    ));
+                }
+                Ok(PermissionResp::Allow)
+            }
+        }
+
+        let checker = Arc::new(RecordingSinkChecker {
+            checked_sinks: Default::default(),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+
+        let catalog =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let executor = Arc::new(MockProcedureExecutor::new(catalog.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog,
+            test_table(1025, "target")?,
+            plugins,
+            None,
+            executor.clone(),
+        )
+        .await?;
+
+        let ctx = QueryContextBuilder::default()
+            .current_catalog("greptime".to_string())
+            .current_schema("analytics".to_string())
+            .build()
+            .into();
+
+        for (flow_name, sink_catalog, sink_schema, sink_table) in [
+            ("flow_unqual", "", "", "unqual_sink"),
+            ("flow_schema_qual", "", "explicit_db", "schema_qual_sink"),
+            ("flow_full_qual", "other_cat", "other_db", "full_qual_sink"),
+        ] {
+            let request = Request::Ddl(api::v1::DdlRequest {
+                expr: Some(api::v1::ddl_request::Expr::CreateFlow(
+                    api::v1::CreateFlowExpr {
+                        flow_name: flow_name.to_string(),
+                        source_table_names: vec![api::v1::TableName {
+                            catalog_name: "greptime".to_string(),
+                            schema_name: "public".to_string(),
+                            table_name: "source".to_string(),
+                        }],
+                        sink_table_name: Some(api::v1::TableName {
+                            catalog_name: sink_catalog.to_string(),
+                            schema_name: sink_schema.to_string(),
+                            table_name: sink_table.to_string(),
+                        }),
+                        eval_interval: Some(api::v1::EvalInterval { seconds: 10 }),
+                        sql: "SELECT id, ts FROM greptime.public.source".to_string(),
+                        ..Default::default()
+                    },
+                )),
+            });
+            servers::query_handler::grpc::GrpcQueryHandler::do_query(
+                &instance,
+                request,
+                Arc::clone(&ctx),
+            )
+            .await
+            .unwrap();
+        }
+
+        let checked = checker.checked_sinks.lock().unwrap().clone();
+        assert_eq!(
+            checked,
+            vec![
+                (
+                    "greptime".to_string(),
+                    "analytics".to_string(),
+                    "unqual_sink".to_string(),
+                ),
+                (
+                    "greptime".to_string(),
+                    "explicit_db".to_string(),
+                    "schema_qual_sink".to_string(),
+                ),
+                (
+                    "other_cat".to_string(),
+                    "other_db".to_string(),
+                    "full_qual_sink".to_string(),
+                ),
+            ]
+        );
+
+        let submitted = executor.submitted.lock().unwrap();
+        assert_eq!(3, submitted.len());
+        let expected_sinks = [
+            TableName::new("greptime", "analytics", "unqual_sink"),
+            TableName::new("greptime", "explicit_db", "schema_qual_sink"),
+            TableName::new("other_cat", "other_db", "full_qual_sink"),
+        ];
+        for (task, expected_sink) in submitted.iter().zip(expected_sinks) {
+            let DdlTask::CreateFlow(flow_task) = task else {
+                panic!("expected CreateFlow task");
+            };
+            assert_eq!("greptime", flow_task.catalog_name);
+            assert_eq!(expected_sink, flow_task.sink_table_name);
+        }
+
         Ok(())
     }
 }

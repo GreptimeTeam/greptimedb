@@ -1777,6 +1777,7 @@ async fn test_postgres_copy_in_prom_write_batching_parity() {
             _: auth::UserInfoRef,
             req: auth::PermissionReq,
             targets: auth::PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> auth::error::Result<auth::PermissionResp> {
             if matches!(req, auth::PermissionReq::Action(auth::PROM_STORE_WRITE)) {
                 assert!(

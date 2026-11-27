@@ -74,6 +74,7 @@ pub(crate) fn test_create_flow_task(
         sql: "select 1".to_string(),
         flow_options: Default::default(),
         eval_schedule: None,
+        allow_sink_create: true,
     }
 }
 
@@ -107,6 +108,7 @@ fn flow_info_for_schedule_test(
         created_time,
         updated_time: created_time,
         eval_schedule,
+        allow_sink_create: true,
     }
 }
 
@@ -1303,6 +1305,7 @@ fn create_test_flow_task_for_serialization() -> CreateFlowTask {
         sql: "SELECT * FROM source_table".to_string(),
         flow_options: HashMap::new(),
         eval_schedule: None,
+        allow_sink_create: true,
     }
 }
 

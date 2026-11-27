@@ -564,6 +564,7 @@ mod tests {
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
             eval_schedule: None,
+            allow_sink_create: true,
         }
     }
 
@@ -898,6 +899,7 @@ mod tests {
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
             eval_schedule: None,
+            allow_sink_create: true,
         };
         let err = flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value, flow_routes.clone())
@@ -1279,6 +1281,7 @@ mod tests {
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
             eval_schedule: None,
+            allow_sink_create: true,
         };
         let err = flow_metadata_manager
             .update_flow_metadata(

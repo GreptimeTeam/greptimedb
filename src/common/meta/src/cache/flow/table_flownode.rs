@@ -242,6 +242,7 @@ mod tests {
                     created_time: chrono::Utc::now(),
                     updated_time: chrono::Utc::now(),
                     eval_schedule: None,
+                    allow_sink_create: true,
                 },
                 (1..=3)
                     .map(|i| {

@@ -368,7 +368,17 @@ impl FlowDualEngine {
                         eval_interval: info.eval_interval(),
                         comment: Some(info.comment().clone()),
                         sql: info.raw_sql().clone(),
-                        flow_options: info.options().clone(),
+                        flow_options: {
+                            let mut flow_options = info.options().clone();
+                            if !info.allow_sink_create() {
+                                flow_options.insert(
+                                    common_meta::ddl::create_flow::INTERNAL_ALLOW_SINK_CREATE_KEY
+                                        .to_string(),
+                                    "false".to_string(),
+                                );
+                            }
+                            flow_options
+                        },
                         eval_schedule: effective_eval_schedule_from_flow_info(&info)
                             .map_err(BoxedError::new)
                             .context(ExternalSnafu)?,

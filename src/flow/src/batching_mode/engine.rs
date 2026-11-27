@@ -732,10 +732,15 @@ impl BatchingEngine {
             eval_schedule,
         };
 
+        let allow_sink_create = flow_options
+            .get(common_meta::ddl::create_flow::INTERNAL_ALLOW_SINK_CREATE_KEY)
+            .map(String::as_str)
+            != Some("false");
         let task = BatchingTask::try_new_with_exact_sequence_range_required(
             task_args,
             exact_sequence_range_required,
-        )?;
+        )?
+        .with_allow_sink_create(allow_sink_create);
 
         if task.config.exact_sequence_range_required {
             ensure!(
