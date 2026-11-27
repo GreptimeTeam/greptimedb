@@ -551,7 +551,7 @@ impl FileCache {
         }
     }
 
-    pub(crate) async fn remove_native(
+    pub(crate) async fn remove_narthex(
         &self,
         region_id: RegionId,
         files: &std::collections::HashSet<FileId>,
@@ -818,8 +818,8 @@ pub struct IndexKey {
 }
 
 impl IndexKey {
-    /// The native inventory ends with its manifest; all preceding objects are in part-ID order.
-    pub(crate) fn native_objects(
+    /// The Narthex inventory ends with its manifest; all preceding objects are in part-ID order.
+    pub(crate) fn narthex_objects(
         file: &crate::sst::file::FileMeta,
         region_dir: &str,
     ) -> Vec<(Self, crate::series_index::artifact::ArtifactObject)> {

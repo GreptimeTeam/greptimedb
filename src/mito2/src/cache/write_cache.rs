@@ -480,11 +480,11 @@ impl WriteCache {
         Ok(true)
     }
 
-    pub(crate) const NATIVE_STAGE: &'static str = "cache/staging/narthex/";
+    pub(crate) const NARTHEX_STAGE: &'static str = "cache/staging/narthex/";
 
     /// Staging is distinct from authoritative paths even if both stores share an FS root.
-    pub(crate) fn native_stage(path: &str) -> String {
-        format!("{}{path}", Self::NATIVE_STAGE)
+    pub(crate) fn narthex_stage(path: &str) -> String {
+        format!("{}{path}", Self::NARTHEX_STAGE)
     }
 
     /// Uploads a Parquet file or a Puffin file to the remote object store.
@@ -611,7 +611,7 @@ impl WriteCache {
 }
 
 /// The writer owns a fresh physical file ID until the complete upload returns.
-pub(crate) struct NativeUpload {
+pub(crate) struct NarthexUpload {
     cache: WriteCacheRef,
     remote: ObjectStore,
     manifest_key: IndexKey,
@@ -620,7 +620,7 @@ pub(crate) struct NativeUpload {
     uploaded: Vec<(IndexKey, String)>,
 }
 
-impl NativeUpload {
+impl NarthexUpload {
     pub(crate) fn new(
         cache: &WriteCacheRef,
         remote: &ObjectStore,
@@ -652,7 +652,7 @@ impl NativeUpload {
         self.uploaded.push((key, path.to_owned()));
         let disk = self.cache.file_cache();
         disk.local_store()
-            .rename(&WriteCache::native_stage(path), &disk.cache_file_path(key))
+            .rename(&WriteCache::narthex_stage(path), &disk.cache_file_path(key))
             .await
             .context(error::OpenDalSnafu)?;
         self.cache
@@ -673,7 +673,7 @@ impl NativeUpload {
         for (key, path) in &self.uploaded {
             self.cache.remove(*key).await;
             if let Err(error) = self.remote.delete(path).await {
-                common_telemetry::warn!(error; "Failed to remove unpublished native object {}", path);
+                common_telemetry::warn!(error; "Failed to remove unpublished Narthex object {}", path);
             }
         }
         self.uploaded.clear();
@@ -1001,7 +1001,7 @@ mod tests {
         use crate::series_index::artifact::ArtifactObject;
         use object_store::layers::mock::MockLayerBuilder;
         let env = TestEnv::new().await;
-        let root = create_temp_dir("native-upload");
+        let root = create_temp_dir("narthex-upload");
         let cache = env
             .create_write_cache_from_path(root.path().to_str().unwrap(), ReadableSize::mb(8))
             .await;
@@ -1036,7 +1036,7 @@ mod tests {
         ] {
             let path = format!("artifact/{name}");
             local
-                .write(&WriteCache::native_stage(&path), vec![42; 16])
+                .write(&WriteCache::narthex_stage(&path), vec![42; 16])
                 .await
                 .unwrap();
             inventory.push((
@@ -1047,7 +1047,7 @@ mod tests {
                 },
             ));
         }
-        let mut upload = NativeUpload::new(
+        let mut upload = NarthexUpload::new(
             &cache,
             &remote,
             IndexKey::new(owner, id, FileType::Series(None)),
@@ -1059,7 +1059,7 @@ mod tests {
             assert!(remote.exists(&object.path).await.unwrap());
             assert!(
                 !local
-                    .exists(&WriteCache::native_stage(&object.path))
+                    .exists(&WriteCache::narthex_stage(&object.path))
                     .await
                     .unwrap()
             );
@@ -1077,7 +1077,7 @@ mod tests {
             assert!(!remote.exists(&object.path).await.unwrap());
             assert!(
                 !local
-                    .exists(&WriteCache::native_stage(&object.path))
+                    .exists(&WriteCache::narthex_stage(&object.path))
                     .await
                     .unwrap()
             );

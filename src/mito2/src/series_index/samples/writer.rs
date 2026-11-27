@@ -181,7 +181,7 @@ pub(crate) struct SamplesWriter {
     failed: bool,
 }
 impl SamplesWriter {
-    pub(crate) fn set_upload(&mut self, upload: crate::cache::write_cache::NativeUpload) {
+    pub(crate) fn set_upload(&mut self, upload: crate::cache::write_cache::NarthexUpload) {
         self.outputs.upload = Some(upload);
     }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Native Narthex sample and series-index writers.
+//! Narthex sample and series-index writers.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -30,7 +30,7 @@ use store_api::storage::FileId;
 use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::access_layer::{OperationType, SstInfoArray};
 use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::write_cache::{NativeUpload, WriteCacheRef};
+use crate::cache::write_cache::{NarthexUpload, WriteCacheRef};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::reader::ColumnarReader;
@@ -76,7 +76,7 @@ pub(crate) async fn write_samples(
         id,
     )?);
     if let Some(cache) = cache {
-        writer.set_upload(NativeUpload::new(
+        writer.set_upload(NarthexUpload::new(
             cache,
             layer.object_store(),
             IndexKey::new(region_id, id, FileType::Samples(None)),
@@ -194,7 +194,7 @@ pub(crate) async fn write_samples(
     Ok(smallvec::smallvec![info])
 }
 
-/// Reconstruct the canonical sparse key from a native series row, in SST order.
+/// Reconstruct the canonical sparse key from a Narthex series row, in SST order.
 async fn series_keys(
     layer: &AccessLayer,
     cache: Option<&WriteCacheRef>,
@@ -255,7 +255,7 @@ pub(crate) async fn write_series(
         prefix,
     )?;
     if let Some(cache) = cache {
-        writer.set_upload(NativeUpload::new(
+        writer.set_upload(NarthexUpload::new(
             cache,
             layer.object_store(),
             IndexKey::new(metadata.region_id, id, FileType::Series(None)),
@@ -287,7 +287,7 @@ pub(crate) async fn write_series(
                         .boxed()
                 }
                 FileFormat::Parquet => {
-                    return Err(invalid("expected native series or samples"));
+                    return Err(invalid("expected Narthex series or samples"));
                 }
             };
             if let Some((key, rows)) = stream.try_next().await? {

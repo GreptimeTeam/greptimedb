@@ -108,7 +108,7 @@ impl SeriesIndexFileHandle {
         })
     }
 
-    pub(crate) fn native_file(&self) -> Option<&crate::sst::file::FileHandle> {
+    pub(crate) fn narthex_file(&self) -> Option<&crate::sst::file::FileHandle> {
         self.inner.narthex_file.as_ref()
     }
 

@@ -190,7 +190,7 @@ impl SamplesFileHandle {
         }
     }
 
-    pub(crate) fn native_file(&self) -> Option<&crate::sst::file::FileHandle> {
+    pub(crate) fn narthex_file(&self) -> Option<&crate::sst::file::FileHandle> {
         match &self.0.lifetime {
             SamplesLifetime::Narthex(file) => Some(file),
             _ => None,

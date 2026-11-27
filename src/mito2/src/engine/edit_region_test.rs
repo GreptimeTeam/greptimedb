@@ -472,7 +472,7 @@ async fn narthex_import_preloads_all_parts_from_the_physical_owner() {
         )),
         ..Default::default()
     };
-    let inventory = IndexKey::native_objects(&file, &region.access_layer.build_region_dir(owner));
+    let inventory = IndexKey::narthex_objects(&file, &region.access_layer.build_region_dir(owner));
     for (_, object) in &inventory {
         region
             .access_layer

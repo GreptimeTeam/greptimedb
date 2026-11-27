@@ -617,7 +617,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 if let Some(files) = preload
                     && let Some(cache) = self.cache_manager.write_cache()
                 {
-                    preload_native_files(&region, cache, &self.listener, files);
+                    preload_narthex_files(&region, cache, &self.listener, files);
                 }
             }
             if edit_result.update_region_state {
@@ -1019,7 +1019,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
         edit.series_indexes_to_add.is_empty(),
         crate::error::InvalidRequestSnafu {
             region_id,
-            reason: "only a pinned native maintenance build can publish sequence coverage",
+            reason: "only a pinned Narthex maintenance build can publish sequence coverage",
         }
     );
     edit.validate_shared_reclassification(region_id)?;
@@ -1111,7 +1111,7 @@ async fn edit_region(
     preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
-    // Editing fences new native publications. Read the manifest after taking
+    // Editing fences new Narthex publications. Read the manifest after taking
     // that fence so a retired input cannot silently acknowledge invalidation.
     if !edit.series_indexes_to_remove.is_empty() {
         let manifest = region.manifest_ctx.manifest().await;
@@ -1251,7 +1251,7 @@ async fn edit_region(
     result.map(|_| ())
 }
 
-fn preload_native_files(
+fn preload_narthex_files(
     region: &MitoRegionRef,
     cache: &crate::cache::write_cache::WriteCacheRef,
     listener: &WorkerListener,
@@ -1275,7 +1275,7 @@ fn preload_native_files(
         };
         let file = handle.meta_ref();
         let inventory =
-            IndexKey::native_objects(file, &region.access_layer.build_region_dir(file.region_id));
+            IndexKey::narthex_objects(file, &region.access_layer.build_region_dir(file.region_id));
         let cache = cache.clone();
         let store = region.access_layer.object_store().clone();
         let listener = listener.clone();
@@ -1295,7 +1295,7 @@ fn preload_native_files(
                     Ok(new) => downloaded |= new,
                     Err(error) => {
                         WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
-                        common_telemetry::warn!(error; "Failed to preload native object {}", object.path);
+                        common_telemetry::warn!(error; "Failed to preload Narthex object {}", object.path);
                         return;
                     }
                 }

@@ -1606,7 +1606,7 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: std::result::Result<RegionEditOutcome, Arc<Error>>,
-    /// Whether to preload native SST files after applying the edit.
+    /// Whether to preload Narthex SST files after applying the edit.
     pub(crate) preload_sst_cache: bool,
     /// Whether region state need to be set to Writable after handling this request.
     pub(crate) update_region_state: bool,

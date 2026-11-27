@@ -18,7 +18,7 @@ use bytes::Bytes;
 use object_store::{ObjectStore, Writer};
 use snafu::{IntoError, ResultExt};
 
-use crate::cache::write_cache::{NativeUpload, WriteCache};
+use crate::cache::write_cache::{NarthexUpload, WriteCache};
 use crate::error::{JoinSnafu, OpenDalSnafu, Result};
 use crate::series_index::columnar::{invalid, require};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
@@ -51,13 +51,13 @@ pub(super) struct Outputs {
     pub(super) active: Option<LiveFile>,
     pub(super) paths: Vec<String>,
     pub(super) committed: bool,
-    pub(super) upload: Option<NativeUpload>,
+    pub(super) upload: Option<NarthexUpload>,
 }
 impl Outputs {
     pub(super) async fn open(&mut self, path: String) -> Result<()> {
         require(self.active.is_none(), "artifact output already open")?;
         let path = if self.upload.is_some() {
-            WriteCache::native_stage(&path)
+            WriteCache::narthex_stage(&path)
         } else {
             path
         };
@@ -106,7 +106,7 @@ impl Outputs {
             .context(OpenDalSnafu)?;
         file.writer = None;
         if let Some(upload) = &mut self.upload {
-            let path = file.path.strip_prefix(WriteCache::NATIVE_STAGE).unwrap();
+            let path = file.path.strip_prefix(WriteCache::NARTHEX_STAGE).unwrap();
             upload.upload_closed(path).await?;
         }
         self.active = None;

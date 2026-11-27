@@ -391,7 +391,7 @@ pub(crate) struct ColumnarPreparedSource {
     reservation: Arc<MemoryReservation>,
 }
 
-/// Only native index readers carry a coverage window. A failed index read can
+/// Only Narthex index readers carry a coverage window. A failed index read can
 /// schedule discovery from the corresponding pinned samples once per scan.
 #[derive(Default)]
 pub(crate) struct SeriesDiscovery {

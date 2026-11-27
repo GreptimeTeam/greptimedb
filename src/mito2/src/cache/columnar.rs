@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Immutable native-reader metadata shares the decoded SST reservation.
+//! Immutable Narthex reader metadata shares the decoded SST reservation.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -23,7 +23,7 @@ use store_api::storage::FileId;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::cache::{
-    CacheManagerRef, CacheStrategy, MetaValue, NativePrefilterBlock, PrefilterKey,
+    CacheManagerRef, CacheStrategy, MetaValue, NarthexPrefilterBlock, PrefilterKey,
     SstDecodedMetaKey,
 };
 use crate::error::Result;
@@ -31,7 +31,7 @@ use crate::metrics::{CACHE_HIT, CACHE_MISS};
 
 pub(super) const COLUMNAR_META: &str = "columnar_metadata";
 
-/// Identity of one immutable native-reader structure.
+/// Identity of one immutable Narthex reader structure.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct DecodedKey {
     namespace: FileId,
@@ -44,7 +44,7 @@ pub(crate) struct DecodedValue {
     value: Arc<dyn Any + Send + Sync>,
     pub(super) weight: u32,
 }
-/// Cache context for immutable native objects.
+/// Cache context for immutable Narthex objects.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
     memory: Option<CacheManagerRef>,
@@ -98,11 +98,11 @@ impl MetadataCache {
 #[derive(Clone)]
 pub(crate) struct ObjectReader {
     remote: object_store::Reader,
-    refill: Option<Arc<NativeRefill>>,
+    refill: Option<Arc<NarthexRefill>>,
     local: Option<(FileCacheRef, IndexKey)>,
 }
 
-struct NativeRefill {
+struct NarthexRefill {
     store: object_store::ObjectStore,
     path: String,
     size: u64,
@@ -130,7 +130,7 @@ impl ObjectReader {
                 (disk, key)
             });
         let refill = file.filter(|_| download && local.is_some()).map(|file| {
-            Arc::new(NativeRefill {
+            Arc::new(NarthexRefill {
                 store: store.clone(),
                 path: path.to_owned(),
                 size,
@@ -272,7 +272,7 @@ impl PartArea {
         manager.prefilter_result_cache.as_ref()?;
         let mut key = PrefilterKey::new(context.namespace, 0, None, 0, exprs.clone());
         key.mem_usage += self.path.len();
-        key.native_block = Some(NativePrefilterBlock {
+        key.narthex_block = Some(NarthexPrefilterBlock {
             path: self.path.clone(),
             offset: block_offset,
         });
@@ -297,7 +297,7 @@ impl PartArea {
         if let Some(context) = &self.cache
             && let Some(pages) = context.memory.as_ref().and_then(|c| c.page_cache.as_ref())
         {
-            pages.invalidate_native(context.namespace, self.path.clone());
+            pages.invalidate_narthex(context.namespace, self.path.clone());
         }
         let bytes = self
             .reader
@@ -341,14 +341,14 @@ impl PartArea {
             }
         }
         let pooled = reservation.is_some();
-        let reader = Arc::new(NativePageReader {
+        let reader = Arc::new(NarthexPageReader {
             reader: self.reader.clone(),
             bounds: self.bounds.clone(),
             _reservation: reservation,
         });
         pages
-            .fetch_native(
-                manager.native_load_pool(),
+            .fetch_narthex(
+                manager.narthex_load_pool(),
                 context.namespace,
                 self.path.clone(),
                 self.bounds.clone(),
@@ -380,14 +380,14 @@ impl PartArea {
 }
 
 /// Keeps the read budget alive until a worker completes or drops this request.
-struct NativePageReader {
+struct NarthexPageReader {
     reader: ObjectReader,
     bounds: std::ops::Range<u64>,
     _reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
 #[async_trait::async_trait]
-impl common_base::range_read::RangeReader for NativePageReader {
+impl common_base::range_read::RangeReader for NarthexPageReader {
     async fn metadata(&self) -> std::io::Result<common_base::range_read::Metadata> {
         Ok(common_base::range_read::Metadata {
             content_length: self.bounds.end - self.bounds.start,
@@ -397,7 +397,7 @@ impl common_base::range_read::RangeReader for NativePageReader {
         self.reader
             .read(self.bounds.start + range.start..self.bounds.start + range.end)
             .await
-            .map_err(native_page_io_error)
+            .map_err(narthex_page_io_error)
     }
     async fn read_vec(
         &self,
@@ -410,11 +410,11 @@ impl common_base::range_read::RangeReader for NativePageReader {
         self.reader
             .fetch(ranges)
             .await
-            .map_err(native_page_io_error)
+            .map_err(narthex_page_io_error)
     }
 }
 
-fn native_page_io_error(error: object_store::Error) -> std::io::Error {
+fn narthex_page_io_error(error: object_store::Error) -> std::io::Error {
     std::io::Error::other(Arc::new(crate::error::OpenDalSnafu.into_error(error)))
 }
 
@@ -452,12 +452,12 @@ where
             + std::mem::size_of::<MetaValue>()
             + 2 * std::mem::size_of::<usize>(),
     );
-    let key = SstDecodedMetaKey::Native(DecodedKey {
+    let key = SstDecodedMetaKey::Narthex(DecodedKey {
         namespace: context.namespace,
         identity,
         representation: TypeId::of::<T>(),
     });
-    if let Some(MetaValue::Native(hit)) = decoded.get(&key).await {
+    if let Some(MetaValue::Narthex(hit)) = decoded.get(&key).await {
         CACHE_HIT.with_label_values(&[COLUMNAR_META]).inc();
         return Ok(hit.value.downcast::<T>().expect("type is part of the key"));
     }
@@ -479,18 +479,18 @@ where
                 if let Ok(weight) = u32::try_from(retained)
                     && u64::from(weight) <= cache.capacity()
                 {
-                    Ok(MetaValue::Native(DecodedValue { value, weight }))
+                    Ok(MetaValue::Narthex(DecodedValue { value, weight }))
                 } else {
                     Err(Uncached::Value(value))
                 }
             })
             .await;
         match result {
-            Ok(MetaValue::Native(entry)) => Ok(entry
+            Ok(MetaValue::Narthex(entry)) => Ok(entry
                 .value
                 .downcast::<T>()
                 .expect("type is part of the key")),
-            Ok(MetaValue::Parquet(_)) => unreachable!("native key contains Parquet metadata"),
+            Ok(MetaValue::Parquet(_)) => unreachable!("Narthex key contains Parquet metadata"),
             Err(result) => match result.as_ref() {
                 Uncached::Value(value) => Ok(value.clone()),
                 Uncached::Error(error) => {
@@ -499,7 +499,7 @@ where
             },
         }
     };
-    match manager.native_load_pool().run(job).await {
+    match manager.narthex_load_pool().run(job).await {
         Some(result) => result,
         None => metrics.loads.observe(loader()).await.map(Arc::new),
     }

@@ -1218,7 +1218,7 @@ impl RegionLoadCacheTask {
             for handle in version.ssts.series_indexes().values() {
                 let meta = handle.meta_ref();
                 let dir = self.region.access_layer.build_region_dir(meta.region_id);
-                for (key, object) in IndexKey::native_objects(meta, &dir) {
+                for (key, object) in IndexKey::narthex_objects(meta, &dir) {
                     if file_cache.contains_key(&key) {
                         files_already_cached += 1;
                     } else {
@@ -1330,7 +1330,7 @@ fn maybe_load_cache(
 }
 
 /// Uses only a resident manifest or a local region backend during startup.
-async fn preload_native_descriptor(
+async fn preload_narthex_descriptor(
     manager: &CacheManagerRef,
     file: FileHandle,
     region_dir: &str,
@@ -1417,7 +1417,7 @@ async fn preload_sst_meta_cache_for_files(
             crate::sst::file::FileFormat::Parquet
         ) {
             let dir = region_dir_from_table_dir(&table_dir, file_id.region_id(), path_type);
-            if preload_native_descriptor(
+            if preload_narthex_descriptor(
                 &cache_manager,
                 file_handle,
                 &dir,

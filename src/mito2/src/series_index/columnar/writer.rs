@@ -69,7 +69,7 @@ pub(crate) struct ColumnarWriter {
     failed: bool,
 }
 impl ColumnarWriter {
-    pub(crate) fn set_upload(&mut self, upload: crate::cache::write_cache::NativeUpload) {
+    pub(crate) fn set_upload(&mut self, upload: crate::cache::write_cache::NarthexUpload) {
         self.outputs.upload = Some(upload);
     }
 

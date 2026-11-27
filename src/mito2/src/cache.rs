@@ -612,7 +612,7 @@ impl From<&RowSelector> for PrefilterRowSelector {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct NativePrefilterBlock {
+struct NarthexPrefilterBlock {
     path: Arc<str>,
     offset: u64,
 }
@@ -620,7 +620,7 @@ struct NativePrefilterBlock {
 /// Key for a cached prefilter result.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PrefilterKey {
-    native_block: Option<NativePrefilterBlock>,
+    narthex_block: Option<NarthexPrefilterBlock>,
     file_id: FileId,
     row_group_idx: u32,
     row_selection: Option<Arc<Vec<PrefilterRowSelector>>>,
@@ -662,7 +662,7 @@ impl PrefilterKey {
         let expr_bytes = filter_exprs.iter().map(|s| s.capacity()).sum::<usize>();
 
         Self {
-            native_block: None,
+            narthex_block: None,
             file_id,
             row_group_idx,
             row_selection,
@@ -787,7 +787,7 @@ impl CacheStrategy {
             })
             .await;
         match result {
-            Ok(MetaValue::Native(_)) => unreachable!(),
+            Ok(MetaValue::Narthex(_)) => unreachable!(),
             Ok(MetaValue::Parquet(value)) => (
                 Ok((value.metadata.clone(), value.cache_miss)),
                 value.resolution,
@@ -1127,8 +1127,8 @@ pub struct CacheManager {
     /// Cache for decoded SST metadata, used only as an acceleration tier.
     sst_decoded_meta_cache: Option<Arc<SstDecodedMetaCache>>,
     /// Drives decoded metadata and page misses independently of query readers.
-    native_load_pool: OnceLock<common_cache::LoadPool>,
-    /// Physical loads elected for native decoded metadata.
+    narthex_load_pool: OnceLock<common_cache::LoadPool>,
+    /// Physical loads elected for decoded Narthex metadata.
     columnar_load_metrics: Option<Arc<common_cache::metrics::CacheMetrics>>,
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
@@ -1157,27 +1157,27 @@ pub struct CacheManager {
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
-/// Internal override, read once when the engine starts its native load pool.
-const NATIVE_LOAD_WORKERS_ENV: &str = "GREPTIME_NATIVE_CACHE_ADMISSION_WORKERS";
+/// Internal override, read once when the engine starts its Narthex load pool.
+const NARTHEX_LOAD_WORKERS_ENV: &str = "GREPTIME_NARTHEX_CACHE_LOAD_WORKERS";
 
-fn native_load_workers(value: Option<&str>) -> NonZeroUsize {
+fn narthex_load_workers(value: Option<&str>) -> NonZeroUsize {
     if let Some(value) = value {
         if let Ok(workers) = value.parse::<NonZeroUsize>()
             && workers.get() <= tokio::sync::Semaphore::MAX_PERMITS
         {
             return workers;
         }
-        warn!("Invalid {NATIVE_LOAD_WORKERS_ENV}={value:?}; using the CPU-based default");
+        warn!("Invalid {NARTHEX_LOAD_WORKERS_ENV}={value:?}; using the CPU-based default");
     }
     NonZeroUsize::new(crate::config::divide_num_cpus(2)).unwrap_or(NonZeroUsize::MIN)
 }
 
 impl CacheManager {
-    fn native_load_pool(&self) -> &common_cache::LoadPool {
-        self.native_load_pool.get_or_init(|| {
-            let value = std::env::var(NATIVE_LOAD_WORKERS_ENV).ok();
+    fn narthex_load_pool(&self) -> &common_cache::LoadPool {
+        self.narthex_load_pool.get_or_init(|| {
+            let value = std::env::var(NARTHEX_LOAD_WORKERS_ENV).ok();
             common_cache::LoadPool::new(
-                native_load_workers(value.as_deref()),
+                narthex_load_workers(value.as_deref()),
                 common_runtime::spawn_global,
             )
         })
@@ -1757,7 +1757,7 @@ impl CacheManagerBuilder {
                 decoded_meta_capacity,
                 |key, value| match value {
                     MetaValue::Parquet(v) => decoded_meta_cache_weight(key, v),
-                    MetaValue::Native(v) => v.weight,
+                    MetaValue::Narthex(v) => v.weight,
                 },
                 |_k, _v, cause| {
                     CACHE_EVICTION
@@ -1827,7 +1827,7 @@ impl CacheManagerBuilder {
             _sst_meta_size_registration: sst_meta_size_registration,
             disable_sst_meta_cache_on_write: self.disable_sst_meta_cache_on_write,
             sst_decoded_meta_cache: sst_decoded_meta_cache.map(Arc::new),
-            native_load_pool: OnceLock::new(),
+            narthex_load_pool: OnceLock::new(),
             columnar_load_metrics,
             vector_cache,
             page_cache,
@@ -2035,7 +2035,7 @@ enum SstDecodedMetaKey {
         file: SstMetaKey,
         policy: mem::Discriminant<PageIndexPolicy>,
     },
-    Native(DecodedKey),
+    Narthex(DecodedKey),
 }
 
 impl SstDecodedMetaKey {
@@ -2055,7 +2055,7 @@ type SstDecodedMetaCache = common_cache::Cache<SstDecodedMetaKey, MetaValue>;
 #[derive(Clone)]
 enum MetaValue {
     Parquet(Arc<SstMetaLoadResult>),
-    Native(DecodedValue),
+    Narthex(DecodedValue),
 }
 
 /// Maps [Value] to a vector that holds this value repeatedly.
@@ -2091,12 +2091,12 @@ mod tests {
     use crate::sst::parquet::row_selection::RowGroupSelection;
 
     #[test]
-    fn test_native_load_workers() {
+    fn test_narthex_load_workers() {
         let default = crate::config::divide_num_cpus(2).max(1);
-        assert_eq!(native_load_workers(None).get(), default);
-        assert_eq!(native_load_workers(Some("3")).get(), 3);
+        assert_eq!(narthex_load_workers(None).get(), default);
+        assert_eq!(narthex_load_workers(Some("3")).get(), 3);
         for invalid in ["0", "-1", "many", &usize::MAX.to_string()] {
-            assert_eq!(native_load_workers(Some(invalid)).get(), default);
+            assert_eq!(narthex_load_workers(Some(invalid)).get(), default);
         }
     }
 

@@ -332,9 +332,9 @@ async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()>
             ..Default::default()
         })
         .await;
-    let native = RegionId::new(1024, 0);
+    let narthex = RegionId::new(1024, 0);
     let local = RegionId::new(1025, 0);
-    for (id, format) in [(local, "flat"), (native, "narthex")] {
+    for (id, format) in [(local, "flat"), (narthex, "narthex")] {
         engine
             .handle_request(
                 id,
@@ -354,7 +354,7 @@ async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()>
         engine
             .handle_request(id, build_series_index_request())
             .await?;
-        if id == native {
+        if id == narthex {
             assert_eq!(1, region.version().ssts.series_indexes().len());
         } else {
             assert!(region.series_index_version().disk_usage() >= budget.as_bytes());
@@ -508,7 +508,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
         .flat_map(|level| level.files.values())
         .chain(std::iter::once(file))
     {
-        for (key, object) in crate::cache::file_cache::IndexKey::native_objects(
+        for (key, object) in crate::cache::file_cache::IndexKey::narthex_objects(
             handle.meta_ref(),
             &region.access_layer.build_region_dir(id),
         ) {
@@ -516,7 +516,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
             let cached = disk
                 .read_ranges(key, &ranges)
                 .await
-                .expect("native write-through");
+                .expect("Narthex write-through");
             assert_eq!(
                 cached[0],
                 region

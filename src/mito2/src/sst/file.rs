@@ -1325,7 +1325,10 @@ impl UncommittedSsts {
                 .filter_map(|(id, f)| matches!(f, UncommittedFile::Narthex).then_some(*id))
                 .collect();
             if !ids.is_empty() {
-                cache.file_cache().remove_native(self.region_id, &ids).await;
+                cache
+                    .file_cache()
+                    .remove_narthex(self.region_id, &ids)
+                    .await;
             }
         }
         let mut delete_index = false;

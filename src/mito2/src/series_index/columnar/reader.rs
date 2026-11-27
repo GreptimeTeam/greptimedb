@@ -158,7 +158,7 @@ impl ColumnarReader {
         )?;
         let object = ObjectReader::open(
             cache,
-            handle.native_file(),
+            handle.narthex_file(),
             crate::cache::file_cache::FileType::Series(None),
             &store,
             &path,
@@ -390,7 +390,7 @@ impl ColumnarReader {
                 let timer = metrics.timer("columnar_series_metadata_wall");
                 let path: Arc<str> = manifest.part_path(part.part_id).into();
                 let size = part.file_size;
-                let reader = ObjectReader::open(cache.as_ref(), _handle.native_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
+                let reader = ObjectReader::open(cache.as_ref(), _handle.narthex_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
                 let framing_reader = reader.clone();
                 let expected = (part.first, part.last);
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), move || async move {

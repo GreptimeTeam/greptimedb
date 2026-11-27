@@ -136,7 +136,7 @@ impl SamplesReader {
         )?;
         let object = ObjectReader::open(
             cache,
-            handle.native_file(),
+            handle.narthex_file(),
             crate::cache::file_cache::FileType::Samples(None),
             &store,
             &path,
@@ -325,7 +325,7 @@ impl SamplesFormatReader for SamplesReader {
                 let path = manifest.part_path(part.part_id);
                 // One lazy reader per accessed part, shared across this query's streams.
                 let reader = parts[part.part_id as usize].get_or_try_init(|| async {
-                    ObjectReader::open(cache.as_ref(), handle.native_file(), crate::cache::file_cache::FileType::Samples(Some(part.part_id)), &store, &path, part.file_size).await
+                    ObjectReader::open(cache.as_ref(), handle.narthex_file(), crate::cache::file_cache::FileType::Samples(Some(part.part_id)), &store, &path, part.file_size).await
                 }).await?;
                 let size = part.file_size;
                 let metadata_started = Instant::now();

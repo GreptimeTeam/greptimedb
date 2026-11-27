@@ -58,7 +58,7 @@ pub(crate) const MAX_PAGE_SIZE: u64 = u32::MAX as u64
 #[derive(Clone, Hash, PartialEq, Eq)]
 enum PageFile {
     Parquet(RegionFileId),
-    Native {
+    Narthex {
         namespace: store_api::storage::FileId,
         path: Arc<str>,
         start: u64,
@@ -96,7 +96,7 @@ impl ParquetPageCache {
                         + mem::size_of::<u64>()
                         + bytes.len()
                         + match &key.0 {
-                            PageFile::Native { path, .. } => path.len(),
+                            PageFile::Narthex { path, .. } => path.len(),
                             _ => 0,
                         })
                     .try_into()
@@ -148,15 +148,15 @@ impl ParquetPageCache {
         Ok(result)
     }
 
-    pub(crate) fn invalidate_native(&self, namespace: store_api::storage::FileId, path: Arc<str>) {
-        self.cache.invalidate_if(move |file| matches!(file, PageFile::Native { namespace: ns, path: p, .. } if *ns == namespace && p == &path)).expect("page cache supports invalidation predicates");
+    pub(crate) fn invalidate_narthex(&self, namespace: store_api::storage::FileId, path: Arc<str>) {
+        self.cache.invalidate_if(move |file| matches!(file, PageFile::Narthex { namespace: ns, path: p, .. } if *ns == namespace && p == &path)).expect("page cache supports invalidation predicates");
     }
 
     pub(crate) fn page_size(&self) -> u64 {
         self.page_size
     }
 
-    pub(crate) async fn fetch_native<R: RangeReader + 'static>(
+    pub(crate) async fn fetch_narthex<R: RangeReader + 'static>(
         &self,
         pool: &common_cache::LoadPool,
         namespace: store_api::storage::FileId,
@@ -166,7 +166,7 @@ impl ParquetPageCache {
         reader: Arc<R>,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
         let size = area.end - area.start;
-        let key = PageFile::Native {
+        let key = PageFile::Narthex {
             namespace,
             path,
             start: area.start,
