@@ -58,9 +58,9 @@ use promql::extension_plan::{
     RawSeriesSource, input_locality, keys_survive_metadata_drop, matching_operands_drop_key,
 };
 use promql::native::plan::{
-    AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, aggregate_state_binding, binary_output_field_kind, fused_output_tags,
-    native_tree_supported, uniform_field_kind,
+    AggregateKind, BoundAggregate, BoundInput, NativeExpr, NativeNode, NativeTree, NativeType,
+    aggregate_state_binding, binary_output_field_kind, fused_output_tags, native_tree_supported,
+    uniform_field_kind,
 };
 use promql::native::segment::{
     self, NATIVE_ORDERING, canonical_boundary_stages, canonical_local_prefix,
@@ -433,21 +433,16 @@ impl PromPlanner {
         {
             return Ok(declined("engine_without_raw_series_scanner"));
         }
-        // The region's raw-series preflight refuses these, and the physical layer turns that
-        // refusal into an error, so decline this route here instead.
+        // The region's raw-series preflight refuses a non-millisecond time index, and the physical
+        // layer turns that refusal into an error, so decline this route here instead.
         let time_index_type = table_meta
             .schema
             .timestamp_column()
             .map(|column| &column.data_type);
         if time_index_type
             != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
-            || table_meta
-                .options
-                .extra_options
-                .get(store_api::mito_engine_options::APPEND_MODE_KEY)
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
         {
-            return Ok(declined("unsupported_time_index_type_or_append_mode"));
+            return Ok(declined("unsupported_time_index_type"));
         }
         // A partition column that is not a tag splits one series across regions, and a bare scan cannot
         // reconcile the fragments; a raw source can, so such a selector is admitted and its input is bound per
@@ -1742,12 +1737,12 @@ impl PromPlanner {
         {
             return Ok(declined("histogram_aggregate_needs_state_this_route_lacks"));
         }
-        // The split keeps its prefix per-series, which is why it declines an operation whose
-        // answer depends on the order its input arrives in. A node over more than one input reads
-        // its inputs' partitions in the order they became ready, so that refusal holds there too.
-        if multi_input && depends_on_input_order(root) {
-            return Ok(declined("answer_depends_on_input_order"));
-        }
+        // A tree over more than one input reads its inputs' partitions in the order they became
+        // ready, but Prometheus defines `limitk` as keeping *any* `k` series of a group, so which
+        // ones arrive first is a freedom the statement already grants. No other operation is left
+        // to that order: a shape whose own selection or fold would be is refused where it is
+        // bound, by `native_tree_supported` or by its node's `validate`.
+        //
         // The native output schema can name only compiled value fields, the time index and the tag
         // columns a source declares, and `source_tags` declares the metric name of every occurrence of
         // a statement reading more than one input - the label a grouping by `__name__` keeps, so that
@@ -2537,53 +2532,6 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
             }))
 }
 
-/// Whether `node` holds an operation whose answer depends on the order its input arrives in.
-///
-/// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]),
-/// and a node with more than one input reads them through a gather that hands over whichever
-/// partition became ready first, so the schedule would decide which series a query keeps. Only this
-/// operation's selection depends on that order: `topk` breaks ties by label and `limit_ratio`
-/// selects by a label hash.
-fn depends_on_input_order(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. }
-        // `vector()` and `scalar()` answer one series or one value from their input, and since
-        // `scalar()` exists their input can hold an order-dependent selection:
-        // `vector(scalar(limitk(1, a)))` keeps whichever `a` series the gather handed over first.
-        | NativeExpr::VectorOf { input }
-        | NativeExpr::ScalarOf { input } => depends_on_input_order(input),
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => depends_on_input_order(input) || depends_on_input_order(parameter),
-        // The fold's own order is its input's, and the argument it reads per point can hold an
-        // order-dependent selection of its own (`quantile(scalar(limitk(1, a)), b)`).
-        NativeExpr::ParameterizedAggregate {
-            input, parameter, ..
-        } => depends_on_input_order(input) || depends_on_input_order(parameter),
-        NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
-        NativeExpr::Vector { input, op } => {
-            matches!(op, BoundVectorOp::LimitK { .. }) || depends_on_input_order(input)
-        }
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            depends_on_input_order(left) || depends_on_input_order(right)
-        }
-        NativeExpr::Info { base, info, .. } => {
-            depends_on_input_order(base) || depends_on_input_order(info)
-        }
-    }
-}
-
 /// One side of a set operation, as the slice of the pre-order selector list it reads.
 ///
 /// The slice is the side's whole subtree, so it also says whether the side reads a table at all.
@@ -3041,8 +2989,12 @@ fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> Publish
 /// what that bound admits: the fold it applies is already a float fold, which is
 /// [`publishes_float_values`] of the aggregate itself.
 ///
-/// A bare selector, a literal and a call hand over one sample at a time, so the cast reaches the same
-/// sample the scan casts and no fold happens in between.
+/// The walk descends through every node that hands its child's answer on unchanged: a fold one
+/// wrapper down is the same fold to the cast above it, since `abs` keeps the type it is given. A
+/// node the walk does not know is a decline, not an admit, hence the arms rather than a catch-all.
+///
+/// A bare selector and a literal are the samples themselves, so the cast reaches the same sample the
+/// scan casts and no fold happens in between.
 fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
     match statement {
         PromExpr::Paren(ParenExpr { expr }) => folds_before_cast(expr, field_type),
@@ -3051,12 +3003,26 @@ fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
             folds_before_cast(&binary.lhs, field_type) || folds_before_cast(&binary.rhs, field_type)
         }
         PromExpr::Unary(unary) => folds_before_cast(&unary.expr, field_type),
+        // A call hands on what its arguments answer: the math functions keep the type they are
+        // given, and a range function casts the window's values itself, so `abs(sum(x))` folds one
+        // call deep while `rate(m[5m])` folds nothing.
+        PromExpr::Call(call) => call
+            .args
+            .args
+            .iter()
+            .any(|arg| folds_before_cast(arg, field_type)),
+        PromExpr::Extension(extension) => extension
+            .expr
+            .children()
+            .iter()
+            .any(|child| folds_before_cast(child, field_type)),
         // A fold answers what it folds: an integer `sum` keeps the integer it added, `count` builds an
         // `Int64`, and the ranking aggregates report the samples they were given. None of them is a
         // `Float64`, so the cast above one of them is the late cast this refuses.
         PromExpr::Aggregate(_) => !publishes_float_values(statement, field_type),
-        // A selector, a literal and a call reach one sample at a time; the cast reaches that same sample.
-        _ => false,
+        // A matrix selector wraps a vector selector, not an expression: neither folds anything.
+        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => false,
+        PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => false,
     }
 }
 

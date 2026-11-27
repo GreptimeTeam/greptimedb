@@ -527,11 +527,7 @@ impl SeriesScan {
             });
         }
         let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
-        if fields.is_empty()
-            || (input.append_mode && !input.requires_narthex_preparation())
-            || input.series_row_selector.is_some()
-            || !time_is_millis
-        {
+        if fields.is_empty() || input.series_row_selector.is_some() || !time_is_millis {
             debug!(
                 "Raw series scan preflight rejected scan options: region_id={}, selected_fields={}, append_mode={}, row_selector={}, time_is_millis={}",
                 metadata.region_id,
@@ -1155,6 +1151,7 @@ impl RegionScanner for SeriesScan {
             metrics,
             preparation.predicates,
             SeriesOrdering::KeyThenTime,
+            self.stream_ctx.input.append_mode,
         )))
     }
 

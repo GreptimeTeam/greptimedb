@@ -252,6 +252,21 @@ fn convert_with_source(
         metrics(),
         vec![],
         ordering,
+        false,
+    )
+}
+
+/// A stream over an append-mode region's rows, which keeps one row per write.
+fn convert_append(inner: ScanBatchStream, schema: Arc<SeriesSchema>) -> SendableRawSeriesStream {
+    make_stream(
+        inner,
+        schema,
+        primary_key_source(metadata()),
+        vec![(0, ConcreteDataType::int64_datatype())],
+        metrics(),
+        vec![],
+        SeriesOrdering::KeyThenTime,
+        true,
     )
 }
 
@@ -308,6 +323,7 @@ fn convert_with_predicate_ordering(
         metrics(),
         vec![predicate],
         ordering,
+        false,
     )
 }
 
@@ -600,6 +616,7 @@ async fn typed_predicate_filters_before_numeric_samples_are_cast() {
         metrics(),
         vec![predicate],
         SeriesOrdering::Contiguous,
+        false,
     );
     let chunk = output.next().await.unwrap().unwrap();
     assert!(chunk.is_last);
@@ -630,6 +647,7 @@ async fn predicate_error_is_terminal() {
         metrics(),
         vec![predicate],
         SeriesOrdering::Contiguous,
+        false,
     );
     assert!(output.next().await.unwrap().is_err());
     assert!(output.next().await.is_none());
@@ -680,6 +698,52 @@ async fn upstream_error_is_terminal_after_yielded_prefix_without_flushing_pendin
         panic!("unexpected upstream error: {error}");
     };
     assert_eq!(reason, "upstream injected failure");
+    assert!(output.next().await.is_none());
+}
+
+/// A repeated `(key, timestamp)` answers as the row written last, in and across a record.
+#[tokio::test]
+async fn append_mode_collapses_repeated_timestamps_to_the_newest_row() {
+    let mut output = convert_append(
+        input(vec![
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                // Two rows for timestamp 2: the newest write comes first, so 22 is the sample.
+                &[b"a", b"a", b"a", b"b"],
+                &[1, 2, 2, 1],
+                &[Some(11), Some(22), Some(33), Some(44)],
+            ))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                // A tie split over two records, and a repeated tie inside the second one.
+                &[b"b", b"c", b"c", b"c"],
+                &[1, 5, 5, 6],
+                &[Some(55), Some(66), Some(77), Some(88)],
+            ))),
+        ]),
+        schema(),
+    );
+    let first = output.next().await.unwrap().unwrap();
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert_eq!(first.time.len(), 2);
+    assert_eq!(first.time.timestamp(0), Some(1));
+    assert_eq!(first.time.timestamp(1), Some(2));
+    assert_eq!(values(&first), vec![Some(11.0), Some(22.0)]);
+    // A series ends where the next one starts, so this chunk closes it.
+    assert!(first.is_last);
+
+    let second = output.next().await.unwrap().unwrap();
+    assert_eq!(second.primary_key.as_slice(), b"b");
+    assert_eq!(second.time.len(), 1);
+    assert_eq!(second.time.timestamp(0), Some(1));
+    assert_eq!(values(&second), vec![Some(44.0)]);
+    assert!(second.is_last);
+
+    let third = output.next().await.unwrap().unwrap();
+    assert_eq!(third.primary_key.as_slice(), b"c");
+    assert_eq!(third.time.len(), 2);
+    assert_eq!(third.time.timestamp(0), Some(5));
+    assert_eq!(third.time.timestamp(1), Some(6));
+    assert_eq!(values(&third), vec![Some(66.0), Some(88.0)]);
+    assert!(third.is_last);
     assert!(output.next().await.is_none());
 }
 

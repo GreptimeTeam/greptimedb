@@ -1057,6 +1057,10 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             self.metrics.clone(),
             self.raw.predicates.clone(),
             SeriesOrdering::KeyThenTime,
+            // The narthex preparation already collapsed an append-mode tie, and a sidecar
+            // preparation is served without that step, so the raw stream repeats the collapse
+            // for whichever source answered.
+            self.context.input.append_mode,
         );
         if self.sample_schema.is_none() {
             return Ok(stream);
