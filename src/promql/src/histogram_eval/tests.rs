@@ -20,7 +20,7 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
@@ -315,10 +315,6 @@ fn native_histograms_match_prometheus() {
         };
         assert_outcome(case, actual, &case.outcome);
     }
-    // The aggregate cases are the 241 the fixture's spec names, and these are what the verdicts
-    // above saw of them: every group that mixes the two kinds refused, every answer of a group that
-    // does not compared, and the three single-sample zero sums that keep no sign compared against a
-    // pinned `+0` (see [`pin_negative_zero_sum`]).
     assert_eq!(tally.refused, 138, "mixed groups refused");
     assert_eq!(tally.compared, 275, "histogram answers compared");
     assert_eq!(tally.negative_zero_sums, 3, "single-sample zero sums");
@@ -459,42 +455,18 @@ fn histogram_arithmetic_matches_prometheus() {
 /// The message both halves of the kernel use when one field, or one group, holds both kinds.
 const MIXED_KINDS: &str = "cannot mix float and histogram samples in one field";
 
-/// What the aggregate cases asserted, tallied so the test can pin how much of the fixture the fold
-/// covered.
+/// How much of the fixture the aggregate cases covered.
 #[derive(Default)]
 struct FoldTally {
-    /// Groups whose raw input had to be refused, one per group.
     refused: usize,
-    /// Histogram answers compared with a fixture answer, one per answered (group, position).
     compared: usize,
-    /// Answers where a single sample's `-0.0` came back as `+0.0` ([`pin_negative_zero_sum`]).
     negative_zero_sums: usize,
 }
 
-/// Folds the input of a `sum`/`avg` case, with or without `by (job)`, through the native aggregate
-/// and compares the histograms with the fixture; what a group that mixes the two kinds gets is
-/// asserted apart from that comparison, on the group's raw input.
-///
-/// The kernel folds one kind per field, so a group that saw a float sample and a histogram sample is
-/// refused whole -- `Group::accumulate` refuses a column holding both, and `finish_histogram_group`
-/// refuses a group that folded a float anywhere -- rather than answered step by step. A group is
-/// therefore one of two things here:
-///
-/// * A group whose samples are all histograms is folded with every histogram point it carries, no
-///   point taken out first, and its answer is compared with the fixture's bit for bit.
-/// * A group that carries a float sample is handed to the kernel as it arrived, floats and
-///   histograms together, and the fold must refuse it.
-///
-/// The fixtures are silent exactly where those two rules stop agreeing: 179 (group, step) pairs in
-/// `native_cases.txt` hold both a float and a histogram, and neither a float nor a histogram answer
-/// sits on any of them. A fixture does answer a mixed group's other steps, the ones one kind holds
-/// alone, and the kernel refuses those along with the group, so 140 of the file's 415 histogram
-/// answers belong to a mixed group and are not compared -- 138 mixed groups are refused instead.
-///
-/// The retired `aggregate_histograms` stopped folding the current (group, step, field) at a mixed
-/// bucket layout, drained the remaining iterator and propagated later conversion errors, then
-/// discarded that point if it had a float. Other steps continued. The kernel does not exercise
-/// that drain and error ordering here, so this coverage has not migrated it.
+/// Folds a `sum`/`avg` case, with or without `by (job)`, through the native aggregate. The kernel
+/// refuses a whole group that holds both floats and histograms, while Prometheus answers that
+/// group's single-kind steps; so a mixed group is asserted to be refused, and only histogram-only
+/// groups are compared with the fixture bit for bit.
 fn assert_aggregates(
     case: &GoldenCase,
     schema: &Arc<SeriesSchema>,
@@ -515,9 +487,7 @@ fn assert_aggregates(
         }
         group
     };
-    // Every group's members as they arrived, the kinds those members carry, and how many samples sit
-    // at each of the group's steps: one step's answer is one fold over the samples the group has
-    // there.
+    // Members per group, the kinds they carry, and the sample count at each step.
     let mut members: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
     let mut kinds: BTreeMap<Labels, (bool, bool)> = BTreeMap::new();
     let mut samples: BTreeMap<Labels, BTreeMap<usize, usize>> = BTreeMap::new();
@@ -542,8 +512,6 @@ fn assert_aggregates(
     for (group, group_members) in &members {
         let (has_float, has_histogram) = kinds[group];
         if has_float && has_histogram {
-            // Its raw input, floats and histograms both: the refusal is per group, so it may not see
-            // a group whose mixed steps were taken out for it.
             let error = match aggregate_float(schema, group_members, op, Grouping::By(&by)) {
                 Ok(_) => panic!(
                     "case {:?}: group {group:?} carries both kinds and was answered",
@@ -559,8 +527,6 @@ fn assert_aggregates(
             tally.refused += 1;
             continue;
         }
-        // Select histogram-only groups by input kind. A future float-only group is outside this
-        // histogram comparison; it must not be ignored based on the kind of its output.
         if has_histogram {
             folded.extend(group_members.iter().cloned());
         }
@@ -579,8 +545,7 @@ fn assert_aggregates(
             (labels.clone(), points)
         })
         .collect();
-    // Even an empty input is evaluated and checked against this case's expected groups. In
-    // particular, all-mixed and genuinely empty cases cannot borrow a previous case's verdict.
+    // Evaluated even when empty, so an all-mixed case still checks its expected groups.
     let answers = aggregate_float(schema, &folded, op, Grouping::By(&by)).unwrap();
     let mut actual: BTreeMap<Labels, &Series> = BTreeMap::new();
     for series in &answers {
@@ -641,27 +606,12 @@ fn assert_aggregates(
     }
 }
 
-/// The fixture's answer at one position, with its one known difference from this kernel set aside.
-///
-/// Prometheus v3.15.0 starts a group's fold from `h.Copy()` of the first sample and holds a
-/// compensation only once an add produced one (`engine.go:3694-3708`), and it adds that compensation
-/// in only when it is there (`:4013-4019`). A fold of one sample therefore hands that sample's own
-/// `-0.0` back. This kernel always holds a compensation beside the value and always adds it, and
-/// `-0.0 + +0.0` is `+0.0`: the zero keeps no sign. That is a deviation, not an equivalence, and it
-/// is pinned rather than smoothed -- the position folded exactly one sample, the fixture holds
-/// `-0.0` in its sum, and this kernel must answer `+0.0` there. Only then is the expected sum
-/// rewritten, and only for the comparison: that field of that answer, every other field and every
-/// other position stays bit-identical. Five fixtures hold such a sum
-/// (`native_cases.txt:4305,4410,4464,4513,4569`); the two that sit in a mixed group's answer are
-/// refused with the group, so three reach the comparison.
-/// Pins the one place this kernel's answer differs from Prometheus' by a zero's sign.
-///
-/// A fold of exactly one sample answers `+0.0` where Prometheus hands the sample's own `-0.0` back:
-/// this accumulator always seeds a compensation and always adds it, while Prometheus only adds one
-/// that exists. Recorded in <https://github.com/GreptimeTeam/greptimedb/issues/10530>, together with
-/// why closing it is not a mechanical change. The actual side still compares raw bits; only the
-/// expected side rewrites this field, and only after checking the fold had one sample and the
-/// kernel answered `+0.0`.
+/// The fixture's answer with its one known deviation set aside: a fold of exactly one sample
+/// answers `+0.0` where Prometheus hands the sample's own `-0.0` back, because this accumulator
+/// always adds a compensation and Prometheus adds one only when an add produced it
+/// (`engine.go:3694-3708`, `:4013-4019`). Tracked in
+/// <https://github.com/GreptimeTeam/greptimedb/issues/10530>. Only the expected sum is rewritten,
+/// and only after checking the fold had one sample and the kernel answered `+0.0`.
 fn pin_negative_zero_sum(
     case: &GoldenCase,
     labels: &Labels,
@@ -716,14 +666,8 @@ fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
         .collect()
 }
 
-/// The start timestamp is payload of a histogram that was read, and not of one that was computed.
-///
-/// This pins GreptimeDB's own payload policy, not a Prometheus expectation: the timestamp is read
-/// off a sample ([`FloatHistogram::try_from_view`]) and written back
-/// ([`FloatHistogram::push_to`]), which is what a selection needs to hand a sample on unchanged,
-/// and every operation that derives a value from its input clears it. Nothing else depends on the
-/// field: the type derives `Debug` and `Clone` only, so it has no equality, hash or serialized form
-/// that could compare it, and [`FloatHistogram::equals`] is Go `Equals` on counts and bucket layout.
+/// GreptimeDB's own policy, not Prometheus': a read and written-back histogram keeps its start
+/// timestamp, a derived one has none.
 #[test]
 fn a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one() {
     let offsets = [0];
@@ -752,7 +696,6 @@ fn a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one() {
     let histogram = FloatHistogram::try_from_view(&view).unwrap();
     assert_eq!(histogram.start_timestamp, Some(1500));
 
-    // Writing it back keeps it, which is what makes a selected sample a sample.
     let mut builder = HistogramBatchBuilder::new();
     histogram.push_to(&mut builder).unwrap();
     let table = builder.finish().unwrap();
@@ -762,7 +705,6 @@ fn a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one() {
         "the histogram was written back without the start timestamp it was read with"
     );
 
-    // A value derived from it carries none, whichever operation derived it.
     let mut added = histogram.clone();
     added.add(&histogram).unwrap();
     assert_eq!(added.start_timestamp, None);
@@ -781,7 +723,6 @@ fn a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one() {
     assert_eq!(compacted.start_timestamp, None);
     assert_eq!(histogram.copy_to_schema(0).unwrap().start_timestamp, None);
     assert_eq!(histogram.empty_like().start_timestamp, None);
-    // The one it was read into is still the sample it was read from.
     assert_eq!(histogram.start_timestamp, Some(1500));
 }
 
@@ -1006,11 +947,8 @@ fn aggregation_propagates_errors_other_than_mixed_schemas() {
     }
 }
 
-/// A result names the runs its rows make up, not the envelope of the input.
-///
-/// The input is one ordinary contiguous range whose middle row holds no histogram, the shape a
-/// sparse evaluation already hands over. Only positions 0 and 2 carry a result, so the output must
-/// be two one-row runs of two rows -- not a padded range of three rows over the same span.
+/// A contiguous input whose middle row holds no histogram yields two one-row runs, not a padded
+/// three-row range.
 #[test]
 fn histogram_aggregation_names_the_runs_of_its_results() {
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 3).unwrap()).unwrap());
@@ -1061,27 +999,9 @@ fn histogram_aggregation_names_the_runs_of_its_results() {
         histogram_points(output),
         BTreeMap::from([(0, wanted.clone()), (2, wanted)])
     );
-
-    // A dense axis over the same span would hold a row at the hole as well: three rows against the
-    // two the assertions above allow.
-    let dense = TimeAxis::Grid(GridRange::try_new(grid, 0, 3).unwrap());
-    assert_eq!(
-        dense
-            .runs()
-            .map(|run| (run.position, run.len))
-            .collect::<Vec<_>>(),
-        vec![(0, 3)]
-    );
-    assert_eq!(dense.len(), 3);
-    assert!(dense.len() > output.time.len());
 }
 
-/// F: `histogram_count` (and its relatives) over a series of several runs reports one value per
-/// histogram position, at that position, dropping the float samples that share the axis.
-///
-/// The input holds histograms at 1 and 6 and a float at 3: the float position holds a row (so the
-/// axis carries it) but no histogram, so the mapped result holds nothing there -- and the axis
-/// names the two runs that remain.
+/// Histograms at 1 and 6 and a float at 3: the float row is dropped and splits the result runs.
 #[test]
 fn native_histogram_functions_keep_the_runs_of_a_sparse_series() {
     use crate::grid_series::reference::{
@@ -1141,9 +1061,7 @@ fn native_histogram_functions_keep_the_runs_of_a_sparse_series() {
         expected[6] = vec![Some(value)];
         assert_result_eq(Some(&mapped), &expected, &metric_of(&metric));
     }
-    // The spread functions read the same positions too; their value is a bucket-wide statistic, so
-    // the assertion here is that both positions survive and hold a finite number -- the kernel's
-    // own arithmetic is pinned by the fixtures elsewhere.
+    // Variance values are pinned by the golden fixtures; here only the positions matter.
     for function in [
         NativeHistogramFunction::StdVar,
         NativeHistogramFunction::StdDev,

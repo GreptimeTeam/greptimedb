@@ -27,17 +27,11 @@ use crate::map::drop_metric_name;
 #[cfg(test)]
 mod tests;
 
-/// The source rows [`select_instants`] examined, counted per row.
-///
-/// The selector advances one cursor over the axis, so the rows it reads can never outnumber the
-/// rows of the axis: one pass, not one per grid point. Counting them is what keeps a second pass
-/// over the axis from being added back unobserved, since the selection it returns is the same
-/// either way.
+/// Source rows [`select_instants`] examined, so tests can assert it makes one pass over the axis.
 #[cfg(test)]
 pub(crate) static AXIS_ROWS_READ: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// Counts one row of the axis examined; a no-op outside tests.
 fn row_read() {
     #[cfg(test)]
     AXIS_ROWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -47,8 +41,7 @@ fn row_read() {
 /// rules of [`select_instants`]: the last sample at or before `at_ms` (shifted by `offset_ms`) and
 /// not more than the lookback before it, unless a stale marker is the latest sample there.
 ///
-/// `None` means the anchor selects nothing, which is what an anchor outside the series' data or one
-/// whose only candidate is too old or stale reports.
+/// `None` means the anchor selects nothing.
 pub fn select_instant_at(
     time: &RawTimestamps,
     fields: &SeriesFields,
@@ -56,9 +49,6 @@ pub fn select_instant_at(
     lookback_ms: i64,
     offset_ms: i64,
 ) -> Result<Option<u64>> {
-    // One point at the anchor is the same rule `select_instants` applies per grid point, so the
-    // anchor is asked of it rather than re-derived here: a second copy of the boundary arithmetic
-    // is a second place for the lookback edge to disagree.
     let (indices, _) = select_instants(time, fields, at_ms..=at_ms, 1, lookback_ms, offset_ms)?;
     Ok(indices.into_iter().next())
 }
@@ -76,9 +66,8 @@ pub(crate) struct InstantCandidateSpan {
 
 /// Clips the candidate span using only the source axis endpoints; allocates nothing.
 ///
-/// The caller validates `step_ms > 0`, `lookback_ms >= 0` and the ordered query range. The wide
-/// count leaves each caller's existing conversion to `usize` unchanged. The end is a scan bound,
-/// not necessarily a grid position when the query end is not aligned to its start.
+/// The caller validates `step_ms > 0`, `lookback_ms >= 0` and the ordered query range. The end is a
+/// scan bound, not necessarily a grid position when the query end is not aligned to its start.
 pub(crate) fn instant_candidate_span(
     endpoints: Option<(i64, i64)>,
     range: RangeInclusive<i64>,
@@ -117,18 +106,12 @@ pub(crate) fn instant_candidate_span(
 
 /// Selects source rows for an aligned PromQL instant-evaluation range.
 ///
-/// Returns original logical row indices and evaluation timestamps from a complete source axis of
-/// strictly increasing milliseconds. Any provided field's stale marker suppresses selection;
-/// missing samples are not stale and remain selectable.
+/// Returns source row indices and evaluation timestamps from a complete source axis of strictly
+/// increasing milliseconds. Any provided field's stale marker suppresses selection; missing samples
+/// are not stale and remain selectable.
 ///
-/// The ordering of the axis is [`RawTimestamps`]' own guarantee, checked when it was built, so this
-/// walks the axis once -- one cursor advance per row -- and validates nothing about it again.
-///
-/// The two vectors it returns hold one `u64` source row index and one `i64` evaluation timestamp
-/// per selected point, so what it allocates is 16 bytes per point of the clipped grid rather than
-/// anything proportional to the samples of the axis. It reserves none of that: every caller grows
-/// a memory reservation for those two vectors before it calls, which is what bounds an instant
-/// selection now that the kernel carries no point limit of its own.
+/// Allocates 16 bytes per point of the `instant_candidate_span` and reserves none of it; callers
+/// grow their memory reservation before calling.
 pub fn select_instants(
     time: &RawTimestamps,
     fields: &SeriesFields,
@@ -221,19 +204,11 @@ pub fn select_instants(
 /// which sample is selected but not the time reported. The metric name, `__type__` and `__unit__`
 /// are dropped.
 ///
-/// `indices` and `evaluation_timestamps` are a selection of `time` and `fields` as
-/// [`select_instants`] returns one: grid positions increasing, rows not decreasing. `schema` holds
-/// the evaluation grid the timestamps lie on and one field per field of `fields`. A field without a
-/// sample in the selected row has no result there.
-///
-/// A `schema` of one field over several `fields` reads a row as one sample: the result holds the
-/// row's time where any field has a sample, as the existing planner reports a multi-field table.
-///
-/// `timestamp(x @ t)` selects at `t` for every point, so its selection repeats one row. This
-/// kernel reports the sample the caller selected and does not decide the selector's time
-/// modifiers: the native Instant caller selects the sample under the intersection of the ordinary
-/// anchored selector window and the timestamp function's unshifted window. `info()` retains ordinary
-/// selector offset behavior.
+/// `indices` and `evaluation_timestamps` are a selection as [`select_instants`] returns one: grid
+/// positions increasing, rows not decreasing (an `@` selection repeats one row). `schema` holds the
+/// evaluation grid and either one field per field of `fields`, or one field that reads a row as one
+/// sample: its result holds the row's time where any field has a sample. The caller decides which
+/// sample the time modifiers select; this kernel reports the selected one.
 pub fn timestamp_of_selection(
     schema: &Arc<SeriesSchema>,
     metric: &SeriesLabels,
@@ -337,13 +312,8 @@ fn collapsed<'a>(schema: &SeriesSchema, row: &'a mut Vec<Option<f64>>) -> &'a [O
 }
 
 /// One series over an instant selection, each field holding `value(sample, original time)` where
-/// the selected row has a sample for it.
-///
-/// The selection is `indices` and `evaluation_timestamps` as [`select_instants`] returns them: one
-/// source row and one grid timestamp per selected point, with positions increasing and rows not
-/// decreasing. An `@` selection, which reads one row at every point, repeats that row; it is the
-/// caller's to build. A selection off the grid, going back, or naming a row the series does not
-/// have fails.
+/// the selected row has a sample for it. A selection off the grid, going back, or naming a row the
+/// series does not have fails.
 fn project_selection(
     schema: &Arc<SeriesSchema>,
     metric: SeriesLabels,
@@ -367,7 +337,7 @@ fn project_selection(
     let spec = grid.spec();
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut cursors: Vec<_> = fields.iter().map(|field| field.cursor()).collect();
-    // Consecutive points often select the same row, which a cursor reads only once.
+    // Consecutive points often select the same row; `row` is reused instead of re-read.
     let mut row: Vec<Option<f64>> = Vec::with_capacity(fields.len());
     let mut last: Option<(i128, usize)> = None;
     for (&index, &timestamp) in indices.iter().zip(evaluation_timestamps) {

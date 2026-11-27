@@ -91,8 +91,8 @@ fn metadata(encoding: PrimaryKeyEncoding) -> Arc<RegionMetadata> {
             column_id: id,
         });
     }
-    // main's `fix!: enforce sparse primary key schema` requires sparse primary keys to start
-    // with `(__table_id, __tsid)`, and every primary-key column id must exist in the schema.
+    // Sparse primary keys must start with `(__table_id, __tsid)`, and every primary-key column id
+    // must exist in the schema.
     let mut primary_key = vec![8, 2, 41];
     if encoding == PrimaryKeyEncoding::Sparse {
         builder.push_column_metadata(ColumnMetadata {
@@ -891,8 +891,7 @@ async fn constructor_and_mode_errors_drop_input_without_polling_ahead() {
         fields: SeriesFields::one(Samples::from_float(Float64Array::from(Vec::<f64>::new()))),
         is_last: false,
     };
-    // `RawTimestamps` rejects duplicate or descending axes at construction, so a chunk
-    // carrying an out-of-order time axis can no longer be constructed.
+    // An out-of-order time axis cannot be constructed.
     assert!(RawTimestamps::try_new(ScalarBuffer::from(vec![100, 100, 90])).is_err());
     for malformed in [malformed_shape, malformed_empty_time] {
         let (raw, polls, drops) = mock(
@@ -1072,9 +1071,8 @@ async fn dense_and_sparse_sources_materialize_complete_labels() {
     }
 }
 
-/// A consumer that received only the raw series frame decodes labels with no scan-bound source:
-/// the producer's description travels inside the frame schema, so unpacking needs no binding and
-/// materialization builds its decoder from that description alone.
+/// The label decode description travels in the frame schema, so a consumer holding only the frame
+/// decodes labels without a binding.
 #[tokio::test]
 async fn materializes_labels_from_a_frame_with_no_supplied_binding() {
     for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
@@ -1100,8 +1098,6 @@ async fn materializes_labels_from_a_frame_with_no_supplied_binding() {
             "{encoding:?}: the frame schema is the producer's only label statement"
         );
 
-        // Everything the consumer keeps is the frame stream: no expected schema, no binding, no
-        // region metadata anywhere on the decode path.
         let framed = unpack_raw_series(framed, None).unwrap();
         assert_eq!(
             framed.label_decode_spec(),

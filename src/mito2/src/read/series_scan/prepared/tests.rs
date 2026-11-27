@@ -338,14 +338,9 @@ fn rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
                 };
                 (
                     {
-                        let key = if chunk.metric.is_some() {
-                            &chunk.primary_key.as_slice()[8..]
-                        } else {
-                            chunk.primary_key.as_slice()
-                        };
                         let (table, tsid) =
                             mito_codec::row_converter::SparsePrimaryKeyCodec::schemaless()
-                                .decode_ids(key)
+                                .decode_ids(chunk.primary_key.as_slice())
                                 .unwrap();
                         [
                             table.to_be_bytes().as_slice(),
@@ -1150,6 +1145,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let source = ColumnarPreparedSource {
         dedup_append_raw: false,
+        sample_partition: None,
         scan_pool: source.scan_pool.clone(),
         merge_field_start: 0,
         context: source.context.clone(),
@@ -1192,7 +1188,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         let keys = source
             .candidates
             .iter()
-            .map(|c| c.merge_key.to_vec())
+            .map(|c| c.key.to_vec())
             .collect::<BTreeSet<_>>();
         for request in requests.iter() {
             let requested = request
@@ -2463,7 +2459,7 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
     let identities: HashSet<Vec<u8>> = source
         .candidates
         .iter()
-        .map(|candidate| candidate.merge_key.to_vec())
+        .map(|candidate| candidate.key.to_vec())
         .collect();
     assert_eq!(2, identities.len(), "colliding series keep distinct keys");
     if !mixed {
@@ -2642,13 +2638,11 @@ async fn long_keys_prepare_and_read() {
         .unwrap();
     let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
     // The fixture's own series prepare beside this one; the long key must survive preparation
-    // byte for byte and own its samples. Served samples make `primary_key` region-qualified.
-    let mut expected = metadata.region_id.as_u64().to_be_bytes().to_vec();
-    expected.extend_from_slice(&key);
+    // byte for byte and own its samples. The identity is the stored key itself, not a
+    // region-qualified form, so fragments of a series in other regions report the same one.
     let ordinal = (0..source.num_series())
         .find(|ordinal| {
-            source.series_info(*ordinal).unwrap().primary_key.as_ref() as &[u8]
-                == expected.as_slice()
+            source.series_info(*ordinal).unwrap().primary_key.as_ref() as &[u8] == key.as_slice()
         })
         .expect("preparation must keep the series whose key is longer than 8 KiB");
     let chunks = source
@@ -3105,6 +3099,13 @@ async fn authoritative_narthex_preparation_without_sidecars(
 }
 
 async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRegionRef) {
+    authoritative_fixture_with(merge_mode, None).await
+}
+
+async fn authoritative_fixture_with(
+    merge_mode: &str,
+    partition_expr: Option<String>,
+) -> (TestEnv, MitoEngine, MitoRegionRef) {
     let mut env = TestEnv::with_prefix("narthex-review").await;
     let engine = env
         .create_engine(MitoConfig {
@@ -3124,6 +3125,7 @@ async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRe
         .insert_option("primary_key_encoding", "sparse")
         .insert_option("sst_format", "narthex")
         .insert_option("merge_mode", merge_mode)
+        .partition_expr_json(partition_expr)
         .build();
     create.column_metadatas = metadata.column_metadatas;
     create.primary_key = metadata.primary_key;
@@ -3134,6 +3136,73 @@ async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRe
         .unwrap();
     let region = engine.get_region(id).unwrap();
     (env, engine, region)
+}
+
+/// A time-partitioned region keeps only its own rows, though a file shared after repartition
+/// holds rows of both partitions and series rows carry no time index to filter on. Key columns
+/// a mixed rule references take the series' values, `__table_id` included.
+#[rstest::rstest]
+#[case::time(None)]
+#[case::tag_and_time(Some(partition::expr::col("tag_0").eq(Value::from("a"))))]
+#[case::table_id_and_time(Some(
+    partition::expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(Value::UInt32(10))
+))]
+#[tokio::test]
+async fn authoritative_time_partition_filters_sample_rows(
+    #[case] key_rule: Option<partition::expr::PartitionExpr>,
+) {
+    let time_rule = partition::expr::col("ts").lt(Value::Timestamp(
+        common_time::Timestamp::new_millisecond(60_000),
+    ));
+    let rule = match key_rule {
+        Some(key_rule) => key_rule.and(time_rule),
+        None => time_rule,
+    };
+    let (_env, engine, region) =
+        authoritative_fixture_with("last_row", Some(rule.as_json_str().unwrap())).await;
+    // 61_000 belongs to the other partition, as rows of a shared file do.
+    for timestamp in [1000, 61_000] {
+        write(&engine, &region, 7, timestamp, Some(7.0)).await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+
+    let stream = engine
+        .scan_to_stream(region.region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = common_recordbatch::RecordBatches::try_collect(stream)
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+
+    // Compaction reads without the region predicate, so only the rule keeps the other
+    // partition's row out of the output.
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Compact(store_api::region_request::RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow { window_seconds: 60 },
+                ),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let version = region.version();
+    let rows = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .map(|file| file.meta_ref().num_rows)
+        .sum::<u64>();
+    assert_eq!(rows, 1);
+    engine.stop().await.unwrap();
 }
 
 #[tokio::test]

@@ -32,18 +32,13 @@ pub enum ScalarSeriesOperand<'a> {
     Right(&'a Series),
 }
 
-/// Applies arithmetic between vector fields and a time-varying scalar, aligned by absolute grid
-/// index, and drops the metric name.
+/// Applies arithmetic between vector fields and a time-varying scalar on the same grid, and drops
+/// the metric name.
 ///
-/// Prometheus scalars exist at every step; a missing scalar point here yields a missing output.
-/// The output covers the valid rows and nothing else, and `None` means there is none. A scalar
-/// point holding no value is a hole in the one result series, not the end of a piece: the axis
-/// names the runs of consecutive valid positions. The scalar must be unlabelled and single-field
-/// on the same grid; histogram/mixed/raw inputs are rejected even outside the overlap. Both
-/// operands may skip positions: only the positions both carry are evaluated, and the two axes are
-/// aligned by intersecting their runs, never by subtracting one axis' first position from the
-/// other's indices. Two unlabelled single-field inputs also evaluate scalar–scalar operations.
-/// Same-labelset merging is left to the caller, as in [`crate::map::map_math`].
+/// Only positions both operands carry are evaluated; a missing scalar point yields a missing
+/// output, and `None` means no output row. The scalar must be unlabelled and single-field, and both
+/// inputs must hold floats only, even outside the overlap. Two scalars also work. Same-labelset
+/// merging is left to the caller.
 pub fn map_arithmetic_series(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
@@ -65,13 +60,9 @@ pub fn map_arithmetic_series(
 /// Compares against a time-varying scalar. Filter keeps vector values and labels; bool emits
 /// 0/1 and drops the metric name.
 ///
-/// Shares [`map_arithmetic_series`]'s alignment and row-keeping contract. Each field is compared
-/// independently; a row is kept where any field passes a filter.
-///
-/// A histogram has no ordering against a scalar, so the positions it holds answer nothing; the
-/// second element of the answer reports whether one was dropped so the caller can say so. The
-/// literal-scalar form ([`crate::map::map_compare_literal`]) applies the same rule, and both exist
-/// because a time-varying scalar cannot be folded into a constant.
+/// Aligns like [`map_arithmetic_series`]. Each field is compared independently; a row is kept
+/// where any field passes. Histogram samples are dropped, as in
+/// [`crate::map::map_compare_literal`], and the second element reports whether one was.
 pub fn map_compare_series(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
@@ -103,10 +94,7 @@ pub(crate) enum ScalarFunction {
 
 impl ScalarFunction {
     /// Go's `math.Max` / `math.Min`: an infinity of the function's own sign wins over NaN, NaN
-    /// over any other value, and `+0` is greater than `-0`.
-    ///
-    /// Both are symmetric in their arguments, signed zero included, so the kernel does not depend
-    /// on which operand came first.
+    /// over any other value, and `+0` is greater than `-0`. Symmetric in its arguments.
     pub(crate) fn apply(self, a: f64, b: f64) -> f64 {
         let (wins, signed_zero_wins) = match self {
             Self::MaxOf => (f64::INFINITY, false),
@@ -130,12 +118,8 @@ impl ScalarFunction {
     }
 }
 
-/// A math function whose parameters are scalar expressions, which Prometheus evaluates at every
-/// step, with those parameters as time-varying scalars.
-///
-/// All but `max_of` and `min_of` map an evaluated vector's fields onto the same fields; those two
-/// are functions of two scalars, so the series they map is the unlabelled one-field scalar the
-/// call's first operand evaluates to.
+/// A math function whose parameters are time-varying scalars. For `max_of` and `min_of` the
+/// mapped series is the first scalar operand.
 #[derive(Clone, Copy, Debug)]
 pub enum ParameterizedMath<'a> {
     /// `round(v, to_nearest)`.
@@ -146,16 +130,13 @@ pub enum ParameterizedMath<'a> {
     ClampMin { min: &'a Series },
     /// `clamp_max(v, max)`.
     ClampMax { max: &'a Series },
-    /// `max_of(a, b)`, whose two operands are scalars: the input of the call is `a` and `other` is
-    /// `b`.
+    /// `max_of(a, b)`: the mapped series is `a`, `other` is `b`.
     MaxOf { other: &'a Series },
-    /// `min_of(a, b)`, whose two operands are scalars: the input of the call is `a` and `other` is
-    /// `b`.
+    /// `min_of(a, b)`: the mapped series is `a`, `other` is `b`.
     MinOf { other: &'a Series },
 }
 
 impl<'a> ParameterizedMath<'a> {
-    /// The parameters in argument order.
     fn parameters(self) -> Vec<&'a Series> {
         match self {
             Self::Round { to_nearest } => vec![to_nearest],
@@ -166,7 +147,7 @@ impl<'a> ParameterizedMath<'a> {
         }
     }
 
-    /// The function with the parameter values of one point, in argument order.
+    /// Binds one point's parameter values, given in argument order.
     fn at(self, values: &[f64]) -> PointMath {
         match self {
             Self::Round { .. } => PointMath::Math(MathOp::Round { nearest: values[0] }),
@@ -188,14 +169,10 @@ impl<'a> ParameterizedMath<'a> {
     }
 }
 
-/// What one point's parameter values make of a parameterized math function: the kernel that reads
-/// the input's own value, with everything else the point decides already bound.
+/// A parameterized math function with one point's parameters bound.
 #[derive(Clone, Copy, Debug)]
 enum PointMath {
-    /// A math function of the input's value, as `round` is.
     Math(MathOp),
-    /// The larger or smaller of the input's value and the parameter's, which are the two operands
-    /// of `max_of` and `min_of`.
     Scalar {
         function: ScalarFunction,
         other: f64,
@@ -203,8 +180,7 @@ enum PointMath {
 }
 
 impl PointMath {
-    /// The value the function answers for `value`, or `None` where it answers nothing: a `clamp`
-    /// whose bounds were written the wrong way round has no result at that point.
+    /// `None` for a `clamp` with `max < min`, which has no result at that point.
     fn calculate(self, value: f64) -> Option<f64> {
         match self {
             Self::Math(op) => (!op.is_empty_clamp()).then(|| op.calculate(value)),
@@ -213,17 +189,12 @@ impl PointMath {
     }
 }
 
-/// Applies `function` to every field with its parameters read at each point from time-varying
-/// scalars, and drops the metric name, as [`crate::map::map_math`] does with constant parameters;
-/// native histogram samples are skipped the same way.
+/// Applies `function` to every float field with parameters read per point, and drops the metric
+/// name, like [`crate::map::map_math`] with constant parameters; histogram samples are skipped.
 ///
-/// A point where a parameter has no value has no result. `clamp` with `max < min` at a point has
-/// no result there, as Prometheus returns an empty vector for that step. `None` means no point
-/// holds a result. Same-labelset merging is left to the caller.
-///
-/// `series` is one evaluated series, which for `max_of` and `min_of` is the unlabelled one-field
-/// scalar their first argument evaluates to: those two are functions of two scalars, so what they
-/// map is the first of them and what they read per point is the second.
+/// A point where a parameter has no value, or where `clamp` has `max < min` (Prometheus returns an
+/// empty vector for that step), has no result. `None` means no point has one. Same-labelset merging
+/// is left to the caller.
 pub fn map_math_with_parameters(
     schema: &Arc<SeriesSchema>,
     series: &Series,
@@ -235,7 +206,7 @@ pub fn map_math_with_parameters(
     for parameter in &parameters {
         parameter_axes.push(validate_scalar(schema, parameter)?);
     }
-    // Points only increase, so each parameter's row does too and one cursor reads it.
+    // Points only increase, so one forward cursor per parameter suffices.
     let mut parameter_cursors: Vec<_> = parameters
         .iter()
         .map(|parameter| parameter.fields.as_slice()[0].cursor())
@@ -268,18 +239,17 @@ pub fn map_math_with_parameters(
     builder.finish(drop_metric_name(&series.metric)?)
 }
 
-/// Calls `calculate(left, right, vector_sample)` at each index where both operands exist.
-/// What a vector sample that holds no float value means to the kernel being applied.
+/// How [`map_grid_scalar`] treats a histogram sample in the vector.
 #[derive(Clone, Copy, Debug)]
 enum NonFloatSample {
-    /// The caller proved the vector holds floats only, so a histogram here is a bug.
+    /// The vector is validated as float-only.
     Impossible,
-    /// The operation has no answer for it: the position answers nothing and the caller is told
-    /// that a sample was dropped, which is what Prometheus does with a histogram under an operator
-    /// it has no meaning for.
+    /// The position yields nothing and the drop is reported, as Prometheus does for an operator
+    /// undefined on histograms.
     Drop,
 }
 
+/// Calls `calculate(left, right, vector_sample)` at each position where both operands exist.
 fn map_grid_scalar(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
@@ -298,9 +268,8 @@ fn map_grid_scalar(
     };
     let scalar_time = validate_scalar(schema, scalar_series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    // The shared runs carry both compact rows, so each operand reads its own field from the row
-    // its own axis assigns to the position. A position only one side carries is missing anyway:
-    // the pairing would be missing, and the builder keeps no row for it.
+    // Each operand reads its own row from the shared run; positions only one side carries yield
+    // nothing, so they are skipped.
     let mut scalar_samples = scalar_series.fields.as_slice()[0].cursor();
     let mut field_samples = vector
         .fields

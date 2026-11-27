@@ -21,7 +21,6 @@ use datafusion::error::Result;
 
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
-/// A native histogram aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistogramAggregate {
     Sum,
@@ -29,14 +28,9 @@ pub(crate) enum HistogramAggregate {
 }
 
 /// The Kahan sum or the mean of `histograms` in order, without compaction; `None` when there is
-/// none or they mix exponential and custom buckets. Prometheus `sum_over_time` and
-/// `avg_over_time` run the same steps as the aggregations. Histograms are consumed one at a
-/// time, so the first error ends the fold. The result is derived, so it carries no start
-/// timestamp.
-///
-/// The flag reports whether any add had to reconcile two different custom-bucket sets, which is
-/// what Prometheus annotates with an info. It is carried out of the fold rather than recomputed:
-/// the fold already calls [`FloatHistogram::kahan_add`] and receives that outcome.
+/// none or they mix exponential and custom buckets. The first input error ends the fold. The
+/// result has no start timestamp. The flag reports whether any add reconciled two different
+/// custom-bucket sets, which Prometheus annotates with an info.
 pub(crate) fn sum_or_avg(
     op: HistogramAggregate,
     histograms: impl IntoIterator<Item = Result<FloatHistogram>>,
@@ -120,11 +114,8 @@ pub(crate) fn sum_or_avg(
             }
         },
     }
-    // The result was derived from its inputs, so it carries no start timestamp of its own, like
-    // every other operation that builds one. Clearing it here covers the fold that added nothing:
-    // the first histogram of a window becomes the result as it arrived, and the adds above are
-    // what drop the field otherwise, which would make the payload depend on the sample count.
-    // The bucket layout is left as the fold built it -- compaction belongs to the caller.
+    // A single-input fold returns its input unchanged, so clear the start timestamp the adds
+    // would otherwise have cleared.
     value.start_timestamp = None;
     Ok((Some(value), custom_reconciled))
 }

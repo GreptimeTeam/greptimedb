@@ -14,23 +14,12 @@
 
 //! Per-node metric handles for native PromQL execution and their DataFusion registration.
 //!
-//! Node metrics retain no names or tree topology: [`NodeMetrics::register`] names the handles for
-//! one registration, and the set holds them from there. What outlives an execution is therefore its
-//! counters and gauges, not the nodes that recorded them.
-//!
-//! The name carries the node's position in the runtime tree: the whole native tree registers into
-//! the one [`ExecutionPlanMetricsSet`] the enclosing physical operator (`FusedSeriesExec`) owns, and
-//! the reader aggregates by name, so two nodes of a kind sharing
-//! a name would be summed into a single figure. What a consumer can rely on is the grammar
-//! `native.<path>.<metric>` with the suffixes of [`NodeMetric::ALL`]: splitting off the final
-//! component leaves the metric, and the path before it keys the node within that operator. That key
-//! is promised only inside the topology that produced it:
-//!
-//! - the path names a node of one runtime topology;
-//! - queries, plan rewrites, and versions move it, so it is neither a persisted nor a public
-//!   identifier;
-//! - `peak_reserved_bytes` alone carries `p<partition>`, because the reader sums gauges by name and
-//!   a sum of peaks is not a peak.
+//! The whole native tree registers into the one [`ExecutionPlanMetricsSet`] of its enclosing
+//! operator (`FusedSeriesExec`), and readers aggregate by name, so each name carries the node's
+//! path in the runtime tree: `native.<path>.<metric>`, with a metric from [`NodeMetric::ALL`]. The
+//! path is valid only within the topology that produced it; it is not a persisted or public
+//! identifier. `peak_reserved_bytes` alone is named `native.p<partition>.<path>.<metric>`, because
+//! a sum of peaks is not a peak.
 
 use std::collections::HashMap;
 
@@ -42,11 +31,9 @@ use datafusion::physical_plan::metrics::{
 /// The reserved first segment of every native metric name.
 const NATIVE_PREFIX: &str = "native";
 
-/// The metric names one node reports.
-///
-/// [`Self::ALL`] is the list a reader should treat as complete: [`NodeMetrics::register`] names each
-/// handle itself, and `registered_metrics_are_exactly_the_declared_set` fails when the two sides
-/// drift apart.
+/// The metric names one node reports. [`Self::ALL`] is complete:
+/// `fresh_exports_register_exactly_the_declared_metrics_without_growth` checks it against
+/// [`NodeMetrics::register`].
 pub struct NodeMetric;
 
 impl NodeMetric {
@@ -90,27 +77,19 @@ impl NodeMetric {
     ];
 }
 
-/// The figures every node of one execution left, keyed by the path it was registered under.
-///
-/// A path is the one [`NodeMetrics::register`] was called with (`root`, `root.left`, ...), which is
-/// exactly what the runtime builds while it compiles the tree: a reader that walks the *same* tree
-/// reaches the same path for the same node, so a figure is found rather than guessed.
-///
-/// Partitions are combined here because a node is registered once per partition: counts and times
-/// add up, and `peak_reserved_bytes` — the one figure whose name carries its partition, because a
-/// sum of peaks is not a peak — is the highest of them.
+/// The figures every node of one execution recorded, keyed by the path passed to
+/// [`NodeMetrics::register`] (`root`, `root.left`, ...). A node's partitions are combined: counts
+/// and times add up, and `peak_reserved_bytes` takes the highest.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeMetricsSnapshot {
     nodes: HashMap<String, Vec<(String, usize)>>,
 }
 
 impl NodeMetricsSnapshot {
-    /// Reads every native node figure in `set`.
+    /// Reads every native node figure in `set`, ignoring other metrics. A plan that never ran
+    /// yields an empty snapshot.
     ///
-    /// `set` may hold other metrics, and holds nothing at all before an execution: a snapshot of a
-    /// plan that never ran is empty, which is how a plain `EXPLAIN` shows a tree without figures.
-    ///
-    /// The partitions of one node are combined here rather than by
+    /// Partitions are combined here rather than by
     /// [`MetricsSet::aggregate_by_name`](datafusion::physical_plan::metrics::MetricsSet::aggregate_by_name),
     /// which adds at least one nanosecond to every time it touches: a node whose timer never ran
     /// would then report time it did not spend.
@@ -123,8 +102,7 @@ impl NodeMetricsSnapshot {
             let value = metric.value().as_usize();
             let figures = nodes.entry(path.to_string()).or_default();
             match figures.iter_mut().find(|(figure, _)| figure == name) {
-                // A peak is per partition because partitions peak at different moments: the node's
-                // peak is the highest of theirs, never their sum.
+                // Partitions peak at different moments, so the node's peak is the max, not the sum.
                 Some((_, accumulated)) if name == NodeMetric::PEAK_RESERVED_BYTES => {
                     *accumulated = (*accumulated).max(value)
                 }
@@ -138,11 +116,8 @@ impl NodeMetricsSnapshot {
         Self { nodes }
     }
 
-    /// What this node recorded, as `name: value`, dropping the figures that are zero.
-    ///
-    /// A node registers every figure it may record, so a node that did one thing would otherwise
-    /// report ten things it did not: the tree would stop reading as a tree. A node that recorded
-    /// nothing therefore reports nothing, the same way one that never ran does.
+    /// What this node recorded, dropping zero figures: a node registers every metric, so most are
+    /// zero on any one node.
     pub fn described(&self, path: &str) -> Vec<(String, usize)> {
         self.of(path)
             .iter()
@@ -158,12 +133,8 @@ impl NodeMetricsSnapshot {
     }
 }
 
-/// Splits a registered metric name into the node path and the figure it reports.
-///
-/// A name is `native.<path>.<metric>`, and `native.p<partition>.<path>.<metric>` for a figure that
-/// is registered per partition. The partition belongs to that registration rather than to the
-/// node, so it is dropped here and its values are combined by [`NodeMetricsSnapshot::read`]. A name
-/// that is not one of this module's is not a node figure, and is left to whoever else reads `set`.
+/// Splits `native.<path>.<metric>` or `native.p<partition>.<path>.<metric>` into path and metric,
+/// dropping the partition. Returns `None` for any other name.
 fn split_name(name: &str) -> Option<(&str, &str)> {
     let rest = name.strip_prefix(NATIVE_PREFIX)?.strip_prefix('.')?;
     let rest = match rest.strip_prefix('p').and_then(|rest| rest.split_once('.')) {
@@ -178,8 +149,7 @@ fn split_name(name: &str) -> Option<(&str, &str)> {
     NodeMetric::ALL.contains(&metric).then_some((path, metric))
 }
 
-/// Where `metric` sits in the declared order, so a node's figures read the same on every node and
-/// on every run.
+/// Where `metric` sits in [`NodeMetric::ALL`], so figures print in a stable order.
 fn node_metric_order(metric: &str) -> usize {
     NodeMetric::ALL
         .iter()
@@ -187,10 +157,7 @@ fn node_metric_order(metric: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-/// The metric handles one node updates as it runs.
-///
-/// The node writes these directly; it never looks a metric up by name, and it never formats a path
-/// on the hot path.
+/// The metric handles one node in one partition updates as it runs.
 #[derive(Clone, Debug)]
 pub struct NodeMetrics {
     input_batches: Count,
@@ -236,20 +203,13 @@ fn named(name: &str, metric: &str) -> String {
 }
 
 /// The full metric name for `metric` in `partition` of the node called `name`.
-///
-/// A figure that must not be merged across partitions needs the partition in its name: the
-/// collector aggregates by name first, and a sum of peaks is not a peak.
 fn partitioned(name: &str, metric: &str, partition: usize) -> String {
     format!("{NATIVE_PREFIX}.p{partition}.{name}.{metric}")
 }
 
 impl NodeMetrics {
-    /// Registers this node's handles under `name` into `set`.
-    ///
-    /// A caller registers once per execution, before that execution starts, so what `set` holds
-    /// afterwards follows what this node records as it runs. The name belongs to that registration
-    /// and is not retained here. `partition` is part of the DataFusion registration, and the peak
-    /// name includes it because peaks must not be summed across partitions.
+    /// Registers this node's handles under `name` into `set`. Call once per execution, before it
+    /// starts; `set` then follows what the node records.
     pub fn register(&self, name: &str, set: &ExecutionPlanMetricsSet, partition: usize) {
         fn count(set: &ExecutionPlanMetricsSet, partition: usize, name: String, count: &Count) {
             MetricBuilder::new(set)
@@ -310,12 +270,7 @@ impl NodeMetrics {
             named(name, NodeMetric::CURRENT_RESERVED_BYTES),
             &self.current_reserved_bytes,
         );
-        // The peak is the one figure named per partition. The collector groups by name and sums
-        // gauges, and a sum of two peaks is neither peak: partitions peak at different moments.
-        // Summing the other gauges and counts stays meaningful — the memory held now and the
-        // samples seen add up across partitions. `groups` does not: a `Partial` aggregate sees the
-        // same group in every partition it reaches, so the sum is per-partition entries, not
-        // distinct groups.
+        // The collector sums gauges by name; the peak alone must not be summed.
         gauge(
             set,
             partition,
@@ -364,26 +319,21 @@ impl NodeMetrics {
         self.completed_series.add(series);
     }
 
-    /// Records that this node now reserves `bytes`.
-    ///
-    /// The peak is a high-water mark of this node in this partition, never a sum of the peaks of
-    /// different nodes: those peaks can happen at different times.
+    /// Records that this node now reserves `bytes`, raising its peak if higher.
     pub fn record_reserved_bytes(&self, bytes: usize) {
         self.current_reserved_bytes.set(bytes);
-        // A high-water mark, not a sum: two nodes peak at different moments.
         self.peak_reserved_bytes.set_max(bytes);
     }
 
-    /// Records the size of the grouping and state this node holds.
+    /// Records the size of the grouping and state this node holds. No production node calls this
+    /// yet, so `groups` and `state_entries` report zero.
     pub fn record_state(&self, groups: usize, entries: usize) {
         self.groups.set(groups);
         self.state_entries.set(entries);
     }
 
-    /// Starts timing this node's own work.
-    ///
-    /// The returned timer must be dropped before the node polls its input: a node's self time
-    /// excludes the work its inputs do.
+    /// Starts timing this node's own work. Drop the guard before polling an input: self time
+    /// excludes the inputs' work.
     pub fn timer(&self) -> datafusion::physical_plan::metrics::ScopedTimerGuard<'_> {
         self.self_compute_time.timer()
     }
@@ -450,21 +400,12 @@ mod tests {
         assert_eq!(counter("native.root.output_values"), Some(11));
     }
 
-    /// Each partition's peak is exported under a name of its own, from handles of its own.
-    ///
-    /// A [`NodeMetrics`] belongs to one node in one partition, which is the shape one runtime tree
-    /// per partition gives. Two partitions are therefore two sets of handles that grow
-    /// independently: what the second one records never reaches the figure the first one exported,
-    /// and the peak of each is reported under the partition it belongs to rather than summed under
-    /// one shared name.
     #[test]
     fn peak_exports_are_distinct_per_partition() {
         let first_metrics = NodeMetrics::default();
         first_metrics.record_reserved_bytes(1024);
         let first = ExecutionPlanMetricsSet::new();
         first_metrics.register("root", &first, 0);
-        // The second partition's node is another set of handles, recorded and exported later: the
-        // first export above must not follow it.
         let second_metrics = NodeMetrics::default();
         second_metrics.record_reserved_bytes(2048);
         let second = ExecutionPlanMetricsSet::new();
@@ -489,9 +430,6 @@ mod tests {
         );
     }
 
-    /// A node is registered once per partition, so one node's figures are the sum of its
-    /// partitions' - except the peak, which is the highest one, because partitions peak at
-    /// different moments.
     #[test]
     fn a_node_reports_one_set_of_figures_across_its_partitions() {
         let set = ExecutionPlanMetricsSet::new();
@@ -515,8 +453,6 @@ mod tests {
         assert_eq!(figure(NodeMetric::PEAK_RESERVED_BYTES), 4096);
     }
 
-    /// The path is what the registration named, and a partition segment is not part of it: the two
-    /// partitions above file under one node rather than under `p0.root` and `p1.root`.
     #[test]
     fn a_partition_belongs_to_the_registration_and_not_to_the_path() {
         let set = ExecutionPlanMetricsSet::new();
@@ -528,7 +464,6 @@ mod tests {
         assert!(snapshot.of("p7.root.left").is_empty());
     }
 
-    /// A metric this module did not name is not a node figure, so it is not filed under a node.
     #[test]
     fn a_name_outside_the_grammar_is_not_a_node_figure() {
         let set = ExecutionPlanMetricsSet::new();

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::ops::Div;
 
 use api::v1::meta::MailboxMessage;
@@ -26,14 +27,14 @@ use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::RegionRequirements;
 use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
-use crate::procedure::region_migration::{Context, RegionMigrationTriggerReason, State};
+use crate::procedure::region_migration::{Context, RegionMigrationTriggerReason, State, utils};
 use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::Channel;
 
@@ -125,8 +126,11 @@ impl OpenCandidateRegion {
     /// - The Datanode is unreachable(e.g., Candidate pusher is not found).
     /// - Unexpected instruction reply.
     /// - Another procedure is opening the candidate region.
+    /// - The candidate is a follower of one of the migrated regions.
+    /// - The table route of a migrated region is not physical.
     ///
     /// Retry:
+    /// - Failed to retrieve the metadata of table.
     /// - Exceeded deadline of open instruction.
     /// - Datanode failed to open the candidate region.
     async fn open_candidate_region(
@@ -152,6 +156,36 @@ impl OpenCandidateRegion {
                         region_id: *region_id,
                     })?;
                 vc.opening_region_guards.push(guard);
+            }
+        }
+
+        // A follower can be added on the candidate after the submission checked the routes, so
+        // every attempt checks them while it holds the candidate registrations.
+        {
+            let region_id_set = region_ids.iter().collect::<HashSet<_>>();
+            let table_routes = ctx.get_table_route_values().await?;
+            for (table_id, table_route) in &table_routes {
+                let region_routes = table_route.region_routes().with_context(|_| {
+                    error::UnexpectedLogicalRouteTableSnafu {
+                        err_msg: format!(
+                            "TableRoute({table_id:?}) is a non-physical TableRouteValue."
+                        ),
+                    }
+                })?;
+                for region_route in region_routes
+                    .iter()
+                    .filter(|region_route| region_id_set.contains(&region_route.region.id))
+                {
+                    ensure!(
+                        !utils::has_peer_conflict(region_route, candidate.id),
+                        error::MigrationAbortSnafu {
+                            reason: format!(
+                                "The candidate peer {} is already a follower of region {}",
+                                candidate.id, region_route.region.id
+                            ),
+                        }
+                    );
+                }
             }
         }
 
@@ -399,6 +433,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_candidate_is_follower_error() {
+        let state = OpenCandidateRegion;
+        let mut persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_ids[0];
+        let follower_region_id = RegionId::new(1024, 2);
+        persistent_context.region_ids.push(follower_region_id);
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let mut env = TestingEnv::new();
+        let mut region_routes = [region_id, follower_region_id]
+            .map(|region_id| RegionRoute {
+                region: Region::new_test(region_id),
+                leader_peer: Some(Peer::empty(from_peer_id)),
+                ..Default::default()
+            })
+            .to_vec();
+        env.create_physical_table_metadata(new_test_table_info(1024), region_routes.clone())
+            .await;
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+            .await;
+
+        // The first attempt sends the open instruction, which times out.
+        let open_instruction = state
+            .build_open_region_instruction(&mut ctx, RegionMigrationTriggerReason::Unknown)
+            .await
+            .unwrap();
+        let (result, _) = tokio::join!(
+            state.open_candidate_region(&mut ctx, open_instruction),
+            async {
+                let response = rx.recv().await.unwrap().unwrap();
+                let id = response.mailbox_message.unwrap().id;
+                mailbox
+                    .on_recv(id, Err(error::MailboxTimeoutSnafu { id }.build()))
+                    .await
+                    .unwrap();
+            }
+        );
+        assert!(result.unwrap_err().is_retryable());
+
+        // A follower is added on the candidate before the retry, which holds the registrations.
+        let current = ctx.get_table_route_value(1024).await.unwrap();
+        let region_info = ctx
+            .get_from_peer_datanode_table_value(1024)
+            .await
+            .unwrap()
+            .region_info;
+        region_routes[1]
+            .follower_peers
+            .push(Peer::empty(to_peer_id));
+        env.table_metadata_manager()
+            .update_table_route(
+                1024,
+                region_info.clone(),
+                &current,
+                region_routes,
+                &region_info.region_options,
+                &region_info.region_wal_options,
+            )
+            .await
+            .unwrap();
+        assert!(!ctx.volatile_ctx.opening_region_guards.is_empty());
+        let open_instruction = state
+            .build_open_region_instruction(&mut ctx, RegionMigrationTriggerReason::Unknown)
+            .await
+            .unwrap();
+        let err = state
+            .open_candidate_region(&mut ctx, open_instruction)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::MigrationAbort { .. });
+        assert!(!err.is_retryable());
+        assert!(rx.try_recv().is_err());
+
+        // A first attempt, as after a recovery, registers the regions again before it aborts.
+        ctx.volatile_ctx.opening_region_guards.clear();
+        let open_instruction = state
+            .build_open_region_instruction(&mut ctx, RegionMigrationTriggerReason::Unknown)
+            .await
+            .unwrap();
+        let err = state
+            .open_candidate_region(&mut ctx, open_instruction)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::MigrationAbort { .. });
+        assert_eq!(ctx.volatile_ctx.opening_region_guards.len(), 2);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn test_unexpected_instruction_reply() {
         let state = OpenCandidateRegion;
         // from_peer: 1
@@ -595,11 +723,20 @@ mod tests {
 
         // Prepares table
         let table_info = new_test_table_info(1024);
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(Peer::empty(from_peer_id)),
-            ..Default::default()
-        }];
+        let region_routes = vec![
+            RegionRoute {
+                region: Region::new_test(region_id),
+                leader_peer: Some(Peer::empty(from_peer_id)),
+                ..Default::default()
+            },
+            // A region outside the migration may have a follower on the candidate.
+            RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 2)),
+                leader_peer: Some(Peer::empty(from_peer_id)),
+                follower_peers: vec![Peer::empty(to_peer_id)],
+                ..Default::default()
+            },
+        ];
 
         env.table_metadata_manager()
             .create_table_metadata(
