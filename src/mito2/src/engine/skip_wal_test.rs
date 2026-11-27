@@ -25,8 +25,7 @@ use store_api::logstore::provider::Provider;
 use store_api::mito_engine_options::SKIP_WAL_KEY;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionCloseRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequest, RegionTruncateRequest, SetRegionOption,
+    RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -35,16 +34,8 @@ use crate::engine::listener::AlterFlushListener;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, flush_region,
     kafka_log_store_factory, multiple_log_store_factories, prepare_test_for_kafka_log_store,
-    put_rows, raft_engine_log_store_factory, reopen_region, rows_schema,
+    put_rows, raft_engine_log_store_factory, reopen_region, rows_schema, set_skip_wal_request,
 };
-
-fn set_skip_wal_request(skip_wal: bool) -> RegionRequest {
-    RegionRequest::Alter(RegionAlterRequest {
-        kind: AlterKind::SetRegionOptions {
-            options: vec![SetRegionOption::SkipWal(skip_wal)],
-        },
-    })
-}
 
 #[tokio::test]
 async fn test_close_region_skip_wal_with_pending_data() {

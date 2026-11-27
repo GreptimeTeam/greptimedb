@@ -1218,6 +1218,8 @@ pub(crate) enum BackgroundNotify {
     },
     /// The catchup again of a region that awaited its Leader lease has finished.
     CaughtUpAgain(CaughtUpAgain),
+    /// A catchup committed the handover of a region, whose edit the worker applies.
+    HandedOver(HandedOver),
     /// The region became writable and may have pending tails to replay, or work due once it is a
     /// writable leader with its Leader lease.
     RegionBecameWritable,
@@ -1295,6 +1297,7 @@ impl BackgroundNotify {
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
             | Self::CaughtUpAgain(_)
+            | Self::HandedOver(_)
             | Self::RegionBecameWritable
             | Self::LeaderLeaseWaitEnded
             | Self::BackfillDeferred { .. }
@@ -1636,6 +1639,19 @@ pub(crate) struct CaughtUpAgain {
     pub(crate) result: Result<MitoRegionRef>,
     /// Whether the catchup promotes the region.
     pub(crate) set_writable: bool,
+    /// Receives the result of the catchup.
+    pub(crate) sender: OptionOutputTx,
+}
+
+/// The handover a catchup committed for a region, see
+/// [hand_over](crate::region::catchup::hand_over).
+#[derive(Debug)]
+pub(crate) struct HandedOver {
+    /// The instance the catchup handed over.
+    pub(crate) region: MitoRegionRef,
+    /// The committed edit, None for a region that skips the WAL, whose catchup committed an
+    /// empty one.
+    pub(crate) edit: Option<RegionEdit>,
     /// Receives the result of the catchup.
     pub(crate) sender: OptionOutputTx,
 }

@@ -137,6 +137,7 @@ impl UpgradeRegionsHandler {
                     replay_entry_id,
                     metadata_replay_entry_id,
                     replay_timeout,
+                    location_id,
                     ..
                 } = upgrade_region;
                 match timeout {
@@ -165,6 +166,7 @@ impl UpgradeRegionsHandler {
                         entry_id: last_entry_id,
                         metadata_entry_id: metadata_last_entry_id,
                         checkpoint,
+                        source_node_id: location_id,
                     },
                 ));
             }
@@ -324,14 +326,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_legacy_wal_index_hint() {
+    async fn test_location_id_is_the_catchup_source() {
         for location_id in [None, Some(42)] {
             let mock_region_server = mock_region_server();
             let region_id = RegionId::new(1024, 1);
             let (mock_engine, _) =
                 MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |engine| {
                     engine.mock_role = Some(Some(RegionRole::Follower));
-                    engine.handle_request_mock_fn = Some(Box::new(|_, request| {
+                    engine.handle_request_mock_fn = Some(Box::new(move |_, request| {
                         let store_api::region_request::RegionRequest::Catchup(request) = request
                         else {
                             panic!("expected catchup request");
@@ -339,6 +341,7 @@ mod tests {
                         assert!(request.set_writable);
                         assert_eq!(request.entry_id, Some(10));
                         assert_eq!(request.metadata_entry_id, Some(5));
+                        assert_eq!(request.source_node_id, location_id);
                         Ok(0)
                     }));
                 });

@@ -465,10 +465,6 @@ impl PromPlanner {
         // that do not cast, so a float here is only the same answer where the statement's own shape says
         // the existing plan reports `Float64` too; [`read_field_type`] states that per field.
         //
-        // `Float64` fields are answered by the columnar series-index reader when a region prepares one. A
-        // histogram field is not, since the logical plan cannot tell which reader a region will prepare, so
-        // such a selection falls back to the ordinary scan.
-        //
         // A numeric field whose statement publishes the field's own type keeps the existing plan. Naming
         // that refusal here keeps it apart from a selection whose fields genuinely disagree, and it is the
         // refusal a reader can act on: the expression needs an operator that casts - an arithmetic one, a
