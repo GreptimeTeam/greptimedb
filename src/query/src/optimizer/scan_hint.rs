@@ -88,6 +88,9 @@ impl ScanHintRule {
 
         // File scans follow file order and leave time-series row selection to the query.
         if original.is_file_engine() {
+            return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
+        }
+
         // Relational (external table) scans return rows in the remote MySQL
         // order, not time-ordered, so no time-series row selector or ordering
         // hint can be applied: `ORDER BY ... LIMIT` / `last_value` would select

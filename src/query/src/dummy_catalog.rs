@@ -210,6 +210,9 @@ impl TableProvider for DummyTableProvider {
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
         // File readers may use predicates for pruning without filtering individual rows.
         if self.is_file_engine() {
+            return Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()]);
+        }
+
         // The relational engine never evaluates filters (zero pushdown): its
         // synthetic `greptime_timestamp` time index is always `Timestamp(0)`, so
         // a `Tag`/`Timestamp` simple predicate must not be declared `Exact` —
@@ -276,6 +279,8 @@ impl DummyTableProvider {
     /// Returns whether this provider scans File Engine regions.
     pub(crate) fn is_file_engine(&self) -> bool {
         self.engine.name() == FILE_ENGINE
+    }
+
     /// Whether this provider backs a relational (external table) region.
     pub(crate) fn is_relational_engine(&self) -> bool {
         self.engine.name() == RELATIONAL_ENGINE

@@ -41,10 +41,6 @@ pub(crate) struct RelationalScanPlan {
 }
 
 impl RelationalScanPlan {
-    pub(crate) fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
     pub(crate) fn create_stream(&self) -> SendableRecordBatchStream {
         mysql_stream::create_stream(
             self.opts.clone(),

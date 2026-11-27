@@ -21,19 +21,14 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::consts::RELATIONAL_ENGINE;
 use common_error::ext::BoxedError;
-use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
-use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
-use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PrepareRequest, QueryScanContext, RegionEngine, RegionRole, RegionScanner, RegionScannerRef,
-    RegionStatistic, RemapManifestsRequest, RemapManifestsResponse, ScannerProperties,
-    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
-    SyncRegionFromRequest, SyncRegionFromResponse,
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+    SettableRegionRoleState, SinglePartitionScanner, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -46,7 +41,6 @@ use crate::error::{
     RegionNotFoundSnafu, Result as EngineResult, UnexpectedEngineSnafu, UnsupportedSnafu,
 };
 use crate::manifest::RelationalRegionManifest;
-use crate::query::RelationalScanPlan;
 use crate::region::{RelationalRegion, RelationalRegionRef};
 
 pub struct RelationalEngine {
@@ -93,7 +87,17 @@ impl RegionEngine for RelationalEngine {
             .prepare_scan(request)
             .await
             .map_err(BoxedError::new)?;
-        Ok(Box::new(RelationalScanner::new(plan, region.metadata())))
+        // The relational scan is a single remote full-table query with no local
+        // data to partition. Wrap it in `SinglePartitionScanner` so the query
+        // optimizer's `parallelize_scan` rule leaves it at one partition instead
+        // of splitting it into `target_partitions` copies of the same full scan.
+        let stream = plan.create_stream();
+        Ok(Box::new(SinglePartitionScanner::new(
+            stream,
+            false,
+            region.metadata(),
+            None,
+        )))
     }
 
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
@@ -178,80 +182,6 @@ impl RegionEngine for RelationalEngine {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-#[derive(Debug)]
-struct RelationalScanner {
-    plan: RelationalScanPlan,
-    metadata: RegionMetadataRef,
-    properties: ScannerProperties,
-}
-
-impl RelationalScanner {
-    fn new(plan: RelationalScanPlan, metadata: RegionMetadataRef) -> Self {
-        Self {
-            plan,
-            metadata,
-            properties: ScannerProperties::default(),
-        }
-    }
-}
-
-impl RegionScanner for RelationalScanner {
-    fn name(&self) -> &str {
-        "Relational"
-    }
-
-    fn properties(&self) -> &ScannerProperties {
-        &self.properties
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.plan.schema()
-    }
-
-    fn metadata(&self) -> RegionMetadataRef {
-        self.metadata.clone()
-    }
-
-    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
-        self.properties.prepare(request);
-        Ok(())
-    }
-
-    fn scan_partition(
-        &self,
-        _ctx: &QueryScanContext,
-        _metrics_set: &ExecutionPlanMetricsSet,
-        _partition: usize,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
-        Ok(self.plan.create_stream())
-    }
-
-    fn has_predicate_without_region(&self) -> bool {
-        false
-    }
-
-    fn add_dyn_filter_to_predicate(
-        &mut self,
-        filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
-    ) -> Vec<bool> {
-        vec![false; filter_exprs.len()]
-    }
-
-    fn set_logical_region(&mut self, logical_region: bool) {
-        self.properties.set_logical_region(logical_region);
-    }
-
-    fn set_query_load_region_id(&mut self, region_id: RegionId) {
-        self.properties.set_query_load_region_id(region_id);
-    }
-}
-
-impl DisplayAs for RelationalScanner {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "RelationalScanner")
     }
 }
 
