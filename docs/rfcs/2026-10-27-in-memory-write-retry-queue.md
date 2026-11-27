@@ -8,15 +8,9 @@ Status: Draft
 
 ## Summary
 
-This RFC proposes an optional, Frontend-local in-memory retry queue for eligible ordinary, non-tracked direct inserts to partitioned, Mito-backed physical Regions on distributed Frontends.
+This RFC proposes an optional, Frontend-local in-memory retry queue for eligible ordinary, non-tracked direct inserts to partitioned, Mito-backed physical Regions on distributed Frontends. It owns the whole direct-insert call before the first write RPC; after the complete first-round report, it retains eligible failed Region requests and replays them only to their original Regions.
 
-The queue is selected as the sole retry owner for the whole direct-insert call before its first write RPC; it is not an additional retry stage after `WriteRetry`. After the complete first-round report is available, it retains eligible failed Region requests and replays them only to their original Regions.
-
-Each record has an absolute retry deadline and a separate budget for potentially submitted replay attempts. A bounded completion wait preserves the existing client behavior: a transient failure can still return `Ok` when replay success is observed in time.
-
-The queue can capture per-entry failures, collapsed single-entry errors, and attributable whole-peer-RPC failures, but only when the original requests and batch mapping are preserved. A confirmed connection failure that proves the unary request was not submitted consumes deadline and backoff, but not the potentially submitted attempt budget.
-
-The queue is disabled by default and is best-effort and process-local. It provides neither durable retention nor exactly-once or at-least-once delivery; ambiguous RPC outcomes remain duplicate-capable. Admission rejection after queue ownership is selected is fail-closed and receives no inline fallback. This can provide fewer retry opportunities than the existing inline path under capacity pressure and is an accepted v1 limitation.
+Each record has an absolute retry deadline and a separate budget for potentially submitted replay attempts. A bounded completion wait can preserve the existing client behavior by returning `Ok` when every admitted record is observed applied in time. The queue is disabled by default and is best-effort and process-local: it provides no durability, exactly-once, or at-least-once guarantee, and ambiguous outcomes remain duplicate-capable. Once queue ownership is selected, admission rejection is fail-closed with no inline fallback.
 
 ## Motivation
 
@@ -24,22 +18,19 @@ The existing `WriteRetry` in `src/operator/src/write_dispatcher.rs` retries elig
 
 A Datanode restart can outlast the inline retry window. Several failure forms are also difficult to recover from today. A connection refusal may occur before submission, but error conversion can discard its precise transport cause. A peer-batched RPC may fail without per-entry results, and a single-entry failure is returned as a tonic error rather than a `PartialRegion` response. A queue limited to explicit per-entry failures would miss these cases.
 
-The queue also needs a bounded completion wait. Returning the first-round error immediately after background admission would regress the existing contract, under which an inline retry can turn a transient failure into `Ok`.
+The bounded completion wait avoids returning the first-round error immediately after background admission. Capture begins only after the complete first-round report, so a first-round RPC that never returns remains outside the queue's recovery guarantee.
 
-Queue ownership begins only after the complete first-round report is available. A first-round RPC that never returns therefore remains outside the queue's recovery guarantee, and ambiguous outcomes remain duplicate-capable.
+The proposed five-minute `retry_budget` is a qualification starting point for a Datanode restart, including process cold start, Region reopening, and gRPC readiness; it is not a guarantee for arbitrary outages or every migration path. Region failover is disabled by default in the current MetaSrv options, so the budget must not assume that failover will promptly move a Region to another peer. Deployments that enable failover must qualify failure detection, route publication, and migration time separately and verify the required `H_min` before enabling the queue.
 
 ## Goals and Non-goals
 
 ### Goals
 
-- Extend the recovery window for eligible transient insert failures beyond the current inline retry window.
-- Select one retry owner for the whole direct-insert call before the first write RPC.
-- Preserve original Region requests, peer-batch mapping, result provenance, and deterministic error selection.
-- Capture retryable per-entry, collapsed single-entry, and attributable whole-peer-RPC failures.
-- Return `Ok` when every admitted Region record is observed applied within the bounded completion wait.
-- Keep each replay bound to its original Region and validate that the retained request remains compatible with the current table and Region metadata.
-- Bound retained queue state, record lifetime, potentially submitted replay attempts, and local active replay work.
-- Keep queue ownership and lifecycle inside one distributed Frontend runtime and opt the queue into only the supported producer path.
+- Extend recovery beyond the inline retry window without introducing a second retry owner.
+- Preserve request identity, peer-batch provenance, attribution, and deterministic client-visible results.
+- Replay only to the original Region after validating current table and Region compatibility.
+- Bound retained state, replay lifetime, potentially submitted attempts, and local replay work.
+- Restrict ownership to the supported direct-insert path within one distributed Frontend runtime.
 
 ### Non-goals
 
@@ -58,7 +49,7 @@ Queue ownership begins only after the complete first-round report is available. 
 
 ### Supported path
 
-V1 applies only to ordinary, non-tracked direct inserts that reach the `Inserter::do_request` path and dispatch writes to partitioned, Mito-backed physical Regions through the Frontend `WriteDispatcher`.
+V1 applies only to ordinary, non-tracked direct inserts that dispatch to partitioned, Mito-backed physical Regions through the distributed Frontend direct-insert path.
 
 Eligibility depends on the actual producer path and planned Region requests, not the external protocol or table name. SQL, gRPC, pipeline, COPY, and Prometheus requests are included only when their producer uses this direct-insert path and meets every eligibility rule.
 
@@ -73,56 +64,37 @@ The following remain on their existing paths:
 | Sparse primary-key encoding | Whole call remains on its existing path |
 | Metric logical-engine Regions, metric logical-batcher flushes, pending-row/table batchers | Existing path; not queue-owned |
 | Delete, BulkInsert, Flight `DoPut`, and other non-direct insert operations | Existing path; not queue-owned |
-| Standalone Frontend | Queue unsupported |
+| Standalone Frontend | Unsupported; startup validation rejects `write_queue.enable = true` |
 
-Regions without a `partition_expr_version` are excluded intentionally. `partition/src/cache.rs` represents an empty partition expression as `None`, including for unpartitioned Regions, and Mito does not validate a missing version. V1 does not invent a synthetic fence.
+Regions without a `partition_expr_version` are excluded intentionally. V1 does not invent a synthetic partition fence for unpartitioned Regions or Regions whose partition-expression version is unavailable.
 
 V1 requires effective `Dense` primary-key encoding in both the planned Region options and the retained request hint; an absent hint means `Dense`. Sparse encoding is excluded because its missing-column synthesis semantics differ. Replay never rewrites the retained hint.
 
 ### Whole-call retry-owner selection
 
-The producer performs queue preflight after the original insert has been planned and materialized, and after the target Region requests have been prepared, but before the first write RPC.
+When queue mode is disabled, the producer skips queue-specific capture and estimation and keeps the existing path. When enabled, preflight runs after planning, materialization, and Region-request preparation, but before the first write RPC. If any Region attempt is ineligible, the whole call stays on its existing path; a no-leader or preparation failure before RPC entry is a call-level error and creates no record.
 
-- If every Region attempt is eligible and queue mode is enabled for this supported producer call, the whole call selects the queue as its retry owner.
-- If any Region attempt is ineligible, the whole call remains on the existing path. V1 does not mix queue ownership and legacy inline ownership within one call.
-- Once queue ownership is selected, admission rejection is fail-closed. The queue does not fall back to inline retry for a rejected candidate.
-
-Preflight follows route/leader preparation. A no-leader or preparation failure before the first write RPC is a call-level error and creates no queue record. A stale-leader or transport failure after RPC entry is a first-round outcome and may be admitted when its provenance and retry classification permit it.
+When every Region attempt is eligible, compute the request charge and atomically select the retry owner for the whole call. The selection succeeds only while the queue is open and healthy; if it is already closed or unhealthy, reject the call before the first write RPC rather than silently falling back to inline retry. Once selected, the queue is the sole retry owner and ownership cannot later switch to inline retry. Candidate publication is still per Region, so a later close, coordinator failure, or capacity rejection may reject a candidate without fallback. A stale-leader or transport failure after RPC entry is classified from its first-round provenance. This avoids mixing retry owners within one call.
 
 Queue-owned calls work with `write_retry.max_retries = 0` because capture and replay are independent of `WriteRetry`. Preflight-ineligible calls keep the existing behavior and receive no legacy retry rounds when that setting is zero.
 
-### Explicit producer integration
+### Frontend ownership and producer boundary
 
-The distributed Frontend `Instance` owns one queue, constructed by `FrontendBuilder`. Inject it only into the supported ordinary `inserter`; do not add it to shared `WriteDispatcher` configuration.
+A distributed Frontend owns one queue, coordinator, ledger, and shutdown lifecycle shared by all of its request-serving instances. A standalone Frontend is unsupported. The queue becomes the retry owner only for eligible ordinary, non-tracked direct inserts; tracked writes, bulk operations, pending-row/table batchers, and unrelated dispatcher users retain their existing paths.
 
-`FrontendBuilder::try_build` creates the ordinary `inserter` and execution-only `bulk_inserter` through a shared closure. Keep the `bulk_inserter` queue-free: inject the queue after separating the ordinary producer path. It must not reach pending-row/table-batcher flushes, Delete, BulkInsert, tracked writes, or other shared-dispatcher users. Carry the eligibility decision in the supported direct-insert execution context.
-
-Capture Flow eligibility from the same `FlowMirrorTask` construction that creates and detaches mirror work before Region dispatch. Carry an immutable `has_mirror_requests` (or equivalent) result; do not query Flow membership again during replay. Impure defaults are materialized before dispatch, and replay reuses the retained request without re-evaluation.
+Eligibility is decided from the planned request before the first write RPC. The queue captures the planning-time Flow decision and reuses already-materialized request values; it does not re-evaluate impure defaults or submit Flow mirrors during replay. A request with an existing Flow mirror remains ineligible.
 
 ## First-Round Capture and Admission
 
 ### Required capture path
 
-The current dispatcher does not provide the capture behavior required by the queue in all configurations:
+The queue requires an explicit capture path independent of the legacy `WriteRetry` loop and independent of whether `WriteProgress` is present. This path must preserve the original materialized Region requests and their provenance; it must not reconstruct or serialize request payloads solely for replay.
 
-- `execute_with_progress` selects `send_batch` only when legacy retry is present or progress tracking is enabled.
-- The direct `send` path does not retain a failed request when `retry` is `None`.
-- The `send_batch` path with `retry == None` requests per-entry partial results, but its failure results do not retain the original per-Region requests for replay.
-- The current `WriteRetry::should_retry` treats a terminal sibling as a reason not to retry the whole attempt set.
+Before peer grouping, assign each planned Region attempt a deterministic ordinal and retain its exact mapping to the peer-batch entry, original Region and peer, retry hint, typed submission disposition, plan-time compatibility metadata, and `WriteAttribution`. After the complete first-round report, create records only for eligible failed Region attempts. Successful entries remain observed applied and are never replayed. Missing or ambiguous request/result provenance makes the affected attempt unadmittable rather than guessed.
 
-V1 therefore requires a queue-specific first-round capture path that is explicitly selected by the supported producer and works independently of both `WriteRetry` and `WriteProgress`. It must not change the retry behavior of unrelated dispatch callers.
+Preserve attribution independently of retry ownership. A successful Datanode acknowledgement updates only its successful Region rows. A queued failed Region retains its matching attribution and may update it once on an observed replay acknowledgement; first-round successes must not be counted again. A local attribution/accounting error after observed Datanode success remains a client-visible local error but must never turn the confirmed storage success into a replay candidate. `affected_rows` and progress remain acknowledgement observations, not exact logical-row or deduplicated-application totals.
 
-Before peer grouping, assign each planned Region attempt a deterministic ordinal and retain a lightweight sidecar containing:
-
-- the ordinal, target `RegionId`, and original peer-batch membership;
-- the exact mapping from each peer-batch entry back to its Region attempt;
-- the original retry hint/error and structured submission disposition for each observed result;
-- the plan-time table, Region, partition, Flow, and request-compatibility metadata;
-- the precomputed retained-charge estimate.
-
-Keep shared ownership of the original peer-batch request through the RPC; do not build a second payload copy. On failure, use the captured entry mapping to isolate only failed entries and create `RoutedWrite` values holding their original materialized `Arc<RegionRequest>`. Successful entries do not become queue records. The implementation may use the envelope type already present in `send_batch`, but must not encode/decode or reconstruct payloads.
-
-`WriteDispatcher::prepare` groups Region requests by peer using a `HashMap`, so iteration order is unstable. Assign Region ordinals and preserve entry mapping before grouping; error selection must not depend on map order or RPC completion timing.
+If a retained progress handle owns an upstream reservation or acknowledgement observer, the queue must retain that ownership safely and account for its bounded memory. Shared progress allocations and reservations are charged once across records and released only after the last queue-owned reference is released.
 
 ### Partial results and Datanode compatibility
 
@@ -141,51 +113,34 @@ Every target Datanode must support the per-entry partial-result contract before 
 
 | First-round outcome | Queue action |
 |---|---|
-| Observed success | Never replay |
-| Per-entry retryable failure with exact request and sidecar | Admit as an independently retryable Region record |
+| Observed Datanode success | Never replay; preserve the applied result |
+| Datanode success followed by a local attribution/accounting error | Preserve the observed application and local error separately; do not create a queue record or replay the write |
+| Per-entry retryable failure with exact request and sidecar | Admit as `observed_retryable_failure` |
 | Collapsed single-entry retryable failure with exact request and sidecar | Admit as `first_round_unknown`; the original write may have applied |
-| Whole-peer-RPC retryable failure with exact split requests and batch mapping | Admit one `first_round_unknown` record for each original Region split |
+| Other retryable whole-peer-RPC failure with exact split requests and batch mapping | Admit one `first_round_unknown` record per original Region split; an exact typed `not_submitted` marker is classified as `first_round_not_submitted` as in the following row |
 | Confirmed `not_submitted` with exact request and provenance | Admit as `first_round_not_submitted`, even without a normal retry hint |
 | Terminal error | Preserve the error; do not admit that Region attempt |
 | Retryable-looking error with missing/ambiguous provenance | `unadmittable`; preserve the error and do not replay |
 
-The table covers outcomes after the first write RPC is entered. A no-leader or preparation failure before RPC entry is a call-level pre-dispatch error and creates no queue record; see **Whole-call retry-owner selection**. A whole-peer-RPC or collapsed single-entry failure does not prove that the Datanode applied nothing, so replay remains duplicate-capable.
+The table covers outcomes after RPC entry. A whole-peer-RPC or collapsed single-entry failure does not prove non-application and remains duplicate-capable. Queue records have exactly three first-round dispositions: `observed_retryable_failure`, `first_round_not_submitted`, or `first_round_unknown`; terminal and `unadmittable` outcomes create no record. A successful Datanode response remains observed applied even when local attribution/accounting fails: preserve the accounting error for client response selection, but never admit or replay that Region.
 
-The dispatcher waits for all peer-batch futures before producing the first-round report. V1 keeps this handoff boundary: it neither streams partial results into the queue nor adds a timeout to the initial RPC. A hung first-round RPC can therefore delay the whole call and prevent already-failed siblings from admission; `completion_wait` starts only after the report and admission decisions are complete.
+V1 waits for the complete first-round report before handing results to the queue; it neither streams partial results nor adds a timeout to the initial RPC. The queue does not define a separate cancellation protocol for in-flight first-round RPCs: if caller cancellation or task abort prevents a complete report from being produced, no partial report is handed to the queue, although a Datanode may already have applied an RPC. When a complete report is available, cancellation is checked at each candidate-publication boundary. A hung first-round RPC can therefore delay the whole call and prevent already-failed siblings from admission; `completion_wait` starts only after the report and admission decisions are complete.
 
 Retryable siblings may still be admitted when another sibling is terminal or unadmittable. The caller receives an error, but admitted siblings remain queue-owned and may apply later.
 
 ### `not_submitted` classification
 
-Datanode channels are lazy: `client.ready()` may succeed before a connection is established. A connection refusal can instead surface from `unary()` as `Unavailable` with the exact `tonic::ConnectError` in its raw source chain.
+`not_submitted` is reserved for a typed transport disposition that positively establishes that the RPC was not submitted. Attach that disposition before error normalization can discard the evidence, and carry it with the original request and peer-batch provenance.
 
-Attach the typed `not_submitted` disposition at that `unary()` error boundary, before `map_region_error` normalizes the status and drops the source detail. Carry it as structured metadata with the original Region request and peer-batch provenance.
-
-Do not classify a request as `not_submitted` based on:
-
-- a `ready()` error;
-- generic `Unavailable` or `Unknown` status;
-- error text or message matching;
-- an arbitrary transport error;
-- a source chain inspected later, after error normalization.
-
-Only that exact connection-error type at the unary boundary qualifies. If the marker is unavailable or the client behavior changes, fall back to the propagated retry hint or mark the attempt unadmittable. Pin the implementation and test to the repository's resolved Tonic version.
+Generic `Unavailable`/`Unknown` statuses, error text, arbitrary transport errors, or a source chain inspected after normalization are not proof of non-submission. If the transport layer cannot provide the typed proof, retain the propagated retry hint or mark the attempt unadmittable; do not infer that the remote write did not happen. Confirmed non-submission does not consume the potentially-submitted attempt budget, but remains subject to the record deadline and backoff.
 
 ### Admission and capacity behavior
 
-Admission is the ownership boundary: publication transfers a candidate to the queue, which owns it until settlement or shutdown.
+Admission is a per-Region ownership transition: publication transfers a candidate to the queue, which owns it until settlement or shutdown. Cancellation observed before publication prevents that candidate from being admitted; cancellation after publication only detaches the caller. The record, retained-memory charge, and completion registration must become visible together.
 
-The caller's cancellation token is checked under the QueueState lock immediately before each candidate is published, with no `await` between the check and commit. This is the candidate's publication linearization point: cancellation observed at the check prevents publication; cancellation racing after the check loses to publication.
+Admission is non-blocking and may reject a candidate because the queue is closed or unhealthy, provenance is invalid, or shared record/byte capacity is exhausted. Publication is per Region, not atomic for the whole call, and V1 does not reserve capacity for the whole call before its first RPC. A candidate rejected after queue ownership has been selected fails closed with no inline fallback; already-published siblings remain queue-owned.
 
-The record, retained charge, and completion-observer registration are committed together. Publication is per Region candidate, not atomic for the whole call. Already-published records remain queue-owned; cancellation only detaches the caller and prevents publication of later candidates.
-
-Admission does not wait for capacity, network I/O, metadata lookup, or worker scheduling. It may reject a candidate because the queue is closed or unhealthy, its sidecar is invalid, or shared record/byte capacity is exhausted. Only errors from explicitly fallible reservation/allocation APIs are surfaced; v1 does not catch process-wide OOM.
-
-**V1 does not reserve capacity for the whole call before its first RPC.** A candidate that fits individually may still be rejected after queue ownership is selected because other records consumed the shared budget. Rejection is fail-closed, with no inline fallback, and can provide fewer retry opportunities than the existing inline path under saturation.
-
-This is an accepted v1 limitation; opt-in rollout and workload qualification must establish that the configured envelope fits. Whole-call reservation is a separate design requirement if maintainers require no capacity-pressure regression.
-
-If a candidate's charge cannot be computed safely or exceeds the entire `max_bytes` limit, preflight excludes the whole call before queue ownership is selected.
+If the retained charge cannot be computed safely or exceeds the entire configured byte limit, exclude the whole call before selecting queue ownership. Whole-call capacity reservation is deferred; the accepted possibility of partial admission must be covered by workload qualification.
 
 ## Client-Visible Contract
 
@@ -193,47 +148,34 @@ If a candidate's charge cannot be computed safely or exceeds the entire `max_byt
 
 Assign each Region attempt its ordinal before peer grouping. Determine the selected first-round error from the complete first-round report and admission results, before entering completion wait:
 
-1. If any terminal, unadmittable, or admission-rejected candidate exists, select the original first-round error belonging to the lowest-ordinal such candidate. Capacity/closed rejection does not replace it with a synthetic queue error; the rejection reason is recorded separately.
+1. If any terminal, unadmittable, admission-rejected, or cancelled-before-publication candidate exists, or a local attribution/accounting error is attached to an observed Datanode success, select the lowest-ordinal associated error. For a failed candidate, preserve its original first-round error; for an observed success with failed local attribution, preserve the local accounting error. Capacity/closed rejection and cancellation do not replace an original error with a synthetic queue error. A failed candidate that was not published must prevent `Ok`, even if every already-published sibling later applies.
 2. Otherwise, if at least one candidate was admitted, select the original first-round error belonging to the lowest-ordinal admitted candidate. This is the fallback response if completion wait does not observe all records applied.
-3. If there are no failed candidates, return the ordinary first-round success result.
+3. If the report contains no errors and no failed Region candidates, return the ordinary first-round success result.
 
-Selection is independent of peer `HashMap` order and RPC completion timing. A later replay error never replaces the selected first-round error; replay outcomes remain in bounded record history and queue observability.
+Selection is deterministic and independent of peer grouping order or RPC completion timing. A later replay error never replaces the selected first-round error; replay outcomes remain in bounded record history and queue observability.
 
 ### Bounded completion wait
 
-After the complete first-round report and all admission decisions are available:
+After the complete report and admission decisions:
 
-- If any first-round outcome is terminal or unadmittable, or any candidate is rejected, return the selected first-round error. Admitted siblings continue independently.
-- If every failed candidate is admitted and already observed applied, return `Ok` without waiting.
-- Otherwise, wait up to `write_queue.completion_wait` for all admitted records to become applied. Return `Ok` only if every record is observed applied before the deadline; otherwise return the selected first-round error.
-- A final non-applied settlement or wait expiry does not cancel other queue-owned records. `completion_wait = 0` takes an immediate completion snapshot and never blocks.
+- If the report contains a terminal or unadmittable outcome, a candidate rejected or cancelled before publication, or an observed Datanode success with a local attribution/accounting error, return the error selected by rule 1; already-published siblings remain queue-owned.
+- If every failed candidate is admitted and observed applied, return `Ok` without waiting.
+- Otherwise, wait up to `write_queue.completion_wait` for every admitted record to become applied. Return `Ok` only when all are applied before the deadline; return the fallback first-round error selected by rule 2 as soon as any record settles non-applied or the wait expires.
+- Caller detachment or wait expiry does not cancel queue-owned records. `completion_wait = 0` takes an immediate snapshot and never blocks.
 
 Register completion notification before a record becomes runnable so a completion racing with wait registration remains observable. After publication, caller detachment releases only the observer; it does not cancel the record. Cancellation before publication prevents admission, as defined in **Admission and capacity behavior**.
 
-`affected_rows` is a response-time snapshot. It includes first-round successes and replay successes observed before the response is constructed. It is not an exact logical row total: an earlier `first_round_unknown` or replay `issue_unknown` may also have applied.
+`affected_rows` is a response-time snapshot. It includes first-round successes and replay successes observed before the response is constructed. `WriteProgress` follows the same acknowledgement-based accounting. Neither value is an exact logical row total: an earlier `first_round_unknown` or replay `issue_unknown` may also have applied, and a duplicate-capable replay can acknowledge rows whose original application was not observed.
 
 ## Replay Model
 
 ### Record and ownership
 
-One queue record represents one original Region request. It retains:
+One queue record represents one original Region request. It retains the original materialized request, Region identity, matching write attribution, immutable first-round disposition, bounded error/retry provenance, plan-time replay-policy and request-compatibility metadata, retained-charge estimate, admission time/deadline, attempt and backoff state, bounded replay history, and caller completion state while attached.
 
-- the original materialized `Arc<RegionRequest>`;
-- the original peer and Region identity;
-- immutable first-round disposition and bounded error/retry provenance;
-- plan-time replay-policy and request-compatibility snapshots;
-- retained-charge estimate;
-- admission time and absolute retry deadline;
-- potentially-submitted replay-attempt count;
-- backoff state and a bounded potentially-submitted replay-attempt history, with at most `max_attempts` entries;
-- bounded diagnostics for confirmed replay `not_submitted` outcomes (a saturating per-record count and the last bounded error class, not an unbounded per-invocation list);
-- caller completion state while the caller remains attached.
+The first-round disposition never changes. Replay outcomes update only replay history and final settlement. History and diagnostics are bounded; raw or unbounded error messages are not retained. Caller detachment stops completion observation but does not release record-owned request or attribution state.
 
-The first-round disposition never changes. Replay outcomes update only replay history and settlement. Both the potentially submitted history and `not_submitted` diagnostics are bounded; raw or unbounded error messages are not retained.
-
-There is one FIFO per Region. Records are ordered by successful admission-publication sequence, not client arrival, original dispatch-start time, or SQL row order. Only one record per Region is eligible to replay at a time. The FIFO head retains its Region reservation across backoff but does not occupy a Frontend-wide replay slot while sleeping.
-
-A FIFO covers admitted queue records only. It does not serialize replay against concurrent live writes, legacy-inline retries, or other Frontends.
+There is one FIFO per Region, ordered by successful admission publication. Only one record per Region is eligible to replay at a time. The FIFO head retains its Region position during backoff but releases its Frontend-wide replay slot. This FIFO orders queue records only; it does not serialize replay against concurrent live writes, legacy-inline retries, or other Frontends.
 
 ### Retry deadline and attempts
 
@@ -241,25 +183,33 @@ Each record has an absolute monotonic deadline:
 
 `deadline = admission_time + write_queue.retry_budget`
 
-The deadline includes backoff, route/catalog preparation, leader resolution, and replay RPC execution. A record that reaches its deadline before send authorization is settled without another RPC.
+The deadline covers backoff, route/catalog/leader/client preparation, and replay authorization. No RPC may be authorized at or after the deadline. Preparation that outlives the remaining budget is cancelled locally and settles from the history already observed. A replay authorized before the deadline may finish under its separate `replay_rpc_timeout`; settlement and cleanup may occur after the deadline, but no later invocation may be authorized. Expiry of one record must not cancel a shared refresh still needed by other records.
 
-`write_queue.max_attempts` counts potentially submitted replay invocations, not the original first-round request. Confirmed `not_submitted` invocations increment the bounded diagnostics in **Record and ownership**, but do not enter the attempt history or consume this budget; they still consume deadline and backoff. Every other authorized invocation consumes one attempt. If it ends without an observed result, it is recorded as unresolved (`issue_unknown`) and remains duplicate-capable.
+`write_queue.max_attempts` counts potentially submitted replay invocations, not the original first-round request. A confirmed typed `not_submitted` invocation does not consume this budget, but does consume deadline and backoff. Any other invocation authorized for RPC submission consumes one attempt. A timeout or worker failure after authorization without an observed result is unresolved (`issue_unknown`) and remains duplicate-capable.
 
-Queue replay reuses `write_retry.initial_backoff`, `write_retry.max_backoff`, and `write_retry.backoff_multiplier`, including positive jitter. `write_retry.max_retries` does not apply to queue-owned records. The maximum backoff setting caps the base delay before jitter, so the actual wait may approach twice the configured cap.
+The authorization boundary must be linearized immediately before invoking the RPC. Once authorization commits, the invocation is potentially submitted unless a typed proof of non-submission is observed; timeout or worker failure after that boundary is not evidence that the Datanode did no work. There must be no asynchronous gap between authorization and invoking the RPC. `replay_rpc_timeout` covers the complete authorized RPC operation.
 
-The table covers both pre-authorization outcomes and replay invocations. Classify RPC errors using the final propagated `RetryHint`; the queue's deadline and attempt budget do not make a non-retryable error retryable:
+### Connection-establishment timeout ordering
+
+A typed connection failure can be classified as `not_submitted` only if it reaches the queue before the outer `replay_rpc_timeout` expires. When the queue is enabled, startup validation must use the effective `datanode.client.connect_timeout` and require it to be non-zero and `write_queue.replay_rpc_timeout >= datanode.client.connect_timeout + 1s`. Reject an invalid configuration at startup; do not silently relax the classification or fall back to the legacy retry owner. The one-second floor is a provisional minimum propagation margin, not a proven upper bound for scheduler delay; its adequacy must be demonstrated by the required failure tests. It does not cover arbitrary queueing behind other calls on the shared channel.
+
+The repository example sets `datanode.client.connect_timeout = 10s`; therefore the provisional `replay_rpc_timeout` in this RFC is `15s`, not `10s`. Operators who change the effective Datanode client timeout must keep this relationship valid. If the outer RPC timeout wins before a typed connection disposition is observed, the invocation remains `issue_unknown` and consumes one potentially submitted attempt; the implementation must never infer `not_submitted` merely because the peer appears unreachable.
+
+The shared per-peer lazy channel can serialize delivery of connection failures to queued calls. Qualification must therefore also exercise multiple replay invocations targeting the same peer at the maximum configured `replay_concurrency`, alongside the single-invocation blackhole case. Record which calls receive typed connection errors and which reach the outer timeout. Any timeout without typed proof remains `issue_unknown`; if that behavior exhausts the declared retry/workload envelope, enablement is blocked until the timeout/concurrency arrangement is corrected or the supported workload is explicitly narrowed. The timeout inequality alone is not evidence that arbitrary same-channel backlog is covered.
+
+Queue replay reuses `write_retry.initial_backoff`, `write_retry.max_backoff`, and `write_retry.backoff_multiplier`, including the existing positive-jitter policy, but not the finite legacy retry iterator or `write_retry.max_retries`. The queue uses a saturating, deadline-bounded backoff whose base delay is capped at `max_backoff` before positive jitter; as in the existing policy, the actual wait may approach twice the configured cap. Exact `not_submitted` outcomes and pre-authorization deferrals continue to be scheduled while the record deadline remains.
+
+The first replay preserves the first-round classification. `observed_retryable_failure` and `first_round_unknown` retain the original `RetryHint`; a route-refresh hint joins a coalesced route refresh after the initial backoff. `first_round_not_submitted` resolves the current route after backoff without forcing invalidation solely because the original connection was refused. In all cases replay resolves a peer/leader for the same Region and does not use the legacy request-rebuild path.
 
 | Replay-processing outcome | Queue action |
 |---|---|
-| Observed success | Settle `applied` and release the Region FIFO head |
-| Retryable hint without route refresh | Consume one potentially submitted attempt; back off and retry while both budgets remain |
-| `RetryAfterRouteRefresh` | Consume one potentially submitted attempt; join a coalesced refresh cycle, refresh routing for the original Region, then retry only that same Region if still valid and budgets remain |
-| Non-retryable hint | Stop authorizing retries; final settlement follows **Replay of unknown outcomes**, where an earlier unresolved invocation keeps the result `issue_unknown` |
-| Exact typed replay `not_submitted` | Record bounded diagnostics; consume deadline/backoff but not `max_attempts` or the potentially-submitted attempt history |
-| No-leader or transient route/catalog preparation failure before authorization | Defer with backoff; no invocation and no attempt consumed |
-| Timeout or worker failure after authorization without an observed result | Mark the invocation unresolved (`issue_unknown`); consume one potentially submitted attempt and permit another invocation only while both budgets remain |
-
-Use the final hint from the existing error-classification path, never status text. Pre-authorization deferrals and confirmed `not_submitted` outcomes release the active replay slot during backoff but retain the Region FIFO head. Route refresh never changes the target Region; see **Same-Region replay only**.
+| Observed success | Settle `applied`; stop replay for the record |
+| Retryable hint | Consume one potentially submitted attempt; back off while both budgets remain |
+| `RetryAfterRouteRefresh` | Consume one attempt; coalesce refresh work, then retry only the original Region if still valid |
+| Non-retryable hint | Stop authorizing retries; settlement follows **Replay of unknown outcomes** |
+| Confirmed typed `not_submitted` | Do not consume an attempt; retain the Region FIFO head and back off |
+| No-leader or transient preparation failure before authorization | Defer with backoff; no invocation or attempt consumed |
+| Timeout or worker failure after authorization without a result | Record unresolved `issue_unknown`; consume one potentially submitted attempt |
 
 ### Replay of unknown outcomes
 
@@ -275,7 +225,7 @@ Each record has one final replay settlement, with earlier outcomes retained in b
 4. `observed_failure` if a potentially submitted replay returned an error, no replay success was observed, no invocation remains unresolved, and replay stops without a confirmed stale-target result.
 5. `replay_not_sent` if no potentially submitted replay invocation occurred and no confirmed stale-target result applies. Confirmed `not_submitted` invocations and pre-authorization deferrals do not change this settlement.
 
-`replay_not_sent` describes only the replay phase. The original first-round disposition remains unchanged and is recorded separately.
+`replay_not_sent` describes only the replay phase. The original first-round disposition remains unchanged and is recorded separately. In particular, when the first-round disposition is `first_round_unknown`, any non-`applied` replay settlement describes only replay and does not establish that the logical write was not applied by the original RPC.
 
 A worker failure before send authorization creates no invocation. A worker failure after authorization without an observed result marks that invocation unresolved. A per-record failure must not stop unrelated Regions. V1 does not automatically restart a failed record or coordinator.
 
@@ -294,26 +244,15 @@ Before send authorization, replay must establish:
 
 A confirmed mismatch sets `give_up_reason = stale_target` and stops replay. Final settlement still follows **Replay of unknown outcomes**; an earlier unresolved invocation remains `issue_unknown`. Stale, unavailable, incomplete, or conflicting observations defer with backoff and never authorize a send.
 
-Route and catalog observations are refreshed through the existing Frontend partition/catalog/cache services. They are not an atomic cross-cache snapshot. For one replay refresh cycle, work for runnable records should be coalesced by table identity and reuse the current `WriteRetry::reroute_failed_writes` refresh pattern where applicable:
+Route and catalog refreshes may be coalesced across ready Region heads to avoid one refresh per record. They are observations, not an atomic cross-cache snapshot and not a substitute for per-record validation. Every record must independently validate the refreshed table identity, Region route, request compatibility, and selected leader before send authorization. Stale, unavailable, incomplete, or conflicting metadata defers the record; it never authorizes a speculative send.
 
-1. Batch-invalidate the affected Region routes.
-2. Resolve each distinct table's current name from its stable table identity.
-3. Invalidate the corresponding name-keyed table cache entry.
-4. Reload each distinct table through the existing `catalog_manager.table(name)` path, preserving its version-checked cache behavior.
-5. Revalidate each record against its own captured table/Region/request sidecar and refreshed route snapshot.
+Queue replay does not rebuild a partitioner, repartition rows, or redirect to another Region. A refreshed route is used only to locate the current peer/leader for the original `RegionId`. If the existing services cannot provide a sufficiently current view, defer the send.
 
-Unlike the inline retry path, queue replay does not reconstruct a partitioner or reroute the request. The refreshed route is used only to find the current peer/leader for the original `RegionId`. If existing services cannot provide a sufficiently current route/catalog view, defer the send.
-
-`TableIdent.version` is a freshness signal, not table identity and not an automatic stale condition. A version change triggers compatibility revalidation. A rename preserves identity when `TableId` remains unchanged; drop/create under the same name produces a different identity.
+The table metadata version is a freshness signal, not table identity and not an automatic stale condition. A version change triggers compatibility revalidation. A rename preserves identity when the stable table ID is unchanged; drop/create under the same name produces a different identity.
 
 ### Request compatibility
 
-The plan-time sidecar captures the minimum information needed to validate the meaning of the retained request:
-
-- complete table column-name-to-`ColumnId` mapping;
-- for each planning column: name, `ColumnId`, logical type including datatype extension, semantic type, nullability, and default constraint;
-- for present request columns: whether the retained values contain NULL;
-- replay-policy fields: engine, append mode, instant-TTL, effective Dense encoding, and the original Flow-mirror decision.
+The plan-time sidecar captures stable table/column identity, the type and semantic properties relevant to retained values, nullability/default synthesis rules, and replay-policy fields (engine, append mode, instant-TTL, effective Dense encoding, and the original Flow decision). It must include a complete planning-time column-name-to-`ColumnId` mapping so drop/recreate under the same name can be distinguished from a genuinely new column.
 
 If planning metadata lacks a complete column-ID mapping, the whole call is preflight-ineligible. Replay-time missing or ambiguous metadata is unverifiable and defers without sending.
 
@@ -332,45 +271,51 @@ For omitted columns, distinguish columns that existed when the request was plann
 - **Added after planning:** only a name that was absent from the complete planning-time name-to-`ColumnId` map is treated as a genuinely new column. It is compatible if Mito can synthesize it without an impure default: nullable with or without a literal default, or `NOT NULL` with a literal default. An impure default or `NOT NULL` without a default is incompatible.
 - **Dropped and re-added under the same name:** this is not a genuinely new post-planning column. The name existed in the captured map but now resolves to a different `ColumnId`, so the compatibility check returns `stale_target`, including when the replacement column would otherwise be nullable or have a literal default. Further replay stops; final record settlement follows **Replay of unknown outcomes**.
 
-This is a request-specific compatibility check, not a general schema-diff framework. A `TableIdent.version` change or `ADD COLUMN` is not automatically stale when Mito can safely synthesize the omitted value.
+This is a request-specific compatibility check, not a general schema-diff framework. A table metadata version change or `ADD COLUMN` is not automatically stale when Mito can safely synthesize the omitted value.
 
 ## Resource Limits and Scheduling
 
 ### Frontend-wide limits
 
-The queue is one instance per distributed Frontend. It owns the following Frontend-wide limits:
+The queue has one ledger and coordinator per distributed Frontend, shared by all `Instance` references and clones. Its limits are:
 
-- `write_queue.max_bytes`: estimated retained charge for request payload and bounded queue metadata;
-- `write_queue.max_records`: admitted records, including records whose payload has been released but whose caller completion state remains attached;
-- `write_queue.replay_concurrency`: active local replay work, including metadata/route preparation and RPC execution.
+- `write_queue.max_bytes`: estimated charge for all queue-retained request, attribution/progress, and bounded metadata state;
+- `write_queue.max_records`: admitted records, including completion-only records whose payload has been released;
+- `write_queue.replay_concurrency`: active local replay work, including metadata/route/leader/client preparation and RPC execution.
 
-The queue retains the original materialized request by `Arc`; it does not create an encoded copy or replay-side body copy. A typed, checked-arithmetic estimator computes the retained charge once per Region request before the first RPC. It covers request rows/columns and dynamic string/bytes/JSON payloads supported by the request type, plus bounded queue metadata and completion state. If the estimate cannot be computed safely, preflight keeps the whole call on its existing path.
+The queue retains the original materialized request; it does not create an encoded or replay-side payload copy. The estimator must conservatively account for queue-owned allocations using allocated capacities, including request data, compatibility metadata, attribution, shared progress reservations, bounded diagnostics, and caller-completion state. If an owned allocation cannot be measured safely, the call is preflight-ineligible. Shared allocations and reservations are charged once and released only after their last queue-owned reference is released.
 
-The estimator runs on the successful producer path, so first-round successes also pay its traversal cost. It must not acquire the QueueState lock, perform extra route/catalog lookups, or encode/copy the payload solely for queue accounting. Run it once over the materialized request and report its cost separately from failure-path work.
+`max_bytes` is an admission-accounting bound, not a process RSS cap. Payload/attribution and completion-state charges have separate release points: settlement releases the payload/attribution charge, while completion state remains charged until the caller detaches. `max_records` likewise includes attached completion-only records. Every terminal/rejection path must release each applicable charge exactly once. No dead-letter payload archive or query API is provided in v1.
 
-Before rollout, compare CPU per row, throughput, and latency with the queue-disabled baseline. Maintainers must explicitly accept the measured overhead; this RFC sets no percentage threshold. The ledger is an estimate, not an RSS bound: allocator overhead, gRPC/protobuf buffers, unrelated Frontend allocations, and remote Datanode work are excluded. Measure RSS separately.
-
-Temporary reservations and published entries use the same ledger so concurrent admissions cannot overcommit the configured queue limits. Every rejection and terminal path releases its reservation/charge exactly once. No dead-letter payload archive or dead-letter query API is provided in v1.
+When queue mode is enabled, estimation is part of the successful producer path even when the first-round write succeeds; this cost must be measured against a queue-disabled baseline. The estimator must not perform route/catalog I/O or create a payload copy solely for accounting. Temporary reservations and published records share the same ledger so concurrent admissions cannot overcommit configured limits.
 
 ### Scheduling and fairness
 
-The scheduler runs ready Region FIFO heads with round-robin selection among Regions that are currently runnable. A record in backoff holds its Region FIFO head but no Frontend-wide active replay slot. Slow route/catalog/leader preparation consumes an active replay slot.
+The scheduler runs ready Region FIFO heads with round-robin selection among runnable Regions. A head retains its Region FIFO position during backoff but releases its Frontend-wide replay slot. Preparation consumes a slot and is bounded by the remaining record deadline. V1 does not promise bounded drain time or strict fairness: a hot Region is serialized, a prolonged no-leader backlog can consume shared capacity, and slow preparation can occupy every replay slot.
 
-V1 makes no drain-time promise for arbitrary backlogs. `retry_budget` is an authorization deadline, not a service objective. Before enablement, maintainers must define the supported total backlog, maximum hot-Region depth, drain-time objective, p99 admission-to-first-authorization latency, and acceptable pre-authorization expiry fraction.
+The supported backlog, hot-Region depth, recovery drain objective, first-authorization latency, expiry fraction, and `H_min` must be qualified under **Performance and workload qualification**. Refresh coalescing reduces repeated metadata work but does not add per-Region replay parallelism. Further scheduling, reservation, or rate-control mechanisms require separate evidence and review.
 
-Qualification must show that records within this envelope retain an approved `H_min` at first authorization. Set `H_min` from measured replay RPC duration, settlement overhead, and a safety margin; this RFC does not assign it a numeric value. If one-record-per-RPC scheduling and per-Region serialization cannot meet the envelope, keep the feature disabled. Coalescing or per-Region reservations require a separate decision.
+### Performance and workload qualification
 
-V1 provides neither bounded drain time nor strict fairness. A hot Region is serialized; a prolonged no-leader backlog can consume shared capacity; and slow metadata preparation can occupy every replay slot. There is no per-Region reservation, per-batch burst limit, or global rate ceiling for confirmed connection failures. Treat these as workload-envelope and canary criteria; add scheduling or rate-control mechanisms only if measurements justify them.
+RFC review does not require running performance or RSS tests. Before canary enablement, the implementation must pass a reproducible qualification against a queue-disabled baseline using the same release build, hardware/container limits, Datanode topology, data, schema, and workload. Test normal and peak eligible-ingest rates, representative production request shapes, capacity/fan-out stress, and failure cases covering Datanode restart, fast connection refusal, an unanswered/blackholed peer reaching `datanode.client.connect_timeout`, same-peer concurrent replays through the shared lazy channel, no-leader/route refresh, Datanode rejection, write-buffer stalls, and repeated local timeouts with remote work still pending. Exercise both hot-Region and distributed-Region workloads.
+
+The qualification must measure: (1) successful-path CPU/row, throughput, and p50/p95/p99 latency, including estimator cost; (2) estimated retained charge versus an independent retained-object capacity measurement, Frontend RSS at baseline/peak backlog/post-drain, and exact-once charge release; (3) Datanode RSS, write-buffer pressure, lingering remote work, confirmed `not_submitted` connection-attempt rates, and the fraction of same-peer calls that time out before a typed connection result; (4) first-authorization latency, pre-authorization expiry, admission rejection, backlog/drain behavior, per-Region wait, and replay-slot utilization; and (5) correctness of request mapping, acknowledgements, attribution, and documented duplicate-capable outcomes.
+
+The deployment owner must predeclare numeric workload-envelope values from production traces or representative load tests: normal/peak requests and rows per second; request size/row distribution; active Region count, peer fan-out, maximum simultaneous replay candidates targeting one Datanode peer (bounded by `replay_concurrency` unless the implementation imposes a lower limit), and hot-Region depth; supported restart/no-leader/stall duration and failure fraction; maximum backlog and acceptable rejection; drain and first-authorization objectives; pre-authorization expiry limit; Frontend RSS headroom and Datanode pressure/lingering-work budgets; aggregate confirmed connection-attempt-rate budgets; and successful-path overhead budgets.
+
+Derive `H_min` from the recovery objective and measured p99 replay duration. It must cover the required replay timeout(s), configured backoffs including positive jitter, route/catalog preparation, settlement, and a safety margin. State explicitly when the objective requires only one replay opportunity; do not imply that the full `max_attempts` budget is guaranteed. The envelope must be consistent with `retry_budget`, `max_attempts`, backoff, and `replay_concurrency`.
+
+Qualification passes only when all predeclared budgets are met; the independent retained-object measurement does not exceed the estimator; concurrent admission does not overcommit `max_bytes`/`max_records`; all charges release exactly once; Queue live charges return to zero after drain; Frontend/Datanode memory and lingering work remain within budget; and failure injection preserves the specified outcome and attribution semantics. RSS need not return byte-for-byte to baseline because allocators may retain pages, but it must reach the approved stable post-drain plateau.
+
+If any criterion fails, keep the feature disabled. Fix accounting/release bugs, reduce limits or the declared workload envelope, adjust backoff/recovery objectives, or optimize estimator overhead without weakening accounting. Do not add a new scheduler, per-Region reservation, coalescing layer, or token bucket solely to pass a benchmark; such mechanisms require measured justification and a separate design decision. Record the approved envelope, configuration, measurements, failure results, and maintainer acceptance in the implementation PR or a linked qualification report. Missing values or unreviewed failures block rollout.
 
 ### Queue failure and shutdown
 
-The Frontend `Instance` owns queue shutdown. The QueueState lock linearizes shutdown against send authorization: shutdown closes the queue under that lock, so an authorization either commits before closure or is rejected after it.
+One shared `Arc`-backed Queue is held by the Frontend `Instance` and accessed by request-serving clones. The owning distributed Frontend drives Queue startup and shutdown; dropping any `Instance` clone must not close it. Start the coordinator before protocol servers accept requests. If startup fails, roll back any partially started servers, the coordinator, and the heartbeat task.
 
-Route, catalog, and leader preparation happen before authorization. Shutdown during this phase creates no replay invocation. Apply the precedence in **Replay of unknown outcomes**: without a prior potentially submitted invocation or confirmed stale target, settle as `replay_not_sent`; otherwise preserve the recorded history. Pre-authorization cancellation never creates `issue_unknown`.
+During shutdown, stop accepting protocol requests, close queue admission and replay authorization, then drain already-authorized work. Queue cleanup must run even when server shutdown reports an error. A replay is either authorized before closure or rejected after it. Already-authorized RPCs may finish within `replay_rpc_timeout`; local timeout or Frontend shutdown does not cancel work already accepted by a Datanode.
 
-An invocation authorized before shutdown is treated as potentially submitted. Wait for its result up to `replay_rpc_timeout`; without a result, mark it `issue_unknown`. Do not `await` between committing authorization and first-polling the RPC future. Closing the local queue does not cancel work already accepted by a Datanode.
-
-If the coordinator fails, close and mark the queue unhealthy through the same boundary. Stop admission and new authorizations, join active tasks within their existing timeouts, settle records from their histories, and notify attached callers. V1 does not restart the coordinator automatically; a record-task failure must remain isolated to that record.
+The current server shutdown signal does not guarantee that every accepted handler has exited before the queue closes. A first-round report arriving after closure is therefore rejected without inline fallback even though its original RPC may have applied. V1 accepts this handoff-loss window and does not add an in-flight handoff barrier. A coordinator failure closes the queue and stops new admission/authorization; the coordinator is not automatically restarted, while an individual record failure must remain isolated.
 
 ## DDL, Flow, and Ordering Limitations
 
@@ -381,11 +326,11 @@ Queued retries may execute after the client has received an error, introducing d
 | Concurrent live write to the same Region/key | Queue FIFO orders only queued records. A later live write may complete before an earlier queued replay; final conflict behavior depends on storage semantics. |
 | `TRUNCATE` after the first-round error | No data-generation fence exists. Delayed replay may reinsert rows after truncation. |
 | `DROP` then create under the same name | New table has a different `TableId`; replay is rejected. |
-| `UNDROP` | The current implementation restores the tombstoned `TableInfo` and `TableRoute` without changing the captured identity fields; `DROP` does not bump `TableIdent.version`. A pre-drop record can therefore pass identity checks after `UNDROP` and replay into the restored table. V1 has no drop-generation fence. |
+| `UNDROP` | V1 has no drop-generation fence. Because `UNDROP` can restore the original table identity, a pre-drop record may pass identity checks after restoration and replay into the restored table. |
 | Repartition or partition-expression change | The original Region/partition identity is no longer valid; stop replay with `give_up_reason = stale_target`, do not redirect or rebuild. Final settlement follows **Replay of unknown outcomes** if an earlier invocation remains unresolved. |
 | `ALTER` racing between validation and send | There is no atomic DDL fence. Request-specific metadata validation reduces but cannot eliminate this race. |
-| Flow exists at planning time | Flow-source request is preflight-ineligible because the original mirror is detached before Region dispatch and replay cannot repeat it safely. |
-| Flow is created/changed after a non-Flow decision was captured | Replay uses the captured decision and does not re-read Flow membership; the delayed source write is not mirrored under the new definition. |
+| Flow exists at planning time | Flow mirror work is submitted independently before Region dispatch; mirror completion is not part of the Region write result. A later queue replay cannot determine whether the original mirror applied and must not submit it again, so Flow-source requests are preflight-ineligible. |
+| Flow is created/changed after a non-Flow decision was captured | Replay uses the captured non-Flow decision and does not re-read Flow membership; a delayed source write is therefore not mirrored under the new definition. V1 has no Flow-generation fence. |
 
 Workloads requiring DDL fencing, same-key ordering across delayed replay and live writes, or Flow changes to cover delayed writes must use a queue-disabled Frontend pool. V1 has no per-table allowlist or hot reload; enabling the queue affects every eligible direct insert on that Frontend, so isolate the pool operationally.
 
@@ -395,16 +340,17 @@ Expose Frontend-scope metrics with bounded labels and non-overlapping accounting
 
 - preflight exclusions by bounded reason;
 - admission candidates accepted/rejected by bounded reason;
-- first-round outcomes: applied, retryable failure, terminal failure, `first_round_not_submitted`, `first_round_unknown`, and unadmittable;
+- first-round outcomes by bounded classification: applied, `observed_retryable_failure`, `first_round_not_submitted`, `first_round_unknown`, terminal failure, and unadmittable; only the three named dispositions create records;
 - replay invocations by outcome: applied, retryable error, terminal error, `issue_unknown`, and confirmed `not_submitted`;
 - final record settlements: `applied`, `issue_unknown`, `observed_failure`, `stale_target`, and `replay_not_sent`;
 - terminal `give_up_reason` counts by bounded reason, kept separate from final settlement (for example, a `stale_target` stop can end with `issue_unknown`);
-- retained bytes, retained record entries, and active replay-slot utilization;
+- retained estimated bytes, retained record entries, and active replay-slot utilization;
+- time from admission to first authorization, pre-authorization deadline expiry, and backlog drain observations;
 - replay-observed rows, explicitly documented as observations rather than exact logical rows.
 
 Emit one bounded structured event for each non-applied settlement, including table/Region identity, first-round provenance, final settlement, give-up reason, and potentially submitted attempt count. Keep IDs, request payloads, and unbounded error text out of metric labels.
 
-Alert on sustained admission rejection, capacity saturation, hot-Region backlog, slow first-replay latency, deadline expiry, stale-target stops, replay timeouts, `issue_unknown` growth, and confirmed connection failures per second. Because `not_submitted` does not consume `max_attempts`, deadline and backoff bound elapsed time but not the aggregate connection-attempt rate.
+Pair Queue metrics with process-level Frontend/Datanode RSS and the approved workload envelope. Alert on sustained admission rejection, capacity saturation, hot-Region backlog, slow first-authorization latency, deadline expiry, stale-target stops, replay timeouts, `issue_unknown` growth, and confirmed connection failures per second. Because `not_submitted` does not consume `max_attempts`, deadline and backoff do not establish an aggregate connection-attempt-rate ceiling.
 
 ## Configuration and Rollout
 
@@ -418,56 +364,37 @@ The following are provisional starting values. They are not production defaults 
 | `write_queue.retry_budget` | Per record | `5m` | Absolute lifetime from admission |
 | `write_queue.max_attempts` | Per record | `3` | Potentially submitted replay attempts; excludes exact `not_submitted` |
 | `write_queue.completion_wait` | Per call | `30s` | Caller wait after report and admission |
-| `write_queue.replay_rpc_timeout` | Per invocation | `10s` | Local timeout for an authorized replay RPC |
+| `write_queue.replay_rpc_timeout` | Per invocation | `15s` | Local timeout for an authorized replay RPC; at least 1s greater than the effective Datanode client connect timeout |
 | `write_queue.replay_concurrency` | Per Frontend | `8` | Active local replay work |
 | `write_retry.initial_backoff` | Shared backoff | Existing setting | Queue base backoff |
 | `write_retry.max_backoff` | Shared backoff | Existing setting | Base-delay cap before positive jitter |
 | `write_retry.backoff_multiplier` | Shared backoff | Existing setting | Exponential multiplier |
 | `write_retry.max_retries` | Legacy path only | `3` | Does not control queue-owned records |
 
-Queue configuration is loaded at startup. When enabled, required limits must be valid and non-zero; `completion_wait = 0` is allowed. Changing the enablement switch requires a Frontend restart, which may discard pending records.
+Queue configuration is loaded at startup. When enabled, required limits and `datanode.client.connect_timeout` must be valid and non-zero; startup rejects `replay_rpc_timeout < datanode.client.connect_timeout + 1s`. `completion_wait = 0` is allowed. The provisional `15s` replay timeout assumes the example `10s` Datanode connect timeout; deployments must validate against their effective value. Changing the enablement switch requires a Frontend restart, which may discard pending records.
 
 ### Enablement gates
 
-Queue mode must remain disabled until all of the following are satisfied:
+Keep the queue disabled until all of the following pass:
 
-- The queue-specific first-round capture path preserves original Region requests, deterministic ordinals, per-entry mapping, retry provenance, and structured submission disposition independently of `WriteRetry` and `WriteProgress`.
-- Tests cover per-entry failures, collapsed single-entry failures, whole-peer-RPC failures, mixed batches, missing provenance, `write_retry.max_retries = 0`, and partial admission.
-- Every target Datanode supports the per-entry partial-result contract; mixed-version operation is excluded.
-- The typed `not_submitted` marker is attached only at the verified unary error boundary, before error conversion, and survives the request/result path without being inferred from generic status or text.
-- Completion wait, cancellation, publication ownership, response selection, and shutdown behavior pass integration and failure-injection tests.
-- Same-Region validation and request-compatibility tests cover explicit columns, omitted-column Case A/Case B, `ColumnId` replacement, route refresh, and DDL limitations.
-- Resource tests cover null-heavy and string/bytes-heavy requests, concurrent admission, maximum peer-batch fan-out, hot Regions, leaderless backlog, capacity exhaustion, and release-once behavior.
-- Failure tests cover repeated connection refusal, fast Datanode rejection, Mito write-buffer stalls, local replay timeout, lingering remote work, worker failure, coordinator failure, and shutdown.
-- Performance tests compare queue-enabled and queue-disabled successful paths under identical load, including estimator CPU per row, throughput, latency percentiles, retained estimate versus RSS, and failure-path behavior. The results must be reviewed by maintainers against an explicitly accepted successful-path overhead budget; no threshold is assumed by this RFC.
-- The declared workload envelope specifies maximum total backlog, maximum hot-Region depth, drain-time objective, p99 admission-to-first-authorization latency, acceptable pre-authorization expiry fraction, and an approved `H_min`. Measurements demonstrate that records within that envelope reach first potentially submitted replay authorization with at least `H_min` remaining and that Datanode backlog/RSS remain acceptable under repeated timeouts.
+- Capture tests preserve original requests, deterministic peer-batch mapping, retry provenance, typed submission disposition, and write attribution independently of legacy retry settings.
+- Outcome tests cover per-entry, collapsed single-entry, whole-peer-RPC, mixed-batch, missing-provenance, partial-admission, and all-Datanode compatibility cases.
+- Client-contract and lifecycle tests cover deterministic error selection, completion wait, cancellation/publication, startup rollback, shutdown, late first-round reports, authorized replay drain, and coordinator/worker failure.
+- Same-Region and schema-compatibility tests cover route refresh, explicit/omitted columns, `ColumnId` replacement, DDL limitations, and Flow exclusion.
+- Resource and failure tests verify no ledger overcommit or double release, deadline behavior, hot/leaderless Regions, saturation, fast connection refusal, a blackholed/unanswered peer that reaches `connect_timeout`, same-peer concurrent replay on the shared lazy channel at maximum configured concurrency, Datanode stalls, local timeout, and lingering remote work. Startup-validation tests reject invalid `replay_rpc_timeout` / `connect_timeout` combinations. The blackhole test must prove that a typed connection failure arrives before the outer replay timeout for the single-invocation case; concurrent cases must preserve `issue_unknown` whenever the outer timeout wins without typed proof.
+- Performance, RSS, Datanode-pressure, connection-attempt-rate, and workload-envelope qualification passes with predeclared and approved numeric budgets. An unfilled envelope or unapproved threshold blocks enablement.
 
 ### Rollout
 
-- Upgrade every target Datanode before enabling the queue. Keep it disabled during mixed-version operation.
-- Enable it first on a dedicated canary Frontend pool whose workloads accept the documented delayed-replay, duplicate, DDL, Flow, and ordering risks.
-- Monitor admission rejection, queue depth/bytes, time to first replay, deadline expiry, confirmed connection failure rate, `issue_unknown`, hot-Region backlog, replay-slot utilization, and Frontend/Datanode RSS.
-- Define alert thresholds and rollback criteria before canary. If the queue exceeds the qualified envelope, stop sending traffic to the pool and restart it with the queue disabled before returning traffic. This operator-driven rollback can discard pending records and does not cancel remote work already accepted by Datanodes.
-- A change to the shipped default requires a separate maintainer decision after integration tests, failure-injection results, workload measurements, canary evidence, and explicit acceptance of remaining risks.
+- Upgrade every target Datanode before enabling the queue; do not run mixed-version operation.
+- Start with a dedicated canary Frontend pool whose workloads accept the documented duplicate, delayed-replay, DDL, Flow, and ordering risks.
+- Apply the approved workload-envelope values as canary alert and rollback thresholds. Monitor admission rejection, retained bytes/records, time to first authorization, deadline expiry, confirmed connection failures, `issue_unknown`, hot-Region backlog, replay-slot utilization, and Frontend/Datanode RSS.
+- On any budget breach, stop sending traffic to the canary pool and restart it with the queue disabled before returning traffic. This may discard pending records and does not cancel work already accepted by Datanodes.
+- Changing the shipped default requires a separate maintainer decision based on integration tests, failure-injection results, workload measurements, canary evidence, and explicit acceptance of residual risks.
 
-## Implementation Mapping to the Current Code
+## Implementation Plan
 
-This RFC requires code changes; the current PR is documentation-only.
-
-| Existing code | Current behavior | Required queue change |
-|---|---|---|
-| `Inserter::do_request` (`src/operator/src/insert.rs`) | Materializes impure defaults, creates/detaches Flow mirror work, prepares ordinary or tracked writes | Capture plan-time eligibility and request-compatibility metadata here; opt in only the supported non-tracked direct path; keep tracked and unsupported producers unchanged |
-| `WriteDispatcher::prepare` (`src/operator/src/write_dispatcher.rs`) | Splits Region requests, resolves peers, groups entries by peer | Preserve deterministic Region ordinals and exact per-entry mapping before peer grouping |
-| `WriteDispatcher::execute_with_progress` | Uses `send_batch` only when legacy retry or progress is present; otherwise calls `send` | Add an explicit queue-owned capture path independent of both legacy retry and progress; do not globally enable queue behavior on shared dispatchers |
-| `WriteDispatcher::send_batch` | Requests partial results; with `retry == None`, failure attempts do not retain replayable requests | Retain each original Region request and provenance for queue-owned calls even when `write_retry.max_retries = 0` |
-| `RoutedWrite` | Already retains `Arc<RegionRequest>`, attribution, and peer | Reuse this ownership model; do not encode/decode or rebuild payloads |
-| `WriteRetry::retry` / `reroute_failed_writes` | Performs inline retries and batches route refresh for failures requiring refresh | Keep this existing path unchanged for non-queue calls; queue has its own bounded replay owner and batches queue refresh work without using inline retry's request rebuilding |
-| `RegionRequester::handle_inner` (`src/client/src/region.rs`) | `ready()` errors are normalized; unary errors are mapped to `RegionServer` errors | Attach typed `not_submitted` only to the verified `unary()` ConnectError branch before `map_region_error` |
-| Datanode `handle_write_request` (`src/datanode/src/region_server.rs`) | Partial result response for supported multi-entry requests; single-entry errors remain tonic errors | Keep upgrade-order gate; test both response forms and preserve original request mapping |
-| `FrontendBuilder::try_build` (`src/frontend/src/instance/builder.rs`) | Creates ordinary `inserter` and execution-only `bulk_inserter` through a shared construction closure | Construct one queue per distributed Frontend `Instance`; inject it only into the ordinary supported direct-insert `inserter`; keep `bulk_inserter` queue-free and do not put queue injection in the shared closure |
-| Partition/catalog/cache services | Existing route and table metadata caches | Use these services for same-Region refresh and name-keyed/version-checked metadata revalidation; do not introduce a separate catalog or routing subsystem |
-
-Land the capture path and its tests before enabling the queue. Keep the queue disabled until every **Enablement gates** criterion passes.
+Implement the queue-specific capture path in the eligible ordinary direct-insert pipeline, followed by the Frontend-owned bounded ledger/coordinator, same-Region replay, request-compatibility validation, and lifecycle integration. Keep existing retry behavior unchanged for ineligible producers. The implementation PR should document concrete source touchpoints and demonstrate every **Enablement gates** criterion; the current PR remains documentation-only.
 
 ## Alternatives
 
