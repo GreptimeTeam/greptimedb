@@ -226,17 +226,27 @@ async fn do_handle_bulk_api(
     };
     let pipeline_params =
         GreptimePipelineParams::from_map(extract_pipeline_params_map_from_headers(&headers));
-    if let Err(e) = ingest_logs_inner(
+    let ingest_result = ingest_logs_inner(
         log_state.log_handler,
         pipeline,
         requests,
         Arc::new(query_ctx),
         pipeline_params,
     )
-    .await
-    {
-        error!(e; "Failed to ingest logs");
-        let http_status = status_code_to_http_status(&e.status_code());
+    .await;
+    let failure = match ingest_result {
+        Ok(response) => response.error_details(),
+        Err(e) => {
+            error!(e; "Failed to ingest logs");
+            Some((status_code_to_http_status(&e.status_code()), e.to_string()))
+        }
+    };
+    if let Some((http_status, reason)) = failure {
+        // The failed write keeps the status of the error, so a 5xx makes Elasticsearch
+        // clients retry the whole batch. The batches that did commit before the failure
+        // are not rolled back, so such a retry can duplicate those rows. Returning `200`
+        // with one item per action would avoid the retry; that is the document-level
+        // work tracked in #10471.
         return (
             http_status,
             elasticsearch_headers(),
@@ -244,7 +254,7 @@ async fn do_handle_bulk_api(
                 start.elapsed().as_millis() as i64,
                 0,
                 http_status.as_u16() as u32,
-                e.to_string().as_str(),
+                reason.as_str(),
             )),
         );
     }
@@ -449,7 +459,219 @@ fn get_log_value_from_msg_field(v: VrlValue, msg_field: &str) -> VrlValue {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::RowInsertRequests;
+    use async_trait::async_trait;
+    use common_query::Output;
+    use datatypes::timestamp::TimestampNanosecond;
+    use pipeline::{Pipeline, PipelineInfo, PipelineOptions, PipelineVersion};
+    use session::context::QueryContextRef;
+    use snafu::Location;
+
     use super::*;
+    use crate::error::Error as ServersError;
+    use crate::http::HttpResponse;
+    use crate::http::result::error_result::ErrorResponse;
+    use crate::http::result::greptime_result_v1::GreptimedbV1Response;
+    use crate::query_handler::{PipelineHandler, PipelineHandlerRef};
+
+    /// A pipeline handler whose inserts always report the given outcome.
+    struct MockPipelineHandler {
+        options: PipelineOptions,
+        /// `None` reports a successful insert of every batch; `Some(reason)`
+        /// reports the failure of every batch with that reason.
+        insert_failure: Option<String>,
+    }
+
+    impl MockPipelineHandler {
+        fn new(insert_failure: Option<&str>) -> Self {
+            Self {
+                options: PipelineOptions::default(),
+                insert_failure: insert_failure.map(|reason| reason.to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PipelineHandler for MockPipelineHandler {
+        async fn insert(
+            &self,
+            _input: RowInsertRequests,
+            _ctx: QueryContextRef,
+        ) -> ServersResult<Output> {
+            unimplemented!()
+        }
+
+        async fn insert_all(
+            &self,
+            inputs: Vec<(QueryContextRef, RowInsertRequests)>,
+        ) -> ServersResult<Vec<ServersResult<Output>>> {
+            let outputs = inputs
+                .iter()
+                .map(|_| match &self.insert_failure {
+                    // The insert of a batch failed, e.g. because a value does not
+                    // match the type of an existing column (case 1 in #10471).
+                    Some(reason) => Err(ServersError::InvalidParameter {
+                        reason: reason.clone(),
+                        location: Location::default(),
+                    }),
+                    None => Ok(Output::new_with_affected_rows(1)),
+                })
+                .collect();
+            Ok(outputs)
+        }
+
+        fn check_pipeline_query_permission(
+            &self,
+            _query_ctx: &QueryContextRef,
+        ) -> ServersResult<()> {
+            Ok(())
+        }
+
+        async fn get_pipeline(
+            &self,
+            _name: &str,
+            _version: PipelineVersion,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<Arc<Pipeline>> {
+            unimplemented!()
+        }
+
+        async fn insert_pipeline(
+            &self,
+            _name: &str,
+            _content_type: &str,
+            _pipeline: &str,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<PipelineInfo> {
+            unimplemented!()
+        }
+
+        async fn delete_pipeline(
+            &self,
+            _name: &str,
+            _version: PipelineVersion,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<Option<()>> {
+            unimplemented!()
+        }
+
+        async fn get_table(
+            &self,
+            _table: &str,
+            _query_ctx: &QueryContext,
+        ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error> {
+            // No existing table, so the identity pipeline infers the schema from
+            // the documents themselves.
+            Ok(None)
+        }
+
+        fn pipeline_options(&self) -> &PipelineOptions {
+            &self.options
+        }
+
+        fn build_pipeline(&self, _pipeline: &str) -> ServersResult<Pipeline> {
+            unimplemented!()
+        }
+
+        async fn get_pipeline_str(
+            &self,
+            _name: &str,
+            _version: PipelineVersion,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<(String, TimestampNanosecond)> {
+            unimplemented!()
+        }
+    }
+
+    async fn bulk_request(log_handler: PipelineHandlerRef, payload: &str) -> (StatusCode, Value) {
+        let log_state = LogState {
+            log_handler,
+            log_validator: None,
+            ingest_interceptor: None,
+        };
+        let response = do_handle_bulk_api(
+            log_state,
+            None,
+            LogIngesterQueryParams::default(),
+            QueryContext::with("greptime", "public"),
+            HeaderMap::new(),
+            payload.to_string(),
+        )
+        .await
+        .into_response();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read the bulk response body");
+        let body = serde_json::from_slice(&body).expect("Failed to parse the bulk response body");
+        (status, body)
+    }
+
+    /// A failed insert must not be acknowledged with `201` for every document:
+    /// Elasticsearch clients read `errors` and `items[].create.status` and would
+    /// treat the dropped documents as written. See #10471.
+    #[tokio::test]
+    async fn test_bulk_insert_failure_is_reported() {
+        let payload = "{\"create\":{\"_index\":\"test\",\"_id\":\"1\"}}\n{\"age\":\"adult\"}";
+        let (status, body) = bulk_request(
+            Arc::new(MockPipelineHandler::new(Some(
+                "column age expect type Int64, given: STRING",
+            ))),
+            payload,
+        )
+        .await;
+
+        assert_eq!(StatusCode::BAD_REQUEST, status);
+        assert_eq!(Some(true), body["errors"].as_bool());
+        let item = &body["items"][0]["create"];
+        assert_eq!(Some(400), item["status"].as_u64());
+        let reason = item["error"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("column age expect type Int64, given: STRING"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    /// The successful path is unchanged: one `201` item per document.
+    #[tokio::test]
+    async fn test_bulk_insert_success_is_unchanged() {
+        let payload = "{\"create\":{\"_index\":\"test\",\"_id\":\"1\"}}\n{\"age\":30}\n{\"create\":{\"_index\":\"test\",\"_id\":\"2\"}}\n{\"age\":31}";
+        let (status, body) = bulk_request(Arc::new(MockPipelineHandler::new(None)), payload).await;
+
+        assert_eq!(StatusCode::OK, status);
+        assert_eq!(Some(false), body["errors"].as_bool());
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(2, items.len());
+        for item in items {
+            assert_eq!(Some(201), item["create"]["status"].as_u64());
+        }
+    }
+
+    #[test]
+    fn test_ingest_failure() {
+        // A failed insert is returned as an `Ok` error response and must be reported.
+        let response = HttpResponse::Error(ErrorResponse::from_error_message(
+            common_error::status_code::StatusCode::InvalidArguments,
+            "column age expect type Int64, given: STRING".to_string(),
+        ));
+        let (status, reason) = response.error_details().unwrap();
+        assert_eq!(StatusCode::BAD_REQUEST, status);
+        assert_eq!("column age expect type Int64, given: STRING", reason);
+
+        let response = HttpResponse::Error(ErrorResponse::from_error_message(
+            common_error::status_code::StatusCode::Internal,
+            "region unavailable".to_string(),
+        ));
+        let (status, _) = response.error_details().unwrap();
+        assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, status);
+
+        let response = HttpResponse::GreptimedbV1(GreptimedbV1Response {
+            output: vec![],
+            execution_time_ms: 0,
+            resp_metrics: Default::default(),
+        });
+        assert!(response.error_details().is_none());
+    }
 
     #[test]
     fn test_parse_bulk_request() {

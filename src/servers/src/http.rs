@@ -58,6 +58,7 @@ use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::elasticsearch;
 use crate::error::{
     AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
+    status_code_to_http_status,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::otlp::OtlpState;
@@ -529,6 +530,21 @@ pub enum HttpResponse {
 }
 
 impl HttpResponse {
+    /// The HTTP status and message of a failed write, if this response reports one.
+    ///
+    /// The ingest handlers get `Ok(HttpResponse::Error(..))` when the rows were parsed
+    /// but writing them failed, so a handler that acknowledges the request has to inspect
+    /// the response instead of assuming every `Ok` wrote the rows.
+    pub fn error_details(&self) -> Option<(axum::http::StatusCode, String)> {
+        match self {
+            HttpResponse::Error(resp) => Some((
+                status_code_to_http_status(&resp.status_code()),
+                resp.error().to_string(),
+            )),
+            _ => None,
+        }
+    }
+
     pub fn with_execution_time(self, execution_time: u64) -> Self {
         match self {
             HttpResponse::Arrow(resp) => resp.with_execution_time(execution_time).into(),
