@@ -635,9 +635,6 @@ impl RangeEvaluator {
         }
         let fold_offset = fold_offset(grid.spec(), window)?;
         let step_invariant = !matches!(function, RangeFunction::PredictLinear(_));
-        if !step_invariant {
-            predict_linear_instants(grid.spec(), fold_offset)?;
-        }
         // A modified window corrects counters over the samples it holds rather than through the
         // reset index, and has no batch form.
         let (kernel, index_resets) = match window.modifier {
@@ -1658,6 +1655,10 @@ pub(crate) fn check_modifier(
 /// The offset samples are shifted by: the selector offset, or for `@` the offset that places
 /// the anchored window at the first grid point.
 ///
+/// Both terms of the difference fit an `i64` on their own, but it can leave one, and the offset is
+/// the shift every retained sample's timestamp takes (`RangeEvaluator` applies it with
+/// `checked_add`), so a window it does not fit cannot be placed at all.
+///
 /// `pub(crate)` because whether it fits is decided from the grid and the window alone, so the
 /// native route's admission predicate asks the same arithmetic rather than a second copy of it.
 pub(crate) fn fold_offset(grid: GridSpec, window: RangeWindow) -> Result<i64> {
@@ -1673,30 +1674,6 @@ pub(crate) fn fold_offset(grid: GridSpec, window: RangeWindow) -> Result<i64> {
                 window.offset_ms
             ))
         })
-}
-
-/// Checks that `predict_linear` can read the instant of every point of `grid` once shifted by
-/// `fold_offset`.
-///
-/// Unlike every other range function, which reads the window a grid point opens alone,
-/// `predict_linear` reads the instant it reports as well, and reports it shifted by the fold
-/// offset. The first and the last point are the ones checked: the shift is the same at every point
-/// and the grid's points are ordered, so what fits at both ends fits between them.
-///
-/// The refusal is arithmetic rather than shape, but it is decided by the grid and the window alone,
-/// which is why the native route's admission predicate reaches it too
-/// (`native_tree_supported`): a query refused only here has to keep the plan it had instead of
-/// failing while its runtime is built.
-pub(crate) fn predict_linear_instants(grid: GridSpec, fold_offset: i64) -> Result<()> {
-    let last = i128::from(grid.start_ms) + i128::from(grid.step_ms) * (i128::from(grid.len) - 1);
-    for eval_ts in [i128::from(grid.start_ms), last] {
-        if i64::try_from(eval_ts + i128::from(fold_offset)).is_err() {
-            return Err(DataFusionError::Plan(format!(
-                "predict_linear evaluation time {eval_ts} overflows with offset {fold_offset} ms"
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// The inner grid of a subquery read by `window` from the outer grid `outer`: the multiples of

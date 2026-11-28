@@ -4386,30 +4386,33 @@ async fn native_fused_partitioned_table_label_rewrite_plans_a_canonical_boundary
     );
 }
 
-/// A `predict_linear` horizon whose instants do not fit keeps the existing plan.
+/// A `predict_linear` horizon whose instants leave `i64` keeps the native route, not a decline.
 ///
 /// A window folds its `@` anchor into an offset from the grid's first point, and `predict_linear`
-/// is the one range function that adds that offset to a point of the grid as well. `@` is the epoch
-/// and the statement starts 5e18 ms later, so the fold offset is that same 5e18 ms and the sum the
-/// horizon reads is 1e19 ms - not an instant an `i64` holds. The runtime refuses the window while
-/// it builds it.
+/// is the one range function that shifts a point of the grid by it as well. `@` is the epoch and
+/// the statement starts 5e18 ms later, so the fold offset is that same 5e18 ms and the instant
+/// the horizon regresses around is 1e19 ms - not an instant an `i64` holds. That instant is no
+/// reason to refuse the window: the regression reads only how far each sample is from it, so the
+/// kernel takes the shift widened, and the route admits the tree the statement compiles to.
 ///
 /// The window is wrapped in `topk`, a whole-vector consumer: it makes the route cut the window as a
-/// segment and decide the statement's plan from that segment while planning, which is the moment
-/// the refusal cannot be left to the executor - a native plan that fails while its physical plan is
-/// built has none to fall back to. Deciding this during planning is what the route did while it
-/// decided admission by building the runtime and dropping it, and it is what the admission
-/// predicate decides now: every site that commits to a tree asks `native_tree_supported` and builds
-/// no runtime, so `window_instants_fit` is the only thing that keeps this query off the native
-/// route, and dropping it from the predicate makes this test fail. (The `@` half of the same
-/// arithmetic is pinned one level down, in `native::plan::tests`, because a statement whose anchor
-/// and start are that far apart is refused by the planner's own at-modifier rewrite first.)
+/// segment and decide the statement's plan from that segment while planning, which is where a
+/// refusal that only the runtime could raise used to be raised instead - a native plan that fails
+/// while its physical plan is built has none to fall back to, which is why the window's instants
+/// were once decided by admission. They no longer are.
 ///
-/// A platform whose `SystemTime` cannot represent the `5e18 ms` start skips the high-level
-/// shape; the platform-independent `native_tree_supported_declines_the_instants_that_overflow`
-/// still covers the admission predicate there.
+/// What the statement *answers* is pinned one level down, where the window is executed:
+/// `promql`'s `native::execute::tests::an_anchored_predict_linear_past_i64_answers_an_empty_matrix`
+/// runs this window shape over an empty source and answers no row, as Prometheus answers the
+/// statement with an empty matrix. The refusals that remain - an `@` fold offset past `i64`, and
+/// the `@` modifier's own out-of-range check - are pinned in `native::plan::tests` and in this
+/// file.
+///
+/// A platform whose `SystemTime` cannot represent the `5e18 ms` start skips the shape;
+/// `native_tree_supported_declines_the_fold_offsets_that_overflow` covers the admission predicate
+/// there.
 #[tokio::test]
-async fn native_fused_windows_whose_instants_overflow_fall_back() {
+async fn native_fused_predict_linear_horizon_past_i64_keeps_the_native_route() {
     // The far end of the `i64` millisecond range, one step apart. Windows' `SystemTime` and
     // 32-bit `time_t` targets cannot represent it, so they cannot build this statement.
     let Some(far_start) = UNIX_EPOCH.checked_add(Duration::from_millis(5_000_000_000_000_000_000))
@@ -4450,18 +4453,20 @@ async fn native_fused_windows_whose_instants_overflow_fall_back() {
     // `@ 0` folds to the grid's own start, which the horizon then adds to a point of the grid.
     let query = "topk(1, predict_linear(some_metric[1m] @ 0, 60))";
     let native = plan_for(query, true).await;
-    let fallback = plan_for(query, false).await;
     assert!(
-        find_fused_series(&native).is_none(),
-        "{query} reads an instant the runtime cannot compute and must keep the existing plan: {}",
+        find_fused_series(&native).is_some(),
+        "{query} reads an instant the runtime computes and must take the native route: {}",
         native.display_indent()
     );
-    assert_eq!(
-        native.display_indent().to_string(),
-        fallback.display_indent().to_string(),
-        "{query}: the native setting must plan exactly what the existing planner plans"
+    // The existing plan is a different one, which is what the native route replaces here.
+    let fallback = plan_for(query, false).await;
+    assert!(
+        find_fused_series(&fallback).is_none(),
+        "{query}: the existing planner reads no native tree: {}",
+        fallback.display_indent()
     );
-    // The same shape over a statement near the epoch fits, so the route is not narrowed.
+    // The same shape over a statement near the epoch keeps the native route as well, so the route
+    // is not narrowed either way.
     let near = plan_for("topk(1, rate(some_metric[5m]))", true).await;
     assert!(
         find_fused_series(&near).is_some(),

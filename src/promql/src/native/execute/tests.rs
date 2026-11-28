@@ -632,6 +632,37 @@ fn timestamp_instant_rejects_negative_lookback() {
     assert_eq!(pool.reserved(), 0);
 }
 
+/// An `@`-anchored `predict_linear` whose horizon leaves `i64` builds, and answers nothing.
+///
+/// A window folds its `@` anchor into the offset from the grid's first point: `@ 0` over a
+/// statement starting 5e18 ms into the future folds to 5e18 ms, which fits, and the horizon
+/// regresses around a point of that grid shifted by it -- 1e19 ms, an instant no `i64` holds. The
+/// regression only reads how far each sample is from that instant, so the kernel takes the shift
+/// widened instead of refusing the window. Prometheus answers the statement with an empty matrix,
+/// because the anchored window reads the epoch and a table this far in the future has no sample
+/// there; the shape below is that statement's window over an empty source, and it decides no row.
+#[test]
+fn an_anchored_predict_linear_past_i64_answers_an_empty_matrix() {
+    let far = grid(5_000_000_000_000_000_000, 5_000, 3);
+    let mut root = window_with(
+        input(),
+        RangeFunction::PredictLinear(60.0),
+        60_000,
+        None,
+        Arc::clone(&far),
+    );
+    let NativeExpr::Window { op, .. } = &mut root.expr else {
+        unreachable!();
+    };
+    op.window.anchor_ms = Some(0);
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    // The runtime builds the window: the horizon's instant is past `i64` and that is not a refusal.
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    assert!(run(&mut execution).is_empty());
+    assert_eq!(pool.reserved(), 0);
+}
+
 fn merge(inner: NativeNode) -> NativeNode {
     let output = inner.output.clone();
     NativeNode {

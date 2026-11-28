@@ -146,16 +146,18 @@ impl RangeFunction {
             }
             Self::Deriv => Box::new(|window| {
                 (window.values.len() >= 2)
-                    .then(|| linear_regression(&window, window.timestamps[0]).0)
+                    .then(|| linear_regression(&window, i128::from(window.timestamps[0])).0)
             }),
             // Prometheus regresses the unshifted samples around the evaluation time, which on the
-            // shifted timeline is `eval_ts + offset`; `RangeEvaluator::try_new` checks it fits.
+            // shifted timeline is `eval_ts + offset`. The sum is taken widened: the regression
+            // only reads how far each sample is from it, so an instant past `i64` costs nothing,
+            // while an `i64` sum would refuse an `@` anchor as far from the grid as this one.
             Self::PredictLinear(duration) => Box::new(move |window| {
                 if window.values.len() < 2 {
                     return None;
                 }
-                let (slope, intercept) =
-                    linear_regression(&window, window.eval_ts.checked_add(offset_ms)?);
+                let intercept_time = i128::from(window.eval_ts) + i128::from(offset_ms);
+                let (slope, intercept) = linear_regression(&window, intercept_time);
                 Some(slope * duration + intercept)
             }),
             Self::DoubleExponentialSmoothing { smoothing, trend } => Box::new(move |window| {
@@ -566,7 +568,11 @@ fn last_two<const IS_RATE: bool>(window: FloatWindow<'_>) -> Option<f64> {
 
 /// Prometheus `linearRegression`: `(slope, intercept)` with `x` in seconds from
 /// `intercept_time`. Needs at least two samples.
-fn linear_regression(window: &FloatWindow<'_>, intercept_time: i64) -> (f64, f64) {
+///
+/// `intercept_time` is an `i128` because it need not be an instant: shifted by a window's fold
+/// offset, the evaluation time of an `@`-anchored statement can leave `i64`, and only the
+/// difference below is read.
+fn linear_regression(window: &FloatWindow<'_>, intercept_time: i128) -> (f64, f64) {
     let init_y = window.values[0];
     let mut const_y = true;
     let mut n = 0.0;
@@ -579,7 +585,7 @@ fn linear_regression(window: &FloatWindow<'_>, intercept_time: i64) -> (f64, f64
             const_y = false;
         }
         n += 1.0;
-        let x = (i128::from(t) - i128::from(intercept_time)) as f64 / 1e3;
+        let x = (i128::from(t) - intercept_time) as f64 / 1e3;
         (sum_x, c_x) = kahan_inc(x, sum_x, c_x);
         (sum_y, c_y) = kahan_inc(y, sum_y, c_y);
         (sum_xy, c_xy) = kahan_inc(x * y, sum_xy, c_xy);

@@ -2697,21 +2697,24 @@ fn rejects_invalid_parameters() {
         Err(DataFusionError::Plan(_))
     ));
 
+    // An offset this far only pushes the instant `predict_linear` regresses around past `i64`, and
+    // the regression reads that instant widened: there is no invalid parameter here to refuse.
     let far_offset = RangeWindow {
         range_ms: 10,
         offset_ms: i64::MAX - 20,
         anchor_ms: None,
         modifier: None,
     };
-    assert!(matches!(
+    assert!(
         RangeEvaluator::try_new(
             &raw_schema(1),
             grid(0, 10, 4),
             far_offset,
             RangeFunction::PredictLinear(0.0)
-        ),
-        Err(DataFusionError::Plan(_))
-    ));
+        )
+        .is_ok(),
+        "a predict_linear horizon past i64 is read widened, not refused"
+    );
 
     let unrepresentable_anchor = RangeWindow {
         range_ms: 10,

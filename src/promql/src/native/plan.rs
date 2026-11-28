@@ -45,7 +45,7 @@ use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::map_time::DateFunction;
-use crate::range_eval::{RangeFunction, RangeWindow, fold_offset, predict_linear_instants};
+use crate::range_eval::{RangeFunction, RangeWindow, fold_offset};
 use crate::select::SortOrder;
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
@@ -2122,10 +2122,10 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
 ///   `count_values` label that is empty;
 /// - a window whose `anchored` or `smoothed` modifier reads evaluated input, names a function its
 ///   kernel does not correct, or carries a negative lookback;
-/// - a window whose timestamps do not fit: the fold offset an `@` anchor turns into, or the one
-///   `predict_linear` adds to a point of the grid, where the sum leaves `i64`. Not a shape, but it
-///   is decided by the grid and the window alone, so this is where it is decided (see
-///   `window_instants_fit`).
+/// - a window whose offset does not fit: the fold offset an `@` anchor turns into, where the
+///   difference of two timestamps leaves `i64` and every sample it reads would be shifted out of
+///   range. Not a shape, but it is decided by the grid and the window alone, so this is where it is
+///   decided (see `window_fold_offset_fits`).
 ///
 /// # What `NativeExecutionState::try_new` still decides
 ///
@@ -2171,7 +2171,7 @@ fn native_node_supported_within_stack(node: &NativeNode) -> bool {
         NativeExpr::Window { input, op } => {
             native_node_supported(input)
                 && window_modifier_supported(input, op)
-                && window_instants_fit(op)
+                && window_fold_offset_fits(op)
         }
         NativeExpr::ParameterizedMap {
             input, parameters, ..
@@ -2382,26 +2382,23 @@ fn window_modifier_supported(input: &NativeNode, op: &BoundWindow) -> bool {
     })
 }
 
-/// Whether the runtime can compute the timestamps `op` reads.
+/// Whether the runtime can place the window `op` opens: whether the offset it shifts its samples
+/// by fits.
 ///
-/// Unlike the window itself, which a point of the grid opens alone, these timestamps are sums of
-/// the window's own parts: an `@` anchor becomes an offset from the grid's first point, and
-/// `predict_linear` adds that offset to the first and last point of the grid. Every term of either
-/// sum is bound on the node, but a sum of two that fit can still leave `i64`, and the runtime
-/// refuses the window when one does. Asking [`fold_offset`] and [`predict_linear_instants`] here
-/// rather than repeating their arithmetic keeps the two verdicts the same one: a query whose only
-/// refusal is this one keeps the plan it had instead of failing while the runtime is built.
-fn window_instants_fit(op: &BoundWindow) -> bool {
-    let grid = op.output_grid.spec();
-    let Ok(fold_offset) = fold_offset(grid, op.window) else {
-        return false;
-    };
-    match op.function {
-        // Only `predict_linear` reads the instant it reports; every other function reads the
-        // window it opens, which the grid alone decides.
-        RangeFunction::PredictLinear(_) => predict_linear_instants(grid, fold_offset).is_ok(),
-        _ => true,
-    }
+/// Unlike the window itself, which a point of the grid opens alone, the samples it reads are
+/// shifted by an offset the window and the grid decide together: with `@`, an anchor becomes an
+/// offset from the grid's first point. Every term of that difference is bound on the node, but a
+/// difference of two that fit can still leave `i64`, and the runtime refuses the window when it
+/// does. Asking [`fold_offset`] here rather than repeating its arithmetic keeps the two verdicts
+/// the same one: a query whose only refusal is this one keeps the plan it had instead of failing
+/// while the runtime is built.
+///
+/// `predict_linear` also reads the instant it reports, a point of the grid shifted by that same
+/// offset. That sum does not have to fit: the regression reads only how far each sample is from
+/// it, so its kernel takes it widened (`i128`) and answers the statement Prometheus answers
+/// instead of refusing it.
+fn window_fold_offset_fits(op: &BoundWindow) -> bool {
+    fold_offset(op.output_grid.spec(), op.window).is_ok()
 }
 
 /// Stack one [`NativeNode::validate`] level needs below it before the check grows its stack.

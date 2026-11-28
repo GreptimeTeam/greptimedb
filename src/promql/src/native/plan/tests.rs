@@ -3935,16 +3935,24 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
     }
 }
 
-/// A window whose timestamps do not fit is refused by the runtime, so admission refuses it too.
+/// A window whose fold offset does not fit is refused by the runtime, so admission refuses it too;
+/// a window whose horizon is merely wider than `i64` is admitted, and the runtime builds it.
 ///
-/// These two are not shapes and every term of their arithmetic fits: an `@` anchor is folded into
-/// an offset from the grid's first point, which is a difference of two timestamps, and
-/// `predict_linear` adds that offset to the first and last point of the grid. A tree carrying
-/// either is still one the runtime cannot build, and admitting it is what made a query the
-/// existing plan answered fail while its runtime was built instead of keeping that plan, because a
-/// refusal raised during physical planning cannot fall back.
+/// The fold offset is not a shape and every term of its arithmetic fits: an `@` anchor is folded
+/// into an offset from the grid's first point, a difference of two timestamps, and it is the shift
+/// every sample the window reads takes. A tree whose difference leaves `i64` is one the runtime
+/// cannot build, and admitting it is what made a query the existing plan answered fail while its
+/// runtime was built instead of keeping that plan, because a refusal raised during physical
+/// planning cannot fall back.
+///
+/// `predict_linear` reads one more instant, a point of the grid shifted by that offset, and that
+/// sum can leave `i64` while the offset itself fits. It is no refusal: the regression only reads
+/// how far each sample is from the instant, so its kernel takes the shift widened and answers the
+/// statement Prometheus answers (`promql`'s
+/// `native::execute::tests::an_anchored_predict_linear_past_i64_answers_an_empty_matrix` runs the
+/// same window shape to an empty answer).
 #[test]
-fn native_tree_supported_declines_the_instants_that_overflow() {
+fn native_tree_supported_declines_the_fold_offsets_that_overflow() {
     // The first point of a statement reaching far into the future, a step apart: this is the grid
     // `predict_linear(some_metric[1m] @ 0, 60)` is planned over, whose anchor makes the fold offset
     // the grid's own start and whose horizon then adds the two.
@@ -3966,8 +3974,9 @@ fn native_tree_supported_declines_the_instants_that_overflow() {
         },
         output: evaluated(Arc::new([]), out),
     };
-    // The fold offset is 5e18 ms and `predict_linear` adds it to a point of the grid: 1e19 ms is
-    // what an `i64` cannot hold, so the kernel would read an instant that does not exist.
+    // The fold offset is 5e18 ms, which fits, and `predict_linear` adds it to a point of the grid:
+    // 1e19 ms is what an `i64` cannot hold, and the regression reads the difference widened, so the
+    // window is one the runtime builds.
     let horizon = window(
         RangeFunction::PredictLinear(60.0),
         Some(0),
@@ -3975,17 +3984,28 @@ fn native_tree_supported_declines_the_instants_that_overflow() {
     );
     assert_admission(
         horizon,
-        false,
-        "a predict_linear horizon over the grid that overflows",
+        true,
+        "a predict_linear horizon past i64 over a fitting fold offset",
     );
-    // The same overflow without `predict_linear`: `@ -5e18` over that grid is a fold offset of
-    // 1e19 ms on its own, so even `rate` reads a window the runtime cannot place.
+    // `@ -5e18` over that grid is a fold offset of 1e19 ms on its own, so even `rate` reads a
+    // window the runtime cannot place.
     let anchored = window(
         RangeFunction::Rate,
         Some(-5_000_000_000_000_000_000),
         Arc::clone(&far),
     );
     assert_admission(anchored, false, "an `@` anchor whose fold offset overflows");
+    // The horizon does not lift that refusal: the samples it would read still cannot be shifted.
+    let anchored_horizon = window(
+        RangeFunction::PredictLinear(60.0),
+        Some(-5_000_000_000_000_000_000),
+        Arc::clone(&far),
+    );
+    assert_admission(
+        anchored_horizon,
+        false,
+        "a predict_linear horizon whose fold offset overflows",
+    );
     // The same shapes over a grid near the epoch fit, so the check does not narrow the route.
     let fitting = window(
         RangeFunction::PredictLinear(60.0),
