@@ -4942,6 +4942,58 @@ async fn native_fused_metric_table_without_logical_metadata_falls_back() {
     );
 }
 
+/// A selector naming a metric-engine physical table runs natively, reading the table through a
+/// source that answers each label set once: the logical tables on it key their series by
+/// `__table_id` and `__tsid`, which are not labels.
+#[tokio::test]
+async fn native_physical_metric_table_reads_through_a_label_set_merge() {
+    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+
+    for query in ["phy", "rate(phy[5m])", "sum by (tag_0) (phy)"] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            metric_discovery_provider(&["a", "b"]).await,
+        )
+        .await;
+        assert_eq!(None, take_reported_decline(), "{query}: {plan}");
+        assert!(find_fused_series(&plan).is_some(), "{query}: {plan}");
+        // Every read of the table, including the partial half of a split aggregate, goes through
+        // the merging source: a bare scan would hand the node one stored series per logical table.
+        let mut sources = Vec::new();
+        plan.apply(|node| {
+            if let LogicalPlan::Extension(extension) = node
+                && let Some(source) = extension.node.as_any().downcast_ref::<RawSeriesSource>()
+            {
+                sources.push(source.merges_label_sets());
+            }
+            if let LogicalPlan::Extension(extension) = node
+                && let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>()
+            {
+                assert!(
+                    !fused
+                        .inputs()
+                        .iter()
+                        .any(|input| matches!(input, LogicalPlan::TableScan(_))),
+                    "{query}: {plan}"
+                );
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        assert_eq!(sources, vec![true], "{query}: {plan}");
+    }
+    // A logical table on the same physical table keeps its own scan: its series are unique per
+    // label set already.
+    let plan = build_native_fused_plan_with_provider(
+        "rate(a[5m])",
+        true,
+        metric_discovery_provider(&["a", "b"]).await,
+    )
+    .await;
+    assert!(find_metric_physical_scan(&plan).is_some(), "{plan}");
+}
+
 /// A table whose engine has no raw-series scanner keeps the existing plan.
 ///
 /// A file-engine table answers an ordinary read with a `SinglePartitionScanner`, whose

@@ -3836,6 +3836,7 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         1,
         SeriesOrdering::Contiguous,
         super::IdentityCompletion::MergeInputs,
+        false,
     );
     wait_until("both identities and EOF are queued", || {
         producer_stopped(&shared)
@@ -5873,6 +5874,7 @@ async fn a_recorded_failure_reaches_every_output_once() {
                 2,
                 SeriesOrdering::Contiguous,
                 super::IdentityCompletion::MergeInputs,
+                false,
             ))),
         }) as SendableEvaluatedSeriesStream);
     }
@@ -6210,6 +6212,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
                         2,
                         SeriesOrdering::Contiguous,
                         super::IdentityCompletion::MergeInputs,
+                        false,
                     ))),
                 }),
                 Arc::clone(&series_schema),
@@ -6322,6 +6325,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
                     2,
                     SeriesOrdering::Contiguous,
                     super::IdentityCompletion::MergeInputs,
+                    false,
                 ))),
             }),
             Arc::clone(&schema()),
@@ -6484,6 +6488,7 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
             1,
             SeriesOrdering::Contiguous,
             super::IdentityCompletion::MergeInputs,
+            false,
         ))),
     });
     let future = route_partition(
@@ -7066,6 +7071,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         1,
         SeriesOrdering::Contiguous,
         super::IdentityCompletion::MergeInputs,
+        false,
     );
     wait_until("internal producer finishes", || producer_stopped(&shared)).await;
     // Queue, EOF, and identity-group metadata are charged alongside the retained chunks, so the
@@ -7373,6 +7379,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         1,
         SeriesOrdering::Contiguous,
         super::IdentityCompletion::MergeInputs,
+        false,
     );
     wait_until("histogram producer queues the whole chain", || {
         producer_stopped(&shared)
