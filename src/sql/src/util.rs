@@ -29,9 +29,8 @@ use sqlparser::ast::{
 };
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::ast::ObjectNamePartExt;
+use crate::ast::{ObjectNamePartExt, normalize_ident};
 use crate::error::{InvalidExprAsOptionValueSnafu, InvalidSqlSnafu, Result};
-use crate::parser::ParserContext;
 use crate::parsers::with_tql_parser::CteContent;
 use crate::statements::alter::AlterTableOperation;
 use crate::statements::comment::CommentObject;
@@ -261,7 +260,7 @@ fn extract_tables_from_statement(stmt: &Statement, names: &mut HashSet<ObjectNam
             if let AlterTableOperation::RenameTable { new_table_name } = alter.alter_operation() {
                 let mut renamed = current;
                 if let Some(last) = renamed.0.last_mut() {
-                    *last = ObjectNamePart::Identifier(Ident::new(new_table_name));
+                    *last = ObjectNamePart::Identifier(Ident::with_quote('"', new_table_name));
                 }
                 names.insert(renamed);
             }
@@ -398,8 +397,8 @@ fn collect_relations(ast: &impl AstVisit, names: &mut HashSet<ObjectName>) {
 
 fn metadata_table_name(table: &str, database: Option<&str>) -> ObjectName {
     let mut parts = Vec::with_capacity(usize::from(database.is_some()) + 1);
-    parts.extend(database.map(Ident::new));
-    parts.push(Ident::new(table));
+    parts.extend(database.map(|db| Ident::with_quote('"', db)));
+    parts.push(Ident::with_quote('"', table));
     ObjectName::from(parts)
 }
 
@@ -429,7 +428,7 @@ fn extract_tables_from_hybrid_cte_query(
     let cte_names: HashSet<String> = hybrid_cte
         .cte_tables
         .iter()
-        .map(|cte| ParserContext::canonicalize_identifier(cte.name.clone()).value)
+        .map(|cte| normalize_ident(&cte.name))
         .collect();
     remove_cte_names(sql_names, &cte_names);
 
@@ -460,7 +459,7 @@ fn remove_cte_names(names: &mut HashSet<ObjectName>, cte_names: &HashSet<String>
             return true;
         };
 
-        let canonical = ParserContext::canonicalize_identifier(ident.clone()).value;
+        let canonical = normalize_ident(ident);
         !cte_names.contains(&canonical)
     });
 }
@@ -518,9 +517,9 @@ fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName
                 Some(_) => return true,
             }
             self.names
-                .insert(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                    DEFAULT_INFO_METRIC,
-                ))]));
+                .insert(ObjectName(vec![ObjectNamePart::Identifier(
+                    Ident::with_quote('"', DEFAULT_INFO_METRIC),
+                )]));
             true
         }
     }
@@ -597,13 +596,13 @@ fn extract_metric_name_from_vector_selector(
 
     if let Some(schema) = schema_matcher {
         names.insert(ObjectName(vec![
-            ObjectNamePart::Identifier(Ident::new(&schema.value)),
-            ObjectNamePart::Identifier(Ident::new(metric_name)),
+            ObjectNamePart::Identifier(Ident::with_quote('"', &schema.value)),
+            ObjectNamePart::Identifier(Ident::with_quote('"', metric_name)),
         ]));
     } else {
-        names.insert(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-            metric_name,
-        ))]));
+        names.insert(ObjectName(vec![ObjectNamePart::Identifier(
+            Ident::with_quote('"', metric_name),
+        )]));
     }
     true
 }
@@ -683,7 +682,7 @@ impl Visitor for RelationCollector<'_> {
             (
                 with.cte_tables
                     .iter()
-                    .map(|cte| ParserContext::canonicalize_identifier(cte.alias.name.clone()).value)
+                    .map(|cte| normalize_ident(&cte.alias.name))
                     .collect(),
                 with.recursive,
             )
@@ -717,9 +716,7 @@ impl Visitor for RelationCollector<'_> {
             relation.0.as_slice(),
             [part]
                 if part.as_ident().is_some_and(|ident| {
-                    self.ctes_in_scope.contains(
-                        &ParserContext::canonicalize_identifier(ident.clone()).value,
-                    )
+                    self.ctes_in_scope.contains(&normalize_ident(ident))
                 })
         );
         if !is_cte {
@@ -732,6 +729,20 @@ impl Visitor for RelationCollector<'_> {
 /// Helper function for [extract_tables_from_query].
 ///
 /// Handle [sqlparser::ast::Query].
+pub fn extract_tables_from_sql_query_ast(query: &sqlparser::ast::Query) -> HashSet<ObjectName> {
+    let mut names = HashSet::new();
+    extract_tables_from_sql_query(query, &mut names);
+    names
+}
+
+/// Walks any sqlparser AST node using [`RelationCollector`] so CTE aliases are
+/// scoped accurately while collecting all referenced table relations.
+pub fn collect_relations_from_ast(ast: &impl AstVisit) -> HashSet<ObjectName> {
+    let mut names = HashSet::new();
+    collect_relations(ast, &mut names);
+    names
+}
+
 fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut HashSet<ObjectName>) {
     let _ = query.visit(&mut RelationCollector::new(names));
 }
@@ -1088,6 +1099,18 @@ SELECT * FROM (
 );
 "#,
                 vec!["nested_source".to_string()],
+            ),
+            (
+                "WITH \u{212A}pi AS (SELECT 1) SELECT * FROM kpi;",
+                vec!["kpi".to_string()],
+            ),
+            (
+                "WITH \u{212A}pi AS (SELECT 1) SELECT * FROM \u{212A}PI;",
+                vec![],
+            ),
+            (
+                "SELECT * FROM (WITH \u{212A}pi AS (SELECT 1) SELECT * FROM kpi);",
+                vec!["kpi".to_string()],
             ),
         ];
 

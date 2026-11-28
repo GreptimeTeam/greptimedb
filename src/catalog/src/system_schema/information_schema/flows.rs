@@ -503,6 +503,7 @@ mod tests {
                 catchup_max_runs: 3,
                 catchup_max_lag_secs: 300,
             }),
+            allow_sink_create: true,
         }
     }
 

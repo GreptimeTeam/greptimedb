@@ -73,8 +73,6 @@ pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
 }
 
 pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
-    use crate::parser::ParserContext;
-
     let Some(hybrid_cte) = &query.hybrid_cte else {
         return false;
     };
@@ -94,8 +92,8 @@ pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
         return false;
     };
 
-    let reference = ParserContext::canonicalize_identifier(reference).value;
-    let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
+    let reference = crate::ast::normalize_ident(&reference);
+    let cte_name = crate::ast::normalize_ident(&cte.name);
     reference == cte_name
 }
 

@@ -123,6 +123,7 @@ impl EntityGraphProviderImpl {
                 ctx.current_user(),
                 PermissionReq::Action(SEMANTIC_GRAPH_QUERY),
                 targets,
+                Some(&ctx.current_schema()),
             ) {
             Ok(_) => Ok(true),
             Err(err) if err.status_code() == StatusCode::PermissionDenied => Ok(false),
@@ -815,6 +816,7 @@ mod tests {
             _: auth::UserInfoRef,
             _: PermissionReq,
             targets: PermissionTableTargets,
+            _: Option<&str>,
         ) -> auth::error::Result<auth::PermissionResp> {
             let PermissionTableTargets::Resolved(targets) = targets else {
                 panic!("entity graph must resolve its sources");

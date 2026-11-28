@@ -1877,6 +1877,7 @@ mod tests {
             sql: "select 1".to_string(),
             flow_options: Default::default(),
             eval_schedule: None,
+            allow_sink_create: true,
         }
     }
 

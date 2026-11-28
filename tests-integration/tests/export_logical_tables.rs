@@ -1013,6 +1013,7 @@ async fn packed_copy_standalone_heterogeneous_streams() {
             _: auth::UserInfoRef,
             req: auth::PermissionReq,
             targets: auth::PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> auth::error::Result<auth::PermissionResp> {
             let denied = self.0.load(std::sync::atomic::Ordering::SeqCst)
                 && !req.is_readonly()

@@ -306,6 +306,7 @@ pub trait PermissionChecker: Send + Sync {
         _user_info: UserInfoRef,
         _req: PermissionReq,
         targets: &PermissionTableTargets,
+        _current_schema: Option<&str>,
     ) -> Result<TableTargetPrecheck> {
         if !self.uses_table_targets() {
             return Ok(TableTargetPrecheck::NeedsPhysicalResolution(Vec::new()));
@@ -340,6 +341,7 @@ pub trait PermissionChecker: Send + Sync {
         user_info: UserInfoRef,
         req: PermissionReq,
         targets: PermissionTableTargets,
+        current_schema: Option<&str>,
     ) -> Result<PermissionResp>;
 }
 
@@ -400,12 +402,15 @@ impl PermissionChecker for Option<&PermissionCheckerRef> {
         user_info: UserInfoRef,
         req: PermissionReq,
         targets: &PermissionTableTargets,
+        current_schema: Option<&str>,
     ) -> Result<TableTargetPrecheck> {
         match self {
-            Some(checker) => match checker.precheck_table_targets(user_info, req, targets)? {
-                TableTargetPrecheck::Reject => PermissionDeniedSnafu.fail(),
-                other => Ok(other),
-            },
+            Some(checker) => {
+                match checker.precheck_table_targets(user_info, req, targets, current_schema)? {
+                    TableTargetPrecheck::Reject => PermissionDeniedSnafu.fail(),
+                    other => Ok(other),
+                }
+            }
             None => Ok(TableTargetPrecheck::Allow),
         }
     }
@@ -415,11 +420,15 @@ impl PermissionChecker for Option<&PermissionCheckerRef> {
         user_info: UserInfoRef,
         req: PermissionReq,
         targets: PermissionTableTargets,
+        current_schema: Option<&str>,
     ) -> Result<PermissionResp> {
         match self {
-            Some(checker) => check_permission_result(
-                checker.check_permission_with_table_targets(user_info, req, targets),
-            ),
+            Some(checker) => check_permission_result(checker.check_permission_with_table_targets(
+                user_info,
+                req,
+                targets,
+                current_schema,
+            )),
             None => Ok(PermissionResp::Allow),
         }
     }
@@ -477,6 +486,7 @@ impl PermissionChecker for DefaultPermissionChecker {
         user_info: UserInfoRef,
         req: PermissionReq,
         _targets: PermissionTableTargets,
+        _current_schema: Option<&str>,
     ) -> Result<PermissionResp> {
         self.check_permission(user_info, req)
     }
@@ -519,6 +529,7 @@ mod tests {
             _user_info: UserInfoRef,
             req: PermissionReq,
             targets: PermissionTableTargets,
+            _current_schema: Option<&str>,
         ) -> Result<PermissionResp> {
             if !matches!(req, PermissionReq::Action(PROM_STORE_READ)) {
                 return Ok(PermissionResp::Reject);
@@ -737,6 +748,7 @@ mod tests {
                 crate::userinfo_by_name(None),
                 PermissionReq::Action(PROM_STORE_READ),
                 resolved_targets("allowed"),
+                None,
             )
             .unwrap();
         assert!(matches!(allowed, PermissionResp::Allow));
@@ -746,6 +758,7 @@ mod tests {
                 crate::userinfo_by_name(None),
                 PermissionReq::Action(PROM_STORE_READ),
                 PermissionTableTargets::resolved(Vec::new()),
+                None,
             )
             .unwrap();
         assert!(matches!(empty, PermissionResp::Allow));
@@ -754,6 +767,7 @@ mod tests {
             crate::userinfo_by_name(None),
             PermissionReq::Action(PROM_STORE_WRITE),
             PermissionTableTargets::resolved(Vec::new()),
+            None,
         );
         assert!(matches!(
             rejected_operation,
@@ -764,6 +778,7 @@ mod tests {
             crate::userinfo_by_name(None),
             PermissionReq::Action(PROM_STORE_READ),
             resolved_targets("denied"),
+            None,
         );
         assert!(matches!(rejected, Err(Error::PermissionDenied { .. })));
 
@@ -774,6 +789,7 @@ mod tests {
                 PermissionTableTarget::new("greptime", "public", "allowed"),
                 PermissionTableTarget::new("greptime", "public", "denied"),
             ]),
+            None,
         );
         assert!(matches!(mixed, Err(Error::PermissionDenied { .. })));
 
@@ -781,6 +797,7 @@ mod tests {
             crate::userinfo_by_name(None),
             PermissionReq::Action(PROM_STORE_READ),
             resolved_targets("error"),
+            None,
         );
         assert!(matches!(error, Err(Error::InternalState { msg }) if msg == "testing"));
 
@@ -810,6 +827,7 @@ mod tests {
                 crate::userinfo_by_name(None),
                 PermissionReq::Action(PROM_STORE_READ),
                 PermissionTableTargets::Unresolved,
+                None,
             )
             .unwrap();
         assert!(matches!(allowed, PermissionResp::Allow));
@@ -841,7 +859,7 @@ mod tests {
             let user = DefaultUserInfo::with_name_and_permission("test_user", permission);
             let direct = checker.check_permission(user.clone(), req.clone()).unwrap();
             let targeted = checker
-                .check_permission_with_table_targets(user, req, resolved_targets("metrics"))
+                .check_permission_with_table_targets(user, req, resolved_targets("metrics"), None)
                 .unwrap();
 
             assert_eq!(
@@ -863,20 +881,31 @@ mod tests {
                 .precheck_table_targets(
                     ro_user.clone(),
                     PermissionReq::Action(PROMQL_QUERY),
-                    &targets
+                    &targets,
+                    None
                 )
                 .unwrap(),
             TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
         );
         assert_eq!(
             default_checker
-                .precheck_table_targets(ro_user, PermissionReq::Action(PROM_STORE_WRITE), &targets)
+                .precheck_table_targets(
+                    ro_user,
+                    PermissionReq::Action(PROM_STORE_WRITE),
+                    &targets,
+                    None
+                )
                 .unwrap(),
             TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
         );
         assert_eq!(
             default_checker
-                .precheck_table_targets(rw_user, PermissionReq::Action(PROM_STORE_WRITE), &targets)
+                .precheck_table_targets(
+                    rw_user,
+                    PermissionReq::Action(PROM_STORE_WRITE),
+                    &targets,
+                    None
+                )
                 .unwrap(),
             TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
         );
@@ -896,6 +925,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: PermissionTableTargets,
+                _: Option<&str>,
             ) -> Result<PermissionResp> {
                 Ok(PermissionResp::Reject)
             }
@@ -906,6 +936,7 @@ mod tests {
                     crate::userinfo_by_name(None),
                     PermissionReq::Action(PROM_STORE_WRITE),
                     &targets,
+                    None,
                 )
                 .unwrap(),
             TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
@@ -924,6 +955,7 @@ mod tests {
                     crate::userinfo_by_name(None),
                     PermissionReq::Action(PROM_STORE_READ),
                     &mixed_targets,
+                    None,
                 )
                 .unwrap(),
             TableTargetPrecheck::NeedsPhysicalResolution(vec![0, 2])
@@ -934,6 +966,7 @@ mod tests {
                     crate::userinfo_by_name(None),
                     PermissionReq::Action(PROM_STORE_READ),
                     &PermissionTableTargets::Unresolved,
+                    None,
                 )
                 .unwrap(),
             TableTargetPrecheck::NeedsPhysicalResolution(Vec::new())
@@ -946,6 +979,7 @@ mod tests {
                     crate::userinfo_by_name(None),
                     PermissionReq::Action(PROM_STORE_READ),
                     &mixed_targets,
+                    None,
                 )
                 .unwrap(),
             TableTargetPrecheck::NeedsPhysicalResolution(vec![0, 2])
@@ -962,6 +996,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: &PermissionTableTargets,
+                _: Option<&str>,
             ) -> Result<TableTargetPrecheck> {
                 Ok(TableTargetPrecheck::Reject)
             }
@@ -971,6 +1006,7 @@ mod tests {
                 _: UserInfoRef,
                 _: PermissionReq,
                 _: PermissionTableTargets,
+                _: Option<&str>,
             ) -> Result<PermissionResp> {
                 Ok(PermissionResp::Reject)
             }
@@ -981,6 +1017,7 @@ mod tests {
             crate::userinfo_by_name(None),
             PermissionReq::Action(PROM_STORE_WRITE),
             &targets,
+            None,
         );
         assert!(matches!(rejected, Err(Error::PermissionDenied { .. })));
 
@@ -991,6 +1028,7 @@ mod tests {
                     crate::userinfo_by_name(None),
                     PermissionReq::Action(PROM_STORE_WRITE),
                     &PermissionTableTargets::Unresolved,
+                    None,
                 )
                 .unwrap(),
             TableTargetPrecheck::Allow

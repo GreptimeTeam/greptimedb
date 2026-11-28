@@ -206,17 +206,17 @@ impl<'a> StatementToRegion<'a> {
             [table] => Ok((
                 self.ctx.current_catalog().to_owned(),
                 self.ctx.current_schema(),
-                table.to_string_unquoted(),
+                table.to_string_normalized(),
             )),
             [schema, table] => Ok((
                 self.ctx.current_catalog().to_owned(),
-                schema.to_string_unquoted(),
-                table.to_string_unquoted(),
+                schema.to_string_normalized(),
+                table.to_string_normalized(),
             )),
             [catalog, schema, table] => Ok((
-                catalog.to_string_unquoted(),
-                schema.to_string_unquoted(),
-                table.to_string_unquoted(),
+                catalog.to_string_normalized(),
+                schema.to_string_normalized(),
+                table.to_string_normalized(),
             )),
             _ => InvalidSqlSnafu {
                 err_msg: format!(

@@ -166,6 +166,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Permission denied: {reason}"))]
+    PermissionDenied {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Datatypes error: {source} with extra message: {extra}"))]
     Datatypes {
         source: datatypes::Error,
@@ -318,10 +325,17 @@ impl ErrorExt for Error {
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::FlowNotFound { .. } => StatusCode::FlowNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::CreateFlow { .. }
-            | Self::CreateSinkTable { .. }
-            | Self::Arrow { .. }
-            | Self::Time { .. } => StatusCode::EngineExecuteQuery,
+            Self::PermissionDenied { .. } => StatusCode::PermissionDenied,
+            Self::CreateFlow { source, .. } => {
+                if source.status_code() == StatusCode::PermissionDenied {
+                    StatusCode::PermissionDenied
+                } else {
+                    StatusCode::EngineExecuteQuery
+                }
+            }
+            Self::CreateSinkTable { .. } | Self::Arrow { .. } | Self::Time { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Self::Unexpected { .. }
             | Self::SyncCheckTask { .. }
             | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,

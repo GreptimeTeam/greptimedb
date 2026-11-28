@@ -1332,6 +1332,14 @@ pub struct CreateFlowTask {
     /// defaults are resolved.
     #[serde(default)]
     pub eval_schedule: Option<crate::key::flow::flow_info::FlowScheduleConfig>,
+    /// Whether the flow creator was authorized to auto-create the sink table
+    /// (and incremental flow state table/result view) when missing.
+    #[serde(default = "default_allow_sink_create")]
+    pub allow_sink_create: bool,
+}
+
+fn default_allow_sink_create() -> bool {
+    true
 }
 
 impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
@@ -1370,6 +1378,19 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
                 None => None,
             };
 
+        let allow_sink_create =
+            match flow_options.remove(crate::ddl::create_flow::INTERNAL_ALLOW_SINK_CREATE_KEY) {
+                Some(value) => value.parse::<bool>().map_err(|_| {
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Invalid internal allow sink create payload '{value}': expected boolean"
+                        ),
+                    }
+                    .build()
+                })?,
+                None => true,
+            };
+
         Ok(CreateFlowTask {
             catalog_name,
             flow_name,
@@ -1388,6 +1409,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             sql,
             flow_options,
             eval_schedule: None,
+            allow_sink_create,
         })
     }
 }
@@ -1407,6 +1429,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             comment,
             sql,
             mut flow_options,
+            allow_sink_create,
             ..
         }: CreateFlowTask,
     ) -> Self {
@@ -1416,6 +1439,12 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             flow_options.insert(
                 crate::ddl::create_flow::INTERNAL_EVAL_OFFSET_KEY.to_string(),
                 offset_secs.to_string(),
+            );
+        }
+        if !allow_sink_create {
+            flow_options.insert(
+                crate::ddl::create_flow::INTERNAL_ALLOW_SINK_CREATE_KEY.to_string(),
+                "false".to_string(),
             );
         }
         PbCreateFlowTask {

@@ -42,7 +42,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
-    INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
+    INTERNAL_ALLOW_SINK_CREATE_KEY, INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
 };
 use common_meta::instruction::CacheIdent;
 #[cfg(feature = "enterprise")]
@@ -229,7 +229,10 @@ fn validate_and_normalize_flow_options(
         .map(|(key, value)| {
             if matches!(
                 key.as_str(),
-                FlowType::FLOW_TYPE_KEY | INTERNAL_EVAL_OFFSET_KEY | INTERNAL_EVAL_SCHEDULE_KEY
+                FlowType::FLOW_TYPE_KEY
+                    | INTERNAL_EVAL_OFFSET_KEY
+                    | INTERNAL_EVAL_SCHEDULE_KEY
+                    | INTERNAL_ALLOW_SINK_CREATE_KEY
             ) {
                 return InvalidSqlSnafu {
                     err_msg: format!("flow option '{key}' is reserved for internal use"),
@@ -939,13 +942,25 @@ impl StatementExecutor {
         stmt: CreateFlow,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        self.create_flow_with_sink_create_permission(stmt, true, query_context)
+            .await
+    }
+
+    /// SQL entry point for `CREATE FLOW` with pre-evaluated sink-table create permission.
+    #[tracing::instrument(skip_all)]
+    pub async fn create_flow_with_sink_create_permission(
+        &self,
+        stmt: CreateFlow,
+        allow_sink_create: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
         // TODO(ruihang): do some verification
         let eval_offset_secs = stmt.eval_offset;
         let expr = expr_helper::to_create_flow_task_expr(stmt, &query_context)?;
 
         // The typed `EVAL OFFSET` comes straight from the parsed SQL AST; it is
         // the only trusted source of the offset at this boundary.
-        self.create_flow_procedure(expr, eval_offset_secs, query_context)
+        self.create_flow_procedure(expr, eval_offset_secs, allow_sink_create, query_context)
             .await?;
         Ok(Output::new_with_affected_rows(0))
     }
@@ -956,7 +971,18 @@ impl StatementExecutor {
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        self.create_flow_procedure(expr, None, query_context)
+        self.create_flow_inner_with_sink_create_permission(expr, true, query_context)
+            .await
+    }
+
+    /// Direct gRPC entry point for `CREATE FLOW` with pre-evaluated sink-table create permission.
+    pub async fn create_flow_inner_with_sink_create_permission(
+        &self,
+        expr: CreateFlowExpr,
+        allow_sink_create: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        self.create_flow_procedure(expr, None, allow_sink_create, query_context)
             .await?;
         Ok(Output::new_with_affected_rows(0))
     }
@@ -965,6 +991,7 @@ impl StatementExecutor {
         &self,
         mut expr: CreateFlowExpr,
         eval_offset_secs: Option<i64>,
+        allow_sink_create: bool,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let eval_interval_secs = expr.eval_interval.as_ref().map(|e| e.seconds);
@@ -1003,6 +1030,7 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
         task.eval_offset_secs = eval_offset_secs;
+        task.allow_sink_create = allow_sink_create;
         let executor_context = to_executor_context(query_context, TriggerReason::Manual);
         let request = SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task));
 

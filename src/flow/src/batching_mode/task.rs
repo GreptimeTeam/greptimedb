@@ -163,6 +163,8 @@ pub struct TaskConfig {
     pub flow_eval_interval: Option<Duration>,
     /// Typed schedule configuration, pre-parsed at task creation time.
     pub eval_schedule: Option<EvalSchedule>,
+    /// Whether the flow creator was authorized to auto-create the sink table when missing.
+    pub allow_sink_create: bool,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -446,6 +448,7 @@ impl BatchingTask {
                 batch_opts,
                 flow_eval_interval,
                 eval_schedule,
+                allow_sink_create: true,
             }),
             state: Arc::new(RwLock::new(state)),
             execution_lock: Arc::new(Mutex::new(())),
@@ -458,6 +461,11 @@ impl BatchingTask {
         execution: Option<Arc<dyn crate::BatchingExecution>>,
     ) -> Self {
         self.execution = execution;
+        self
+    }
+
+    pub(crate) fn with_allow_sink_create(mut self, allow_sink_create: bool) -> Self {
+        Arc::make_mut(&mut self.config).allow_sink_create = allow_sink_create;
         self
     }
 
@@ -529,6 +537,15 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
     ) -> Result<TableRef, Error> {
         if !self.is_table_exist(&self.config.sink_table_name).await? {
+            snafu::ensure!(
+                self.config.allow_sink_create,
+                crate::error::PermissionDeniedSnafu {
+                    reason: format!(
+                        "Permission denied to auto-create missing flow sink table `{}`",
+                        self.config.sink_table_name.join(".")
+                    ),
+                }
+            );
             let create_table = self.gen_create_table_expr(engine.clone()).await?;
             info!(
                 "Try creating sink table(if not exists) with expr: {:?}",

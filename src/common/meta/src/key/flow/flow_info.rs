@@ -269,6 +269,14 @@ pub struct FlowInfoValue {
     /// limits). Absent for flows without `EVAL INTERVAL`.
     #[serde(default)]
     pub eval_schedule: Option<FlowScheduleConfig>,
+    /// Whether the flow creator was authorized to auto-create the sink table
+    /// (and incremental flow state table/result view) when missing.
+    #[serde(default = "default_allow_sink_create")]
+    pub allow_sink_create: bool,
+}
+
+fn default_allow_sink_create() -> bool {
+    true
 }
 
 impl FlowInfoValue {
@@ -353,6 +361,10 @@ impl FlowInfoValue {
 
     pub fn updated_time(&self) -> &DateTime<Utc> {
         &self.updated_time
+    }
+
+    pub fn allow_sink_create(&self) -> bool {
+        self.allow_sink_create
     }
 }
 

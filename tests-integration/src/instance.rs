@@ -723,6 +723,7 @@ mod tests {
                 _: auth::UserInfoRef,
                 req: auth::PermissionReq,
                 targets: auth::PermissionTableTargets,
+                _current_schema: Option<&str>,
             ) -> auth::error::Result<auth::PermissionResp> {
                 if !matches!(req, auth::PermissionReq::Action(auth::PROMQL_QUERY)) {
                     return Ok(auth::PermissionResp::Allow);
@@ -859,6 +860,7 @@ mod tests {
                 _user_info: auth::UserInfoRef,
                 req: auth::PermissionReq,
                 targets: auth::PermissionTableTargets,
+                _current_schema: Option<&str>,
             ) -> auth::error::Result<auth::PermissionResp> {
                 if matches!(req, auth::PermissionReq::Action(auth::SEMANTIC_GRAPH_QUERY))
                     && let auth::PermissionTableTargets::Resolved(targets) = targets
@@ -1024,6 +1026,7 @@ mod tests {
                 _user_info: auth::UserInfoRef,
                 _req: auth::PermissionReq,
                 targets: auth::PermissionTableTargets,
+                _current_schema: Option<&str>,
             ) -> auth::error::Result<auth::PermissionResp> {
                 if let auth::PermissionTableTargets::Resolved(targets) = targets
                     && targets
@@ -1109,6 +1112,349 @@ mod tests {
         assert!(
             !pretty_print.contains("greptime_otel_resource_info"),
             "denied descriptor table was created:\n{pretty_print}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_flow_sink_denial_vs_checker_error() {
+        use std::sync::Mutex;
+
+        use api::v1::greptime_request::Request;
+        use servers::query_handler::grpc::GrpcQueryHandler;
+
+        common_telemetry::init_default_ut_logging();
+
+        #[derive(Clone, Copy)]
+        enum SinkCreateMode {
+            Allow,
+            Deny,
+            InternalFailure,
+        }
+
+        struct ToggleSinkCreateChecker {
+            mode: Mutex<SinkCreateMode>,
+        }
+
+        impl auth::PermissionChecker for ToggleSinkCreateChecker {
+            fn check_permission(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+
+            fn grpc_table_targets(
+                &self,
+                request: &Request,
+                _catalog: &str,
+                _schema: &str,
+            ) -> auth::PermissionTableTargets {
+                match request {
+                    Request::Ddl(ddl)
+                        if matches!(ddl.expr, Some(api::v1::ddl_request::Expr::CreateFlow(_))) =>
+                    {
+                        auth::PermissionTableTargets::resolved(vec![])
+                    }
+                    _ => auth::PermissionTableTargets::Unresolved,
+                }
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: auth::UserInfoRef,
+                req: auth::PermissionReq,
+                _targets: auth::PermissionTableTargets,
+                _current_schema: Option<&str>,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                let auth::PermissionReq::GrpcRequest(Request::Ddl(ddl)) = req else {
+                    return Ok(auth::PermissionResp::Allow);
+                };
+                if !matches!(ddl.expr, Some(api::v1::ddl_request::Expr::CreateTable(_))) {
+                    return Ok(auth::PermissionResp::Allow);
+                }
+                match *self.mode.lock().unwrap() {
+                    SinkCreateMode::Allow => Ok(auth::PermissionResp::Allow),
+                    SinkCreateMode::Deny => Ok(auth::PermissionResp::Reject),
+                    SinkCreateMode::InternalFailure => auth::error::InternalStateSnafu {
+                        msg: "auth backend down",
+                    }
+                    .fail(),
+                }
+            }
+        }
+
+        let checker = Arc::new(ToggleSinkCreateChecker {
+            mode: Mutex::new(SinkCreateMode::Allow),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(checker.clone());
+
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_create_flow_sink_denial_vs_checker_error")
+                .with_plugin(plugins)
+                .build()
+                .await;
+        let instance = standalone.fe_instance().clone();
+
+        create_table(
+            &instance,
+            "CREATE TABLE flow_src (val INT, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+        create_table(
+            &instance,
+            "CREATE TABLE existing_sink (val INT, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+
+        let grpc_create_flow = |flow_name: &str, sink_name: &str| {
+            Request::Ddl(api::v1::DdlRequest {
+                expr: Some(api::v1::ddl_request::Expr::CreateFlow(
+                    api::v1::CreateFlowExpr {
+                        flow_name: flow_name.to_string(),
+                        source_table_names: vec![api::v1::TableName {
+                            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                            table_name: "flow_src".to_string(),
+                        }],
+                        sink_table_name: Some(api::v1::TableName {
+                            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                            table_name: sink_name.to_string(),
+                        }),
+                        eval_interval: Some(api::v1::EvalInterval { seconds: 10 }),
+                        sql: "SELECT val, ts FROM flow_src".to_string(),
+                        ..Default::default()
+                    },
+                )),
+            })
+        };
+
+        // Denying `table.create` still allows creating flows against an existing sink.
+        *checker.mode.lock().unwrap() = SinkCreateMode::Deny;
+        query(
+            &instance,
+            "CREATE FLOW flow_existing_sql SINK TO existing_sink EVAL INTERVAL '10s' AS SELECT val, ts FROM flow_src",
+        )
+        .await;
+        GrpcQueryHandler::do_query(
+            &*instance,
+            grpc_create_flow("flow_existing_grpc", "existing_sink"),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+
+        // Missing sink with denied `table.create` must fail with PermissionDenied.
+        let denied_err = SqlQueryHandler::do_query(
+            &*instance,
+            "CREATE FLOW flow_missing_denied SINK TO missing_sink EVAL INTERVAL '10s' AS SELECT val, ts FROM flow_src",
+            QueryContext::arc(),
+        )
+        .await
+        .remove(0)
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, denied_err.status_code());
+
+        // Checker failures must propagate with their original status and create no flow.
+        *checker.mode.lock().unwrap() = SinkCreateMode::InternalFailure;
+        let sql_err = SqlQueryHandler::do_query(
+            &*instance,
+            "CREATE FLOW flow_err_sql SINK TO existing_sink EVAL INTERVAL '10s' AS SELECT val, ts FROM flow_src",
+            QueryContext::arc(),
+        )
+        .await
+        .remove(0)
+        .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, sql_err.status_code());
+
+        let grpc_err = GrpcQueryHandler::do_query(
+            &*instance,
+            grpc_create_flow("flow_err_grpc", "existing_sink"),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::Unexpected, grpc_err.status_code());
+
+        *checker.mode.lock().unwrap() = SinkCreateMode::Allow;
+        let output = query(
+            &instance,
+            "SELECT flow_name FROM information_schema.flows ORDER BY flow_name",
+        )
+        .await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty = batches.pretty_print().unwrap();
+        assert!(pretty.contains("flow_existing_sql"), "{pretty}");
+        assert!(pretty.contains("flow_existing_grpc"), "{pretty}");
+        assert!(!pretty.contains("flow_missing_denied"), "{pretty}");
+        assert!(!pretty.contains("flow_err_sql"), "{pretty}");
+        assert!(!pretty.contains("flow_err_grpc"), "{pretty}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_grpc_create_flow_sink_namespace_persistence() {
+        use std::sync::Mutex;
+
+        use api::v1::greptime_request::Request;
+        use servers::query_handler::grpc::GrpcQueryHandler;
+        use session::context::QueryContextBuilder;
+
+        common_telemetry::init_default_ut_logging();
+
+        struct RecordingSinkChecker {
+            checked: Mutex<Vec<(String, String, String)>>,
+        }
+
+        impl auth::PermissionChecker for RecordingSinkChecker {
+            fn check_permission(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+
+            fn grpc_table_targets(
+                &self,
+                request: &Request,
+                _catalog: &str,
+                _schema: &str,
+            ) -> auth::PermissionTableTargets {
+                match request {
+                    Request::Ddl(ddl)
+                        if matches!(ddl.expr, Some(api::v1::ddl_request::Expr::CreateFlow(_))) =>
+                    {
+                        auth::PermissionTableTargets::resolved(vec![])
+                    }
+                    _ => auth::PermissionTableTargets::Unresolved,
+                }
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: auth::UserInfoRef,
+                req: auth::PermissionReq,
+                _targets: auth::PermissionTableTargets,
+                _current_schema: Option<&str>,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if let auth::PermissionReq::GrpcRequest(Request::Ddl(ddl)) = req
+                    && let Some(api::v1::ddl_request::Expr::CreateTable(create_table)) = &ddl.expr
+                {
+                    self.checked.lock().unwrap().push((
+                        create_table.catalog_name.clone(),
+                        create_table.schema_name.clone(),
+                        create_table.table_name.clone(),
+                    ));
+                }
+                Ok(auth::PermissionResp::Allow)
+            }
+        }
+
+        let checker = Arc::new(RecordingSinkChecker {
+            checked: Mutex::new(Vec::new()),
+        });
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(checker.clone());
+
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_grpc_create_flow_sink_namespace_persistence")
+                .with_plugin(plugins)
+                .build()
+                .await;
+        let instance = standalone.fe_instance().clone();
+
+        query(&instance, "CREATE DATABASE session_db").await;
+        query(&instance, "CREATE DATABASE explicit_db").await;
+        create_table(
+            &instance,
+            "CREATE TABLE session_db.src_tbl (val INT, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+        create_table(
+            &instance,
+            "CREATE TABLE session_db.unqual_sink (val INT, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+        create_table(
+            &instance,
+            "CREATE TABLE explicit_db.qual_sink (val INT, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+
+        let ctx: QueryContextRef = QueryContextBuilder::default()
+            .current_catalog(DEFAULT_CATALOG_NAME.to_string())
+            .current_schema("session_db".to_string())
+            .build()
+            .into();
+
+        for (flow_name, sink_schema, sink_table) in [
+            ("flow_unqual_sink", "", "unqual_sink"),
+            ("flow_qual_sink", "explicit_db", "qual_sink"),
+        ] {
+            let request = Request::Ddl(api::v1::DdlRequest {
+                expr: Some(api::v1::ddl_request::Expr::CreateFlow(
+                    api::v1::CreateFlowExpr {
+                        flow_name: flow_name.to_string(),
+                        source_table_names: vec![api::v1::TableName {
+                            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                            schema_name: "session_db".to_string(),
+                            table_name: "src_tbl".to_string(),
+                        }],
+                        sink_table_name: Some(api::v1::TableName {
+                            catalog_name: String::new(),
+                            schema_name: sink_schema.to_string(),
+                            table_name: sink_table.to_string(),
+                        }),
+                        eval_interval: Some(api::v1::EvalInterval { seconds: 10 }),
+                        sql: "SELECT val, ts FROM session_db.src_tbl".to_string(),
+                        ..Default::default()
+                    },
+                )),
+            });
+            GrpcQueryHandler::do_query(&*instance, request, Arc::clone(&ctx))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            *checker.checked.lock().unwrap(),
+            vec![
+                (
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    "session_db".to_string(),
+                    "unqual_sink".to_string(),
+                ),
+                (
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    "explicit_db".to_string(),
+                    "qual_sink".to_string(),
+                ),
+            ]
+        );
+
+        let output = query(
+            &instance,
+            "SELECT flow_name, sink_table_name FROM information_schema.flows ORDER BY flow_name",
+        )
+        .await;
+        let OutputData::Stream(s) = output.data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty = batches.pretty_print().unwrap();
+        assert!(
+            pretty.contains("flow_unqual_sink")
+                && pretty.contains("greptime.session_db.unqual_sink"),
+            "{pretty}"
+        );
+        assert!(
+            pretty.contains("flow_qual_sink") && pretty.contains("greptime.explicit_db.qual_sink"),
+            "{pretty}"
         );
     }
 }

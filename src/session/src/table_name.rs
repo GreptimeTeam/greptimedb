@@ -48,22 +48,154 @@ pub fn table_idents_to_full_name(
         [table] => Ok((
             query_ctx.current_catalog().to_string(),
             query_ctx.current_schema().clone(),
-            table.to_string_unquoted(),
+            table.to_string_normalized(),
         )),
         [schema, table] => Ok((
             query_ctx.current_catalog().to_string(),
-            schema.to_string_unquoted(),
-            table.to_string_unquoted(),
+            schema.to_string_normalized(),
+            table.to_string_normalized(),
         )),
         [catalog, schema, table] => Ok((
-            catalog.to_string_unquoted(),
-            schema.to_string_unquoted(),
-            table.to_string_unquoted(),
+            catalog.to_string_normalized(),
+            schema.to_string_normalized(),
+            table.to_string_normalized(),
         )),
         _ => InvalidSqlSnafu {
             msg: format!(
                 "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
             ),
         }.fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::{ParseOptions, ParserContext};
+    use sql::statements::statement::Statement;
+    use sql::util::extract_tables_from_statement_checked;
+
+    use super::*;
+    use crate::context::QueryContext;
+
+    #[test]
+    fn test_table_idents_to_full_name_quote_aware_normalization() {
+        let query_ctx = Arc::new(QueryContext::with("greptime", "public"));
+
+        let extract_single = |sql: &str| -> ObjectName {
+            let stmt = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()
+            .remove(0);
+            let mut tables = extract_tables_from_statement_checked(&stmt).unwrap();
+            let table = tables.next().unwrap();
+            assert!(tables.next().is_none());
+            table
+        };
+
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "readings".to_string()
+            ),
+            table_idents_to_full_name(&extract_single("SELECT * FROM Readings"), &query_ctx)
+                .unwrap()
+        );
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "readings".to_string()
+            ),
+            table_idents_to_full_name(&extract_single("SELECT * FROM Public.Readings"), &query_ctx)
+                .unwrap()
+        );
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "readings".to_string()
+            ),
+            table_idents_to_full_name(
+                &extract_single("SELECT * FROM Greptime.Public.Readings"),
+                &query_ctx
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "Readings".to_string()
+            ),
+            table_idents_to_full_name(&extract_single(r#"SELECT * FROM "Readings""#), &query_ctx)
+                .unwrap()
+        );
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "Public".to_string(),
+                "Readings".to_string()
+            ),
+            table_idents_to_full_name(
+                &extract_single(r#"SELECT * FROM "Public"."Readings""#),
+                &query_ctx
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "Readings".to_string()
+            ),
+            table_idents_to_full_name(&extract_single("SELECT * FROM `Readings`"), &query_ctx)
+                .unwrap()
+        );
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "\u{212A}pi".to_string()
+            ),
+            table_idents_to_full_name(&extract_single("SELECT * FROM \u{212A}PI"), &query_ctx)
+                .unwrap()
+        );
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "\u{212A}PI".to_string()
+            ),
+            table_idents_to_full_name(&extract_single("SELECT * FROM \"\u{212A}PI\""), &query_ctx)
+                .unwrap()
+        );
+
+        let stmt = ParserContext::create_with_dialect(
+            "TQL EVAL (0, 10, '5s') Readings",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+        assert!(matches!(stmt, Statement::Tql(_)));
+        let tql_table = extract_tables_from_statement_checked(&stmt)
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(
+            (
+                "greptime".to_string(),
+                "public".to_string(),
+                "Readings".to_string()
+            ),
+            table_idents_to_full_name(&tql_table, &query_ctx).unwrap()
+        );
     }
 }

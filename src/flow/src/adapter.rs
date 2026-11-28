@@ -864,8 +864,21 @@ impl StreamingEngine {
             &source_primary_key_indices,
             &flow_plan,
         );
+        let allow_sink_create = args
+            .flow_options
+            .get(common_meta::ddl::create_flow::INTERNAL_ALLOW_SINK_CREATE_KEY)
+            .map(String::as_str)
+            != Some("false");
         let sink_exists = self.fetch_table_pk_schema(sink_table_name).await?.is_some();
         if !sink_exists {
+            if create_sink && !allow_sink_create {
+                return crate::error::PermissionDeniedSnafu {
+                    reason: format!(
+                        "Permission denied to auto-create missing flow sink table `{sink_table_name:?}`"
+                    ),
+                }
+                .fail();
+            }
             validate_auto_column_names(&inferred_schema)?;
         }
         if !sink_exists

@@ -19,8 +19,24 @@ pub use sqlparser::ast::{
     visit_expressions_mut, visit_statements_mut,
 };
 
+/// Normalizes an identifier using ASCII-only case folding when unquoted,
+/// preserving exact casing for quoted identifiers (matching DataFusion's
+/// `IdentNormalizer` with `enable_ident_normalization = true`).
+pub fn normalize_ident(ident: &Ident) -> String {
+    if ident.quote_style.is_some() {
+        ident.value.clone()
+    } else {
+        ident.value.to_ascii_lowercase()
+    }
+}
+
 pub trait ObjectNamePartExt {
     fn to_string_unquoted(&self) -> String;
+
+    /// Returns the identifier string normalized with ASCII-only lowercase when
+    /// unquoted, preserving original casing for quoted identifiers (matching
+    /// DataFusion's SQL planner with `enable_ident_normalization = true`).
+    fn to_string_normalized(&self) -> String;
 }
 
 impl ObjectNamePartExt for ObjectNamePart {
@@ -30,6 +46,13 @@ impl ObjectNamePartExt for ObjectNamePart {
             return self.to_string();
         };
         ident.value.clone()
+    }
+
+    fn to_string_normalized(&self) -> String {
+        let ObjectNamePart::Identifier(ident) = self else {
+            return self.to_string();
+        };
+        normalize_ident(ident)
     }
 }
 
@@ -46,7 +69,7 @@ pub fn object_name_to_string_unquoted(name: &ObjectName) -> String {
 mod tests {
     use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
 
-    use super::object_name_to_string_unquoted;
+    use super::{ObjectNamePartExt, object_name_to_string_unquoted};
 
     #[test]
     fn test_object_name_to_string_unquoted() {
@@ -64,5 +87,20 @@ mod tests {
             object_name_to_string_unquoted(&unquoted),
             object_name_to_string_unquoted(&quoted)
         );
+    }
+
+    #[test]
+    fn test_object_name_part_to_string_normalized() {
+        let unquoted = ObjectNamePart::Identifier(Ident::new("Readings"));
+        let double_quoted = ObjectNamePart::Identifier(Ident::with_quote('"', "Readings"));
+        let backtick_quoted = ObjectNamePart::Identifier(Ident::with_quote('`', "Readings"));
+        let kelvin_unquoted = ObjectNamePart::Identifier(Ident::new("\u{212A}PI"));
+        let kelvin_quoted = ObjectNamePart::Identifier(Ident::with_quote('"', "\u{212A}PI"));
+
+        assert_eq!("readings", unquoted.to_string_normalized());
+        assert_eq!("Readings", double_quoted.to_string_normalized());
+        assert_eq!("Readings", backtick_quoted.to_string_normalized());
+        assert_eq!("\u{212A}pi", kelvin_unquoted.to_string_normalized());
+        assert_eq!("\u{212A}PI", kelvin_quoted.to_string_normalized());
     }
 }
