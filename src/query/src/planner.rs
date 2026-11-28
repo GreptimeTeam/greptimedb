@@ -141,6 +141,12 @@ fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
         && (found_raw || found_region_local || is_regionless_fused_plan(plan))
 }
 
+/// The cause reported for a native plan a distributed planner cannot route.
+///
+/// A distributed planner reads every selector through a source that names its region, so a plan
+/// without that shape has no placement this deployment can give it.
+const DISTRIBUTION_CANNOT_ROUTE: &str = "the distribution planner cannot route this plan";
+
 /// Whether `plan` is a native fused plan with no region below it.
 ///
 /// Two shapes qualify, and both are already the finished plan: a statement that reads no data -
@@ -213,6 +219,19 @@ fn strips_only_tsid(plan: &LogicalPlan, inner: &LogicalPlan) -> bool {
         .map(|field| field.name())
         .collect::<Vec<_>>();
     projected == stripped && projected.len() + 1 == inner.schema().fields().len()
+}
+
+/// The error a statement that asked for the native route is answered with when this deployment
+/// cannot route the plan the route built.
+///
+/// The plan it refuses names no region for a read it makes, so no region can be given it, and a
+/// query that asked for this route is not answered by another plan in its place.
+fn native_plan_not_routable() -> crate::error::Error {
+    let unsupported = UnsupportedNativeShapeSnafu {
+        reason: DISTRIBUTION_CANNOT_ROUTE,
+    }
+    .build();
+    QueryPlanSnafu.into_error(BoxedError::new(unsupported))
 }
 
 /// The error a statement that asked for the native route is answered with when this CTE cannot
@@ -809,27 +828,17 @@ impl DfLogicalPlanner {
         .context(QueryPlanSnafu)?;
 
         // A distributed planner plans a native statement over per-selector raw sources, and a
-        // statement that reads no table needs none. Anything else keeps the existing plan. Decide
-        // while the original statement is still available: physical planning cannot fall back
-        // safely. An engine with no distributed planner plans no region, so there is nothing to
-        // admit its plan against.
-        let plan = if native_requested
+        // statement that reads no table needs none. A plan without that shape is one this
+        // deployment cannot route, and a query that asked for this route is not answered by the
+        // plan it asked to avoid: it is reported instead. Decide while the original statement is
+        // still available - physical planning cannot refuse on the route's behalf. An engine with
+        // no distributed planner places no region, so its plans need no such check.
+        if native_requested
             && self.engine_state.with_dist_planner()
             && !remote_native_raw_plan_supported(&plan)
         {
-            PromPlanner::stmt_to_plan_with_annotations(
-                table_provider(),
-                stmt,
-                &self.engine_state,
-                promql_annotations,
-                false,
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(QueryPlanSnafu)?
-        } else {
-            plan
-        };
+            return Err(native_plan_not_routable());
+        }
         let context = QueryEngineContext::new(scheduled_state, query_ctx);
         let plan = self
             .engine_state
@@ -1267,6 +1276,7 @@ mod tests {
     use common_recordbatch::RecordBatch;
     use common_recordbatch::util::collect_batches;
     use common_time::Timezone;
+    use datafusion::datasource::DefaultTableSource;
     use datatypes::arrow::array::{Array, Float64Array, StringArray};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -1277,11 +1287,13 @@ mod tests {
         DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
         METRIC_ENGINE_NAME,
     };
+    use store_api::storage::RegionId;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::test_util::EmptyTable;
 
     use super::*;
     use crate::datafusion::QUERY_FALLBACK_HINT;
+    use crate::optimizer::test_util::mock_table_provider;
     use crate::parser::{PromQuery, QueryLanguageParser};
     use crate::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
     use crate::{QueryEngineFactory, QueryEngineRef};
@@ -1696,12 +1708,15 @@ mod tests {
         assert!(message.contains("Expected true or false"), "{message}");
     }
 
-    /// One deployment, one topology: an engine that plans regions reads every selector through one
-    /// source per region, so the admission gate admits the same shapes wherever those regions are.
-    /// An engine with no distributed planner plans no region, so its plans keep the shapes a region
-    /// runs itself and there is nothing for the gate to judge.
+    /// A statement the route answers is answered by the route, and by no other plan: what it plans
+    /// is never handed to the existing planner to answer instead.
+    ///
+    /// The shape it plans depends on where its regions are. An engine that plans regions reads
+    /// every selector through one source per region, while an engine with no distributed planner
+    /// keeps the scans its own nodes run themselves - and a statement that reads more than one table
+    /// reads through sources either way. Neither deployment replans what the route built.
     #[tokio::test]
-    async fn test_native_promql_admission_is_the_same_for_both_deployments() {
+    async fn test_native_promql_answers_without_replanning_on_both_deployments() {
         for (with_dist_planner, query, sourced) in [
             (false, "some_metric + other_metric", true),
             (false, "rate(some_metric[5m])", false),
@@ -1739,8 +1754,8 @@ mod tests {
                 "with_dist_planner={with_dist_planner}, query={query}: {display}"
             );
             if with_dist_planner {
-                // The gate admits the plan instead of replanning it through the legacy route: one
-                // source per region under a fused node.
+                // One source per region under a fused node: the shape this deployment routes, so
+                // the route's own answer is the answer.
                 assert!(remote_native_raw_plan_supported(&plan), "{display}");
             }
             assert_eq!(
@@ -1748,7 +1763,64 @@ mod tests {
                 sourced,
                 "with_dist_planner={with_dist_planner}, query={query}: {display}"
             );
+            // The existing planner's answer to these statements reads the same scans through its
+            // own nodes. A plan carrying one of them stands beside the route's answer rather than
+            // replacing it, which is what planning the statement a second time used to do.
+            for existing in [
+                "SeriesDivide",
+                "SeriesNormalize",
+                "InstantManipulate",
+                "RangeManipulate",
+            ] {
+                assert!(
+                    !display.contains(existing),
+                    "with_dist_planner={with_dist_planner}, query={query}: the existing planner \
+                     answered instead: {display}"
+                );
+            }
         }
+    }
+
+    /// A plan whose every read is a bare scan is one no region can be given, and the refusal this
+    /// deployment answers it with names that cause rather than going unrecorded.
+    ///
+    /// The native planner reads every selector through its own source when a distributed planner
+    /// plans the statement, so no statement reaches this refusal today - a fused node over one bare
+    /// scan is the one shape that still reads a scan directly, and it is the shape a region runs.
+    /// The refusal stays the answer a plan of bare scans gets instead of the existing planner's
+    /// plan, which is what the statements below pin.
+    #[test]
+    fn test_a_plan_no_region_can_be_given_is_refused_by_name() {
+        let scan = LogicalPlanBuilder::scan(
+            "some_metric",
+            Arc::new(DefaultTableSource::new(Arc::new(mock_table_provider(
+                RegionId::new(1, 1),
+            )))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(
+            !remote_native_raw_plan_supported(&scan),
+            "a bare scan carries no region: {scan}"
+        );
+
+        let error = native_plan_not_routable();
+        let crate::error::Error::QueryPlan { source, .. } = error else {
+            panic!("the refusal is reported as a plan failure");
+        };
+        assert!(
+            matches!(
+                source
+                    .into_inner()
+                    .as_any()
+                    .downcast_ref::<crate::promql::error::Error>(),
+                Some(crate::promql::error::Error::UnsupportedNativeShape { reason, .. })
+                    if reason.as_str() == DISTRIBUTION_CANNOT_ROUTE
+            ),
+            "the refusal names the cause it reports"
+        );
     }
 
     /// Plans `query` on the fixture engine with the native route requested. The engine is one with
