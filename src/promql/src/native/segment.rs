@@ -276,6 +276,7 @@ fn rewrite_inner_segment(node: &NativeNode, sources: &[usize]) -> NativeNode {
                 .expect("the segment collected every scan it reads"),
             output: input.output.clone(),
             ordering: input.ordering,
+            time_unit: input.time_unit,
         }),
         expr => expr.with_children(
             expr.children()
@@ -306,6 +307,7 @@ fn rewrite_segment(
                 .expect("the segment collected every scan it reads"),
             output: input.output.clone(),
             ordering: input.ordering,
+            time_unit: input.time_unit,
         }),
         expr => {
             let children = expr
@@ -320,6 +322,7 @@ fn rewrite_segment(
                                 source_index: index,
                                 output: child.output.clone(),
                                 ordering: NATIVE_ORDERING,
+                                time_unit: Default::default(),
                             }),
                             output: child.output.clone(),
                         }
@@ -504,6 +507,7 @@ pub fn canonical_boundary_stages(
             source_index: 0,
             output: evaluated.clone(),
             ordering: NATIVE_ORDERING,
+            time_unit: Default::default(),
         }),
         output: evaluated,
     })
@@ -1088,6 +1092,7 @@ mod tests {
                 output: output.clone(),
                 source_index: 0,
                 ordering: SeriesOrdering::Contiguous,
+                time_unit: Default::default(),
             }),
             output: output.clone(),
         };

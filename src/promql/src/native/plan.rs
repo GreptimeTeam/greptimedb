@@ -41,6 +41,7 @@ use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::map_time::DateFunction;
 use crate::range_eval::{RangeFunction, RangeWindow, fold_offset, predict_linear_instants};
+use crate::raw_time::RawTimeUnit;
 use crate::select::SortOrder;
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
@@ -652,6 +653,9 @@ pub struct BoundInput {
     /// The ordering the input guarantees; an instant selection and a window reject an interleaved
     /// one.
     pub ordering: SeriesOrdering,
+    /// The unit of the timestamps a raw input hands over. Evaluated and state inputs are on a
+    /// millisecond grid.
+    pub time_unit: RawTimeUnit,
 }
 
 /// A constant scalar. Varying scalars ([`NativeExpr::EvalTime`], [`NativeExpr::ScalarOf`], a
@@ -1070,6 +1074,30 @@ impl NativeNode {
                 .children()
                 .into_iter()
                 .any(|child| child.any(predicate))
+    }
+
+    /// This node with the time unit of every input leaf set to `units[source_index]`; a leaf whose
+    /// index `units` does not reach keeps its unit.
+    pub fn with_input_time_units(&self, units: &[RawTimeUnit]) -> NativeNode {
+        let expr = match &self.expr {
+            NativeExpr::Input(input) => NativeExpr::Input(BoundInput {
+                time_unit: units
+                    .get(input.source_index)
+                    .copied()
+                    .unwrap_or(input.time_unit),
+                ..input.clone()
+            }),
+            expr => expr.with_children(
+                expr.children()
+                    .into_iter()
+                    .map(|child| child.with_input_time_units(units))
+                    .collect(),
+            ),
+        };
+        NativeNode {
+            expr,
+            output: self.output.clone(),
+        }
     }
 
     /// The input leaves below this node in evaluation order, one entry per leaf.

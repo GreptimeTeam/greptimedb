@@ -22,7 +22,8 @@ use crate::error::{InvalidSeriesSnafu, Result};
 use crate::series::samples::{SeriesFields, SeriesSchema};
 use crate::series::{SeriesLabels, invalid_series};
 
-/// Strictly increasing source timestamps in milliseconds for a raw series chunk.
+/// Strictly increasing source timestamps for a raw series chunk, in the unit of the source's time
+/// index.
 ///
 /// Its private buffer ensures timestamps are validated once at construction. Direct
 /// construction is intentionally unavailable:
@@ -82,6 +83,12 @@ impl RawTimestamps {
         Ok(Self {
             values: self.values.slice(offset, len),
         })
+    }
+}
+
+impl AsRef<[i64]> for RawTimestamps {
+    fn as_ref(&self) -> &[i64] {
+        &self.values
     }
 }
 

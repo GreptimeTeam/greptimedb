@@ -4207,40 +4207,46 @@ async fn native_fused_time_partitioned_table_reads_through_a_raw_source() {
     );
 }
 
+/// A time index stored in seconds, microseconds or nanoseconds is read as stored, and the scan is
+/// bounded by literals in that unit rather than by a cast of the column.
 #[tokio::test]
-async fn native_fused_non_millisecond_time_index_falls_back() {
-    let table_provider = build_test_table_provider_with_options(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![],
-        ConcreteDataType::timestamp_microsecond_datatype(),
-        false,
-        ConcreteDataType::float64_datatype(),
-        NATIVE_ENGINE,
-    )
-    .await;
-    let native =
-        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
-    let fallback_provider = build_test_table_provider_with_options(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![],
-        ConcreteDataType::timestamp_microsecond_datatype(),
-        false,
-        ConcreteDataType::float64_datatype(),
-        NATIVE_ENGINE,
-    )
-    .await;
-    let without_flag =
-        build_native_fused_plan_with_provider("rate(some_metric[5m])", false, fallback_provider)
-            .await;
-    assert!(!native.display_indent().to_string().contains("FusedSeries"));
-    assert_eq!(
-        native.display_indent().to_string(),
-        without_flag.display_indent().to_string()
-    );
+async fn native_fused_reads_a_non_millisecond_time_index() {
+    for (time_index, literal) in [
+        (
+            ConcreteDataType::timestamp_second_datatype(),
+            "TimestampSecond(",
+        ),
+        (
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            "TimestampMicrosecond(",
+        ),
+        (
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+            "TimestampNanosecond(",
+        ),
+    ] {
+        let table_provider = build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            time_index.clone(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            NATIVE_ENGINE,
+        )
+        .await;
+        let native =
+            build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider)
+                .await;
+        let display = native.display_indent().to_string();
+        assert!(
+            find_fused_series(&native).is_some(),
+            "{time_index:?}: {display}"
+        );
+        assert_eq!(take_reported_decline(), None, "{time_index:?}: {display}");
+        assert!(display.contains(literal), "{time_index:?}: {display}");
+    }
 }
 
 #[tokio::test]
@@ -4942,16 +4948,16 @@ async fn native_fused_metric_table_without_logical_metadata_falls_back() {
     );
 }
 
-/// A table whose engine has no raw-series scanner keeps the existing plan.
+/// A file-engine table has no raw-series scanner, so each selector reads it through a
+/// `RowSeriesSource`, which sorts the table's rows into series.
 ///
-/// A file-engine table answers an ordinary read with a `SinglePartitionScanner`, whose
-/// `raw_series_schema` is the trait's default `None`. Offering the native route to such a table
-/// would build the node and then fail in physical planning, because the logical plan is fixed by
-/// then; declining here is what keeps the query answering.
+/// The source reads every tag as text with `NULL` as `''`, as Prometheus labels are, and applies the
+/// matchers and the time range to those rows itself: a file-engine scan only prunes with its
+/// filters. The time range is also pushed into the scan for that pruning.
 #[tokio::test]
-async fn native_fused_engine_without_raw_series_falls_back() {
+async fn native_fused_file_engine_reads_through_a_row_source() {
     let native = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
+        "rate(some_metric{tag_0=\"a\"}[5m])",
         true,
         build_test_table_provider_with_options(
             &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
@@ -4966,37 +4972,44 @@ async fn native_fused_engine_without_raw_series_falls_back() {
         .await,
     )
     .await;
-    let without_flag = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
-        false,
-        build_test_table_provider_with_options(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            1,
-            1,
-            vec![],
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-            ConcreteDataType::float64_datatype(),
-            FILE_ENGINE,
-        )
-        .await,
-    )
-    .await;
+    let fused = find_fused_series(&native).expect("a file-engine table runs natively");
+    let [LogicalPlan::Extension(source)] = fused.inputs().as_slice() else {
+        panic!("expected one row source below the fused node: {native}");
+    };
+    let source = source
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::RowSeriesSource>()
+        .unwrap_or_else(|| panic!("expected a RowSeriesSource: {native}"));
+    let LogicalPlan::Filter(time) = source.input() else {
+        panic!("the row source must filter its rows by time: {native}");
+    };
     assert!(
-        find_fused_series(&native).is_none(),
-        "a file-engine table must not reach the native route"
+        time.predicate.to_string().contains("timestamp <="),
+        "{native}"
     );
-    assert_eq!(
-        native.display_indent().to_string(),
-        without_flag.display_indent().to_string(),
-        "a file-engine table must keep the existing plan"
+    let LogicalPlan::Filter(matchers) = time.input.as_ref() else {
+        panic!("the row source must filter its rows by the matchers: {native}");
+    };
+    assert!(
+        matchers
+            .predicate
+            .to_string()
+            .contains("tag_0 = Utf8(\"a\")"),
+        "{native}"
     );
-    // The refusal is reported with its cause, not a bare Ok(None).
-    assert_eq!(
-        take_reported_decline(),
-        Some("engine_without_raw_series_scanner"),
-        "the refusal names the engine's missing raw-series scanner"
+    let LogicalPlan::Projection(labels) = matchers.input.as_ref() else {
+        panic!("the row source must read its tags as label values: {native}");
+    };
+    assert!(
+        labels.expr[0].to_string().starts_with("coalesce("),
+        "{}",
+        labels.expr[0]
     );
+    let LogicalPlan::TableScan(scan) = labels.input.as_ref() else {
+        panic!("{native}");
+    };
+    assert_eq!(scan.filters.len(), 1, "only the time range prunes the scan");
 }
 
 /// The plan `query` gets, or `None` when the planner refuses it.

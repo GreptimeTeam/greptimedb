@@ -64,6 +64,7 @@ fn raw_input(source_index: usize) -> NativeNode {
             output: output.clone(),
             source_index,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output,
     }

@@ -28,16 +28,18 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use common_telemetry::debug;
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::UserDefinedLogicalNode;
-use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
+use datafusion::logical_expr::{
+    EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
@@ -48,7 +50,8 @@ use datatypes::series::time::EvalGrid;
 use futures::future::BoxFuture;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
-    RawSeriesSource, input_locality, keys_survive_metadata_drop, matching_operands_drop_key,
+    RawSeriesSource, RowSeriesSource, input_locality, keys_survive_metadata_drop,
+    matching_operands_drop_key,
 };
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
@@ -64,6 +67,7 @@ use promql::native::segment::{
 pub(crate) use promql::native::segment::{
     independent_scan_pair, is_empty_discovered_input, pointwise_operand,
 };
+use promql::raw_time::RawTimeUnit;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token;
 use promql_parser::parser::value::ValueType;
@@ -75,7 +79,9 @@ use snafu::{ResultExt, ensure};
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::region_engine::RawLabelSource;
 
-use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
+use crate::promql::error::{
+    DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result, TimeIndexNotFoundSnafu,
+};
 use crate::promql::native_compile::{
     InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
     info_input, statement_grid, subquery_child_grid,
@@ -352,10 +358,20 @@ impl PromPlanner {
                 input = LogicalPlan::TableScan(scan.clone());
                 scan
             }
-            None => match &input {
-                LogicalPlan::TableScan(scan) => scan.clone(),
-                _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
-            },
+            None => {
+                // The existing plan reads a time index in another unit than milliseconds under a
+                // projection that casts or reorders it. The raw series scan and a row source read
+                // the column as stored, so this route takes the scan below it.
+                if let LogicalPlan::Projection(projection) = &input
+                    && let LogicalPlan::TableScan(scan) = projection.input.as_ref()
+                {
+                    input = LogicalPlan::TableScan(scan.clone());
+                }
+                match &input {
+                    LogicalPlan::TableScan(scan) => scan.clone(),
+                    _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
+                }
+            }
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
@@ -370,29 +386,43 @@ impl PromPlanner {
                 .map(|index| &table_meta.schema.column_schemas()[*index]),
         );
         // Checked here because a physical-planning refusal is an error, not a fallback. A
-        // file-engine table has no raw-series scanner; a metric-engine selector needs its verified
-        // logical rewrite.
-        if !supports_native_raw_series(&table_meta.engine)
-            || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
+        // file-engine table reads through a `RowSeriesSource`, which sorts its rows into series; a
+        // metric-engine selector needs its verified logical rewrite.
+        let reads_rows = table_meta.engine == FILE_ENGINE;
+        if !reads_rows
+            && (!supports_native_raw_series(&table_meta.engine)
+                || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite))
         {
             return Ok(declined("engine_without_raw_series_scanner"));
         }
+        // This route names every series it reads by the table, so a tag column named `__name__` has no
+        // label to be read as, and dropping it would merge the series it tells apart.
+        if tags.iter().any(|tag| tag == METRIC_NAME) {
+            return Ok(declined("tag_named_metric_name"));
+        }
         // The region's raw-series preflight refuses these, and the physical layer turns that
         // refusal into an error, so decline this route here instead.
-        let time_index_type = table_meta
+        if table_meta
+            .options
+            .extra_options
+            .get(store_api::mito_engine_options::APPEND_MODE_KEY)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        {
+            return Ok(declined("append_mode_table"));
+        }
+        let sub_millisecond_time_index = table_meta
             .schema
             .timestamp_column()
-            .map(|column| &column.data_type);
-        if time_index_type
-            != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
-            || table_meta
-                .options
-                .extra_options
-                .get(store_api::mito_engine_options::APPEND_MODE_KEY)
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-        {
-            return Ok(declined("unsupported_time_index_type_or_append_mode"));
-        }
+            .map(|column| column.data_type.as_arrow_type())
+            .is_some_and(|data_type| {
+                matches!(
+                    data_type,
+                    ArrowDataType::Timestamp(
+                        ArrowTimeUnit::Microsecond | ArrowTimeUnit::Nanosecond,
+                        _
+                    )
+                )
+            });
         // Admitted: such inputs are read through a raw source, which reconciles the fragments.
         let split_series = !table_meta
             .partition_column_names()
@@ -423,6 +453,11 @@ impl PromPlanner {
         if statement_kind.is_some_and(|kind| kind != field_kind) {
             return Ok(declined("selectors_disagree_on_field_kind"));
         }
+        // A histogram window keeps one time per sample, where a time index finer than milliseconds
+        // needs the window time beside the payload (`promql::raw_time`).
+        if field_kind == FieldKind::Histogram && sub_millisecond_time_index {
+            return Ok(declined("histogram_over_a_sub_millisecond_time_index"));
+        }
         *statement_kind = Some(field_kind);
         let series_schema = Arc::new(SeriesSchema {
             fields: fields
@@ -435,12 +470,32 @@ impl PromPlanner {
             eval_grid: None,
         });
         // The time filter is added after compiling, once the occurrence's window is known.
-        let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
-        if let LogicalPlan::TableScan(table_scan) = &mut input {
-            table_scan.filters.append(&mut filters);
-        } else {
+        if !reads_rows && !matches!(input, LogicalPlan::TableScan(_)) {
             return Ok(declined("selector_plan_is_not_a_table_scan"));
         }
+        if reads_rows {
+            input = row_source_input(input, &tags, &time, &fields, matchers)?;
+            input = LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RowSeriesSource::try_new(
+                        Arc::from(metric.as_str()),
+                        tags.clone(),
+                        time.clone(),
+                        fields.clone(),
+                        input,
+                    )
+                    .context(DataFusionPlanningSnafu)?,
+                ),
+            });
+        } else {
+            let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
+            if let LogicalPlan::TableScan(table_scan) = &mut input {
+                table_scan.filters.append(&mut filters);
+            }
+        }
+        // A row source reads every key column as a label value with no null, so two rows that differ
+        // only by `NULL` against `''` are already one series there.
+        let keys_survive = keys_survive || reads_rows;
         Ok(Some((
             input,
             series_schema,
@@ -451,6 +506,22 @@ impl PromPlanner {
             split_series,
             keys_survive,
         )))
+    }
+
+    /// The unit of the time index `scan` reads.
+    fn scan_time_unit(&self, scan: &datafusion::logical_expr::TableScan) -> Result<ArrowTimeUnit> {
+        let table = self.table_from_source(&scan.source)?;
+        match table
+            .schema()
+            .timestamp_column()
+            .map(|column| column.data_type.as_arrow_type())
+        {
+            Some(ArrowDataType::Timestamp(unit, _)) => Ok(unit),
+            _ => TimeIndexNotFoundSnafu {
+                table: scan.table_name.to_string(),
+            }
+            .fail(),
+        }
     }
 
     pub(super) async fn try_plan_native_fused(
@@ -603,6 +674,7 @@ impl PromPlanner {
                 source_index,
                 output: output.clone(),
                 ordering: SeriesOrdering::Contiguous,
+                time_unit: Default::default(),
             }),
             output: output.clone(),
         };
@@ -1174,7 +1246,7 @@ impl PromPlanner {
         let bind_index = std::cell::Cell::new(0usize);
         let mut compile_stmt = stmt.clone();
         compile_stmt.expr = effective_expr.clone();
-        let compiled = match compile_selectors_with_grid(
+        let mut compiled = match compile_selectors_with_grid(
             &compile_stmt,
             &|req| {
                 let i = bind_index.get();
@@ -1217,6 +1289,8 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
+        // The unit each input hands its timestamps over in, which its evaluation is bound to.
+        let mut input_time_units = Vec::with_capacity(prepared.len());
         for (index, (compiled_input, (scan, _, _, time, _, _, _, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
@@ -1227,7 +1301,6 @@ impl PromPlanner {
                 .requirement
                 .raw_scan_bounds()
                 .context(DataFusionPlanningSnafu)?;
-            let filter = scan_time_filter(start, end, inclusive, time);
             if let LogicalPlan::Extension(extension) = scan
                 && extension.node.as_any().is::<RawSeriesSource>()
             {
@@ -1243,7 +1316,11 @@ impl PromPlanner {
                     ))
                     .context(DataFusionPlanningSnafu);
                 };
-                table_scan.filters.push(filter);
+                let unit = self.scan_time_unit(table_scan)?;
+                table_scan
+                    .filters
+                    .push(scan_time_filter(start, end, inclusive, time, unit));
+                input_time_units.push(RawTimeUnit::from(unit));
                 let replacement = extension
                     .node
                     .with_exprs_and_inputs(vec![], inputs)
@@ -1252,6 +1329,7 @@ impl PromPlanner {
             } else if let LogicalPlan::Union(union) = scan {
                 // Discovered metrics may name their time columns differently, so each source is
                 // bounded on its own column.
+                let mut union_unit = None;
                 for child in &mut union.inputs {
                     let LogicalPlan::Extension(extension) = child.as_ref() else {
                         return Err(DataFusionError::Internal(format!(
@@ -1293,7 +1371,13 @@ impl PromPlanner {
                         )))
                         .context(DataFusionPlanningSnafu);
                     };
-                    let source_filter = scan_time_filter(start, end, inclusive, &source_time);
+                    // Logical metrics on different physical tables may disagree on the unit, and
+                    // the union is one input read in one unit.
+                    let unit = self.scan_time_unit(table_scan)?;
+                    if *union_unit.get_or_insert(unit) != unit {
+                        return Ok(declined("discovered_metrics_disagree_on_time_unit"));
+                    }
+                    let source_filter = scan_time_filter(start, end, inclusive, &source_time, unit);
                     table_scan.filters.push(source_filter);
                     let replacement = extension
                         .node
@@ -1301,15 +1385,47 @@ impl PromPlanner {
                         .context(DataFusionPlanningSnafu)?;
                     *child = Arc::new(LogicalPlan::Extension(Extension { node: replacement }));
                 }
+                input_time_units
+                    .push(union_unit.map_or(RawTimeUnit::Millisecond, RawTimeUnit::from));
+            } else if let LogicalPlan::Extension(extension) = scan
+                && let Some(source) = extension.node.as_any().downcast_ref::<RowSeriesSource>()
+            {
+                let (bound, unit) = bind_row_source_filters(source, start, end, inclusive, time)
+                    .context(DataFusionPlanningSnafu)?;
+                *scan = bound;
+                input_time_units.push(RawTimeUnit::from(unit));
             } else if let LogicalPlan::TableScan(table_scan) = scan {
-                table_scan.filters.push(filter);
+                let unit = self.scan_time_unit(table_scan)?;
+                table_scan
+                    .filters
+                    .push(scan_time_filter(start, end, inclusive, time, unit));
+                input_time_units.push(RawTimeUnit::from(unit));
             } else if let LogicalPlan::EmptyRelation(_) = scan {
+                // The typed empty input hands over no timestamps.
+                input_time_units.push(RawTimeUnit::Millisecond);
             } else {
                 return Err(DataFusionError::Internal(format!(
                     "the child at {index} is not the table scan this route prepared"
                 )))
                 .context(DataFusionPlanningSnafu);
             }
+        }
+        compiled.tree = NativeTree::try_new(
+            compiled
+                .tree
+                .root()
+                .with_input_time_units(&input_time_units),
+        )
+        .context(DataFusionPlanningSnafu)?;
+        // A range modifier reads the samples around its window, which this route only places on a
+        // millisecond timeline.
+        if compiled.tree.root().any(&|node| {
+            matches!(&node.expr, NativeExpr::Window { input, op }
+                if op.window.modifier.is_some()
+                    && matches!(&input.expr, NativeExpr::Input(input)
+                        if !input.time_unit.is_whole_millis()))
+        }) {
+            return Ok(declined("range_modifier_over_a_sub_millisecond_time_index"));
         }
         let multi_input = selectors.len() > 1;
         // The tags each input declares for the output layout. With several inputs, `__name__` is
@@ -1815,15 +1931,106 @@ fn reads_presence(expr: &PromExpr) -> bool {
     presence.0
 }
 
-/// Whether a prepared selector is already a discovered [`RawSeriesSource`] or a `Union` of them,
-/// which must not be wrapped in another source.
+/// Whether a prepared selector is already a discovered [`RawSeriesSource`], a `Union` of them, or
+/// a file-engine [`RowSeriesSource`], which must not be wrapped in another source.
 fn is_sourced_plan(plan: &LogicalPlan) -> bool {
     matches!(plan, LogicalPlan::Union(_))
         || matches!(
             plan,
             LogicalPlan::Extension(extension)
                 if extension.node.as_any().is::<RawSeriesSource>()
+                    || extension.node.as_any().is::<RowSeriesSource>()
         )
+}
+
+/// Reads every tag as its text with `NULL` as `''`, since Prometheus treats an empty label as
+/// absent, and applies the matchers above the scan: a file-engine scan uses filters only to prune.
+fn row_source_input(
+    scan: LogicalPlan,
+    tags: &[String],
+    time: &str,
+    fields: &[String],
+    matchers: Matchers,
+) -> Result<LogicalPlan> {
+    let column = |name: &str| DfExpr::Column(datafusion::common::Column::from_name(name));
+    let mut exprs = tags
+        .iter()
+        .map(|tag| {
+            datafusion::functions::core::expr_fn::coalesce(vec![
+                datafusion_expr::cast(column(tag), ArrowDataType::Utf8),
+                datafusion_expr::lit(""),
+            ])
+            .alias(tag)
+        })
+        .collect::<Vec<_>>();
+    exprs.push(column(time));
+    exprs.extend(fields.iter().map(|field| column(field)));
+    let projected = LogicalPlanBuilder::from(scan)
+        .project(exprs)
+        .context(DataFusionPlanningSnafu)?
+        .build()
+        .context(DataFusionPlanningSnafu)?;
+    let filters = PromPlanner::matchers_to_expr(matchers, projected.schema())?;
+    let Some(predicate) = datafusion_expr::utils::conjunction(filters) else {
+        return Ok(projected);
+    };
+    LogicalPlanBuilder::from(projected)
+        .filter(predicate)
+        .context(DataFusionPlanningSnafu)?
+        .build()
+        .context(DataFusionPlanningSnafu)
+}
+
+/// Filters a row source by the selector's time range, in milliseconds, and returns the source with
+/// the unit of its time index. The range is also pushed into the scan so the file engine can prune
+/// files and row groups.
+fn bind_row_source_filters(
+    source: &RowSeriesSource,
+    start: i64,
+    end: i64,
+    inclusive: bool,
+    time: &str,
+) -> std::result::Result<(LogicalPlan, ArrowTimeUnit), DataFusionError> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+
+    let unit = match source
+        .input()
+        .schema()
+        .field_with_unqualified_name(time)?
+        .data_type()
+    {
+        ArrowDataType::Timestamp(unit, _) => *unit,
+        other => {
+            return Err(DataFusionError::Internal(format!(
+                "row source time index {time:?} is {other}, not a timestamp"
+            )));
+        }
+    };
+    let time_filter = scan_time_filter(start, end, inclusive, time, unit);
+    let input = source
+        .input()
+        .clone()
+        .transform_down(|plan| match plan {
+            LogicalPlan::TableScan(mut scan) => {
+                scan.filters.push(time_filter.clone());
+                Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+            }
+            other => Ok(Transformed::no(other)),
+        })?
+        .data;
+    let input = LogicalPlanBuilder::from(input)
+        .filter(time_filter)?
+        .build()?;
+    let source = LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            datafusion::logical_expr::UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+                source,
+                vec![],
+                vec![input],
+            )?,
+        ),
+    });
+    Ok((source, unit))
 }
 
 /// `millis` from the Unix epoch, negative included; `None` when [`SystemTime`] cannot represent it.
@@ -2005,23 +2212,60 @@ fn plan_split_aggregate(
     .context(DataFusionPlanningSnafu)
 }
 
-/// The time-range filter a selector's scan reads, from the bounds its compiled requirement names.
-fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) -> DfExpr {
+/// The time-range filter a selector's scan reads, from the millisecond bounds its compiled
+/// requirement names, over a time index stored in `unit`.
+fn scan_time_filter(
+    start: i64,
+    end: i64,
+    inclusive: bool,
+    time_column: &str,
+    unit: ArrowTimeUnit,
+) -> DfExpr {
+    use datafusion::scalar::ScalarValue;
+
     let column = DfExpr::Column(datafusion::common::Column::from_name(time_column));
-    let lower = DfExpr::Literal(
-        datafusion::scalar::ScalarValue::TimestampMillisecond(Some(start), None),
-        None,
-    );
-    let upper = DfExpr::Literal(
-        datafusion::scalar::ScalarValue::TimestampMillisecond(Some(end), None),
-        None,
-    );
-    let lower = if inclusive {
-        column.clone().gt_eq(lower)
-    } else {
-        column.clone().gt(lower)
+    if unit == ArrowTimeUnit::Millisecond {
+        let lower = DfExpr::Literal(ScalarValue::TimestampMillisecond(Some(start), None), None);
+        let upper = DfExpr::Literal(ScalarValue::TimestampMillisecond(Some(end), None), None);
+        let lower = if inclusive {
+            column.clone().gt_eq(lower)
+        } else {
+            column.clone().gt(lower)
+        };
+        return lower.and(column.lt_eq(upper));
+    }
+    // The bounds are on the window time `ceil(s)` the evaluation places a sample at
+    // (`promql::raw_time`): `ceil(s) >= start` holds iff `s > start - 1ms`, `ceil(s) > start` iff
+    // `s > start`, and `ceil(s) <= end` iff `s <= end`. In ticks, `s > l` iff
+    // `tick > floor(l / tick)` and `s <= e` iff `tick <= floor(e / tick)`.
+    let nanos_per_tick: i128 = match unit {
+        ArrowTimeUnit::Second => 1_000_000_000,
+        ArrowTimeUnit::Millisecond => 1_000_000,
+        ArrowTimeUnit::Microsecond => 1_000,
+        ArrowTimeUnit::Nanosecond => 1,
     };
-    lower.and(column.lt_eq(upper))
+    let ticks = |millis: i128| (millis * 1_000_000).div_euclid(nanos_per_tick);
+    let literal = |tick: i64| {
+        let value = match unit {
+            ArrowTimeUnit::Second => ScalarValue::TimestampSecond(Some(tick), None),
+            ArrowTimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(tick), None),
+            ArrowTimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(tick), None),
+            ArrowTimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(tick), None),
+        };
+        DfExpr::Literal(value, None)
+    };
+    let lower = ticks(i128::from(start) - i128::from(inclusive));
+    let upper = ticks(i128::from(end));
+    if lower >= i128::from(i64::MAX) || upper < i128::from(i64::MIN) {
+        return datafusion::prelude::lit(false);
+    }
+    let lower = (lower >= i128::from(i64::MIN)).then(|| column.clone().gt(literal(lower as i64)));
+    let upper = (upper <= i128::from(i64::MAX)).then(|| column.lt_eq(literal(upper as i64)));
+    match (lower, upper) {
+        (Some(lower), Some(upper)) => lower.and(upper),
+        (Some(bound), None) | (None, Some(bound)) => bound,
+        (None, None) => datafusion::prelude::lit(true),
+    }
 }
 
 /// Whether any aggregate in `node` consumes histogram samples, wherever it sits in the tree.
@@ -3542,16 +3786,18 @@ mod tests {
 
     #[test]
     fn millisecond_scan_bounds_preserve_open_closed_and_maximum_edges() {
-        let inclusive = scan_time_filter(0, 10, true, "ts").to_string();
+        let inclusive = scan_time_filter(0, 10, true, "ts", ArrowTimeUnit::Millisecond).to_string();
         assert!(inclusive.contains(">="), "{inclusive}");
         assert!(inclusive.contains("<="), "{inclusive}");
 
-        let exclusive = scan_time_filter(0, 10, false, "ts").to_string();
+        let exclusive =
+            scan_time_filter(0, 10, false, "ts", ArrowTimeUnit::Millisecond).to_string();
         assert!(exclusive.contains("> "), "{exclusive}");
         assert!(!exclusive.contains(">="), "{exclusive}");
         assert!(exclusive.contains("<="), "{exclusive}");
 
-        let maximum = scan_time_filter(i64::MAX, i64::MAX, false, "ts").to_string();
+        let maximum = scan_time_filter(i64::MAX, i64::MAX, false, "ts", ArrowTimeUnit::Millisecond)
+            .to_string();
         assert!(maximum.contains("> "), "{maximum}");
         assert!(!maximum.contains(">="), "{maximum}");
         assert!(maximum.contains("<="), "{maximum}");

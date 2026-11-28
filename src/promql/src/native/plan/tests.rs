@@ -75,6 +75,7 @@ fn input() -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -87,6 +88,7 @@ fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -103,6 +105,7 @@ fn input_with_fields(count: usize) -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -116,6 +119,7 @@ fn interleaved_input() -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Interleaved,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -1896,6 +1900,7 @@ fn an_input_must_report_the_binding_it_was_bound_to() {
             })),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output: raw(),
     };
@@ -1911,6 +1916,7 @@ fn an_input_can_bind_aggregate_state() {
             output: state.output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: state.output.clone(),
     };
@@ -1925,6 +1931,7 @@ fn an_input_can_bind_aggregate_state() {
             output: evaluated_a.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: evaluated(fields(2), grid(0, 60_000, 4)),
     };
@@ -1951,6 +1958,7 @@ fn an_input_can_bind_aggregate_state() {
                 output: evaluated_a.clone(),
                 source_index: 0,
                 ordering: SeriesOrdering::Contiguous,
+                time_unit: Default::default(),
             }),
             output,
         };
@@ -1973,6 +1981,7 @@ fn an_input_can_bind_aggregate_state() {
             output: state_a,
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: state_group_mismatch,
     };
@@ -1998,6 +2007,7 @@ fn an_input_can_bind_aggregate_state() {
             output: bound,
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output,
     };
@@ -2322,6 +2332,7 @@ fn an_included_metric_name_survives_an_arithmetic_match() {
                 output: output.clone(),
                 source_index,
                 ordering: SeriesOrdering::KeyThenTime,
+                time_unit: Default::default(),
             }),
             output,
         }
@@ -2907,6 +2918,7 @@ fn native_expr_variant_indices_are_a_wire_contract() {
                 source_index: 0,
                 output: raw(),
                 ordering: SeriesOrdering::KeyThenTime,
+                time_unit: Default::default(),
             }),
             0u8,
             "Input",
@@ -3125,6 +3137,7 @@ fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
             output: evaluated(Arc::new([]), Arc::clone(&out)),
             source_index: 0,
             ordering: SeriesOrdering::Interleaved,
+            time_unit: Default::default(),
         }),
         output: evaluated(Arc::new([]), Arc::clone(&out)),
     };

@@ -65,6 +65,7 @@ use crate::native::plan::{
 };
 use crate::native::state::{StateChunk, state_bytes};
 use crate::range_eval::RangeEvaluator;
+use crate::raw_time::RawTimeUnit;
 use crate::select::{self, SortOrder};
 use crate::vector_match::{
     BinaryKind, BinaryMatching, Cardinality, DuplicateEvidence, FillValues, MatchingLabels,
@@ -562,10 +563,12 @@ struct InstantRuntime {
     chunks: Vec<RawSeriesChunk>,
     /// The bytes `chunks` hold.
     held: usize,
+    /// The unit of the input's timestamps.
+    time_unit: RawTimeUnit,
 }
 
 impl InstantRuntime {
-    fn try_new(input: &SeriesSchema, op: &BoundInstant) -> Result<Self> {
+    fn try_new(input: &SeriesSchema, op: &BoundInstant, time_unit: RawTimeUnit) -> Result<Self> {
         let schema = Arc::new(SeriesSchema {
             fields: Arc::clone(&input.fields),
             eval_grid: Some(Arc::clone(&op.output_grid)),
@@ -576,6 +579,7 @@ impl InstantRuntime {
             schema,
             chunks: Vec::new(),
             held: 0,
+            time_unit,
         })
     }
 
@@ -605,7 +609,14 @@ impl InstantRuntime {
             .flat_map(|chunk| chunk.fields.as_slice())
             .map(|field| field.segments().len())
             .fold(0usize, usize::saturating_add);
-        let axis = rows.saturating_mul(std::mem::size_of::<i64>());
+        // An input finer or coarser than milliseconds is also read as its window times and its
+        // payloads, one millisecond axis each.
+        let axes = if self.time_unit == RawTimeUnit::Millisecond {
+            1
+        } else {
+            3
+        };
+        let axis = rows.saturating_mul(axes * std::mem::size_of::<i64>());
         let layout = chunks
             .saturating_mul(fields)
             .saturating_mul(descriptor)
@@ -646,12 +657,15 @@ impl InstantRuntime {
             return 0;
         }
         let series = || self.chunks.iter().chain(std::iter::once(closing));
+        let window_ms = |tick| self.time_unit.window_ms(tick, 0).ok();
         let endpoints = series()
             .find_map(|chunk| chunk.time.as_buffer().first().copied())
+            .and_then(window_ms)
             .zip(
                 series()
                     .rev()
-                    .find_map(|chunk| chunk.time.as_buffer().last().copied()),
+                    .find_map(|chunk| chunk.time.as_buffer().last().copied())
+                    .and_then(window_ms),
             );
         let span = instant_candidate_span(
             endpoints,
@@ -711,8 +725,30 @@ impl InstantRuntime {
             ));
         };
         let metric = first.metric.clone().ok_or_else(no_labels)?;
-        let time = buffered_time(&self.chunks)?;
+        let ticks = buffered_time(&self.chunks)?;
         let fields = buffered_fields(&self.chunks, self.schema.fields.len())?;
+        // The selection compares window times, and `timestamp()` reports payloads; on a millisecond
+        // input both are the stored ticks.
+        let (mut payloads, mut windows) = (Vec::new(), Vec::new());
+        let (time, window_time): (&[i64], &[i64]) = if self.time_unit == RawTimeUnit::Millisecond {
+            (ticks.as_ref(), ticks.as_ref())
+        } else {
+            self.time_unit
+                .convert(ticks.as_ref(), 0, &mut payloads, &mut windows)?;
+            if self.time_unit.is_whole_millis() {
+                (payloads.as_slice(), payloads.as_slice())
+            } else {
+                (payloads.as_slice(), windows.as_slice())
+            }
+        };
+        // A zero lookback selects only a sample exactly at the instant, and the window time of a
+        // sample less than a millisecond before it is the instant too. The selection's candidate is
+        // the latest sample at or before the instant, so it is the exact one if there is one.
+        let exact_only = |lookback_ms: i64| lookback_ms == 0 && !self.time_unit.is_whole_millis();
+        let at_instant = |index: u64, instant_ms: i128| {
+            self.time_unit
+                .is_at(ticks.as_ref()[index as usize], instant_ms)
+        };
         let grid = Arc::clone(&self.selection.output_grid);
         let spec = grid.spec();
         if let Some(at_ms) = self.selection.at_ms {
@@ -738,18 +774,25 @@ impl InstantRuntime {
                 let metric = drop_metric_name(&metric)?;
                 return no_row_chunk(&self.schema, metric);
             };
+            let selection_offset = if self.selection.value == InstantValue::Timestamp {
+                0
+            } else {
+                self.selection.offset_ms
+            };
             let Some(index) = select_instant_at(
-                &time,
+                window_time,
                 &fields,
                 selection_at,
                 selection_lookback,
-                if self.selection.value == InstantValue::Timestamp {
-                    0
-                } else {
-                    self.selection.offset_ms
-                },
+                selection_offset,
             )?
-            else {
+            .filter(|&index| {
+                !exact_only(selection_lookback)
+                    || at_instant(
+                        index,
+                        i128::from(selection_at) - i128::from(selection_offset),
+                    )
+            }) else {
                 return no_row_chunk(&self.schema, self.output_metric(&metric)?);
             };
             let grid_len = usize::try_from(spec.len).unwrap_or(usize::MAX);
@@ -759,7 +802,7 @@ impl InstantRuntime {
                     .timestamps()
                     .map_err(crate::grid_series::external)?
                     .to_vec();
-                return self.project(&metric, &time, &fields, &indices, &timestamps);
+                return self.project(&metric, time, &fields, &indices, &timestamps);
             }
             self.output.begin_series();
             let mut cursors: Vec<RowCursor<'_>> = fields.iter().map(Samples::cursor).collect();
@@ -779,16 +822,24 @@ impl InstantRuntime {
                 None => no_row_chunk(&self.schema, metric),
             };
         }
-        let (indices, timestamps) = select_instants(
-            &time,
+        let (mut indices, mut timestamps) = select_instants(
+            window_time,
             &fields,
             spec.start_ms..=grid_end_ms(spec),
             spec.step_ms,
             self.selection.lookback_ms,
             self.selection.offset_ms,
         )?;
+        if exact_only(self.selection.lookback_ms) {
+            let offset_ms = i128::from(self.selection.offset_ms);
+            (indices, timestamps) = indices
+                .into_iter()
+                .zip(timestamps)
+                .filter(|&(index, timestamp)| at_instant(index, i128::from(timestamp) - offset_ms))
+                .unzip();
+        }
         if self.selection.value != InstantValue::Sample {
-            return self.project(&metric, &time, &fields, &indices, &timestamps);
+            return self.project(&metric, time, &fields, &indices, &timestamps);
         }
         self.output.begin_series();
         let mut cursors: Vec<RowCursor<'_>> = fields.iter().map(Samples::cursor).collect();
@@ -828,7 +879,7 @@ impl InstantRuntime {
     fn project(
         &self,
         metric: &SeriesLabels,
-        time: &RawTimestamps,
+        time: &[i64],
         fields: &SeriesFields,
         indices: &[u64],
         timestamps: &[i64],
@@ -2164,6 +2215,15 @@ fn window_workspace_bytes(
     })
 }
 
+/// The unit of the timestamps `node` hands over: an input leaf's own; every other node answers on a
+/// millisecond grid.
+fn input_time_unit(node: &NativeNode) -> RawTimeUnit {
+    match &node.expr {
+        NativeExpr::Input(input) => input.time_unit,
+        _ => RawTimeUnit::Millisecond,
+    }
+}
+
 /// The time of the last sample a chunk carries, on its own timeline.
 fn last_sample_ms(chunk: &NativeChunk) -> Result<Option<i64>> {
     match chunk {
@@ -2606,7 +2666,7 @@ impl RuntimeNode {
                 })?;
                 RuntimeOp::Instant {
                     input: Box::new(child),
-                    instant: InstantRuntime::try_new(&input_schema, op)?,
+                    instant: InstantRuntime::try_new(&input_schema, op, input_time_unit(input))?,
                     state: {
                         NodeState::new(
                             format!("native.instant at {location}"),
@@ -2666,12 +2726,15 @@ impl RuntimeNode {
                 );
                 RuntimeOp::Window {
                     input: Box::new(child),
-                    window: Some(RangeEvaluator::try_new(
-                        &input_schema,
-                        Arc::clone(&op.output_grid),
-                        op.window,
-                        op.function,
-                    )?),
+                    window: Some(
+                        RangeEvaluator::try_new(
+                            &input_schema,
+                            Arc::clone(&op.output_grid),
+                            op.window,
+                            op.function,
+                        )?
+                        .with_raw_time_unit(input_time_unit(input)),
+                    ),
                     merge,
                     state,
                 }

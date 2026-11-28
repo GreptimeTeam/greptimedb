@@ -29,6 +29,7 @@ fn instant_tree(schema: Arc<SeriesSchema>, grid: Arc<EvalGrid>) -> NativeTree {
                     source_index: 0,
                     output: NativeType::Samples(Arc::clone(&schema)),
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: NativeType::Samples(Arc::clone(&schema)),
             }),

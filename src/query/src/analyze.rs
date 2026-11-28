@@ -601,6 +601,7 @@ mod tests {
                         source_index: 0,
                         output: raw.clone(),
                         ordering: SeriesOrdering::Contiguous,
+                        time_unit: Default::default(),
                     }),
                     output: raw,
                 }),
