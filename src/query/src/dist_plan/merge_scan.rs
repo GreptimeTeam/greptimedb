@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(test)]
-use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -154,24 +152,11 @@ fn remote_schema_mismatch(message: impl Into<String>) -> DataFusionError {
     DataFusionError::ArrowError(Box::new(ArrowError::SchemaError(message.into())), None)
 }
 
-fn record_merge_scan_schema_error() {
+/// Records one remote schema mismatch on both the process-wide counter and the
+/// per-execution metric of the scan that observed it.
+fn record_merge_scan_schema_error(metric: &MergeScanMetric) {
     MERGE_SCAN_ERRORS_TOTAL.inc();
-
-    #[cfg(test)]
-    TEST_MERGE_SCAN_SCHEMA_ERRORS.with(|count| count.set(count.get() + 1));
-}
-
-#[cfg(test)]
-thread_local! {
-    // Prometheus counters are process-global and tests run concurrently. This
-    // companion counter is incremented at the exact production increment site
-    // and is scoped to the polling test thread, making delta assertions stable.
-    static TEST_MERGE_SCAN_SCHEMA_ERRORS: Cell<u64> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-fn merge_scan_schema_error_count_for_test() -> u64 {
-    TEST_MERGE_SCAN_SCHEMA_ERRORS.with(Cell::get)
+    metric.record_schema_error();
 }
 
 /// Returns true when the field is a JSON column, identified either by its
@@ -834,7 +819,7 @@ impl MergeScanExec {
                     advertised_schema.as_ref(),
                     "advertised remote stream",
                 )
-                .inspect_err(|_| record_merge_scan_schema_error())?;
+                .inspect_err(|_| record_merge_scan_schema_error(&metric))?;
                 let do_get_cost = select_target_cost + do_get_start.elapsed();
 
                 if let Some(remote_dyn_filter_registry_lease) =
@@ -900,7 +885,7 @@ impl MergeScanExec {
                             df_batch.schema_ref().as_ref(),
                             "remote record batch",
                         )
-                        .inspect_err(|_| record_merge_scan_schema_error())?;
+                        .inspect_err(|_| record_merge_scan_schema_error(&metric))?;
                         advertised_schema = df_batch.schema_ref().clone();
                     }
                     let batch =
@@ -1363,6 +1348,9 @@ impl Drop for MergeScanExec {
     }
 }
 
+/// Metric name of the remote schema mismatch count recorded by [`MergeScanMetric`].
+const MERGE_SCAN_SCHEMA_ERRORS: &str = "schema_errors";
+
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
@@ -1373,6 +1361,8 @@ struct MergeScanMetric {
     finish_time: Time,
     /// Count of rows fetched from remote
     output_rows: Count,
+    /// Count of remote schemas rejected while scanning; see [`validate_remote_schema`]
+    schema_errors: Count,
 
     /// Gauge for greptime plan execution cost metrics for output
     greptime_exec_cost: Gauge,
@@ -1385,6 +1375,7 @@ impl MergeScanMetric {
             first_consume_time: MetricBuilder::new(metric).subset_time("first_consume_time", 1),
             finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
+            schema_errors: MetricBuilder::new(metric).counter(MERGE_SCAN_SCHEMA_ERRORS, 1),
             greptime_exec_cost: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_READ_COST, 1),
         }
     }
@@ -1403,6 +1394,10 @@ impl MergeScanMetric {
 
     pub fn record_output_batch_rows(&self, num_rows: usize) {
         self.output_rows.add(num_rows);
+    }
+
+    pub fn record_schema_error(&self) {
+        self.schema_errors.add(1);
     }
 
     pub fn record_greptime_exec_cost(&self, metrics: usize) {
@@ -2712,6 +2707,18 @@ mod tests {
             .await
     }
 
+    /// Returns how many remote schema mismatches the scan that registered into
+    /// `metrics` recorded on its own [`MergeScanMetric`].
+    ///
+    /// The value is read back from the metrics the execution registered, so
+    /// removing the recording in the schema validation path changes it.
+    fn merge_scan_schema_error_count_for_test(metrics: &ExecutionPlanMetricsSet) -> usize {
+        metrics
+            .clone_inner()
+            .sum_by_name(MERGE_SCAN_SCHEMA_ERRORS)
+            .map_or(0, |value| value.as_usize())
+    }
+
     fn assert_int64_batch(batch: &DfRecordBatch, values: (i64, i64)) {
         assert_eq!(batch.schema().as_ref(), &expected_int64_schema());
         let a = batch
@@ -3204,9 +3211,9 @@ mod tests {
             )])),
             1,
         );
-        let errors_before = merge_scan_schema_error_count_for_test();
+        let metrics = exec.metric.clone();
         assert!(collect_merge_scan(exec).await.is_err());
-        assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+        assert_eq!(merge_scan_schema_error_count_for_test(&metrics), 1);
     }
 
     #[tokio::test]
@@ -3251,8 +3258,7 @@ mod tests {
                 )))
                 .unwrap(),
             );
-            let errors_before = merge_scan_schema_error_count_for_test();
-            let result = collect_merge_scan(merge_scan_exec_with_handler(
+            let exec = merge_scan_exec_with_handler(
                 vec![region_id],
                 expected,
                 Arc::new(TestRegionQueryHandler::with_responses(vec![(
@@ -3261,12 +3267,13 @@ mod tests {
                     vec![],
                 )])),
                 1,
-            ))
-            .await;
+            );
+            let metrics = exec.metric.clone();
+            let result = collect_merge_scan(exec).await;
             assert!(result.is_err(), "metadata case {case_index} must fail");
             assert_eq!(
-                merge_scan_schema_error_count_for_test(),
-                errors_before + 1,
+                merge_scan_schema_error_count_for_test(&metrics),
+                1,
                 "metadata case {case_index}"
             );
         }
@@ -3752,7 +3759,6 @@ mod tests {
         let advertised = Arc::new(Schema::try_from(frame.clone()).unwrap());
         let first = RecordBatch::from_df_record_batch(advertised.clone(), first);
         let second = RecordBatch::from_df_record_batch(advertised.clone(), second);
-        let errors_before = merge_scan_schema_error_count_for_test();
         let exec = merge_scan_exec_with_handler(
             vec![region_id],
             frame.as_ref().clone(),
@@ -3773,7 +3779,7 @@ mod tests {
         ));
         assert!(stream.next().await.unwrap().is_err());
         assert!(stream.next().await.is_none());
-        assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+        assert_eq!(merge_scan_schema_error_count_for_test(&exec.metric), 1);
     }
 
     #[tokio::test]
@@ -3842,8 +3848,7 @@ mod tests {
                 )))
                 .unwrap(),
             );
-            let errors_before = merge_scan_schema_error_count_for_test();
-            let result = collect_merge_scan(merge_scan_exec_with_handler(
+            let exec = merge_scan_exec_with_handler(
                 vec![region_id],
                 expected.as_ref().clone(),
                 Arc::new(TestRegionQueryHandler::with_responses(vec![(
@@ -3852,12 +3857,13 @@ mod tests {
                     vec![],
                 )])),
                 1,
-            ))
-            .await;
+            );
+            let metrics = exec.metric.clone();
+            let result = collect_merge_scan(exec).await;
             assert!(result.is_err(), "field schema case {case_index} must fail");
             assert_eq!(
-                merge_scan_schema_error_count_for_test(),
-                errors_before + 1,
+                merge_scan_schema_error_count_for_test(&metrics),
+                1,
                 "field schema case {case_index}"
             );
         }
@@ -4006,9 +4012,9 @@ mod tests {
             )])),
             1,
         );
-        let errors_before = merge_scan_schema_error_count_for_test();
+        let metrics = exec.metric.clone();
         assert!(collect_merge_scan(exec).await.is_err());
-        assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+        assert_eq!(merge_scan_schema_error_count_for_test(&metrics), 1);
     }
 
     #[tokio::test]

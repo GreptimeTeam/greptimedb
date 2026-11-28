@@ -7753,33 +7753,16 @@ async fn test_two_phase_raw_stream_stays_key_ordered_across_disjoint_partition_a
     }
 }
 
-/// Lowers the candidate-series assignment threshold and restores it when dropped.
-///
-/// The override is process-global, so it is restored from `Drop` to keep a failing assertion or a
-/// panic from leaking a weakened threshold into later tests of the same binary. `cargo nextest`
-/// (the documented runner for this crate) additionally runs every test in its own process.
-struct AssignmentThresholdScope;
-
-impl AssignmentThresholdScope {
-    fn lower_to(threshold: usize) -> Self {
-        crate::read::series_scan::set_candidate_series_assignment_threshold(threshold);
-        Self
-    }
-}
-
-impl Drop for AssignmentThresholdScope {
-    fn drop(&mut self) {
-        crate::read::series_scan::set_candidate_series_assignment_threshold(0);
-    }
-}
-
 /// One partition receiving two candidate assignments must still emit one key-then-time stream,
 /// a stronger claim than `Contiguous` because keys must also be increasing. The test checks single-run
-/// ownership for each series and round-trip validation through the frame codec.
+/// ownership for each series and round-trip validation through the frame codec, and it checks what
+/// the partition really took from its distributor instead of how often the distributor tried to
+/// send.
 ///
 /// Without the threshold override a second assignment reaches the same partition only when a
 /// single collection round holds `CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD` (1,000,000) candidate
-/// series, so this test lowers the threshold instead of writing a million series.
+/// series, so this test lowers the threshold of its own scanner instead of writing a million
+/// series. The override stays on that scanner, which the control scan below relies on.
 #[tokio::test]
 async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_key_ordered() {
     use common_query::series_frame::{pack_raw_series, unpack_raw_series};
@@ -7795,7 +7778,6 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_key_orde
     // one. Both rounds are addressed to the single output partition, i.e. to one receiver.
     const CANDIDATE_BATCH: usize = 500;
     const SERIES: usize = CANDIDATE_BATCH + 1;
-    let _scope = AssignmentThresholdScope::lower_to(1);
 
     let mut env = TestEnv::with_prefix("test_two_phase_raw_same_partition_multi_round").await;
     let engine = env
@@ -7885,6 +7867,9 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_key_orde
         SeriesOrdering::KeyThenTime,
         scanner.raw_series_ordering().unwrap()
     );
+    // Lower the threshold of this scanner only: the fixture has 501 series, far below the
+    // production 1,000,000, so without the override no partition would ever see a second round.
+    scanner.set_candidate_series_assignment_threshold(1);
     // The fixture must really be one SST source plus one memtable source, or the two rounds below
     // would be explained by something else.
     {
@@ -7938,11 +7923,13 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_key_orde
     assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
     let schema = Arc::clone(stream.schema());
     let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
-    // Two collection rounds really happened; the fixture never reaches the production threshold.
-    let rounds = crate::read::series_scan::candidate_assignment_rounds();
+    // Partition 0's stream really took more than one non-empty assignment from its distributor.
+    // The count comes from the receive path of this partition of this scanner, so an empty send
+    // round or an assignment addressed elsewhere cannot satisfy it.
+    let rounds = scanner.received_assignments(0);
     assert!(
         rounds >= 2,
-        "the partition must consume more than one assignment round, got {rounds}"
+        "partition 0 must receive more than one non-empty assignment, got {rounds}"
     );
     assert!(
         !chunks.is_empty(),
@@ -8052,6 +8039,57 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_key_orde
         .collect::<Vec<_>>();
     schema_fields.dedup();
     assert_eq!(vec!["field_0"], schema_fields);
+
+    // The lowered threshold belongs to the scanner above. Another scanner over the same fixture
+    // keeps the production threshold, so it takes every series in a single non-empty assignment.
+    // A weakened process-global setting would have split this scan too and failed here.
+    let control_request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let selected = engine.scanner(region_id, control_request).await.unwrap();
+    let Scanner::Series(mut control) = selected else {
+        panic!("sparse PerSeries request must use SeriesScan");
+    };
+    assert_eq!("two_phase", control.mode());
+    let control_source = primary_key_label_source(&control.metadata());
+    let control_ranges = control
+        .properties()
+        .partitions
+        .clone()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    control
+        .prepare(PrepareRequest {
+            ranges: Some(vec![control_ranges]),
+            target_partitions: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+    let control_metrics = ExecutionPlanMetricsSet::default();
+    let control_ctx = QueryScanContext::default();
+    let control_chunks = control
+        .scan_series_partition(&control_ctx, &control_metrics, 0, &control_source)
+        .unwrap()
+        .expect("two-phase raw scan is supported")
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        1,
+        control.received_assignments(0),
+        "another scanner keeps the production threshold and receives one assignment"
+    );
+    assert_eq!(
+        stream_rows,
+        control_chunks
+            .iter()
+            .map(|chunk| chunk.time.len())
+            .sum::<usize>(),
+        "the control scan of the same fixture must read the same rows"
+    );
 }
 
 /// Creates the sparse-encoded flat region shared by the two-phase raw scan tests.

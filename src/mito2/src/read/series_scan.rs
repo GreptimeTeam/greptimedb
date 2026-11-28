@@ -81,49 +81,6 @@ use crate::sst::parquet::format::PrimaryKeyArray;
 /// Maximum number of candidate series retained before distributing assignments.
 const CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD: usize = 1_000_000;
 
-/// Test-only override of [`CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD`], where `0` means "use the
-/// production constant".
-///
-/// The production build compiles this static, the setter below and the private accessor out, so
-/// the shipped threshold is always the constant above.
-#[cfg(test)]
-static CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
-
-/// Test-only number of candidate assignment rounds sent since the override was last set.
-///
-/// A round is one `send_assignments` call, so a partition that received more than one assignment
-/// sees `>= 2` rounds here. Increments are compiled out of production builds.
-#[cfg(test)]
-static CANDIDATE_ASSIGNMENT_ROUNDS: AtomicUsize = AtomicUsize::new(0);
-
-/// Returns the candidate-series assignment threshold, honouring the test-only override.
-fn candidate_series_assignment_threshold() -> usize {
-    #[cfg(test)]
-    {
-        let threshold = CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.load(Ordering::Relaxed);
-        if threshold > 0 {
-            return threshold;
-        }
-    }
-    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD
-}
-
-/// Test-only: overrides the candidate-series assignment threshold and resets the round counter.
-///
-/// Pass `0` to restore the production threshold. Tests must reset the override before they
-/// return; a scope guard in `engine::scan_test` does that even on panic.
-#[cfg(test)]
-pub(crate) fn set_candidate_series_assignment_threshold(threshold: usize) {
-    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.store(threshold, Ordering::Relaxed);
-    CANDIDATE_ASSIGNMENT_ROUNDS.store(0, Ordering::Relaxed);
-}
-
-/// Test-only: returns the number of assignment rounds sent since the override was last set.
-#[cfg(test)]
-pub(crate) fn candidate_assignment_rounds() -> usize {
-    CANDIDATE_ASSIGNMENT_ROUNDS.load(Ordering::Relaxed)
-}
-
 /// Legacy data receivers for output partitions.
 type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
 
@@ -223,6 +180,22 @@ pub struct SeriesScan {
     /// the same pinned state is served from [`Self::preflight`].
     #[cfg(test)]
     preflight_runs: AtomicUsize,
+    /// Test-only override of [`CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD`] for this scan, where `0`
+    /// means "use the production constant".
+    ///
+    /// The override belongs to one scanner, so a test that lowers it only changes how this scan
+    /// distributes candidates. The field is compiled out of production builds, which always use
+    /// the constant above.
+    #[cfg(test)]
+    candidate_threshold_override: AtomicUsize,
+    /// Test-only count of the non-empty candidate assignments each output partition received.
+    ///
+    /// Incremented where a partition's stream takes an assignment from its distributor, so an
+    /// empty assignment, an assignment for another partition or a send that never landed cannot
+    /// raise the count. The list is reset whenever a new distributor is started, i.e. once per
+    /// execution of this scan.
+    #[cfg(test)]
+    received_assignments: Arc<Mutex<Vec<usize>>>,
 }
 
 impl SeriesScan {
@@ -273,7 +246,23 @@ impl SeriesScan {
             preflight: Mutex::new(None),
             #[cfg(test)]
             preflight_runs: AtomicUsize::new(0),
+            #[cfg(test)]
+            candidate_threshold_override: AtomicUsize::new(0),
+            #[cfg(test)]
+            received_assignments: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Returns the candidate-series assignment threshold of this scan.
+    fn candidate_series_assignment_threshold(&self) -> usize {
+        #[cfg(test)]
+        {
+            let threshold = self.candidate_threshold_override.load(Ordering::Relaxed);
+            if threshold > 0 {
+                return threshold;
+            }
+        }
+        CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD
     }
 
     /// Returns the number of preflight computations this scanner has run.
@@ -818,6 +807,9 @@ impl SeriesScan {
             .flatten()
             .copied()
             .collect::<Vec<_>>();
+        // Test-only: observe what this partition takes from its distributor.
+        #[cfg(test)]
+        let received_assignments = Arc::clone(&self.received_assignments);
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
@@ -825,6 +817,10 @@ impl SeriesScan {
             let mut metrics = ScannerMetrics::default();
             while let Some(input) = receiver.recv().await {
                 let input = input?;
+                #[cfg(test)]
+                {
+                    received_assignments.lock().unwrap()[partition] += 1;
+                }
                 metrics.scan_cost += fetch_start.elapsed();
 
                 let build_start = Instant::now();
@@ -904,6 +900,12 @@ impl SeriesScan {
 
         let (senders, receivers, active_receivers) =
             new_candidate_channel_list(self.properties.num_partitions());
+        // A new distributor means new receivers, so the test-only per-partition observations
+        // restart with it.
+        #[cfg(test)]
+        {
+            *self.received_assignments.lock().unwrap() = vec![0; self.properties.num_partitions()];
+        }
         // Capture the first partition's runtime pool once for the shared distributor.
         // reset_state clears the receivers so the next execution captures a fresh pool.
         let mut distributor = SeriesCandidateDistributor {
@@ -914,6 +916,7 @@ impl SeriesScan {
             pruner: self.pruner.clone(),
             senders,
             active_receivers,
+            assignment_threshold: self.candidate_series_assignment_threshold(),
             metrics_set: metrics_set.clone(),
             metrics_list: self.metrics_list.clone(),
             explain_verbose: ctx.explain_verbose,
@@ -1288,6 +1291,29 @@ impl SeriesScan {
     pub(crate) fn mode(&self) -> &'static str {
         self.mode.as_str()
     }
+
+    /// Lowers the candidate-series assignment threshold of this scan, `0` for the production one.
+    ///
+    /// The value is read when the scan starts its candidate distributor, so a test sets it after
+    /// creating the scanner and before scanning the first partition. Only this scanner observes
+    /// it.
+    pub(crate) fn set_candidate_series_assignment_threshold(&mut self, threshold: usize) {
+        self.candidate_threshold_override
+            .store(threshold, Ordering::Relaxed);
+    }
+
+    /// Returns how many non-empty candidate assignments `partition` of this scan received.
+    ///
+    /// The count comes from the partition's receive path, so it reports what that partition
+    /// consumed instead of how often a distributor tried to send.
+    pub(crate) fn received_assignments(&self, partition: usize) -> usize {
+        self.received_assignments
+            .lock()
+            .unwrap()
+            .get(partition)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// The distributor scans series and distributes them to different partitions.
@@ -1478,6 +1504,11 @@ struct SeriesCandidateDistributor {
     pruner: Arc<Pruner>,
     senders: CandidateSenderList,
     active_receivers: Arc<AtomicUsize>,
+    /// Collected candidate series that make up one assignment round.
+    ///
+    /// Taken from the scanner that owns the distributor, so a test can lower it for one scan
+    /// without changing how any other scan distributes candidates.
+    assignment_threshold: usize,
     metrics_set: ExecutionPlanMetricsSet,
     metrics_list: Arc<PartitionMetricsList>,
     explain_verbose: bool,
@@ -1520,7 +1551,7 @@ impl SeriesCandidateDistributor {
                 return Ok(());
             }
             collector.push(batch);
-            if collector.len() >= candidate_series_assignment_threshold() {
+            if collector.len() >= self.assignment_threshold {
                 chunked = true;
                 self.send_assignments(collector.finish(false), &partition_pruner);
                 if !self.should_fetch_candidates() {
@@ -1544,9 +1575,6 @@ impl SeriesCandidateDistributor {
         assignments: Vec<AssignedSeriesBatch>,
         partition_pruner: &Arc<PartitionPruner>,
     ) {
-        // One round of candidate collection; a partition that receives two assignments sees two.
-        #[cfg(test)]
-        CANDIDATE_ASSIGNMENT_ROUNDS.fetch_add(1, Ordering::Relaxed);
         for (partition, assigned_series) in assignments.into_iter().enumerate() {
             if assigned_series.series().is_empty() {
                 continue;

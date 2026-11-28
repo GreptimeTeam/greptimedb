@@ -207,11 +207,7 @@ async fn promql_query_as_batches(
     )
     .await
     .unwrap();
-    match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(recordbatches) => recordbatches,
-        _ => unreachable!(),
-    }
+    rows_batches(output).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -296,11 +292,7 @@ async fn histogram_fraction_binary_join_preserves_partitioned_rows() {
                     .await
                     .remove(0)
                     .unwrap();
-                let batches = match output.data {
-                    OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-                    OutputData::RecordBatches(batches) => batches,
-                    other => panic!("expected result batches, got {other:?}"),
-                };
+                let batches = rows_batches(output).await;
                 let mut rows = batches
                     .iter()
                     .flat_map(|batch| {
@@ -1266,11 +1258,7 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
         .await
         .remove(0)
         .unwrap();
-    let raw_batches = match raw_output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(recordbatches) => recordbatches,
-        _ => unreachable!(),
-    };
+    let raw_batches = rows_batches(raw_output).await;
     let raw_samples = extract_samples(raw_batches);
     assert_eq!(raw_samples.len(), 2, "{raw_samples:?}");
     let stale_marker = raw_samples
@@ -1502,11 +1490,7 @@ async fn f06_ordered_rows(
         .await
         .remove(0)
         .unwrap_or_else(|err| panic!("F06: query failed: {err}\n{sql}"));
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("F06: expected a query result"),
-    };
+    let batches = rows_batches(output).await;
 
     let mut rows = Vec::new();
     for batch in batches.iter() {
@@ -1540,11 +1524,7 @@ async fn f06_ordered_lag_rows(
         .await
         .remove(0)
         .unwrap_or_else(|err| panic!("F06: query failed: {err}\n{sql}"));
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("F06: expected a query result"),
-    };
+    let batches = rows_batches(output).await;
 
     let mut rows = Vec::new();
     for batch in batches.iter() {
@@ -1955,11 +1935,7 @@ async fn native_tql_output(instance: &Arc<Instance>, sql: &str, enabled: bool) -
 }
 
 async fn native_output_text(output: Output) -> String {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("query returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     batches.pretty_print().unwrap()
 }
 
@@ -1981,6 +1957,11 @@ async fn rows_batches(output: Output) -> common_recordbatch::RecordBatches {
         OutputData::RecordBatches(batches) => batches,
         _ => unreachable!("TQL EVAL returns record batches"),
     }
+}
+
+/// [`rows_batches`] for a caller that cannot await.
+fn batches_blocking(output: Output) -> common_recordbatch::RecordBatches {
+    futures::executor::block_on(rows_batches(output))
 }
 
 /// The position of the answer's metric-name column, refused unless it reports exactly `reported`.
@@ -2148,11 +2129,7 @@ async fn collect_error(output: Output) -> String {
 
 /// Like [`native_result_rows`], with both label columns of the discovery fixture.
 async fn native_site_rows(output: Output) -> Vec<(i64, String, String, f64)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = batches
         .iter()
         .flat_map(|batch| {
@@ -2213,11 +2190,7 @@ async fn native_rows_and_names(
     output: Output,
     label: Option<&str>,
 ) -> (Vec<(i64, String, f64)>, Option<Vec<Option<String>>>) {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let declares_name = batches
         .schema()
         .arrow_schema()
@@ -2342,11 +2315,7 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
         let sql = format!("TQL EVAL (0, 0, '1s') {query}");
         observer.clear();
         let output = native_tql_output(&instance, &sql, true).await;
-        let batches = match output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("TQL EVAL returns record batches"),
-        };
+        let batches = rows_batches(output).await;
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
             1
@@ -2745,11 +2714,7 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
                 .await
                 .remove(0)
                 .unwrap();
-            let batches = match output.data {
-                OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-                OutputData::RecordBatches(batches) => batches,
-                _ => unreachable!("a query returns record batches"),
-            };
+            let batches = rows_batches(output).await;
             let batches = batches
                 .iter()
                 .map(|batch| {
@@ -3147,11 +3112,7 @@ fn assert_native_rows_plan(observer: &NativePlanObserver) {
 /// The timestamp is found by type rather than by name: the native route names the time index of a
 /// statement that reads nothing `time`, while the existing planner names it `ts`.
 async fn native_timestamp_rows(output: Output) -> Vec<(i64, f64)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = batches
         .iter()
         .flat_map(|batch| {
@@ -3192,11 +3153,7 @@ async fn native_timestamp_rows(output: Output) -> Vec<(i64, f64)> {
 
 /// [`native_result_rows`] plus each row's OTLP temporality marker, sorted by label then time.
 async fn native_marker_rows(output: Output) -> Vec<(i64, String, String, f64)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = Vec::new();
     for batch in batches.iter() {
         let timestamps = batch
@@ -3919,11 +3876,7 @@ async fn native_test_instance_with_options(
 }
 
 async fn native_scalar_rows(output: Output) -> Vec<(i64, f64)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("PromQL query returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = Vec::new();
     for batch in batches {
         let timestamps = batch
@@ -4501,11 +4454,7 @@ async fn native_promql_composed_binary_canonical_operand() {
         .await
         .remove(0)
         .unwrap();
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!(),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = Vec::new();
     for batch in batches.iter() {
         let batch = batch.df_record_batch();
@@ -4840,11 +4789,7 @@ async fn native_promql_float_function_over_split_histogram_sum_matches_legacy() 
 
 /// How many rows `output` answers, whatever its columns hold.
 async fn answer_rows(output: Output) -> usize {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("PromQL answers record batches"),
-    };
+    let batches = rows_batches(output).await;
     batches.iter().map(|batch| batch.num_rows()).sum()
 }
 
@@ -4957,11 +4902,7 @@ async fn native_promql_composed_histogram_reset_warning() {
         .await
         .remove(0)
         .unwrap();
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!(),
-    };
+    let batches = rows_batches(output).await;
     assert_eq!(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         0
@@ -5269,11 +5210,7 @@ async fn histogram_label_rows(output: Output) -> Vec<(i64, Vec<String>, f64, f64
     use common_query::native_histogram::read_histogram;
     use datatypes::arrow::array::StructArray;
 
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("PromQL answers record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = Vec::new();
     for batch in batches.iter() {
         let batch = batch.df_record_batch();
@@ -6346,11 +6283,7 @@ async fn distributed_native_promql_metric_discovery_reconciles_mixed_ordering() 
             native_plan_shape(plan).fused >= 1,
             "a discovery aggregate stays native: {plan:?}"
         );
-        let batches = match output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("PromQL returns record batches"),
-        };
+        let batches = rows_batches(output).await;
         // Neither column is located by position: the result puts `__name__` last. A row whose series
         // reports no name carries a null there - the column is declared for every samples root, so a
         // null, not a missing column, is exactly "no metric name".
@@ -6503,11 +6436,7 @@ async fn distributed_native_promql_remote_answers_a_name_grouping_over_a_native_
 /// The columns and `(timestamp, value)` rows of a statement that reads no table, whose time column
 /// is the statement's own rather than a table's.
 async fn data_free_rows(output: Output) -> (Vec<String>, Vec<(i64, f64)>) {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("PromQL query returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     for batch in batches {
@@ -6978,11 +6907,7 @@ async fn native_promql_label_rewrites_reach_the_native_route_and_keep_prometheus
     ] {
         observer.clear();
         let output = run_two(expr).await;
-        let batches = match output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("TQL EVAL returns record batches"),
-        };
+        let batches = rows_batches(output).await;
         let schema_names = batches
             .schema()
             .column_schemas()
@@ -7788,13 +7713,7 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
         );
         let legacy = native_tql_output(&instance, sql, false).await;
         if shape.starts_with("histogram_quantile") {
-            let collect = |output: Output| async move {
-                match output.data {
-                    OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-                    OutputData::RecordBatches(batches) => batches,
-                    _ => unreachable!("query returns record batches"),
-                }
-            };
+            let collect = |output: Output| async move { rows_batches(output).await };
             let native = collect(native).await;
             let legacy = collect(legacy).await;
             let native_schema = native.schema();
@@ -7936,13 +7855,7 @@ async fn native_promql_sort_absent_and_histogram_quantile_match_legacy() {
             } else {
                 ReportedName::Metric("native_shapes")
             };
-            let collect = |output: Output| async move {
-                match output.data {
-                    OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-                    OutputData::RecordBatches(batches) => batches,
-                    _ => unreachable!("query returns record batches"),
-                }
-            };
+            let collect = |output: Output| async move { rows_batches(output).await };
             let rows = |batches: &common_recordbatch::RecordBatches, reported: ReportedName<'_>| {
                 batches
                     .iter()
@@ -8390,11 +8303,7 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
         .unwrap();
         if expr == "native_at{host=\"missing\"}" {
             // Legacy preserves the selected NULL sample row; native selectors drop all-missing rows.
-            let batches = match legacy.data {
-                OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-                OutputData::RecordBatches(batches) => batches,
-                _ => unreachable!("TQL EVAL returns record batches"),
-            };
+            let batches = rows_batches(legacy).await;
             assert_eq!(
                 batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
                 1,
@@ -8651,11 +8560,7 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
 
 /// `(ts, host, kind, value)` of every row, sorted, since a set result keeps `kind`.
 async fn native_kind_rows(output: Output) -> Vec<(i64, String, String, f64)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = Vec::new();
     for batch in batches.iter() {
         let timestamps = batch
@@ -9484,16 +9389,6 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
             1,
         ),
     ];
-    // The nodes named `name` reachable from `plan`.
-    let count_nodes = |plan: &Arc<dyn ExecutionPlan>, name: &str| {
-        let mut stack = vec![Arc::clone(plan)];
-        let mut count = 0;
-        while let Some(node) = stack.pop() {
-            count += usize::from(node.name() == name);
-            stack.extend(node.children().into_iter().cloned());
-        }
-        count
-    };
     let mut answers = Vec::new();
     for (query, empty_selectors) in queries {
         // TQL does not prepare discovery scope itself; provide the same authorized scope that the
@@ -9525,7 +9420,7 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
             .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
         assert_eq!(
             empty_selectors,
-            count_nodes(&fused, "EmptyExec"),
+            count_plan_nodes(&fused, "EmptyExec"),
             "`{query}` does not read every zero-match selector as the node's input: {fused:?}"
         );
         if empty_selectors > 0 {
@@ -9597,7 +9492,7 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
         if has_empty {
             assert_eq!(
                 1,
-                count_nodes(&fused, "EmptyExec"),
+                count_plan_nodes(&fused, "EmptyExec"),
                 "`{query}` does not read the subquery's zero-match selector: {fused:?}"
             );
             let mut region_inputs = Vec::new();
@@ -9661,11 +9556,7 @@ async fn native_labelled_rows(
     Vec<String>,
     Vec<(i64, std::collections::BTreeMap<String, String>, f64)>,
 ) {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut columns = batches
         .schema()
         .arrow_schema()
@@ -11082,11 +10973,7 @@ async fn native_promql_repeated_selector_binary_uses_independent_scans() {
     /// route's rows layout declares the per-row name column: the native route does, and the
     /// existing plan answers the same rows without it.
     async fn unlabeled_rows(output: Output, declared_name: bool) -> Vec<(i64, f64)> {
-        let batches = match output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("TQL EVAL returns record batches"),
-        };
+        let batches = rows_batches(output).await;
         // The rows root always declares the per-row metric-name column after the labels, so the
         // answer of a computed value is timestamp, value and that one column - which names nothing
         // here, because a subtraction answers a value of its own and `on()` keeps no labels.
@@ -12062,11 +11949,7 @@ const CTE_NATIVE_ARROW_TYPE_STATEMENT: &str = "WITH tql AS (TQL EVAL (0, 3, '1s'
 
 /// The type names `arrow_typeof` reports for the columns of [`CTE_NATIVE_STATEMENT`].
 async fn cte_native_arrow_types(output: Output) -> Vec<String> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let batch = batches.iter().next().expect("one row of type names");
     ["host", "ts", "val"]
         .iter()
@@ -12089,7 +11972,6 @@ fn cte_native_arrow_types_expected() -> Vec<String> {
 }
 
 /// The rows of a TQL result in the order the statement published them.
-/// The rows of a TQL result in the order the statement published them.
 ///
 /// The time index, the one value column and the label set are found by type, so the statement's own
 /// column names - or the names a CTE gave them - do not matter, and a route that orders its rows
@@ -12097,11 +11979,7 @@ fn cte_native_arrow_types_expected() -> Vec<String> {
 async fn cte_native_rows(
     output: Output,
 ) -> Vec<(i64, std::collections::BTreeMap<String, String>, f64)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = Vec::new();
     for batch in batches.iter() {
         let batch = batch.df_record_batch();
@@ -13583,11 +13461,7 @@ struct Answer {
 /// Reads a TQL answer into an [`Answer`].
 async fn native_answer(output: Output) -> Answer {
     use datafusion::arrow::util::display::array_value_to_string;
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut value_types: Option<Vec<DataType>> = None;
     let mut rows = Vec::new();
     for batch in batches.iter() {
@@ -14265,11 +14139,7 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
 /// One row of a native or legacy answer as (time, host, value): the host is empty for an unlabelled
 /// series, and the value is rendered so a NaN compares equal to a NaN.
 async fn dynamic_scalar_rows(output: Output) -> Vec<(i64, String, String)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut rows = Vec::new();
     for batch in batches.iter() {
         let schema = batch.df_record_batch().schema();
@@ -14504,11 +14374,7 @@ async fn native_promql_same_table_partitioned_scalar_broadcast_gathers_whole_vec
 /// groups nothing also has no label column, which `native_result_rows` needs, so this reads the
 /// two columns an aggregate answers with.
 fn eval_values(output: Output) -> Vec<(i64, f64)> {
-    let batches = match output.data {
-        OutputData::Stream(stream) => futures::executor::block_on(collect_batches(stream)).unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = batches_blocking(output);
     batches
         .iter()
         .flat_map(|batch| {
@@ -14557,11 +14423,7 @@ fn eval_text_rows(output: Output, reported: ReportedName<'_>) -> String {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 
-    let batches = match output.data {
-        OutputData::Stream(stream) => futures::executor::block_on(collect_batches(stream)).unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = batches_blocking(output);
     let mut named: Option<Vec<String>> = None;
     let mut rows: Vec<Vec<String>> = Vec::new();
     for batch in batches {
@@ -14676,11 +14538,7 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
         let sql = format!("TQL EVAL (0, 1, '1s') sum(topk(1, {table}))");
         observer.clear();
         let native_output = native_tql_output(&instance, &sql, true).await;
-        let batches = match native_output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("TQL EVAL returns record batches"),
-        };
+        let batches = rows_batches(native_output).await;
         let rows = batches
             .iter()
             .flat_map(|batch| {
@@ -17244,17 +17102,26 @@ async fn native_promql_corpus_route_matrix() {
     );
 }
 
-/// Walks a physical plan and reports whether `name` appears, and how many times.
-fn count_plan_nodes(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
-    let mut count = 0;
+/// Every node of `plan` for which `predicate` holds, in the stack-based depth-first order the
+/// plan helpers below rely on.
+fn plan_nodes_where(
+    plan: &Arc<dyn ExecutionPlan>,
+    predicate: impl Fn(&Arc<dyn ExecutionPlan>) -> bool,
+) -> Vec<Arc<dyn ExecutionPlan>> {
+    let mut found = Vec::new();
     let mut stack = vec![Arc::clone(plan)];
     while let Some(node) = stack.pop() {
-        if node.name() == name {
-            count += 1;
+        if predicate(&node) {
+            found.push(Arc::clone(&node));
         }
         stack.extend(node.children().into_iter().cloned());
     }
-    count
+    found
+}
+
+/// Walks a physical plan and reports whether `name` appears, and how many times.
+fn count_plan_nodes(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
+    plan_nodes_where(plan, |node| node.name() == name).len()
 }
 
 /// Renders `plan` as an indented tree, so a failing boundary assertion shows what it found.
@@ -17277,14 +17144,9 @@ fn display_plan_tree(plan: &Arc<dyn ExecutionPlan>) -> String {
 
 /// The first node named `name` in `plan`, which is the boundary's own stage when there is one.
 fn find_plan_node(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<Arc<dyn ExecutionPlan>> {
-    let mut stack = vec![Arc::clone(plan)];
-    while let Some(node) = stack.pop() {
-        if node.name() == name {
-            return Some(node);
-        }
-        stack.extend(node.children().into_iter().cloned());
-    }
-    None
+    plan_nodes_where(plan, |node| node.name() == name)
+        .first()
+        .cloned()
 }
 
 /// Every node named `name` that reads a `child_name`, in traversal order.
@@ -17296,20 +17158,13 @@ fn find_plan_nodes_over(
     name: &str,
     child_name: &str,
 ) -> Vec<Arc<dyn ExecutionPlan>> {
-    let mut found = Vec::new();
-    let mut stack = vec![Arc::clone(plan)];
-    while let Some(node) = stack.pop() {
-        if node.name() == name
+    plan_nodes_where(plan, |node| {
+        node.name() == name
             && node
                 .children()
                 .iter()
                 .any(|child| child.name() == child_name)
-        {
-            found.push(Arc::clone(&node));
-        }
-        stack.extend(node.children().into_iter().cloned());
-    }
-    found
+    })
 }
 
 /// The first node named `name` whose own child is named `child_name`.
@@ -17321,19 +17176,9 @@ fn find_plan_node_over(
     name: &str,
     child_name: &str,
 ) -> Option<Arc<dyn ExecutionPlan>> {
-    let mut stack = vec![Arc::clone(plan)];
-    while let Some(node) = stack.pop() {
-        if node.name() == name
-            && node
-                .children()
-                .iter()
-                .any(|child| child.name() == child_name)
-        {
-            return Some(node);
-        }
-        stack.extend(node.children().into_iter().cloned());
-    }
-    None
+    find_plan_nodes_over(plan, name, child_name)
+        .first()
+        .cloned()
 }
 
 /// A label rewrite that folds every series of one metric into one label set, answered from the
