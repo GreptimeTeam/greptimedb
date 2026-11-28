@@ -1,6 +1,6 @@
 ---
 Feature Name: Export V2 Re-export of Time Ranges Changed by Late Writes
-Tracking Issue: TBD
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/10725
 Date: 2026-11-26
 Status: Draft for discussion
 ---
