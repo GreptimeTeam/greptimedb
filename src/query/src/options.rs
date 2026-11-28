@@ -117,7 +117,8 @@ pub struct QueryOptions {
     pub parallelism: usize,
     /// Whether to allow query fallback when push down fails.
     pub allow_query_fallback: bool,
-    /// Experimental: enable shape-based factorized AVG/SUM join aggregation. Default false.
+    /// Experimental: enable shape-based factorized AVG/SUM/COUNT join aggregation.
+    /// Default false.
     pub experimental_enable_factorized_join_agg: bool,
     /// Memory pool size for query execution. Setting it to 0 disables the limit (unbounded).
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
