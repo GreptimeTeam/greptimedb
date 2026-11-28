@@ -2150,7 +2150,10 @@ fn empty_discovered_fields(matchers: Option<&[Matcher]>) -> Option<Vec<String>> 
         return Some(vec![DEFAULT_FIELD_COLUMN.to_string()]);
     };
     let mut fields = Vec::with_capacity(matchers.len());
-    for matcher in matchers.iter().filter(|matcher| matcher.op == MatchOp::Equal) {
+    for matcher in matchers
+        .iter()
+        .filter(|matcher| matcher.op == MatchOp::Equal)
+    {
         if !fields.iter().any(|field| field == &matcher.value) {
             fields.push(matcher.value.clone());
         }

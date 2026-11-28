@@ -7735,7 +7735,9 @@ async fn native_fused_topk_above_aggregate_splits_in_every_form() {
                 &input.expr,
                 NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final
             ),
-            root => panic!("`{query}`: the ranking must run above the Final, got {root:?}: {display}"),
+            root => {
+                panic!("`{query}`: the ranking must run above the Final, got {root:?}: {display}")
+            }
         };
         assert!(
             ranking_reads_final,
@@ -9244,15 +9246,17 @@ async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
 #[tokio::test]
 async fn native_fused_label_rewrite_above_a_histogram_fold_splits() {
     let fold = "sum without (host) (rate(m[5m]))";
-    let above = format!(
-        r#"label_replace(histogram_quantile(0.99, {fold}), "route", "$1", "le", "(.*)")"#
-    );
-    let plan =
-        build_native_fused_plan_with_provider(&above, true, native_classic_histogram_provider().await)
-            .await;
+    let above =
+        format!(r#"label_replace(histogram_quantile(0.99, {fold}), "route", "$1", "le", "(.*)")"#);
+    let plan = build_native_fused_plan_with_provider(
+        &above,
+        true,
+        native_classic_histogram_provider().await,
+    )
+    .await;
     let display = plan.display_indent().to_string();
-    let final_node = find_final_split(&plan)
-        .unwrap_or_else(|| panic!("`{above}` must split: {display}"));
+    let final_node =
+        find_final_split(&plan).unwrap_or_else(|| panic!("`{above}` must split: {display}"));
     let NativeExpr::Map { input, .. } = &final_node.tree().root().expr else {
         panic!("`{above}`: the rewrite runs above the folded answer: {display}");
     };
@@ -9270,9 +9274,12 @@ async fn native_fused_label_rewrite_above_a_histogram_fold_splits() {
     // The control: the same rewrite *below* the function relabels one histogram's buckets apart.
     let below =
         format!(r#"histogram_quantile(0.99, label_replace({fold}, "route", "$1", "le", "(.*)"))"#);
-    let plan =
-        build_native_fused_plan_with_provider(&below, true, native_classic_histogram_provider().await)
-            .await;
+    let plan = build_native_fused_plan_with_provider(
+        &below,
+        true,
+        native_classic_histogram_provider().await,
+    )
+    .await;
     assert!(
         find_final_split(&plan).is_none(),
         "`{below}` must not split: {}",
@@ -18510,13 +18517,10 @@ async fn a_ranking_above_a_histogram_fold_splits_without_ranking_a_histogram() {
     );
     assert!(
         !input.inputs().is_empty()
-            && input
-                .inputs()
-                .iter()
-                .all(|input| input
-                    .output
-                    .samples()
-                    .is_some_and(|schema| schema.eval_grid.is_none())),
+            && input.inputs().iter().all(|input| input
+                .output
+                .samples()
+                .is_some_and(|schema| schema.eval_grid.is_none())),
         "the producer must fold the raw series it read: {display}"
     );
     // The ranking's own column is a histogram: the samples it would rank were never converted to

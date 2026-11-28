@@ -8960,7 +8960,9 @@ fn histogram_split_refuses_a_routing_rewrite_only_below_the_histogram() {
         })
         .unwrap();
         assert_eq!(
-            FusedSeries::split_aggregate(&below, TIME).unwrap().is_some(),
+            FusedSeries::split_aggregate(&below, TIME)
+                .unwrap()
+                .is_some(),
             crate::native::split::histogram_group_is_single(&group),
             "below the histogram, group {group:?}"
         );
@@ -8970,18 +8972,14 @@ fn histogram_split_refuses_a_routing_rewrite_only_below_the_histogram() {
             .unwrap()
             .unwrap_or_else(|| panic!("above the histogram, group {group:?}: {above}"));
         let NativeExpr::Map { input, .. } = &final_tree.root().expr else {
-            panic!(
-                "the rewrite must run above the folded answer, group {group:?}: {final_tree}"
-            );
+            panic!("the rewrite must run above the folded answer, group {group:?}: {final_tree}");
         };
         let NativeExpr::Vector {
             input: folded,
             op: BoundVectorOp::Histogram(_),
         } = &input.expr
         else {
-            panic!(
-                "the rewrite must read the histogram function, group {group:?}: {final_tree}"
-            );
+            panic!("the rewrite must read the histogram function, group {group:?}: {final_tree}");
         };
         assert!(
             matches!(
@@ -9128,7 +9126,12 @@ async fn histogram_split_carries_a_rewrite_above_the_histogram() {
         rows
     };
     let got = answers(
-        &decode(collect(split, SessionContext::default().task_ctx()).await.unwrap()).await,
+        &decode(
+            collect(split, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        )
+        .await,
     );
     let expected = answers(
         &decode(
