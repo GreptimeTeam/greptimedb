@@ -6392,6 +6392,8 @@ async fn native_matrix_root_names_its_value_after_the_statement() {
     for query in [
         "sum(some_metric)[5m:1m]",
         "sum by (tag_0) (rate(some_metric[2m]))[5m:1m]",
+        "some_metric[5m]",
+        "(some_metric[5m] offset 1m)",
     ] {
         let table_provider = build_test_table_provider_with_options(
             &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],

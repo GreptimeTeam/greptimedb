@@ -6344,7 +6344,13 @@ fn instant_candidate_span_covers_native_selection_at_boundaries() {
             .collect();
         assert_eq!(candidates, case.candidates, "{}", case.name);
         assert_eq!(span.count, case.candidates.len() as i128, "{}", case.name);
-        assert_eq!(estimate, case.candidates.len(), "{}", case.name);
+        // Without a lookback a point selects only a sample at it, so no more points than samples.
+        let reachable = if case.lookback == 0 {
+            case.candidates.len().min(case.times.len())
+        } else {
+            case.candidates.len()
+        };
+        assert_eq!(estimate, reachable, "{}", case.name);
 
         let (rows, selected) = select_instants(
             &time,
