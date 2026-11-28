@@ -1566,7 +1566,7 @@ impl PromPlanner {
         };
         // With only empty inputs, the time index is the synthetic `time` column
         // (`setup_context_for_empty_metric`); a value of the same name moves it to the first free
-        // `native_time_N`. A value colliding with a tag keeps the existing plan.
+        // `native_time_N`. A value colliding with a tag has no free name to take.
         let time = if named_by_a_real_input {
             time
         } else {
@@ -1575,6 +1575,22 @@ impl PromPlanner {
                 .iter()
                 .any(|name| output_tags.iter().any(|tag| tag == name))
             {
+                // No table exists, so no row ever carries this layout, and the statement answers
+                // the empty vector whichever column it would name: `__name__` names both the metric
+                // - and so the value column - and the row-name column every samples layout
+                // publishes, and neither can move. The empty input a selector over a missing table
+                // is planned as is that answer, so the statement is answered by it rather than
+                // refused. A statement that reads a table keeps the refusal: there the layout is a
+                // row's.
+                if format == FusedOutputFormat::PlainRows
+                    && children.iter().all(is_empty_discovered_input)
+                    && let Some(empty) = children.first()
+                {
+                    return Ok(NativePlanned {
+                        kind: NativePlannedKind::Rows(empty.clone()),
+                        unproved_keys,
+                    });
+                }
                 return unsupported(UNSUPPORTED_SHAPE_UNNAMED);
             }
             free_time_index(&time, &value_names, &output_tags)
