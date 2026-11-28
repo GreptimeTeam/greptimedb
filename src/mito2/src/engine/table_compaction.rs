@@ -70,6 +70,7 @@ pub fn is_table_compaction_metadata_compatible(
 }
 
 impl MitoEngine {
+    /// Reads committed inputs while an ordinary edit or ALTER is in progress.
     pub fn table_compaction_snapshot(
         &self,
         region_id: RegionId,
@@ -78,7 +79,14 @@ impl MitoEngine {
             .find_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
-            region.state() == RegionRoleState::Leader(RegionLeaderState::Writable),
+            match region.state() {
+                RegionRoleState::Leader(
+                    RegionLeaderState::Writable | RegionLeaderState::Altering,
+                ) => true,
+                RegionRoleState::Leader(RegionLeaderState::Editing) =>
+                    region.manifest_ctx.staging_partition_info().is_none(),
+                _ => false,
+            },
             RegionBusySnafu { region_id }
         );
         let current = region.version_control.current();
