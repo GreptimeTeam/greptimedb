@@ -55,6 +55,12 @@ pub(crate) struct CapturedDynFilter {
     scalar_subquery_filter: Option<Arc<dyn PhysicalExpr>>,
 }
 
+impl CapturedDynFilter {
+    pub(crate) fn filter_id(&self) -> &FilterId {
+        &self.filter_id
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteDynFilterPushdown {
     pub(crate) captured_dyn_filters: Vec<CapturedDynFilter>,

@@ -704,6 +704,10 @@ impl MergeScanExec {
             Vec::new()
         };
         resolve_scalar_subquery_dyn_filters(&captured_remote_dyn_filters);
+        let captured_remote_dyn_filter_ids = captured_remote_dyn_filters
+            .iter()
+            .map(|captured| captured.filter_id().clone())
+            .collect::<Vec<_>>();
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
@@ -825,8 +829,10 @@ impl MergeScanExec {
                     DataFusionError::External(Box::new(BoxedError::new(e)))
                 })?;
 
-                if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
-                    subscriber_rollback.disarm();
+                // The subscription may be shared with a concurrent duplicate read. Once
+                // do_get succeeds, a later schema error must not remove that subscription.
+                if let Some(guard) = subscriber_rollback.as_mut() {
+                    guard.disarm();
                 }
                 let mut advertised_schema = stream.schema().arrow_schema().clone();
                 validate_remote_schema(
@@ -840,6 +846,17 @@ impl MergeScanExec {
                 if let Some(remote_dyn_filter_registry_lease) =
                     remote_dyn_filter_registry_lease.as_ref()
                 {
+                    // The watcher may have published before this successful `do_get`
+                    // installed its registration. Reopened reads can reuse a subscriber but
+                    // install a fresh remote registration, so replay all matching captured
+                    // filters, not just the ones added by the rollback guard.
+                    remote_dyn_filter_registry_lease
+                        .registry()
+                        .schedule_replay_current_snapshot(
+                            region_query_handler.clone(),
+                            &captured_remote_dyn_filter_ids,
+                            &Subscriber::new(region_id, target.clone()),
+                        );
                     remote_dyn_filter_registry_lease
                         .ensure_fanout_task(region_query_handler.clone());
                 }
@@ -1413,6 +1430,7 @@ impl MergeScanMetric {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap as StdHashMap;
+    use std::collections::HashSet;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
@@ -1540,6 +1558,7 @@ mod tests {
     fn remote_dyn_filter_test_exec(
         handler: crate::region_query::RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
+        regions: Vec<RegionId>,
     ) -> MergeScanExec {
         let session_state = SessionStateBuilder::new().build();
         let plan = LogicalPlanBuilder::empty(true)
@@ -1552,7 +1571,7 @@ mod tests {
         MergeScanExec::new(
             &session_state,
             TableName::new("catalog", "schema", "table"),
-            vec![RegionId::new(1024, 1)],
+            regions,
             plan,
             &schema,
             handler,
@@ -1963,7 +1982,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         install_remote_dyn_filter(&exec);
         let stream = exec
             .to_stream(task_context_with_engine_state(state, query_ctx), 0)
@@ -1994,7 +2017,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         install_remote_dyn_filter(&exec);
 
         register_remote_dyn_filters_for_region(Some(&lease), &exec.captured_remote_dyn_filters());
@@ -2024,7 +2051,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         install_remote_dyn_filter(&exec);
 
         let mut stream = exec
@@ -2059,7 +2090,11 @@ mod tests {
         let lease = state
             .acquire_remote_dyn_filter_registry_lease(&query_ctx)
             .unwrap();
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         let dyn_filter = install_remote_dyn_filter(&exec);
 
         let stream = exec
@@ -2093,7 +2128,11 @@ mod tests {
         let handler = Arc::new(ImmediateEofRegionQueryHandler::default());
         let query_ctx = QueryContext::arc();
         let state = query_engine_state(handler.clone());
-        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone());
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1)],
+        );
         let dyn_filter = install_remote_dyn_filter(&exec);
         dyn_filter.update(physical_lit(false) as _).unwrap();
 
@@ -2123,6 +2162,207 @@ mod tests {
                 .to_string(),
             "false"
         );
+    }
+
+    #[tokio::test]
+    async fn late_region_target_receives_the_replayed_remote_dyn_filter_generation() {
+        let handler = Arc::new(LateRegistrationRegionQueryHandler::default());
+        let query_ctx = QueryContext::arc();
+        let state = query_engine_state(handler.clone());
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let exec = remote_dyn_filter_test_exec(
+            handler.clone(),
+            query_ctx.clone(),
+            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+        );
+        let dyn_filter = install_remote_dyn_filter(&exec);
+        dyn_filter.update(physical_lit(false) as _).unwrap();
+        let current_generation = dyn_filter.snapshot_generation();
+
+        let stream = exec
+            .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+            .unwrap();
+        let poll = tokio::spawn(async move {
+            let mut stream = stream;
+            stream.next().await
+        });
+
+        // Region 1's `do_get` publishes the current generation to its ready target.
+        handler.wait_for_applied(1, 1).await;
+        assert_eq!(handler.applied_for(1)[0].generation, current_generation);
+
+        // Region 2 registers its subscriber and enters `do_get` while target 2 has no
+        // registration installed yet: the running watcher re-publishes the current generation
+        // (coalesced with the first publication when it has not happened yet) and target 2
+        // drops it as `MissingRegistration`.
+        handler.second_do_get_entered.notified().await;
+        handler.wait_for_dropped(2, 1).await;
+        assert_eq!(handler.dropped_for(2)[0].generation, current_generation);
+        assert!(handler.applied_for(2).is_empty());
+        // Let the publication that just dropped target 2 finish reaching target 1 too, so the
+        // comparison below only observes updates issued by the replay.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let applied_to_ready_target_before_replay = handler.applied_for(1).len();
+
+        // `do_get` now succeeds. The watcher is already running and its watermark already
+        // covers the current generation, so only the explicit replay can deliver it.
+        handler.release_second_do_get.notify_one();
+        handler.wait_for_applied(2, 1).await;
+
+        let replayed = handler.applied_for(2);
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the late target must be replayed exactly once"
+        );
+        assert_eq!(replayed[0].generation, current_generation);
+        assert!(!replayed[0].is_complete);
+        // The normal subscriber was not re-replayed by the late region.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            handler.applied_for(1).len(),
+            applied_to_ready_target_before_replay
+        );
+
+        assert!(poll.await.unwrap().is_none());
+        drop(exec);
+        drop(dyn_filter);
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn replay_does_not_block_eof_and_is_cancelled_when_the_last_lease_drops() {
+        let handler = Arc::new(ReopenedRegionQueryHandler::default());
+        let query_ctx = QueryContext::arc();
+        let state = query_engine_state(handler.clone());
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let region_id = RegionId::new(1024, 1);
+        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone(), vec![region_id]);
+        let filter = install_remote_dyn_filter(&exec);
+
+        // The first read installs a subscriber and starts its watcher.
+        let mut first = exec
+            .to_stream(
+                task_context_with_engine_state(state.clone(), query_ctx.clone()),
+                0,
+            )
+            .unwrap();
+        assert!(first.next().await.is_none());
+        handler.first_update.notified().await;
+        drop(first);
+        assert_eq!(lease.registry().entries()[0].subscribers().len(), 1);
+
+        // The remote stream has been cleaned up, but its query-local subscriber remains.
+        // Block the only update to the freshly installed second registration.
+        handler.hold_next_update.store(true, Ordering::SeqCst);
+        let mut reopened = exec
+            .to_stream(task_context_with_engine_state(state.clone(), query_ctx), 0)
+            .unwrap();
+        let eof = tokio::time::timeout(Duration::from_secs(5), reopened.next())
+            .await
+            .expect("EOF must not wait for the replay RPC");
+        assert!(eof.is_none());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            handler.held_update_entered.notified(),
+        )
+        .await
+        .expect("reopened duplicate subscriber must receive a replay");
+        drop(reopened);
+        drop(lease);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            handler.held_update_cancelled.notified(),
+        )
+        .await
+        .expect("closing the last lease must cancel the replay RPC");
+        assert!(handler.reopened_updates.lock().unwrap().is_empty());
+        drop(filter);
+    }
+
+    #[tokio::test]
+    async fn reopened_duplicate_subscriber_receives_completed_snapshot() {
+        let handler = Arc::new(ReopenedRegionQueryHandler::default());
+        let query_ctx = QueryContext::arc();
+        let state = query_engine_state(handler.clone());
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let region_id = RegionId::new(1024, 1);
+        let exec = remote_dyn_filter_test_exec(handler.clone(), query_ctx.clone(), vec![region_id]);
+        let filter = install_remote_dyn_filter(&exec);
+
+        let mut first = exec
+            .to_stream(
+                task_context_with_engine_state(state.clone(), query_ctx.clone()),
+                0,
+            )
+            .unwrap();
+        assert!(first.next().await.is_none());
+        handler.first_update.notified().await;
+        filter.update(physical_lit(false) as _).unwrap();
+        filter.mark_complete();
+        tokio::time::timeout(Duration::from_secs(5), handler.completed_update.notified())
+            .await
+            .expect("the watcher must publish completion");
+        let generation = filter.snapshot_generation();
+        drop(first);
+
+        let subscriber = Subscriber::new(region_id, test_target(1));
+        let entry = lease.registry().entries().pop().unwrap();
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(entry.filter_id(), subscriber),
+            crate::dist_plan::SubscriberRegistration::Duplicate
+        );
+        let mut reopened = exec
+            .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+            .unwrap();
+        assert!(reopened.next().await.is_none());
+        tokio::time::timeout(Duration::from_secs(5), handler.reopened_update.notified())
+            .await
+            .expect("the freshly installed registration must receive completion");
+        let updates = handler.reopened_updates.lock().unwrap().clone();
+        assert!(
+            updates
+                .iter()
+                .any(|update| { update.generation == generation && update.is_complete })
+        );
+        drop(reopened);
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn invalid_advertised_schema_preserves_new_subscriber_after_successful_do_get() {
+        let region_id = RegionId::new(1024, 1);
+        let handler = Arc::new(TestRegionQueryHandler::with_responses([(
+            region_id,
+            int64_schema(&["wrong_column"]),
+            vec![],
+        )]));
+        let query_ctx = QueryContext::arc();
+        let state = query_engine_state(handler.clone());
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let exec = remote_dyn_filter_test_exec(handler, query_ctx.clone(), vec![region_id]);
+        let _filter = install_remote_dyn_filter(&exec);
+        let mut stream = exec
+            .to_stream(task_context_with_engine_state(state, query_ctx), 0)
+            .unwrap();
+        assert!(stream.next().await.unwrap().is_err());
+        let entries = lease.registry().entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].subscribers(),
+            vec![Subscriber::new(region_id, test_target(1))]
+        );
+        assert!(!entries[0].fanout_started_for_test());
     }
 
     #[test]
@@ -2527,6 +2767,204 @@ mod tests {
             if let Some(tx) = self.unregister_tx.lock().unwrap().take() {
                 let _ = tx.send(());
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedRemoteDynFilterUpdate {
+        target: u64,
+        generation: u64,
+        is_complete: bool,
+    }
+
+    /// Models a datanode that installs a remote dynamic filter registration only when its
+    /// `do_get` returns: an earlier update is accepted as `MissingRegistration` (`Ok`) and
+    /// dropped. Region 1 runs on target 1, region 2 on target 2, and region 2's `do_get` is
+    /// held until the test releases it.
+    #[derive(Default)]
+    struct LateRegistrationRegionQueryHandler {
+        second_do_get_entered: Notify,
+        release_second_do_get: Notify,
+        registered_targets: Mutex<HashSet<u64>>,
+        applied: Mutex<Vec<RecordedRemoteDynFilterUpdate>>,
+        dropped: Mutex<Vec<RecordedRemoteDynFilterUpdate>>,
+    }
+
+    impl LateRegistrationRegionQueryHandler {
+        fn applied_for(&self, target: u64) -> Vec<RecordedRemoteDynFilterUpdate> {
+            self.applied
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|update| update.target == target)
+                .cloned()
+                .collect()
+        }
+
+        fn dropped_for(&self, target: u64) -> Vec<RecordedRemoteDynFilterUpdate> {
+            self.dropped
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|update| update.target == target)
+                .cloned()
+                .collect()
+        }
+
+        async fn wait_for_applied(&self, target: u64, expected: usize) {
+            for _ in 0..300 {
+                if self.applied_for(target).len() >= expected {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for {expected} remote dyn filter updates to target {target}");
+        }
+
+        async fn wait_for_dropped(&self, target: u64, expected: usize) {
+            for _ in 0..300 {
+                if self.dropped_for(target).len() >= expected {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!(
+                "timed out waiting for {expected} dropped remote dyn filter updates to target {target}"
+            );
+        }
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for LateRegistrationRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            Ok(test_target(region_id.region_number() as u64))
+        }
+
+        async fn do_get(
+            &self,
+            target: &crate::region_query::RegionQueryTarget,
+            request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            if target.peer().id == 2 {
+                self.second_do_get_entered.notify_one();
+                self.release_second_do_get.notified().await;
+            }
+            self.registered_targets
+                .lock()
+                .unwrap()
+                .insert(target.peer().id);
+            Ok(empty_record_batch_stream(&request))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            let recorded = RecordedRemoteDynFilterUpdate {
+                target: target.peer().id,
+                generation: update.generation,
+                is_complete: update.is_complete,
+            };
+            if self
+                .registered_targets
+                .lock()
+                .unwrap()
+                .contains(&target.peer().id)
+            {
+                self.applied.lock().unwrap().push(recorded);
+            } else {
+                self.dropped.lock().unwrap().push(recorded);
+            }
+            Ok(())
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct ReopenedRegionQueryHandler {
+        do_get_calls: AtomicUsize,
+        first_update: Notify,
+        completed_update: Notify,
+        reopened_update: Notify,
+        reopened_updates: Mutex<Vec<api::v1::region::RemoteDynFilterUpdate>>,
+        hold_next_update: std::sync::atomic::AtomicBool,
+        held_update_entered: Notify,
+        release_held_update: Notify,
+        held_update_cancelled: Notify,
+    }
+
+    struct HeldUpdateCancellation<'a>(&'a Notify);
+
+    impl Drop for HeldUpdateCancellation<'_> {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for ReopenedRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            Ok(test_target(1))
+        }
+
+        async fn do_get(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            // Each call installs a fresh remote registration, as after a prior stream cleanup.
+            self.do_get_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(empty_record_batch_stream(&request))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            if self.do_get_calls.load(Ordering::SeqCst) > 1 {
+                if self.hold_next_update.swap(false, Ordering::SeqCst) {
+                    let _cancelled = HeldUpdateCancellation(&self.held_update_cancelled);
+                    self.held_update_entered.notify_one();
+                    self.release_held_update.notified().await;
+                }
+                self.reopened_updates.lock().unwrap().push(update);
+                self.reopened_update.notify_one();
+            } else {
+                self.first_update.notify_one();
+                if update.is_complete {
+                    self.completed_update.notify_one();
+                }
+            }
+            Ok(())
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
             Ok(())
         }
     }
@@ -4083,8 +4521,11 @@ mod tests {
     #[test]
     fn merge_scan_apply_expressions_exposes_remote_dyn_filter_id() {
         let query_ctx = QueryContext::arc();
-        let exec =
-            remote_dyn_filter_test_exec(Arc::new(TestRegionQueryHandler::default()), query_ctx);
+        let exec = remote_dyn_filter_test_exec(
+            Arc::new(TestRegionQueryHandler::default()),
+            query_ctx,
+            vec![RegionId::new(1024, 1)],
+        );
         let dyn_filter = install_remote_dyn_filter(&exec);
         let expected_expression_id = dyn_filter.expression_id();
         let mut expression_ids = Vec::new();
