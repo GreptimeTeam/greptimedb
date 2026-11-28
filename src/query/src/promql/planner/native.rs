@@ -64,6 +64,7 @@ use promql::native::segment::{
 pub(crate) use promql::native::segment::{
     independent_scan_pair, is_empty_discovered_input, pointwise_operand,
 };
+use promql::range_eval::RangeFunction;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token;
 use promql_parser::parser::value::ValueType;
@@ -297,8 +298,8 @@ impl PromPlanner {
             return Ok(declined("field_selector_without_raw_series_equivalent"));
         }
         // Delta samples are increments: the existing planner sums them for `increase` and
-        // divides by the range for `rate`, while the native tree assumes cumulative samples.
-        // Decline only when this selector is read by one of those calls.
+        // divides by the range for `rate`. A window over the raw samples does the same per series;
+        // decline when one of those calls reads this selector through another expression.
         if tags
             .iter()
             .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
@@ -1217,6 +1218,23 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
+        // The per-series delta math is the float windows' own; a histogram window or a range
+        // modifier over a series that may carry the temporality marker keeps the existing plan.
+        let marked = |source: usize| {
+            prepared.get(source).is_some_and(|(_, _, _, _, tags, ..)| {
+                tags.iter()
+                    .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
+            })
+        };
+        if compiled.tree.root().any(&|node| {
+            matches!(&node.expr, NativeExpr::Window { input, op }
+                if matches!(op.function, RangeFunction::Rate | RangeFunction::Increase)
+                    && (statement_kind == Some(FieldKind::Histogram)
+                        || op.window.modifier.is_some())
+                    && matches!(&input.expr, NativeExpr::Input(input) if marked(input.source_index)))
+        }) {
+            return Ok(declined("delta_temporality_under_rate_or_increase"));
+        }
         for (index, (compiled_input, (scan, _, _, time, _, _, _, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
@@ -1835,6 +1853,15 @@ fn epoch_millis(millis: i64) -> Option<SystemTime> {
     }
 }
 
+/// Finds a range selector at the statement root, treating parentheses as transparent.
+fn root_matrix_selector(expr: &PromExpr) -> Option<&MatrixSelector> {
+    match expr {
+        PromExpr::MatrixSelector(selector) => Some(selector),
+        PromExpr::Paren(paren) => root_matrix_selector(&paren.expr),
+        _ => None,
+    }
+}
+
 /// Finds a subquery at the statement root, treating parentheses as transparent.
 fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
     match expr {
@@ -2290,10 +2317,14 @@ fn collect_selectors_with_set_operations<'a>(
                     );
             }
             for arg in &call.args.args {
+                // A window `rate` or `increase` reads straight off the raw samples picks the delta
+                // math per series itself; one read through another expression does not.
+                let reads_raw_window = root_matrix_selector(arg).is_some();
                 if !collect_selectors_with_set_operations(
                     stmt,
                     arg,
-                    under_rate_or_increase || matches!(call.func.name, "rate" | "increase"),
+                    under_rate_or_increase
+                        || (matches!(call.func.name, "rate" | "increase") && !reads_raw_window),
                     out,
                     set_operations,
                 ) {
