@@ -4507,29 +4507,39 @@ fn an_invalid_label_replace_expression_fails_the_statement() {
 }
 
 #[test]
-fn timestamp_multi_field_input_is_not_supported_natively() {
-    for query in ["timestamp(x)", "timestamp(abs(x))"] {
-        let error = compile(
+fn timestamp_timestamps_each_value_field_of_a_multi_field_input() {
+    for (query, evaluated) in [("timestamp(x)", false), ("timestamp(abs(x))", true)] {
+        let tree = compile(
             &eval_stmt(query),
             raw_schema_with_fields(2),
             SeriesOrdering::KeyThenTime,
         )
-        .unwrap_err();
-        assert!(
-            matches!(&error, DataFusionError::NotImplemented(_)),
-            "`{query}` is a shape this compiler refuses: {error}"
+        .unwrap_or_else(|error| panic!("`{query}` over two fields was refused: {error}"));
+        // Each value column is timestamped on its own, so both are kept and neither is a tag.
+        let NativeType::Samples(schema) = &tree.root().output else {
+            panic!("`{query}` does not answer samples: {tree}");
+        };
+        assert_eq!(
+            vec!["value_0", "value_1"],
+            schema
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            "`{query}` keeps every value column: {tree}"
         );
-        assert!(
-            error
-                .to_string()
-                .contains("timestamp() over a multi-value input"),
-            "`{query}` did not name the field count as the reason: {error}"
-        );
-    }
-    // One field is the shape the node does answer, so the refusal is about the field count.
-    for query in ["timestamp(x)", "timestamp(abs(x))"] {
-        compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .unwrap_or_else(|error| panic!("`{query}` over one field was refused: {error}"));
+        // A raw selection reports each selected sample's own time; an evaluated vector reports the
+        // evaluation time.
+        match &tree.root().expr {
+            NativeExpr::Instant { op, .. } => {
+                assert!(!evaluated, "`{query}` is not a raw selection: {tree}");
+                assert_eq!(InstantValue::Timestamp, op.value, "`{query}`: {tree}");
+            }
+            NativeExpr::Timestamp { .. } => {
+                assert!(evaluated, "`{query}` is not an evaluated vector: {tree}");
+            }
+            other => panic!("`{query}` bound another root: {other:?}"),
+        }
     }
 }
 
