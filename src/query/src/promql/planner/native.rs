@@ -30,7 +30,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
-use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -277,7 +276,6 @@ impl PromPlanner {
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
-        under_rate_or_increase: bool,
         // Decides whether the existing plan reports a numeric field as `Float64`.
         statement_expr: &PromExpr,
         logical_scan_id: &mut Option<u32>,
@@ -295,16 +293,6 @@ impl PromPlanner {
         // The raw series scan has no equivalent of the `__field__` projection.
         if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
             return Ok(declined("field_selector_without_raw_series_equivalent"));
-        }
-        // Delta samples are increments: the existing planner sums them for `increase` and
-        // divides by the range for `rate`, while the native tree assumes cumulative samples.
-        // Decline only when this selector is read by one of those calls.
-        if tags
-            .iter()
-            .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
-            && under_rate_or_increase
-        {
-            return Ok(declined("delta_temporality_under_rate_or_increase"));
         }
         // Built by the existing path's method so both paths read the same columns.
         let table_ref = self.table_ref()?;
@@ -744,7 +732,6 @@ impl PromPlanner {
         if !collect_selectors_with_set_operations(
             &stmt,
             effective_expr,
-            false,
             &mut selectors,
             &mut set_operations,
         ) {
@@ -838,7 +825,7 @@ impl PromPlanner {
             let mut logical_ids_differ = false;
             // Selectors must agree on one field kind.
             let mut statement_kind: Option<FieldKind> = None;
-            for (selector, under_rate_or_increase) in &selectors {
+            for selector in &selectors {
                 self.ctx = original_context.clone();
                 if !selector.matchers.or_matchers.is_empty() {
                     return Ok(declined("or_matchers_have_no_single_raw_scan"));
@@ -962,7 +949,6 @@ impl PromPlanner {
                         )) = self
                             .prepare_one_scan(
                                 matchers.clone(),
-                                *under_rate_or_increase,
                                 &stmt.expr,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
@@ -1078,7 +1064,6 @@ impl PromPlanner {
                 let Some(one) = self
                     .prepare_one_scan(
                         matchers,
-                        *under_rate_or_increase,
                         &stmt.expr,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
@@ -1153,7 +1138,7 @@ impl PromPlanner {
         // `collect_selectors_with_set_operations`; a mismatch is an internal error.
         let identities: Vec<(Option<String>, Matchers, i64, Option<i64>)> = selectors
             .iter()
-            .map(|(selector, _)| {
+            .map(|selector| {
                 let offset_ms = selector
                     .offset
                     .as_ref()
@@ -2169,60 +2154,32 @@ struct SetOperation {
 fn collect_selectors_with_set_operations<'a>(
     stmt: &EvalStmt,
     expr: &'a PromExpr,
-    under_rate_or_increase: bool,
-    out: &mut Vec<(Cow<'a, VectorSelector>, bool)>,
+    out: &mut Vec<Cow<'a, VectorSelector>>,
     set_operations: &mut Vec<SetOperation>,
 ) -> bool {
     match expr {
-        PromExpr::VectorSelector(selector) => {
-            out.push((Cow::Borrowed(selector), under_rate_or_increase))
-        }
-        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
-            out.push((Cow::Borrowed(vs), under_rate_or_increase))
-        }
+        PromExpr::VectorSelector(selector) => out.push(Cow::Borrowed(selector)),
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(Cow::Borrowed(vs)),
         PromExpr::Paren(ParenExpr { expr }) => {
-            return collect_selectors_with_set_operations(
-                stmt,
-                expr,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            );
+            return collect_selectors_with_set_operations(stmt, expr, out, set_operations);
         }
         PromExpr::Call(call) if call.func.name == "info" => {
             let Ok(InfoInput { selector, .. }) = info_input(stmt, &call.args.args) else {
                 return false;
             };
-            if !collect_selectors_with_set_operations(
-                stmt,
-                &call.args.args[0],
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) {
+            if !collect_selectors_with_set_operations(stmt, &call.args.args[0], out, set_operations)
+            {
                 return false;
             }
-            out.push((Cow::Owned(selector), under_rate_or_increase));
+            out.push(Cow::Owned(selector));
         }
         PromExpr::Binary(binary) => {
             let lhs_start = out.len();
-            if !collect_selectors_with_set_operations(
-                stmt,
-                &binary.lhs,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) {
+            if !collect_selectors_with_set_operations(stmt, &binary.lhs, out, set_operations) {
                 return false;
             }
             let lhs_end = out.len();
-            if !collect_selectors_with_set_operations(
-                stmt,
-                &binary.rhs,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) {
+            if !collect_selectors_with_set_operations(stmt, &binary.rhs, out, set_operations) {
                 return false;
             }
             if binary.op.is_set_operator() {
@@ -2241,13 +2198,7 @@ fn collect_selectors_with_set_operations<'a>(
         }
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => {
-            return collect_selectors_with_set_operations(
-                stmt,
-                &unary.expr,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            );
+            return collect_selectors_with_set_operations(stmt, &unary.expr, out, set_operations);
         }
         // The compiler binds the vector (last argument) before the parameters.
         PromExpr::Call(call)
@@ -2256,21 +2207,10 @@ fn collect_selectors_with_set_operations<'a>(
             let Some((vector, parameters)) = call.args.args.split_last() else {
                 return false;
             };
-            return collect_selectors_with_set_operations(
-                stmt,
-                vector,
-                under_rate_or_increase,
-                out,
-                set_operations,
-            ) && parameters.iter().all(|parameter| {
-                collect_selectors_with_set_operations(
-                    stmt,
-                    parameter,
-                    under_rate_or_increase,
-                    out,
-                    set_operations,
-                )
-            });
+            return collect_selectors_with_set_operations(stmt, vector, out, set_operations)
+                && parameters.iter().all(|parameter| {
+                    collect_selectors_with_set_operations(stmt, parameter, out, set_operations)
+                });
         }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
@@ -2284,19 +2224,12 @@ fn collect_selectors_with_set_operations<'a>(
                     && collect_selectors_with_set_operations(
                         stmt,
                         &call.args.args[0],
-                        under_rate_or_increase,
                         out,
                         set_operations,
                     );
             }
             for arg in &call.args.args {
-                if !collect_selectors_with_set_operations(
-                    stmt,
-                    arg,
-                    under_rate_or_increase || matches!(call.func.name, "rate" | "increase"),
-                    out,
-                    set_operations,
-                ) {
+                if !collect_selectors_with_set_operations(stmt, arg, out, set_operations) {
                     return false;
                 }
             }
@@ -2306,17 +2239,12 @@ fn collect_selectors_with_set_operations<'a>(
             return collect_selectors_with_set_operations(
                 stmt,
                 &aggregate.expr,
-                under_rate_or_increase,
                 out,
                 set_operations,
             ) && match &aggregate.param {
-                Some(param) => collect_selectors_with_set_operations(
-                    stmt,
-                    param,
-                    under_rate_or_increase,
-                    out,
-                    set_operations,
-                ),
+                Some(param) => {
+                    collect_selectors_with_set_operations(stmt, param, out, set_operations)
+                }
                 None => true,
             };
         }
@@ -2324,7 +2252,6 @@ fn collect_selectors_with_set_operations<'a>(
             return collect_selectors_with_set_operations(
                 stmt,
                 &subquery.expr,
-                under_rate_or_increase,
                 out,
                 set_operations,
             );
@@ -2741,13 +2668,12 @@ mod tests {
         assert!(collect_selectors_with_set_operations(
             &statement,
             &expr,
-            false,
             &mut selectors,
             &mut Vec::new()
         ));
         selectors
             .iter()
-            .map(|(selector, _)| selector.name.clone().unwrap_or_default())
+            .map(|selector| selector.name.clone().unwrap_or_default())
             .collect()
     }
 

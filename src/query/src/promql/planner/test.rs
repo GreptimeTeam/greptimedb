@@ -5221,62 +5221,63 @@ async fn native_fused_or_matchers_fall_back() {
     }
 }
 
-/// A `rate`/`increase` over a delta-temporality table keeps the existing plan, which sums each
-/// series' increments.
-///
-/// The samples of a series tagged `delta` are increments, which the existing planner sums over the
-/// window for `increase` and divides by the range for `rate`, while a cumulative series is rated
-/// from its counter; it picks that per series. A compiled tree rates every series the same way, so
-/// these queries fall back. The same queries over a table without the marker still fold, which is
-/// what makes the decline the marker's doing rather than the shape's.
+/// `rate` and `increase` over a table carrying the OTLP temporality marker run natively, also
+/// through a subquery: the window picks the delta math per series from the labels that reach it,
+/// as the existing planner does.
 #[tokio::test]
-async fn native_fused_delta_temporality_rates_fall_back() {
+async fn native_fused_delta_temporality_rates_run_natively() {
     for query in [
         "rate(some_metric[5m])",
         "increase(some_metric[5m])",
-        // Below another call and inside parentheses, which are the same decline one level down.
         "abs(rate(some_metric[5m]))",
-        "abs(increase(some_metric[5m]))",
         "(rate(some_metric[5m]))",
-        // An aggregate is admitted by descending into its input, so the guard has to see a
-        // `rate`/`increase` under one: the split would fold counters a delta series does not have.
         "sum(rate(some_metric[5m]))",
         "sum(increase(some_metric[5m]))",
+        "max_over_time(rate(some_metric[5m])[10m:1m])",
+        "rate((some_metric)[5m:1m])",
+        "increase(some_metric[5m:1m])",
     ] {
-        let marked = build_native_fused_plan_with_provider(
+        let plan = build_native_fused_plan_with_provider(
             query,
             true,
             native_engine_temporality_marker_provider().await,
         )
         .await;
-        let marked_without_flag = build_native_fused_plan_with_provider(
-            query,
-            false,
-            native_engine_temporality_marker_provider().await,
-        )
-        .await;
         assert!(
-            find_fused_series(&marked).is_none(),
-            "`{query}` needs the per-series delta math: {}",
-            marked.display_indent()
+            find_fused_series(&plan).is_some(),
+            "`{query}`: {}",
+            plan.display_indent()
         );
-        assert_eq!(
-            marked.display_indent().to_string(),
-            marked_without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan, not the counter form for every series"
-        );
+        assert_eq!(take_reported_decline(), None, "`{query}`");
+    }
+}
 
-        let unmarked = build_native_fused_plan_with_provider(
+/// `rate` and `increase` over native histograms marked as delta temporality run natively.
+///
+/// The existing plan picks the delta math only for float samples and rates a native histogram as a
+/// counter whatever its marker says, so a native histogram window ignores the marker too, even
+/// through a subquery.
+#[tokio::test]
+async fn native_fused_delta_temporality_histogram_rates_run_natively() {
+    for query in [
+        "rate(some_metric[5m])",
+        "increase(some_metric[5m])",
+        "histogram_count(rate(some_metric[5m]))",
+        "sum(rate(some_metric[5m]))",
+        "rate((some_metric)[5m:1m])",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
             query,
             true,
-            native_engine_provider(vec![]).await,
+            build_test_native_histogram_table_provider_with_marker("some_metric", true).await,
         )
         .await;
         assert!(
-            find_fused_series(&unmarked).is_some(),
-            "`{query}` over a table without the marker must still fold: {}",
-            unmarked.display_indent()
+            find_fused_series(&plan).is_some(),
+            "`{query}`: {}",
+            plan.display_indent()
         );
+        assert_eq!(take_reported_decline(), None, "`{query}`");
     }
 }
 

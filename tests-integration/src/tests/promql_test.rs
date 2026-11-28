@@ -3132,6 +3132,232 @@ async fn native_promql_canonical_merge_over_partitioned_table() {
     }
 }
 
+/// `delta_temporality.sql`'s rate and increase cases: a NULL marker is a cumulative series, and a
+/// window holding one increment sums to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_delta_temporality_corpus_matches_legacy() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_delta_temporality_corpus",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE delta_temporality (ts TIMESTAMP TIME INDEX, greptime_value DOUBLE, \
+         series STRING, otlp_aggregation_temporality STRING, \
+         PRIMARY KEY (series, otlp_aggregation_temporality)); \
+         INSERT INTO delta_temporality VALUES (60000, 10, 'delta', 'delta'), \
+         (120000, 20, 'delta', 'delta'), (180000, 15, 'delta', 'delta'), \
+         (180000, 7, 'single', 'delta'), (60000, 10, 'cumulative', NULL), \
+         (120000, 20, 'cumulative', NULL), (180000, 30, 'cumulative', NULL)",
+        QueryContext::arc(),
+    )
+    .await;
+    for (sql, reported) in [
+        (
+            "TQL EVAL (180, 180, '1m') increase(delta_temporality[3m])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (120, 180, '1m') rate(delta_temporality[3m])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (180, 180, '1m') sum by (series) (rate(delta_temporality[3m]))",
+            ReportedName::Nothing,
+        ),
+        // The window moves with `offset` and `@`; the sum reads whatever it then holds.
+        (
+            "TQL EVAL (240, 240, '1m') increase(delta_temporality[2m] offset 1m)",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (120, 180, '1m') rate(delta_temporality[2m] @ 150)",
+            ReportedName::Nothing,
+        ),
+    ] {
+        observer.clear();
+        let output = native_tql_output(&instance, sql, true).await;
+        let native = eval_text_rows(collected(output).await, reported);
+        assert!(observer.fused().is_some(), "{sql}");
+        let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+        assert_eq!(legacy, native, "{sql}");
+    }
+    // A subquery keeps the marker on its evaluated series, so the outer window sums the delta
+    // series' points in it: 20 + 15 at 120 and 180, and 10 + 20 + 15 over 180s for `rate`.
+    for (sql, expected) in [
+        (
+            "TQL EVAL (180, 180, '1m') increase(delta_temporality[2m:1m])",
+            [("delta", 35.0), ("single", 7.0)],
+        ),
+        (
+            "TQL EVAL (180, 180, '1m') rate(delta_temporality[3m:1m])",
+            [("delta", 45.0 / 180.0), ("single", 7.0 / 180.0)],
+        ),
+    ] {
+        observer.clear();
+        let output = collected(native_tql_output(&instance, sql, true).await).await;
+        assert!(observer.fused().is_some(), "{sql} must run natively");
+        let native = eval_text_rows(output, ReportedName::Nothing);
+        let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+        assert_eq!(legacy, native, "{sql}");
+        for (series, value) in expected {
+            let line = native
+                .lines()
+                .find(|line| line.contains(&format!("| {series} |")))
+                .unwrap_or_else(|| panic!("{sql}: no `{series}` row in {native}"));
+            let actual = line.rsplit_once(" | ").unwrap().1.parse::<f64>().unwrap();
+            assert!((actual - value).abs() <= 1e-12, "{sql}: {native}");
+        }
+    }
+}
+
+/// `rate` and `increase` over OTLP delta exponential histograms run natively and answer what the
+/// existing plan answers.
+///
+/// OTLP ingest stores each delta point as a gauge-hinted native histogram whose start timestamp is
+/// the previous point's end, with the series marked `otlp_aggregation_temporality="delta"`. Both
+/// routes rate those histograms the same way whatever the marker says, and sum a float derived
+/// from them that keeps the marker.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_otlp_delta_histogram_rates_match_legacy() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::exponential_histogram_data_point::Buckets;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
+        ResourceMetrics, ScopeMetrics, metric,
+    };
+    use servers::query_handler::OpenTelemetryProtocolHandler;
+    use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_otlp_delta_histogram_rates",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+        with_metric_engine: true,
+        ..Default::default()
+    }));
+    let data_points = [(60, 10), (120, 20), (180, 15), (240, 40)]
+        .into_iter()
+        .map(|(end, count)| ExponentialHistogramDataPoint {
+            start_time_unix_nano: (end - 60) * 1_000_000_000,
+            time_unix_nano: end * 1_000_000_000,
+            count,
+            sum: Some(count as f64 * 1.5),
+            zero_threshold: 0.001,
+            positive: Some(Buckets {
+                offset: 0,
+                bucket_counts: vec![count],
+            }),
+            ..Default::default()
+        })
+        .collect();
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "otlp_delta_h".into(),
+                    data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                        aggregation_temporality: AggregationTemporality::Delta as i32,
+                        data_points,
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let outcome = instance
+        .metrics(request, Arc::new(ctx), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (outcome.accepted_data_points, outcome.rejected_data_points),
+        (4, 0)
+    );
+    let values = |text: &str| {
+        text.lines()
+            .filter_map(|line| line.rsplit_once(" | ")?.1.parse::<f64>().ok())
+            .collect::<Vec<_>>()
+    };
+    for (sql, expected) in [
+        (
+            "TQL EVAL (180, 240, '1m') histogram_count(increase(otlp_delta_h[2m]))",
+            [30.0, 55.0].as_slice(),
+        ),
+        (
+            "TQL EVAL (240, 240, '1m') increase(histogram_count(otlp_delta_h)[2m:1m])",
+            [55.0].as_slice(),
+        ),
+    ] {
+        let native = eval_text_rows(
+            collected(native_tql_output(&instance, sql, true).await).await,
+            ReportedName::Nothing,
+        );
+        assert_eq!(values(&native), expected, "{sql}: {native}");
+    }
+    for sql in [
+        "TQL EVAL (240, 240, '1m') histogram_count(rate(otlp_delta_h[3m]))",
+        "TQL EVAL (240, 240, '1m') histogram_sum(increase(otlp_delta_h[3m]))",
+        "TQL EVAL (180, 240, '1m') histogram_count(increase(otlp_delta_h[2m]))",
+        "TQL EVAL (240, 240, '1m') histogram_count(rate(otlp_delta_h[2m] offset 1m))",
+        "TQL EVAL (240, 240, '1m') increase(histogram_count(otlp_delta_h)[2m:1m])",
+        "TQL EVAL (240, 240, '1m') rate(histogram_sum(otlp_delta_h)[3m:1m])",
+    ] {
+        observer.clear();
+        let output = native_tql_output(&instance, sql, true).await;
+        let native = eval_text_rows(collected(output).await, ReportedName::Nothing);
+        assert!(observer.fused().is_some(), "{sql}");
+        let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+        // The two routes extrapolate in a different order, so the value may differ in its last
+        // digits; everything else is compared exactly.
+        let rows = |text: &str| {
+            text.lines()
+                .map(|line| {
+                    let (labels, value) = line.rsplit_once(" | ").unwrap();
+                    (labels.to_string(), value.parse::<f64>().ok())
+                })
+                .collect::<Vec<_>>()
+        };
+        let (native_rows, legacy_rows) = (rows(&native), rows(&legacy));
+        assert!(legacy_rows.len() > 1, "{sql} answers nothing: {legacy}");
+        assert_eq!(
+            native_rows.len(),
+            legacy_rows.len(),
+            "{sql}: {native} vs {legacy}"
+        );
+        for ((native_labels, native_value), (legacy_labels, legacy_value)) in
+            native_rows.iter().zip(&legacy_rows)
+        {
+            assert_eq!(native_labels, legacy_labels, "{sql}: {native} vs {legacy}");
+            match (native_value, legacy_value) {
+                (Some(native_value), Some(legacy_value)) => assert!(
+                    (native_value - legacy_value).abs() <= 1e-12 * legacy_value.abs().max(1.0),
+                    "{sql}: {native} vs {legacy}"
+                ),
+                (native_value, legacy_value) => {
+                    assert_eq!(native_value, legacy_value, "{sql}: {native} vs {legacy}")
+                }
+            }
+        }
+    }
+}
+
+/// `output` with its stream read here: [`eval_text_rows`] blocks on the stream, which inside this
+/// runtime stops being woken once the test task has spent its cooperative budget.
+async fn collected(output: Output) -> Output {
+    match output.data {
+        OutputData::Stream(stream) => {
+            Output::new_with_record_batches(collect_batches(stream).await.unwrap())
+        }
+        _ => output,
+    }
+}
+
 /// The plan the last query ran is the native one, so a row assertion above is about this route.
 fn assert_native_rows_plan(observer: &NativePlanObserver) {
     let root = observer.root_plan();
@@ -13256,9 +13482,7 @@ async fn native_promql_answers_a_quantile_over_a_multi_input_tree() {
 }
 
 /// OTLP delta temporality on the public TQL route: a `delta`-marked series answers the raw sample
-/// sum (10 + 10 = 20) while a cumulative series with the same samples answers 0. The fused node
-/// computes one cumulative window for every series, so it must decline a marker-bearing table
-/// instead of reporting 0 for the delta series.
+/// sum (10 + 10 = 20) while a cumulative series with the same samples answers 0, on both routes.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
     common_telemetry::init_default_ut_logging();
@@ -13333,13 +13557,12 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
             "`{query}`: same rows on both routes"
         );
         assert!(
-            observer.fused().is_none(),
-            "`{query}`: the native route must decline a table that carries the temporality marker"
+            observer.fused().is_some(),
+            "`{query}`: a raw window picks the delta math per series natively"
         );
     }
 
-    // A subquery recurses through the expression tree for the same delta-temporality guard.
-    // Compare against the existing route and assert that native execution declines both functions.
+    // Inside a subquery the call still reads its raw window, so it runs natively too.
     for query in [
         format!("max_over_time(rate({TABLE}[2m])[2m:1m])"),
         format!("max_over_time(increase({TABLE}[2m])[2m:1m])"),
@@ -13357,8 +13580,8 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
             "`{query}`: same rows on both routes"
         );
         assert!(
-            observer.fused().is_none(),
-            "`{query}`: delta temporality inside a subquery must decline native planning"
+            observer.fused().is_some(),
+            "`{query}`: the raw window inside the subquery runs natively"
         );
     }
 

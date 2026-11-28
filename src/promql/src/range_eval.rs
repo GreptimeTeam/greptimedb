@@ -19,6 +19,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL};
 use common_query::prometheus::is_prometheus_stale_nan;
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::arrow::array::{Array, Float64Array};
@@ -169,6 +170,10 @@ pub struct RangeEvaluator {
     window: RangeWindow,
     replay: Replay,
     kernel: WindowKernel,
+    /// The kernel of `rate` or `increase` over a series marked as OTLP delta temporality, which
+    /// the existing plan picks per series: the sum of the window's increments, over the range for
+    /// `rate`. `None` for every other function.
+    delta_kernel: Option<WindowKernel>,
     function: Option<RangeFunction>,
     annotations: Option<PromqlAnnotationCollector>,
     output_schema: Arc<SeriesSchema>,
@@ -379,6 +384,9 @@ struct SeriesState {
     closing: bool,
     /// Grid index after the last position handed out to the consumer.
     emitted_end: usize,
+    /// Whether the series' samples are OTLP delta increments, which `rate` and `increase` sum
+    /// instead of reading as a counter.
+    delta: bool,
 }
 
 impl SeriesState {
@@ -609,6 +617,9 @@ impl RangeEvaluator {
         let mut evaluator =
             Self::with_kernel(input, grid, window, kernel, step_invariant, index_resets)?;
         evaluator.drops_metric_name = function.drops_metric_name();
+        if window.modifier.is_none() {
+            evaluator.delta_kernel = function.delta_temporality_kernel(window.range_ms);
+        }
         evaluator.window_error = window_error;
         evaluator.function = Some(function);
         // An anchored selector replays one window at every point, so its windows do not advance
@@ -651,6 +662,7 @@ impl RangeEvaluator {
             window,
             replay,
             kernel,
+            delta_kernel: None,
             function: None,
             annotations: None,
             output: GridSeriesBuilder::try_new(output_schema.clone())?,
@@ -829,6 +841,10 @@ impl RangeEvaluator {
         match &mut self.series {
             None => {
                 self.output.begin_series();
+                // The existing plan reads the marker off whatever series reaches the window, so
+                // an evaluated series that kept it - a float derived from a delta histogram,
+                // say - is summed too.
+                let delta = self.delta_kernel.is_some() && is_delta_temporality(&series.metric);
                 self.series = Some(SeriesState {
                     primary_key: None,
                     metric: series.metric.clone(),
@@ -836,6 +852,7 @@ impl RangeEvaluator {
                     cursor: 0,
                     closing: false,
                     emitted_end: 0,
+                    delta,
                 });
             }
             Some(state) => {
@@ -979,6 +996,7 @@ impl RangeEvaluator {
                     )
                 })?;
                 self.output.begin_series();
+                let delta = self.delta_kernel.is_some() && is_delta_temporality(&metric);
                 self.series = Some(SeriesState {
                     primary_key: Some(chunk.primary_key.clone()),
                     metric,
@@ -986,6 +1004,7 @@ impl RangeEvaluator {
                     cursor: 0,
                     closing: false,
                     emitted_end: 0,
+                    delta,
                 });
             }
             Some(state) => {
@@ -1295,9 +1314,13 @@ impl RangeEvaluator {
                 return Err(DataFusionError::Execution(error.clone()));
             }
 
+            let delta = state.delta;
             let mut evaluator = RowEvaluator {
                 fields: &self.fields,
-                kernel: &mut self.kernel,
+                kernel: match self.delta_kernel.as_mut() {
+                    Some(kernel) if delta => kernel,
+                    _ => &mut self.kernel,
+                },
                 function: self.function,
                 annotations: self.annotations.as_ref(),
                 range_ms: self.window.range_ms,
@@ -1306,18 +1329,18 @@ impl RangeEvaluator {
             };
             match self.replay {
                 Replay::PerPoint => {
-                    // The batch kernel reads floats only, so a window holding a native histogram
-                    // flushes the batch and goes through the per-window path. Histograms are in
-                    // time order, so checking the first one past the head is enough.
-                    let histogram_window = self.batch.is_some()
-                        && self.fields.iter().any(|field| {
+                    // A delta series reads `delta_kernel` and the batch kernel reads floats only,
+                    // so a delta series and a window holding a native histogram both flush the
+                    // batch and go through the per-window path. Histograms are in time order, so
+                    // checking the first one past the head is enough.
+                    let batched = !delta
+                        && self.batch.is_some()
+                        && !self.fields.iter().any(|field| {
                             field.histograms.get(field.histogram_head).is_some_and(
                                 |(timestamp, _)| i128::from(*timestamp) <= i128::from(eval_ts),
                             )
                         });
-                    if let Some(kernel) = self.batch.as_mut()
-                        && !histogram_window
-                    {
+                    if batched && let Some(kernel) = self.batch.as_mut() {
                         accumulate(&mut self.pending, state.cursor, eval_ts, &self.fields);
                         if self.pending.len() >= EVALUATION_BATCH {
                             flush_batch(
@@ -1475,6 +1498,14 @@ impl RowEvaluator<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether `metric` is marked as OTLP delta temporality.
+fn is_delta_temporality(metric: &SeriesLabels) -> bool {
+    metric.tags().iter().any(|label| {
+        &*label.name == OTLP_AGGREGATION_TEMPORALITY_LABEL
+            && &*label.value == GREPTIME_TEMPORALITY_DELTA
+    })
 }
 
 /// Rejects a modifier on a function Prometheus does not allow it with
