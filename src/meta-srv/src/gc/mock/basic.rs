@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -26,6 +26,7 @@ use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
 use crate::gc::mock::{
     MockSchedulerCtx, TEST_REGION_SIZE_200MB, TestEnv, mock_region_stat, new_candidate,
+    new_empty_report_with,
 };
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
@@ -71,6 +72,7 @@ async fn test_parallel_process_datanodes_with_candidates() {
         region_id,
         GcReport {
             deleted_files: HashMap::from([(region_id, deleted_files.clone())]),
+            processed_regions: HashSet::from([region_id]),
             ..Default::default()
         },
     );
@@ -135,7 +137,7 @@ async fn test_handle_tick() {
     let candidates = HashMap::from([(table_id, vec![new_candidate(region_id, 1.0)])]);
 
     let mut gc_reports = HashMap::new();
-    gc_reports.insert(region_id, GcReport::default());
+    gc_reports.insert(region_id, new_empty_report_with([region_id]));
     let file_refs = FileRefsManifest {
         manifest_version: HashMap::from([(region_id, 1)]),
         ..Default::default()
@@ -227,7 +229,7 @@ async fn test_handle_manual_gc_without_regions_records_manual_event_context() {
             )])))),
             gc_reports: Arc::new(Mutex::new(HashMap::from([(
                 region_id,
-                GcReport::default(),
+                new_empty_report_with([region_id]),
             )]))),
             candidates: Arc::new(Mutex::new(Some(candidates))),
             file_refs: Arc::new(Mutex::new(Some(file_refs))),

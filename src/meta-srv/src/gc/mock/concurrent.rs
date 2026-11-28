@@ -26,6 +26,7 @@ use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
 use crate::gc::mock::{
     MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_candidate, mock_region_stat, new_candidate,
+    new_empty_report_with,
 };
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
@@ -45,6 +46,7 @@ async fn test_concurrent_table_processing_limits() {
             region_id,
             GcReport {
                 deleted_files: HashMap::from([(region_id, vec![FileId::random()])]),
+                processed_regions: HashSet::from([region_id]),
                 ..Default::default()
             },
         );
@@ -141,6 +143,7 @@ async fn test_datanode_processes_tables_with_partial_gc_failures() {
         region1,
         GcReport {
             deleted_files: HashMap::from([(region1, vec![])]),
+            processed_regions: HashSet::from([region1]),
             ..Default::default()
         },
     );
@@ -241,6 +244,7 @@ async fn test_region_gc_concurrency_limit() {
                     region_id,
                     vec![FileId::random(), FileId::random()],
                 )]),
+                processed_regions: HashSet::from([region_id]),
                 ..Default::default()
             },
         );
@@ -352,6 +356,7 @@ async fn test_region_gc_concurrency_with_partial_failures() {
                         region_id,
                         vec![FileId::random(), FileId::random()],
                     )]),
+                    processed_regions: HashSet::from([region_id]),
                     ..Default::default()
                 },
             );
@@ -505,11 +510,7 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
             (
                 region_id,
                 // mock the actual gc report with deleted files when succeeded(even no files to delete)
-                GcReport::new(
-                    HashMap::from([(region_id, vec![])]),
-                    Default::default(),
-                    HashSet::new(),
-                ),
+                new_empty_report_with([region_id]),
             )
         })
         .collect();
