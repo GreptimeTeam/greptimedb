@@ -533,6 +533,7 @@ mod tests {
                 output: samples.clone(),
                 source_index: 0,
                 ordering: SeriesOrdering::Contiguous,
+                time_unit: Default::default(),
             }),
             output: samples,
         })

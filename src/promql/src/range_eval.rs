@@ -35,6 +35,7 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS, external};
 use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::raw_time::RawTimeUnit;
 
 mod function;
 mod histogram;
@@ -192,6 +193,10 @@ pub struct RangeEvaluator {
     pending: PendingBatch,
     /// Kept between chunks so the bulk ingest does not allocate per push.
     bulk_scratch: BulkScratch,
+    /// The unit of raw input timestamps; evaluated input is always on a millisecond grid.
+    raw_time_unit: RawTimeUnit,
+    /// The payloads and window times a raw chunk in another unit is converted into.
+    converted: (Vec<i64>, Vec<i64>),
     #[cfg(test)]
     batch_calls: usize,
 }
@@ -201,13 +206,14 @@ pub struct RangeEvaluator {
 #[derive(Default)]
 struct BulkScratch {
     timestamps: Vec<i64>,
+    windows: Vec<i64>,
     columns: Vec<Vec<f64>>,
 }
 
 impl BulkScratch {
     /// The bytes these buffers hold, by capacity.
     fn bytes(&self) -> usize {
-        self.timestamps.capacity() * std::mem::size_of::<i64>()
+        (self.timestamps.capacity() + self.windows.capacity()) * std::mem::size_of::<i64>()
             + self.columns.capacity() * std::mem::size_of::<Vec<f64>>()
             + self
                 .columns
@@ -310,13 +316,14 @@ fn accumulate(pending: &mut PendingBatch, index: usize, eval_ts: i64, fields: &[
         // forward; never revisit samples already behind every remaining window.
         pending.ends[field_index] = pending.ends[field_index].max(field.head);
         if !pending.positioned[field_index] {
-            pending.ends[field_index] = field.timestamps[field.head..]
+            pending.ends[field_index] = field.window_times()[field.head..]
                 .partition_point(|&timestamp| timestamp_le(timestamp, eval_ts))
                 + field.head;
             pending.positioned[field_index] = true;
         } else {
-            while pending.ends[field_index] < field.timestamps.len()
-                && timestamp_le(field.timestamps[pending.ends[field_index]], eval_ts)
+            let windows = field.window_times();
+            while pending.ends[field_index] < windows.len()
+                && timestamp_le(windows[pending.ends[field_index]], eval_ts)
             {
                 pending.ends[field_index] += 1;
             }
@@ -417,7 +424,11 @@ enum Replay {
 
 #[derive(Default)]
 struct FieldSamples {
+    /// The sample times a kernel reads, shifted by the offset.
     timestamps: Vec<i64>,
+    /// The times window membership is decided on, aligned with `timestamps`, when they differ
+    /// from them: for raw input finer than a millisecond ([`crate::raw_time`]).
+    windows: Option<Vec<i64>>,
     values: Vec<f64>,
     /// Samples before `head` are behind every remaining window.
     head: usize,
@@ -464,7 +475,8 @@ impl FieldSamples {
     /// The bytes this field's buffers hold, by capacity: the samples, the history behind `head`
     /// included, plus the estimated payload of the histograms still held.
     fn bytes(&self) -> usize {
-        self.timestamps.capacity() * std::mem::size_of::<i64>()
+        (self.timestamps.capacity() + self.windows.as_ref().map_or(0, Vec::capacity))
+            * std::mem::size_of::<i64>()
             + self.values.capacity() * std::mem::size_of::<f64>()
             + self.histograms.capacity() * std::mem::size_of::<(i64, FloatHistogram)>()
             + self.resets.capacity() * std::mem::size_of::<CounterReset>()
@@ -478,13 +490,18 @@ impl FieldSamples {
         }
     }
 
+    /// The times window membership is decided on.
+    fn window_times(&self) -> &[i64] {
+        self.windows.as_deref().unwrap_or(&self.timestamps)
+    }
+
     /// Appends one valid sample, recording a counter reset when it dropped below the previous
     /// float.
     ///
     /// The previous float may sit before an intervening native histogram. That is unobservable:
     /// a window holding both floats also holds the histogram, and counter functions report
     /// nothing for a mixed window.
-    fn push(&mut self, timestamp: i64, value: f64) {
+    fn push(&mut self, timestamp: i64, window: Option<i64>, value: f64) {
         if self.index_resets
             && let Some(&previous_value) = self.values.last()
             && value < previous_value
@@ -495,11 +512,14 @@ impl FieldSamples {
             });
         }
         self.timestamps.push(timestamp);
+        if let (Some(windows), Some(window)) = (self.windows.as_mut(), window) {
+            windows.push(window);
+        }
         self.values.push(value);
     }
 
     /// Same as calling [`push`](Self::push) once per sample.
-    fn push_bulk(&mut self, timestamps: &[i64], values: &[f64]) {
+    fn push_bulk(&mut self, timestamps: &[i64], windows: Option<&[i64]>, values: &[f64]) {
         debug_assert_eq!(timestamps.len(), values.len());
         if self.index_resets {
             let start = self.values.len();
@@ -517,6 +537,9 @@ impl FieldSamples {
             }
         }
         self.timestamps.extend_from_slice(timestamps);
+        if let (Some(retained), Some(windows)) = (self.windows.as_mut(), windows) {
+            retained.extend_from_slice(windows);
+        }
         self.values.extend_from_slice(values);
     }
 
@@ -528,6 +551,9 @@ impl FieldSamples {
         }
         self.base += head as u64;
         self.timestamps.drain(..head);
+        if let Some(windows) = self.windows.as_mut() {
+            windows.drain(..head);
+        }
         self.values.drain(..head);
         // A reset at `base` would add back the last dropped sample, so it goes with it.
         let dropped = self
@@ -670,9 +696,20 @@ impl RangeEvaluator {
             batch: None,
             pending: PendingBatch::with_fields(input.fields.len()),
             bulk_scratch: BulkScratch::default(),
+            raw_time_unit: RawTimeUnit::Millisecond,
+            converted: (Vec::new(), Vec::new()),
             #[cfg(test)]
             batch_calls: 0,
         })
+    }
+
+    /// Reads raw chunks whose timestamps are in `unit`.
+    pub fn with_raw_time_unit(mut self, unit: RawTimeUnit) -> Self {
+        self.raw_time_unit = unit;
+        for field in &mut self.fields {
+            field.windows = (!unit.is_whole_millis()).then(Vec::new);
+        }
+        self
     }
 
     /// The evaluation grid the output is addressed on.
@@ -712,6 +749,8 @@ impl RangeEvaluator {
             + self.series.as_ref().map_or(0, SeriesState::identity_bytes)
             + self.pending.bytes()
             + self.bulk_scratch.bytes()
+            + (self.converted.0.capacity() + self.converted.1.capacity())
+                * std::mem::size_of::<i64>()
     }
 
     /// An upper bound of the rows the next push hands out, for input whose last sample is at
@@ -725,6 +764,10 @@ impl RangeEvaluator {
         let state = self.series.as_ref();
         let Some(latest) = last_ts.or_else(|| state.and_then(|state| state.last_ts)) else {
             return 0;
+        };
+        // `latest` is on the input's own timeline; a time that does not convert fails the push.
+        let Ok(latest) = self.raw_time_unit.window_ms(latest, 0) else {
+            return len;
         };
         let cursor = state.map_or(0, |state| state.cursor);
         if !matches!(self.replay, Replay::PerPoint) {
@@ -787,13 +830,28 @@ impl RangeEvaluator {
             ));
         }
         self.check_chunk(chunk)?;
-        self.ingest(chunk.time.as_buffer(), &chunk.fields, true)?;
-        let last_ts = chunk.time.as_buffer()[chunk.time.len() - 1];
+        let ticks = chunk.time.as_buffer();
+        let read_through = if self.raw_time_unit == RawTimeUnit::Millisecond {
+            self.ingest(ticks, None, self.window.offset_ms, &chunk.fields, true)?;
+            i128::from(ticks[ticks.len() - 1]) + i128::from(self.window.offset_ms)
+        } else {
+            let (mut payloads, mut windows) = std::mem::take(&mut self.converted);
+            let ingested = self
+                .raw_time_unit
+                .convert(ticks, self.window.offset_ms, &mut payloads, &mut windows)
+                .and_then(|()| {
+                    let windows = (!self.raw_time_unit.is_whole_millis()).then_some(&windows[..]);
+                    self.ingest(&payloads, windows, 0, &chunk.fields, true)?;
+                    self.raw_time_unit
+                        .floor_ms(ticks[ticks.len() - 1], self.window.offset_ms)
+                });
+            self.converted = (payloads, windows);
+            i128::from(ingested?)
+        };
         if !chunk.is_last {
-            // Later chunks only hold samples after `last_ts`.
-            self.evaluate(Some(
-                i128::from(last_ts) + i128::from(self.window.offset_ms),
-            ))?;
+            // Later chunks only hold samples after this one's last, but one in the same
+            // millisecond shares its window time, so only the millisecond before it is settled.
+            self.evaluate(Some(read_through))?;
             return self.emit();
         }
         self.close_series()
@@ -868,7 +926,13 @@ impl RangeEvaluator {
             }
         }
         if let Some(last_ts) = last_ts {
-            self.ingest(&timestamps, &series.fields, false)?;
+            self.ingest(
+                &timestamps,
+                None,
+                self.window.offset_ms,
+                &series.fields,
+                false,
+            )?;
             if last {
                 return self.close_series();
             }
@@ -1016,6 +1080,8 @@ impl RangeEvaluator {
     fn ingest_in_bulk(
         &mut self,
         timestamps: &[i64],
+        windows: Option<&[i64]>,
+        offset_ms: i64,
         fields: &SeriesFields,
         drop_stale: bool,
     ) -> Result<bool> {
@@ -1045,7 +1111,13 @@ impl RangeEvaluator {
         } else {
             None
         };
-        self.append_float_chunk(timestamps, &columns, stale_rows.as_deref())?;
+        self.append_float_chunk(
+            timestamps,
+            windows,
+            offset_ms,
+            &columns,
+            stale_rows.as_deref(),
+        )?;
         #[cfg(test)]
         {
             self.bulk_ingests += 1;
@@ -1058,22 +1130,39 @@ impl RangeEvaluator {
     fn append_float_chunk(
         &mut self,
         timestamps: &[i64],
+        windows: Option<&[i64]>,
+        offset_ms: i64,
         columns: &[&[f64]],
         stale: Option<&[bool]>,
     ) -> Result<()> {
-        let offset_ms = self.window.offset_ms;
+        debug_assert!(
+            windows.is_none() || offset_ms == 0,
+            "window times are already shifted"
+        );
         if offset_ms == 0 && stale.is_none() {
             for (field, values) in self.fields.iter_mut().zip(columns) {
-                field.push_bulk(timestamps, values);
+                field.push_bulk(timestamps, windows, values);
             }
             return Ok(());
         }
         let BulkScratch {
             timestamps: mut shifted,
+            windows: mut kept_windows,
             columns: mut compacted,
         } = std::mem::take(&mut self.bulk_scratch);
         shifted.clear();
         shifted.reserve(timestamps.len());
+        kept_windows.clear();
+        if let Some(windows) = windows {
+            kept_windows.extend(
+                windows
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, _)| !stale.is_some_and(|stale| stale[*row]))
+                    .map(|(_, &window)| window),
+            );
+        }
+        let kept = windows.map(|_| kept_windows.as_slice());
         for (row, &timestamp) in timestamps.iter().enumerate() {
             if stale.is_some_and(|stale| stale[row]) {
                 continue;
@@ -1082,6 +1171,7 @@ impl RangeEvaluator {
             let Some(shifted_timestamp) = timestamp.checked_add(offset_ms) else {
                 self.bulk_scratch = BulkScratch {
                     timestamps: shifted,
+                    windows: kept_windows,
                     columns: compacted,
                 };
                 return Err(DataFusionError::Execution(format!(
@@ -1093,7 +1183,7 @@ impl RangeEvaluator {
         match stale {
             None => {
                 for (field, values) in self.fields.iter_mut().zip(columns) {
-                    field.push_bulk(&shifted, values);
+                    field.push_bulk(&shifted, kept, values);
                 }
             }
             Some(stale) => {
@@ -1109,26 +1199,37 @@ impl RangeEvaluator {
                     );
                 }
                 for (field, values) in self.fields.iter_mut().zip(&compacted) {
-                    field.push_bulk(&shifted, values);
+                    field.push_bulk(&shifted, kept, values);
                 }
             }
         }
         self.bulk_scratch = BulkScratch {
             timestamps: shifted,
+            windows: kept_windows,
             columns: compacted,
         };
         Ok(())
     }
 
-    /// Retains the samples of `fields` at `timestamps`. From `raw` input a row holding a stale
-    /// marker in any field is dropped; evaluated input keeps it as a value.
-    fn ingest(&mut self, timestamps: &[i64], fields: &SeriesFields, raw: bool) -> Result<()> {
-        if self.ingest_in_bulk(timestamps, fields, raw)? {
+    /// Retains the samples of `fields` at `timestamps` shifted by `offset_ms`. From `raw` input a
+    /// row holding a stale marker in any field is dropped; evaluated input keeps it as a value.
+    ///
+    /// `windows` are the already shifted window times of raw input finer than a millisecond, whose
+    /// `timestamps` are then already shifted payloads and `offset_ms` is zero.
+    fn ingest(
+        &mut self,
+        timestamps: &[i64],
+        windows: Option<&[i64]>,
+        offset_ms: i64,
+        fields: &SeriesFields,
+        raw: bool,
+    ) -> Result<()> {
+        if self.ingest_in_bulk(timestamps, windows, offset_ms, fields, raw)? {
             return Ok(());
         }
         let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();
         let mut row = Vec::with_capacity(samples.len());
-        for &timestamp in timestamps {
+        for (index, &timestamp) in timestamps.iter().enumerate() {
             row.clear();
             let mut stale = false;
             for field in &mut samples {
@@ -1137,7 +1238,7 @@ impl RangeEvaluator {
                     SampleRef::Missing => {}
                     SampleRef::Float(value) => stale |= is_prometheus_stale_nan(*value),
                     SampleRef::Histogram(view) => {
-                        if self.function.is_none() {
+                        if self.function.is_none() || windows.is_some() {
                             return Err(DataFusionError::NotImplemented(
                                 "range evaluation of histogram samples".into(),
                             ));
@@ -1151,14 +1252,12 @@ impl RangeEvaluator {
                 continue;
             }
             // Like RangeManipulate, any kept sample whose shifted time leaves i64 fails the series.
-            let shifted = timestamp
-                .checked_add(self.window.offset_ms)
-                .ok_or_else(|| {
-                    DataFusionError::Execution(format!(
-                        "sample timestamp {timestamp} overflows with offset {} ms",
-                        self.window.offset_ms
-                    ))
-                })?;
+            let shifted = timestamp.checked_add(offset_ms).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "sample timestamp {timestamp} overflows with offset {offset_ms} ms"
+                ))
+            })?;
+            let window = windows.map(|windows| windows[index]);
             // Refused here rather than when a point is evaluated: a smoothed point can be decided
             // before the rest of its window arrives, so whether a later histogram is seen would
             // depend on how the input is chunked.
@@ -1177,7 +1276,7 @@ impl RangeEvaluator {
                 match sample {
                     SampleRef::Missing => {}
                     SampleRef::Float(value) => {
-                        field.push(shifted, *value);
+                        field.push(shifted, window, *value);
                     }
                     SampleRef::Histogram(view) => {
                         let mut h = FloatHistogram::try_from_view(view)?;
@@ -1242,7 +1341,7 @@ impl RangeEvaluator {
                     .iter()
                     .map(|field| {
                         field
-                            .timestamps
+                            .window_times()
                             .last()
                             .map_or(i128::MIN, |&t| i128::from(t))
                     })
@@ -1261,13 +1360,13 @@ impl RangeEvaluator {
             // Later windows start no earlier, so samples behind this one go even when the point
             // itself is not ready yet.
             for field in &mut self.fields {
-                field.head += field.timestamps[field.head..]
+                field.head += field.window_times()[field.head..]
                     .partition_point(|&timestamp| i128::from(timestamp) <= lower);
                 field.histogram_head += field.histograms[field.histogram_head..]
                     .partition_point(|(timestamp, _)| i128::from(*timestamp) <= lower);
                 let first_histogram = field.histograms.get(field.histogram_head);
                 for &timestamp in field
-                    .timestamps
+                    .window_times()
                     .get(field.head)
                     .into_iter()
                     .chain(first_histogram.map(|(timestamp, _)| timestamp))
@@ -1447,10 +1546,10 @@ impl RowEvaluator<'_> {
         // A smoothed window also reads the samples after its end.
         let window_end = window_end + self.modifier.map_or(0, RangeModifier::after_ms);
         for field in self.fields {
-            let timestamps = &field.timestamps[field.head..];
-            let len = timestamps.partition_point(|&timestamp| timestamp <= window_end);
+            let len = field.window_times()[field.head..]
+                .partition_point(|&timestamp| timestamp <= window_end);
             let floats = (len > 0).then(|| FloatWindow {
-                timestamps: &timestamps[..len],
+                timestamps: &field.timestamps[field.head..field.head + len],
                 values: &field.values[field.head..field.head + len],
                 counter_resets: field.resets_in(len),
                 eval_ts,

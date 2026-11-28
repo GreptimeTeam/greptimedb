@@ -3132,6 +3132,205 @@ async fn native_promql_canonical_merge_over_partitioned_table() {
     }
 }
 
+/// A time index in seconds, microseconds or nanoseconds is read natively with the existing route's
+/// semantics: windows and lookbacks are decided on the stored ticks, a kernel reads the time
+/// truncated to milliseconds, and samples less than a millisecond apart stay distinct samples.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_non_millisecond_time_index_answers_like_legacy() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_non_millisecond_time_index",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_us (ts TIMESTAMP(6) TIME INDEX, series STRING PRIMARY KEY, val DOUBLE); \
+         INSERT INTO native_us VALUES (0, 'window', 1), (1, 'window', 2), (2, 'window', 5), \
+         (1000000, 'window', 3), (1000001, 'window', 4), (999500, 'past', 7), \
+         (1000001, 'future', 9), (999999, 'counter', 1), (1000500, 'counter', 3), \
+         (1999700, 'counter', 8), (-1500, 'negative', 6); \
+         CREATE TABLE native_ns (ts TIMESTAMP(9) TIME INDEX, job STRING PRIMARY KEY, val DOUBLE); \
+         INSERT INTO native_ns VALUES (999999900, 'sub_ms', 999), (999999100, 'sub_ms', 10), \
+         (999999500, 'sub_ms', 13), (998000000, 'one_ms', 10), (999000000, 'one_ms', 13); \
+         CREATE TABLE native_sec (ts TIMESTAMP(0) TIME INDEX, host STRING PRIMARY KEY, val DOUBLE); \
+         INSERT INTO native_sec VALUES (0, 'a', 1), (1, 'a', 2), (2, 'a', 4), (3, 'a', 8)",
+        QueryContext::arc(),
+    )
+    .await;
+    let queries = [
+        (
+            "TQL EVAL (1, 2, '1s', '300s') native_us",
+            ReportedName::Metric("native_us"),
+        ),
+        (
+            "TQL EVAL (0, 0, '1s', '300s') native_us offset -1s",
+            ReportedName::Metric("native_us"),
+        ),
+        (
+            "TQL EVAL (1, 2, '1s', '300s') timestamp(native_us)",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (1, 1, '1s', '0') native_us",
+            ReportedName::Metric("native_us"),
+        ),
+        (
+            "TQL EVAL (1, 1, '1s', '0') native_us @ 1",
+            ReportedName::Metric("native_us"),
+        ),
+        (
+            "TQL EVAL (1, 2, '1s') count_over_time(native_us[1s])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (1, 2, '1s') sum_over_time(native_us[1s] offset 1ms)",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (1, 2, '1s') last_over_time(native_us[1s])",
+            ReportedName::Metric("native_us"),
+        ),
+        (
+            "TQL EVAL (2, 2, '1s') rate(native_us[2s])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (1, 1, '1s') irate(native_ns[5s])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (1, 1, '1s') idelta(native_ns[5s])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (1, 1, '1s') count_over_time(native_ns[5s])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (1, 1, '1s', '1s') native_sec offset 500ms",
+            ReportedName::Metric("native_sec"),
+        ),
+        (
+            "TQL EVAL (3, 3, '1s') rate(native_sec[3s])",
+            ReportedName::Nothing,
+        ),
+    ];
+    // Once from the memtables and once from the flushed files.
+    for flushed in [false, true] {
+        if flushed {
+            for table in ["native_us", "native_ns", "native_sec"] {
+                execute_all(
+                    &instance,
+                    &format!("ADMIN FLUSH_TABLE('{table}')"),
+                    QueryContext::arc(),
+                )
+                .await;
+            }
+        }
+        for (sql, reported) in queries {
+            observer.clear();
+            let native = eval_text_rows(
+                collected(native_tql_output(&instance, sql, true).await).await,
+                reported,
+            );
+            assert_native_rows_plan(&observer);
+            let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+            assert_text_rows_close(&legacy, &native, &format!("flushed={flushed}: {sql}"));
+        }
+    }
+}
+
+/// Two physical metric tables may store their time index in different units, and a nameless
+/// selector can discover logical metrics on both. A native input reads its timestamps in one unit,
+/// so such a selector is declined rather than answered with one source's ticks read in the other's.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_over_mixed_time_units_is_declined() {
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, _observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_discovery_mixed_units")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE mixed_phy_ms (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE mixed_phy_us (ts TIMESTAMP(6) TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE mixed_a (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'mixed_phy_ms'); \
+         CREATE TABLE mixed_b (host STRING NULL, ts TIMESTAMP(6) NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'mixed_phy_us'); \
+         INSERT INTO mixed_a (host, ts, v) VALUES ('a', 1000, 2); \
+         INSERT INTO mixed_b (host, ts, v) VALUES ('b', 1000000, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed(["mixed_a", "mixed_b"].map(
+        |table| {
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                table.to_string(),
+            )
+        },
+    )));
+    let result = instance
+        .do_query(
+            r#"TQL EVAL (2, 2, '1s') count_over_time({host=~"a|b"}[2s])"#,
+            Arc::new(ctx),
+        )
+        .await
+        .remove(0);
+    // The existing plan, which the statement keeps, refuses a nameless selector.
+    if let Ok(output) = result {
+        panic!("answered natively: {:?}", native_rows(output, None).await);
+    }
+}
+
+/// `output` with its stream read here: [`eval_text_rows`] blocks on the stream, which inside this
+/// runtime stops being woken once the test task has spent its cooperative budget.
+async fn collected(output: Output) -> Output {
+    match output.data {
+        OutputData::Stream(stream) => {
+            Output::new_with_record_batches(collect_batches(stream).await.unwrap())
+        }
+        _ => output,
+    }
+}
+
+/// Two [`eval_text`] answers that agree cell by cell, a float cell up to its last digits: the two
+/// routes sum the same terms in a different order.
+fn assert_text_rows_close(expected: &str, actual: &str, context: &str) {
+    let rows = |text: &str| {
+        text.lines()
+            .map(|line| line.split(" | ").map(str::to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    let (expected_rows, actual_rows) = (rows(expected), rows(actual));
+    let close = expected_rows.len() == actual_rows.len()
+        && expected_rows.iter().zip(&actual_rows).all(|(left, right)| {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(left, right)| {
+                    left == right
+                        || matches!(
+                            (left.parse::<f64>(), right.parse::<f64>()),
+                            (Ok(left), Ok(right))
+                                if (left - right).abs() <= 1e-12 * left.abs().max(right.abs())
+                        )
+                })
+        });
+    assert!(close, "{context}\nexpected: {expected}\nactual: {actual}");
+}
+
 /// The plan the last query ran is the native one, so a row assertion above is about this route.
 fn assert_native_rows_plan(observer: &NativePlanObserver) {
     let root = observer.root_plan();

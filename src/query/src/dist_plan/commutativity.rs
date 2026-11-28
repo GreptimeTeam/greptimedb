@@ -647,6 +647,7 @@ mod tests {
                         output: evaluated.clone(),
                         source_index: 0,
                         ordering: SeriesOrdering::KeyThenTime,
+                        time_unit: Default::default(),
                     }),
                     output: evaluated.clone(),
                 }),
@@ -900,6 +901,7 @@ mod tests {
                 output: raw.clone(),
                 source_index: 0,
                 ordering: SeriesOrdering::KeyThenTime,
+                time_unit: Default::default(),
             }),
             output: raw,
         };

@@ -29,9 +29,7 @@ use common_query::native_histogram::{
 use common_query::series_frame::label_decode_spec;
 use common_recordbatch::filter;
 use datafusion::physical_plan::PhysicalExpr;
-use datatypes::arrow::array::{
-    Array, BinaryArray, Float64Array, StructArray, TimestampMillisecondArray,
-};
+use datatypes::arrow::array::{Array, BinaryArray, Float64Array, StructArray};
 use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow::compute::{cast, concat_batches};
 use datatypes::arrow::datatypes::ArrowNativeType;
@@ -42,6 +40,7 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
+use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use snafu::Location;
@@ -78,11 +77,10 @@ fn chunk(
     schema: &SeriesSchema,
     fields: &[(usize, ConcreteDataType)],
 ) -> Result<RawSeriesChunk, BoxedError> {
-    let timestamp = batch
-        .column(time_index_column_index(batch.num_columns()))
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .ok_or_else(|| invalid("non-millisecond timestamp array"))?;
+    // The ticks are handed over in the time index's own unit; the consumer is bound to that unit.
+    let (timestamp, _) =
+        timestamp_array_to_primitive(batch.column(time_index_column_index(batch.num_columns())))
+            .ok_or_else(|| invalid("non-timestamp time index array"))?;
     if (start..end).any(|row| !timestamp.is_valid(row)) {
         return Err(invalid("null timestamp"));
     }
