@@ -35,6 +35,12 @@ SELECT ts, host, j.o.l[1].inner.l[2] AS deeply_nested
 FROM json2_list_index
 ORDER BY ts;
 
+-- A TQL CTE leaves field access after a subscript as it is without one.
+WITH tql AS (TQL EVAL (0, 10, '5s') vector(1))
+SELECT ts, host, j.o.l[1].inner.l[2] AS deeply_nested
+FROM json2_list_index
+ORDER BY ts;
+
 SELECT ts,
        j.o.l[1].CASEKEY AS normalized,
        j.o.l[1]."UPPER" AS quoted_upper,

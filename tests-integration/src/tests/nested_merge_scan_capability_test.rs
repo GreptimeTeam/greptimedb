@@ -587,7 +587,7 @@ async fn plan_sql(frontend: &Arc<Instance>, sql: &str, query_ctx: &QueryContextR
         .unwrap_or_else(|e| panic!("failed to parse `{sql}`: {e}"));
     frontend
         .statement_executor()
-        .plan(&stmt, query_ctx.clone())
+        .plan(stmt, query_ctx.clone())
         .await
         .unwrap_or_else(|e| panic!("failed to plan `{sql}`: {e}"))
 }

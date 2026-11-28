@@ -103,7 +103,7 @@ impl StatementExecutor {
         };
         self.query_engine
             .planner()
-            .plan(&stmt, query_ctx.clone())
+            .plan(stmt, query_ctx.clone())
             .await
             .context(PlanStatementSnafu)
     }

@@ -31,7 +31,6 @@ use meta_client::MetaClientRef;
 use promql_parser::parser::EvalStmt;
 use rand::random;
 use snafu::{OptionExt, ResultExt, ensure};
-use sql::statements::statement::Statement;
 
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
@@ -57,21 +56,20 @@ pub struct ProcessManager {
     frontend_selector: Option<MetaClientSelector>,
 }
 
-/// Represents a parsed query statement, functionally equivalent to [query::parser::QueryStatement].
-/// This enum is defined here to avoid cyclic dependencies with the query parser module.
+/// The query a [SlowQueryTimer] reports.
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
-    Sql(Statement),
     // The optional string is the alias of the PromQL query.
     Promql(EvalStmt, Option<String>),
-    /// Logical plan with original query string
-    Plan(String),
+    /// Query text, reported as is: the `Display` of a SQL statement, the indented display of a
+    /// logical plan executed without a statement, or the `query_exemplars(...)` text the frontend
+    /// builds for an exemplar query.
+    Text(String),
 }
 
 impl Display for QueryStatement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            QueryStatement::Sql(stmt) => write!(f, "{}", stmt),
             QueryStatement::Promql(eval_stmt, alias) => {
                 if let Some(alias) = alias {
                     write!(f, "{} AS {}", eval_stmt, alias)
@@ -79,7 +77,7 @@ impl Display for QueryStatement {
                     write!(f, "{}", eval_stmt)
                 }
             }
-            QueryStatement::Plan(query) => write!(f, "{}", query),
+            QueryStatement::Text(query) => write!(f, "{}", query),
         }
     }
 }
@@ -417,10 +415,7 @@ impl SlowQueryTimer {
                 slow_query_event.promql_start = Some(start);
                 slow_query_event.promql_end = Some(end);
             }
-            QueryStatement::Sql(stmt) => {
-                slow_query_event.query = stmt.to_string();
-            }
-            QueryStatement::Plan(query) => {
+            QueryStatement::Text(query) => {
                 slow_query_event.query = query.clone();
             }
         }
@@ -506,7 +501,7 @@ mod tests {
     fn test_forced_slow_query_bypasses_threshold_and_sampling() {
         let event_recorder = Arc::new(RecordingEventRecorder::default());
         let timer = SlowQueryTimer::new(
-            QueryStatement::Plan("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
+            QueryStatement::Text("EXPLAIN ANALYZE VERBOSE SELECT 1".to_string()),
             "public".to_string(),
             Duration::from_secs(3600),
             0.0,
@@ -531,7 +526,7 @@ mod tests {
     fn test_unforced_fast_query_is_not_recorded() {
         let event_recorder = Arc::new(RecordingEventRecorder::default());
         let timer = SlowQueryTimer::new(
-            QueryStatement::Plan("SELECT 1".to_string()),
+            QueryStatement::Text("SELECT 1".to_string()),
             "public".to_string(),
             Duration::from_secs(3600),
             0.0,

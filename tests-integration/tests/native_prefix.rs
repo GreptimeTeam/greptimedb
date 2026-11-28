@@ -98,7 +98,7 @@ async fn native_prefix_multi_partition_single_position_chains() {
     let planned = fe
         .query_engine()
         .planner()
-        .plan(&statement, ctx.clone())
+        .plan(statement, ctx.clone())
         .await
         .unwrap();
     let LogicalPlan::Projection(projection) = planned else {
@@ -287,7 +287,7 @@ async fn native_prefix_multi_partition_multi_chunk_chains() {
     let planned = fe
         .query_engine()
         .planner()
-        .plan(&statement, ctx.clone())
+        .plan(statement, ctx.clone())
         .await
         .unwrap();
     let LogicalPlan::Projection(projection) = planned else {
@@ -469,7 +469,7 @@ async fn native_prefix_executes_over_real_mito_region() {
     let planned = fe
         .query_engine()
         .planner()
-        .plan(&statement, ctx.clone())
+        .plan(statement, ctx.clone())
         .await
         .unwrap();
     let datafusion::logical_expr::LogicalPlan::Projection(projection) = planned else {

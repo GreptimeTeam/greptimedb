@@ -1026,7 +1026,7 @@ pub async fn sql_to_df_plan(
     // columns whichever PromQL route plans it.
     let plan = engine
         .planner()
-        .plan_relation(&query_stmt, query_ctx.clone())
+        .plan_relation(query_stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
@@ -1064,7 +1064,7 @@ async fn sql_to_df_plan_for_sink(
     let query_stmt = parse_flow_query(&query_ctx, sql)?;
     engine
         .planner()
-        .plan(&query_stmt, query_ctx)
+        .plan(query_stmt, query_ctx)
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)
@@ -1074,7 +1074,7 @@ fn parse_flow_query(query_ctx: &QueryContextRef, sql: &str) -> Result<QueryState
     let scheduled_time = query::options::parse_scheduled_time_datetime(&query_ctx.extensions())
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
-    let stmts = ParserContext::create_with_dialect(
+    let mut stmts = ParserContext::create_with_dialect(
         sql,
         query_ctx.sql_dialect(),
         ParseOptions { scheduled_time },
@@ -1088,11 +1088,10 @@ fn parse_flow_query(query_ctx: &QueryContextRef, sql: &str) -> Result<QueryState
             reason: format!("Expect only one statement, found {}", stmts.len())
         }
     );
-    let stmt = &stmts[0];
+    let stmt = stmts.remove(0);
     let query_stmt = match stmt {
         Statement::Tql(tql) => match tql {
             Tql::Eval(eval) => {
-                let eval = eval.clone();
                 let promql = PromQuery {
                     start: eval.start,
                     end: eval.end,
@@ -1101,7 +1100,7 @@ fn parse_flow_query(query_ctx: &QueryContextRef, sql: &str) -> Result<QueryState
                     lookback: eval
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
-                    alias: eval.alias.clone(),
+                    alias: eval.alias,
                 };
 
                 QueryLanguageParser::parse_promql(&promql, query_ctx)
@@ -1113,7 +1112,7 @@ fn parse_flow_query(query_ctx: &QueryContextRef, sql: &str) -> Result<QueryState
             }
             .fail()?,
         },
-        _ => QueryStatement::Sql(stmt.clone()),
+        _ => QueryStatement::Sql(stmt),
     };
     Ok(query_stmt)
 }

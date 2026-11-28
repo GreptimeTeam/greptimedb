@@ -109,7 +109,7 @@ fn engine(enabled: bool, with_dist_planner: bool) -> crate::query_engine::QueryE
 async fn optimized_plan_for(engine: &crate::query_engine::QueryEngineRef, sql: &str) -> String {
     let context = QueryContext::arc();
     let statement = QueryLanguageParser::parse_sql(sql, &context).unwrap();
-    let plan = engine.planner().plan(&statement, context).await.unwrap();
+    let plan = engine.planner().plan(statement, context).await.unwrap();
     let plan = engine.engine_state().optimize_logical_plan(plan).unwrap();
     plan.display_indent().to_string()
 }
@@ -120,7 +120,7 @@ async fn optimized_plan_schema_for(
 ) -> Vec<(String, arrow_schema::DataType)> {
     let context = QueryContext::arc();
     let statement = QueryLanguageParser::parse_sql(sql, &context).unwrap();
-    let plan = engine.planner().plan(&statement, context).await.unwrap();
+    let plan = engine.planner().plan(statement, context).await.unwrap();
     let plan = engine.engine_state().optimize_logical_plan(plan).unwrap();
     plan.schema()
         .fields()
@@ -187,7 +187,7 @@ async fn reconstruction_uses_float_counts_and_nulls_empty_products() {
         let statement = QueryLanguageParser::parse_sql(&sql, &context).unwrap();
         let logical = engine
             .planner()
-            .plan(&statement, context.clone())
+            .plan(statement, context.clone())
             .await
             .unwrap();
         let mut optimizer_options = datafusion::config::ConfigOptions::default();
@@ -412,7 +412,7 @@ fn engine_over(
 async fn query_plan(engine: &crate::query_engine::QueryEngineRef, sql: &str) -> String {
     let context = QueryContext::arc();
     let statement = QueryLanguageParser::parse_sql(sql, &context).unwrap();
-    let plan = engine.planner().plan(&statement, context).await.unwrap();
+    let plan = engine.planner().plan(statement, context).await.unwrap();
     let plan = engine.engine_state().optimize_logical_plan(plan).unwrap();
     plan.display_indent().to_string()
 }
@@ -422,7 +422,7 @@ async fn query_output(engine: &crate::query_engine::QueryEngineRef, sql: &str) -
     let statement = QueryLanguageParser::parse_sql(sql, &context).unwrap();
     let plan = engine
         .planner()
-        .plan(&statement, context.clone())
+        .plan(statement, context.clone())
         .await
         .unwrap();
     let output = engine.execute(plan, context).await.unwrap();
@@ -658,11 +658,7 @@ async fn session_set_false_overrides_server_true() {
         .enabled;
     assert!(inherited_on);
     let statement = QueryLanguageParser::parse_sql(METRIC_AVG_SQL, &ctx).unwrap();
-    let logical = engine
-        .planner()
-        .plan(&statement, ctx.clone())
-        .await
-        .unwrap();
+    let logical = engine.planner().plan(statement, ctx.clone()).await.unwrap();
     let inherited_plan = inherited.optimize(&logical).unwrap();
     assert!(
         inherited_plan
@@ -719,7 +715,7 @@ async fn session_set_false_overrides_server_true() {
     let statement2 = QueryLanguageParser::parse_sql(METRIC_AVG_SQL, &ctx2).unwrap();
     let logical2 = engine_off
         .planner()
-        .plan(&statement2, ctx2.clone())
+        .plan(statement2, ctx2.clone())
         .await
         .unwrap();
     let enabled_ctx = df_engine_off.engine_context_for_tests(ctx2);
