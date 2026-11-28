@@ -18664,3 +18664,89 @@ async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vect
         assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
     }
 }
+
+/// `count_values("", v)` writes a label whose name is empty, which is a label name Prometheus 3
+/// reads as valid UTF-8 like any other.
+///
+/// The rows layout names that label as a column named nothing, which is the column the existing
+/// planner publishes for the same statement: the answer is a series per distinct value carrying
+/// `{"" = <value>}`. A data-free `vector(1)` makes the whole answer the node's own, so the two
+/// routes can be compared row by row; a metric-bound selection is compared by its layout.
+#[tokio::test]
+async fn native_count_values_with_an_empty_destination_answers_the_existing_rows() {
+    let data_free = "count_values(\"\", vector(1))";
+    let plan = build_native_fused_plan(data_free, true).await;
+    assert_eq!(None, take_reported_decline(), "`{data_free}`: {plan:?}");
+    let fused = find_fused_series(&plan).expect("a data-free statement takes the native route");
+    let columns = fused
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        columns.contains(&""),
+        "`{data_free}`: the label the node writes is a column of the answer: {columns:?}"
+    );
+    let expression = parser::parse(data_free).unwrap().to_string();
+    assert!(columns.contains(&expression.as_str()), "{columns:?}");
+
+    // The values the label holds, from whichever route answered the same statement.
+    async fn destination_values(query: &str, native: bool) -> (Vec<String>, usize) {
+        let plan = build_native_fused_plan(query, native).await;
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        let rows = batch_rows(&batches);
+        let mut values = Vec::new();
+        for batch in &batches {
+            let column = batch
+                .column_by_name("")
+                .unwrap_or_else(|| panic!("`{query}` publishes no label column: {batch:?}"));
+            let column = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap_or_else(|| panic!("`{query}`: the label column is not a string"));
+            values.extend(column.iter().flatten().map(str::to_string));
+        }
+        (values, rows)
+    }
+
+    let (native_values, native_rows) = destination_values(data_free, true).await;
+    let (existing_values, existing_rows) = destination_values(data_free, false).await;
+    assert!(
+        existing_rows > 0,
+        "`{data_free}`: the existing answer is empty"
+    );
+    assert_eq!(existing_rows, native_rows, "`{data_free}`: row count");
+    assert_eq!(
+        existing_values, native_values,
+        "`{data_free}`: the label the node writes holds what the existing answer writes"
+    );
+    assert_eq!(
+        vec!["1".to_string(); native_rows],
+        native_values,
+        "`{data_free}`: every point counts the one sample of `vector(1)`"
+    );
+
+    // A metric-bound selection has no rows in this fixture, so its layout is what is compared: the
+    // statement is planned natively rather than handed to the existing planner. A `count_values`
+    // without a modifier compiles to a grouping that keeps no label of its input, so the label the
+    // node writes is the one column of the answer beside the grid and the row name.
+    let bound = "count_values(\"\", some_metric)";
+    let plan = build_native_fused_plan(bound, true).await;
+    assert_eq!(None, take_reported_decline(), "`{bound}`: {plan:?}");
+    let fused = find_fused_series(&plan).expect("a metric-bound selection takes the native route");
+    let expression = parser::parse(bound).unwrap().to_string();
+    let columns = fused
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    // The grid is the table's own time index, `timestamp` in this fixture, not the synthetic name a
+    // statement with no real input publishes.
+    assert_eq!(
+        vec!["timestamp", expression.as_str(), "", METRIC_NAME],
+        columns,
+        "`{bound}`: the label the node writes is published under its own name, which is empty"
+    );
+}

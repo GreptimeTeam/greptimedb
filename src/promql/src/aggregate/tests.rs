@@ -1559,16 +1559,33 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
         11,
         &[vec![Some(1.0)], vec![Some(2.0)]],
     );
-    // Prometheus rejects an empty `count_values` label name at evaluation.
-    assert!(matches!(
-        count_values(
-            &schema,
-            std::slice::from_ref(&source),
-            "",
-            Grouping::By(&[])
-        ),
-        Err(DataFusionError::Execution(_))
-    ));
+    // An empty `count_values` label name is a label whose name is empty, which Prometheus 3 reads as
+    // valid UTF-8 like any other name, so it is answered rather than refused: the grouping keeps
+    // that label alone, and each distinct value becomes one series carrying it, counting the one
+    // sample it was made of.
+    let mut counted = count_values(
+        &schema,
+        std::slice::from_ref(&source),
+        "",
+        Grouping::By(&[]),
+    )
+    .unwrap()
+    .iter()
+    .map(|series| {
+        // A count lands in the field its sample came from, so the series' total is what says how
+        // many samples the value was written for.
+        let count = (0..series.fields.len())
+            .flat_map(|field| values(series, field).1.into_iter().flatten())
+            .sum::<f64>();
+        (series.metric.get("").map(str::to_string), count)
+    })
+    .collect::<Vec<_>>();
+    counted.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        vec![(Some("1".to_string()), 1.0), (Some("2".to_string()), 1.0)],
+        counted,
+        "the empty destination is one label, written once per distinct value"
+    );
     assert!(matches!(
         aggregate_float(
             &schema,

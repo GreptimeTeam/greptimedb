@@ -85,10 +85,9 @@ const PROMQL_METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 /// `histogram_quantile`, every non-filtering binary - so a name rewrite below one of them cannot
 /// make the name reappear above it.
 ///
-/// `None` for a node whose labels this walk does not derive - a `count_values` whose destination is
-/// empty, or an input whose source has no entry. `None` proves nothing: the canonical pass treats
-/// it as "may alias" rather than as "distinct", and the planner keeps the statement off the native
-/// route.
+/// `None` for a node whose labels this walk does not derive - an input whose source has no entry.
+/// `None` proves nothing: the canonical pass treats it as "may alias" rather than as "distinct", and
+/// the planner keeps the statement off the native route.
 pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -205,7 +204,12 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
             // the node groups by, which is the one label its result carries. This walk derives the
             // labels; it does not decide which groupings the kernel accepts, and those refusals stay
             // where they are.
-            BoundVectorOp::CountValues { label, group } if !label.is_empty() => {
+            //
+            // An empty destination is a label whose name is empty. Prometheus 3 reads every UTF-8
+            // string as a label name, so that label is part of the result like any other, and the
+            // existing planner already answers it as one column of the answer. Its name is empty
+            // here too, which a rows layout can carry - a column named nothing is still a column.
+            BoundVectorOp::CountValues { label, group } => {
                 let mut tags = fused_output_tags(input, source_tags)?;
                 if !tags.contains(&label.to_string()) {
                     tags.push(label.to_string());
@@ -230,7 +234,6 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                         .collect(),
                 })
             }
-            BoundVectorOp::CountValues { .. } => None,
             // A classic histogram function folds the bucket series that share the other labels into
             // one series and drops `le`, along with the metadata labels the runtime does not put on
             // its result. What it keeps is everything else its input carried.
@@ -2118,8 +2121,7 @@ impl<'de> serde::Deserialize<'de> for NativeTree {
 ///   existing plan keeps apart;
 /// - `topk`, `bottomk`, `limitk`, `sort` and `sort_desc` over a vector carrying more than one
 ///   field, whose series have no one value to rank;
-/// - a `topk`, `bottomk`, `limitk` or `count_values` grouping that names a value field, and a
-///   `count_values` label that is empty;
+/// - a `topk`, `bottomk`, `limitk` or `count_values` grouping that names a value field;
 /// - a window whose `anchored` or `smoothed` modifier reads evaluated input, names a function its
 ///   kernel does not correct, or carries a negative lookback;
 /// - a window whose timestamps do not fit: the fold offset an `@` anchor turns into, or the one

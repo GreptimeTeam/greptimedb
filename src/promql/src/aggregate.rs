@@ -887,11 +887,10 @@ pub(crate) fn validate_count_values(
         without => without,
     };
     validate_grouping(schema, checked)?;
-    if label.is_empty() {
-        return Err(DataFusionError::Execution(format!(
-            "invalid label name {label:?}"
-        )));
-    }
+    // An empty destination is not refused here. Prometheus 3 reads every UTF-8 string as a label
+    // name, and an empty string is one, so `count_values("", v)` writes a label whose name is empty
+    // and the answer carries it as it carries any other label. This route's own rows layout names
+    // that label as a column named nothing, which is what the existing planner already answers.
     Ok(())
 }
 

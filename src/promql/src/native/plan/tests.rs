@@ -3075,10 +3075,16 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
             &source_tags
         )
     );
-    // An empty destination cannot be a label, so the walk declines rather than name a column.
+    // An empty destination is a label whose name is empty: Prometheus 3 reads every UTF-8 string
+    // as a label name, so the walk names the column it writes like any other destination's.
     assert_eq!(
-        None,
+        tags(&[""]),
         fused_output_tags(&counted("", Grouping::By(Arc::new([]))), &source_tags)
+    );
+    // A grouping that keeps the input's labels keeps them beside it, as it does for any destination.
+    assert_eq!(
+        tags(&["host", "zone", ""]),
+        fused_output_tags(&counted("", Grouping::Without(Arc::new([]))), &source_tags)
     );
 }
 
@@ -3747,16 +3753,6 @@ fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
         (
             "sort over a vector of two fields",
             vector(two_fields(), BoundVectorOp::Sort(SortOrder::Asc)),
-        ),
-        (
-            "count_values under an empty label",
-            vector(
-                one_field(),
-                BoundVectorOp::CountValues {
-                    label: Arc::from(""),
-                    group: Grouping::By(Arc::new([])),
-                },
-            ),
         ),
         (
             "a parameterized topk over a vector of two fields",
