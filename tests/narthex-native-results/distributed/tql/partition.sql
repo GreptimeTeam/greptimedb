@@ -1,0 +1,1 @@
+../../../cases/distributed/common/tql/partition.sql
