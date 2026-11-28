@@ -1,0 +1,338 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/promql/src/map/broadcast.rs`."><title>broadcast.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="promql" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">promql/map/</div>broadcast.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">use </span>std::sync::Arc;
+<a href=#16 id=16 data-nosnippet>16</a>
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span>datafusion::error::{DataFusionError, <span class="prelude-ty">Result</span>};
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span>datatypes::series::SeriesLabels;
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span>datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span>datatypes::series::time::TimeAxis;
+<a href=#21 id=21 data-nosnippet>21</a>
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span><span class="kw">crate</span>::grid_series::GridSeriesBuilder;
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use </span><span class="kw">crate</span>::map::{
+<a href=#24 id=24 data-nosnippet>24</a>    ArithmeticOp, Comparison, MathOp, drop_metric_name, float_sample, validate_float_series,
+<a href=#25 id=25 data-nosnippet>25</a>    validate_grid_series,
+<a href=#26 id=26 data-nosnippet>26</a>};
+<a href=#27 id=27 data-nosnippet>27</a>
+<a href=#28 id=28 data-nosnippet>28</a><span class="doccomment">/// A time-varying, unlabelled single-field scalar, with explicit operand direction.
+<a href=#29 id=29 data-nosnippet>29</a></span><span class="attr">#[derive(Clone, Copy, Debug)]
+<a href=#30 id=30 data-nosnippet>30</a></span><span class="kw">pub enum </span>ScalarSeriesOperand&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#31 id=31 data-nosnippet>31</a>    Left(<span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series),
+<a href=#32 id=32 data-nosnippet>32</a>    Right(<span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series),
+<a href=#33 id=33 data-nosnippet>33</a>}
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a><span class="doccomment">/// Applies arithmetic between vector fields and a time-varying scalar on the same grid, and drops
+<a href=#36 id=36 data-nosnippet>36</a>/// the metric name.
+<a href=#37 id=37 data-nosnippet>37</a>///
+<a href=#38 id=38 data-nosnippet>38</a>/// Only positions both operands carry are evaluated; a missing scalar point yields a missing
+<a href=#39 id=39 data-nosnippet>39</a>/// output, and `None` means no output row. The scalar must be unlabelled and single-field, and both
+<a href=#40 id=40 data-nosnippet>40</a>/// inputs must hold floats only, even outside the overlap. Two scalars also work. Same-labelset
+<a href=#41 id=41 data-nosnippet>41</a>/// merging is left to the caller.
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">pub fn </span>map_arithmetic_series(
+<a href=#43 id=43 data-nosnippet>43</a>    schema: <span class="kw-2">&amp;</span>Arc&lt;SeriesSchema&gt;,
+<a href=#44 id=44 data-nosnippet>44</a>    vector: <span class="kw-2">&amp;</span>Series,
+<a href=#45 id=45 data-nosnippet>45</a>    op: ArithmeticOp,
+<a href=#46 id=46 data-nosnippet>46</a>    scalar: ScalarSeriesOperand&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#47 id=47 data-nosnippet>47</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;Series&gt;&gt; {
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="kw">let </span>metric = drop_metric_name(<span class="kw-2">&amp;</span>vector.metric)<span class="question-mark">?</span>;
+<a href=#49 id=49 data-nosnippet>49</a>    <span class="kw">let </span>(output, <span class="kw">_</span>) = map_grid_scalar(
+<a href=#50 id=50 data-nosnippet>50</a>        schema,
+<a href=#51 id=51 data-nosnippet>51</a>        vector,
+<a href=#52 id=52 data-nosnippet>52</a>        scalar,
+<a href=#53 id=53 data-nosnippet>53</a>        metric,
+<a href=#54 id=54 data-nosnippet>54</a>        NonFloatSample::Impossible,
+<a href=#55 id=55 data-nosnippet>55</a>        |left, right, <span class="kw">_</span>| <span class="prelude-val">Some</span>(op.calculate(left, right)),
+<a href=#56 id=56 data-nosnippet>56</a>    )<span class="question-mark">?</span>;
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="prelude-val">Ok</span>(output)
+<a href=#58 id=58 data-nosnippet>58</a>}
+<a href=#59 id=59 data-nosnippet>59</a>
+<a href=#60 id=60 data-nosnippet>60</a><span class="doccomment">/// Compares against a time-varying scalar. Filter keeps vector values and labels; bool emits
+<a href=#61 id=61 data-nosnippet>61</a>/// 0/1 and drops the metric name.
+<a href=#62 id=62 data-nosnippet>62</a>///
+<a href=#63 id=63 data-nosnippet>63</a>/// Aligns like [`map_arithmetic_series`]. Each field is compared independently; a row is kept
+<a href=#64 id=64 data-nosnippet>64</a>/// where any field passes. Histogram samples are dropped, as in
+<a href=#65 id=65 data-nosnippet>65</a>/// [`crate::map::map_compare_literal`], and the second element reports whether one was.
+<a href=#66 id=66 data-nosnippet>66</a></span><span class="kw">pub fn </span>map_compare_series(
+<a href=#67 id=67 data-nosnippet>67</a>    schema: <span class="kw-2">&amp;</span>Arc&lt;SeriesSchema&gt;,
+<a href=#68 id=68 data-nosnippet>68</a>    vector: <span class="kw-2">&amp;</span>Series,
+<a href=#69 id=69 data-nosnippet>69</a>    comparison: Comparison,
+<a href=#70 id=70 data-nosnippet>70</a>    scalar: ScalarSeriesOperand&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#71 id=71 data-nosnippet>71</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="prelude-ty">Option</span>&lt;Series&gt;, bool)&gt; {
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="kw">let </span>metric = <span class="kw">if </span><span class="macro">matches!</span>(comparison, Comparison::Bool(<span class="kw">_</span>)) {
+<a href=#73 id=73 data-nosnippet>73</a>        drop_metric_name(<span class="kw-2">&amp;</span>vector.metric)<span class="question-mark">?
+<a href=#74 id=74 data-nosnippet>74</a>    </span>} <span class="kw">else </span>{
+<a href=#75 id=75 data-nosnippet>75</a>        vector.metric.clone()
+<a href=#76 id=76 data-nosnippet>76</a>    };
+<a href=#77 id=77 data-nosnippet>77</a>    map_grid_scalar(
+<a href=#78 id=78 data-nosnippet>78</a>        schema,
+<a href=#79 id=79 data-nosnippet>79</a>        vector,
+<a href=#80 id=80 data-nosnippet>80</a>        scalar,
+<a href=#81 id=81 data-nosnippet>81</a>        metric,
+<a href=#82 id=82 data-nosnippet>82</a>        NonFloatSample::Drop,
+<a href=#83 id=83 data-nosnippet>83</a>        |left, right, sample| comparison.apply(left, right, sample),
+<a href=#84 id=84 data-nosnippet>84</a>    )
+<a href=#85 id=85 data-nosnippet>85</a>}
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a><span class="doccomment">/// `max_of(a, b)` and `min_of(a, b)`, which Prometheus evaluates with Go's `math.Max` and
+<a href=#88 id=88 data-nosnippet>88</a>/// `math.Min`.
+<a href=#89 id=89 data-nosnippet>89</a></span><span class="attr">#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+<a href=#90 id=90 data-nosnippet>90</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>ScalarFunction {
+<a href=#91 id=91 data-nosnippet>91</a>    MaxOf,
+<a href=#92 id=92 data-nosnippet>92</a>    MinOf,
+<a href=#93 id=93 data-nosnippet>93</a>}
+<a href=#94 id=94 data-nosnippet>94</a>
+<a href=#95 id=95 data-nosnippet>95</a><span class="kw">impl </span>ScalarFunction {
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="doccomment">/// Go's `math.Max` / `math.Min`: an infinity of the function's own sign wins over NaN, NaN
+<a href=#97 id=97 data-nosnippet>97</a>    /// over any other value, and `+0` is greater than `-0`. Symmetric in its arguments.
+<a href=#98 id=98 data-nosnippet>98</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>apply(<span class="self">self</span>, a: f64, b: f64) -&gt; f64 {
+<a href=#99 id=99 data-nosnippet>99</a>        <span class="kw">let </span>(wins, signed_zero_wins) = <span class="kw">match </span><span class="self">self </span>{
+<a href=#100 id=100 data-nosnippet>100</a>            <span class="self">Self</span>::MaxOf =&gt; (f64::INFINITY, <span class="bool-val">false</span>),
+<a href=#101 id=101 data-nosnippet>101</a>            <span class="self">Self</span>::MinOf =&gt; (f64::NEG_INFINITY, <span class="bool-val">true</span>),
+<a href=#102 id=102 data-nosnippet>102</a>        };
+<a href=#103 id=103 data-nosnippet>103</a>        <span class="kw">if </span>a == wins || b == wins {
+<a href=#104 id=104 data-nosnippet>104</a>            wins
+<a href=#105 id=105 data-nosnippet>105</a>        } <span class="kw">else if </span>a.is_nan() || b.is_nan() {
+<a href=#106 id=106 data-nosnippet>106</a>            f64::NAN
+<a href=#107 id=107 data-nosnippet>107</a>        } <span class="kw">else if </span>a == <span class="number">0.0 </span>&amp;&amp; a == b {
+<a href=#108 id=108 data-nosnippet>108</a>            <span class="kw">if </span>a.is_sign_negative() == signed_zero_wins {
+<a href=#109 id=109 data-nosnippet>109</a>                a
+<a href=#110 id=110 data-nosnippet>110</a>            } <span class="kw">else </span>{
+<a href=#111 id=111 data-nosnippet>111</a>                b
+<a href=#112 id=112 data-nosnippet>112</a>            }
+<a href=#113 id=113 data-nosnippet>113</a>        } <span class="kw">else if </span>(a &gt; b) == (<span class="self">self </span>== <span class="self">Self</span>::MaxOf) {
+<a href=#114 id=114 data-nosnippet>114</a>            a
+<a href=#115 id=115 data-nosnippet>115</a>        } <span class="kw">else </span>{
+<a href=#116 id=116 data-nosnippet>116</a>            b
+<a href=#117 id=117 data-nosnippet>117</a>        }
+<a href=#118 id=118 data-nosnippet>118</a>    }
+<a href=#119 id=119 data-nosnippet>119</a>}
+<a href=#120 id=120 data-nosnippet>120</a>
+<a href=#121 id=121 data-nosnippet>121</a><span class="doccomment">/// A math function whose parameters are time-varying scalars. For `max_of` and `min_of` the
+<a href=#122 id=122 data-nosnippet>122</a>/// mapped series is the first scalar operand.
+<a href=#123 id=123 data-nosnippet>123</a></span><span class="attr">#[derive(Clone, Copy, Debug)]
+<a href=#124 id=124 data-nosnippet>124</a></span><span class="kw">pub enum </span>ParameterizedMath&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="doccomment">/// `round(v, to_nearest)`.
+<a href=#126 id=126 data-nosnippet>126</a>    </span>Round { to_nearest: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series },
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="doccomment">/// `clamp(v, min, max)`.
+<a href=#128 id=128 data-nosnippet>128</a>    </span>Clamp { min: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series, max: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series },
+<a href=#129 id=129 data-nosnippet>129</a>    <span class="doccomment">/// `clamp_min(v, min)`.
+<a href=#130 id=130 data-nosnippet>130</a>    </span>ClampMin { min: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series },
+<a href=#131 id=131 data-nosnippet>131</a>    <span class="doccomment">/// `clamp_max(v, max)`.
+<a href=#132 id=132 data-nosnippet>132</a>    </span>ClampMax { max: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series },
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="doccomment">/// `max_of(a, b)`: the mapped series is `a`, `other` is `b`.
+<a href=#134 id=134 data-nosnippet>134</a>    </span>MaxOf { other: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series },
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="doccomment">/// `min_of(a, b)`: the mapped series is `a`, `other` is `b`.
+<a href=#136 id=136 data-nosnippet>136</a>    </span>MinOf { other: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series },
+<a href=#137 id=137 data-nosnippet>137</a>}
+<a href=#138 id=138 data-nosnippet>138</a>
+<a href=#139 id=139 data-nosnippet>139</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; ParameterizedMath&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="kw">fn </span>parameters(<span class="self">self</span>) -&gt; Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series&gt; {
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#142 id=142 data-nosnippet>142</a>            <span class="self">Self</span>::Round { to_nearest } =&gt; <span class="macro">vec!</span>[to_nearest],
+<a href=#143 id=143 data-nosnippet>143</a>            <span class="self">Self</span>::Clamp { min, max } =&gt; <span class="macro">vec!</span>[min, max],
+<a href=#144 id=144 data-nosnippet>144</a>            <span class="self">Self</span>::ClampMin { min } =&gt; <span class="macro">vec!</span>[min],
+<a href=#145 id=145 data-nosnippet>145</a>            <span class="self">Self</span>::ClampMax { max } =&gt; <span class="macro">vec!</span>[max],
+<a href=#146 id=146 data-nosnippet>146</a>            <span class="self">Self</span>::MaxOf { other } | <span class="self">Self</span>::MinOf { other } =&gt; <span class="macro">vec!</span>[other],
+<a href=#147 id=147 data-nosnippet>147</a>        }
+<a href=#148 id=148 data-nosnippet>148</a>    }
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="doccomment">/// Binds one point's parameter values, given in argument order.
+<a href=#151 id=151 data-nosnippet>151</a>    </span><span class="kw">fn </span>at(<span class="self">self</span>, values: <span class="kw-2">&amp;</span>[f64]) -&gt; PointMath {
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#153 id=153 data-nosnippet>153</a>            <span class="self">Self</span>::Round { .. } =&gt; PointMath::Math(MathOp::Round { nearest: values[<span class="number">0</span>] }),
+<a href=#154 id=154 data-nosnippet>154</a>            <span class="self">Self</span>::Clamp { .. } =&gt; PointMath::Math(MathOp::Clamp {
+<a href=#155 id=155 data-nosnippet>155</a>                min: values[<span class="number">0</span>],
+<a href=#156 id=156 data-nosnippet>156</a>                max: values[<span class="number">1</span>],
+<a href=#157 id=157 data-nosnippet>157</a>            }),
+<a href=#158 id=158 data-nosnippet>158</a>            <span class="self">Self</span>::ClampMin { .. } =&gt; PointMath::Math(MathOp::ClampMin { min: values[<span class="number">0</span>] }),
+<a href=#159 id=159 data-nosnippet>159</a>            <span class="self">Self</span>::ClampMax { .. } =&gt; PointMath::Math(MathOp::ClampMax { max: values[<span class="number">0</span>] }),
+<a href=#160 id=160 data-nosnippet>160</a>            <span class="self">Self</span>::MaxOf { .. } =&gt; PointMath::Scalar {
+<a href=#161 id=161 data-nosnippet>161</a>                function: ScalarFunction::MaxOf,
+<a href=#162 id=162 data-nosnippet>162</a>                other: values[<span class="number">0</span>],
+<a href=#163 id=163 data-nosnippet>163</a>            },
+<a href=#164 id=164 data-nosnippet>164</a>            <span class="self">Self</span>::MinOf { .. } =&gt; PointMath::Scalar {
+<a href=#165 id=165 data-nosnippet>165</a>                function: ScalarFunction::MinOf,
+<a href=#166 id=166 data-nosnippet>166</a>                other: values[<span class="number">0</span>],
+<a href=#167 id=167 data-nosnippet>167</a>            },
+<a href=#168 id=168 data-nosnippet>168</a>        }
+<a href=#169 id=169 data-nosnippet>169</a>    }
+<a href=#170 id=170 data-nosnippet>170</a>}
+<a href=#171 id=171 data-nosnippet>171</a>
+<a href=#172 id=172 data-nosnippet>172</a><span class="doccomment">/// A parameterized math function with one point's parameters bound.
+<a href=#173 id=173 data-nosnippet>173</a></span><span class="attr">#[derive(Clone, Copy, Debug)]
+<a href=#174 id=174 data-nosnippet>174</a></span><span class="kw">enum </span>PointMath {
+<a href=#175 id=175 data-nosnippet>175</a>    Math(MathOp),
+<a href=#176 id=176 data-nosnippet>176</a>    Scalar {
+<a href=#177 id=177 data-nosnippet>177</a>        function: ScalarFunction,
+<a href=#178 id=178 data-nosnippet>178</a>        other: f64,
+<a href=#179 id=179 data-nosnippet>179</a>    },
+<a href=#180 id=180 data-nosnippet>180</a>}
+<a href=#181 id=181 data-nosnippet>181</a>
+<a href=#182 id=182 data-nosnippet>182</a><span class="kw">impl </span>PointMath {
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="doccomment">/// `None` for a `clamp` with `max &lt; min`, which has no result at that point.
+<a href=#184 id=184 data-nosnippet>184</a>    </span><span class="kw">fn </span>calculate(<span class="self">self</span>, value: f64) -&gt; <span class="prelude-ty">Option</span>&lt;f64&gt; {
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#186 id=186 data-nosnippet>186</a>            <span class="self">Self</span>::Math(op) =&gt; (!op.is_empty_clamp()).then(|| op.calculate(value)),
+<a href=#187 id=187 data-nosnippet>187</a>            <span class="self">Self</span>::Scalar { function, other } =&gt; <span class="prelude-val">Some</span>(function.apply(value, other)),
+<a href=#188 id=188 data-nosnippet>188</a>        }
+<a href=#189 id=189 data-nosnippet>189</a>    }
+<a href=#190 id=190 data-nosnippet>190</a>}
+<a href=#191 id=191 data-nosnippet>191</a>
+<a href=#192 id=192 data-nosnippet>192</a><span class="doccomment">/// Applies `function` to every float field with parameters read per point, and drops the metric
+<a href=#193 id=193 data-nosnippet>193</a>/// name, like [`crate::map::map_math`] with constant parameters; histogram samples are skipped.
+<a href=#194 id=194 data-nosnippet>194</a>///
+<a href=#195 id=195 data-nosnippet>195</a>/// A point where a parameter has no value, or where `clamp` has `max &lt; min` (Prometheus returns an
+<a href=#196 id=196 data-nosnippet>196</a>/// empty vector for that step), has no result. `None` means no point has one. Same-labelset merging
+<a href=#197 id=197 data-nosnippet>197</a>/// is left to the caller.
+<a href=#198 id=198 data-nosnippet>198</a></span><span class="kw">pub fn </span>map_math_with_parameters(
+<a href=#199 id=199 data-nosnippet>199</a>    schema: <span class="kw-2">&amp;</span>Arc&lt;SeriesSchema&gt;,
+<a href=#200 id=200 data-nosnippet>200</a>    series: <span class="kw-2">&amp;</span>Series,
+<a href=#201 id=201 data-nosnippet>201</a>    function: ParameterizedMath&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#202 id=202 data-nosnippet>202</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;Series&gt;&gt; {
+<a href=#203 id=203 data-nosnippet>203</a>    <span class="kw">let </span>time = validate_grid_series(schema, series)<span class="question-mark">?</span>;
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="kw">let </span>parameters = function.parameters();
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">let </span><span class="kw-2">mut </span>parameter_axes = Vec::with_capacity(parameters.len());
+<a href=#206 id=206 data-nosnippet>206</a>    <span class="kw">for </span>parameter <span class="kw">in </span><span class="kw-2">&amp;</span>parameters {
+<a href=#207 id=207 data-nosnippet>207</a>        parameter_axes.push(validate_scalar(schema, parameter)<span class="question-mark">?</span>);
+<a href=#208 id=208 data-nosnippet>208</a>    }
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="comment">// Points only increase, so one forward cursor per parameter suffices.
+<a href=#210 id=210 data-nosnippet>210</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>parameter_cursors: Vec&lt;<span class="kw">_</span>&gt; = parameters
+<a href=#211 id=211 data-nosnippet>211</a>        .iter()
+<a href=#212 id=212 data-nosnippet>212</a>        .map(|parameter| parameter.fields.as_slice()[<span class="number">0</span>].cursor())
+<a href=#213 id=213 data-nosnippet>213</a>        .collect();
+<a href=#214 id=214 data-nosnippet>214</a>    <span class="kw">let </span><span class="kw-2">mut </span>field_cursors: Vec&lt;<span class="kw">_</span>&gt; = series.fields.iter().map(|field| field.cursor()).collect();
+<a href=#215 id=215 data-nosnippet>215</a>    <span class="kw">let </span><span class="kw-2">mut </span>values = Vec::with_capacity(parameters.len());
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="kw">let </span><span class="kw-2">mut </span>row = Vec::with_capacity(field_cursors.len());
+<a href=#217 id=217 data-nosnippet>217</a>    <span class="kw">let </span><span class="kw-2">mut </span>builder = GridSeriesBuilder::try_new(schema.clone())<span class="question-mark">?</span>;
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="kw">for </span>(point, index) <span class="kw">in </span>time.positions() {
+<a href=#219 id=219 data-nosnippet>219</a>        values.clear();
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="kw">for </span>(axis, cursor) <span class="kw">in </span>parameter_axes.iter().zip(<span class="kw-2">&amp;mut </span>parameter_cursors) {
+<a href=#221 id=221 data-nosnippet>221</a>            <span class="kw">let </span>value = axis.row_of(point).and_then(|row| {
+<a href=#222 id=222 data-nosnippet>222</a>                float_sample(cursor.at(row).expect(<span class="string">"parameter rows only increase"</span>))
+<a href=#223 id=223 data-nosnippet>223</a>            });
+<a href=#224 id=224 data-nosnippet>224</a>            values.extend(value);
+<a href=#225 id=225 data-nosnippet>225</a>        }
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="kw">let </span>op = (values.len() == parameters.len()).then(|| function.at(<span class="kw-2">&amp;</span>values));
+<a href=#227 id=227 data-nosnippet>227</a>        row.clear();
+<a href=#228 id=228 data-nosnippet>228</a>        <span class="kw">for </span>cursor <span class="kw">in </span><span class="kw-2">&amp;mut </span>field_cursors {
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="kw">let </span>sample = cursor
+<a href=#230 id=230 data-nosnippet>230</a>                .at(index)
+<a href=#231 id=231 data-nosnippet>231</a>                .expect(<span class="string">"the axis and the fields are aligned"</span>);
+<a href=#232 id=232 data-nosnippet>232</a>            row.push(<span class="kw">match </span>(op, sample) {
+<a href=#233 id=233 data-nosnippet>233</a>                (<span class="prelude-val">Some</span>(op), SampleRef::Float(value)) =&gt; op.calculate(value),
+<a href=#234 id=234 data-nosnippet>234</a>                <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#235 id=235 data-nosnippet>235</a>            });
+<a href=#236 id=236 data-nosnippet>236</a>        }
+<a href=#237 id=237 data-nosnippet>237</a>        builder.push(point, <span class="kw-2">&amp;</span>row)<span class="question-mark">?</span>;
+<a href=#238 id=238 data-nosnippet>238</a>    }
+<a href=#239 id=239 data-nosnippet>239</a>    builder.finish(drop_metric_name(<span class="kw-2">&amp;</span>series.metric)<span class="question-mark">?</span>)
+<a href=#240 id=240 data-nosnippet>240</a>}
+<a href=#241 id=241 data-nosnippet>241</a>
+<a href=#242 id=242 data-nosnippet>242</a><span class="doccomment">/// How [`map_grid_scalar`] treats a histogram sample in the vector.
+<a href=#243 id=243 data-nosnippet>243</a></span><span class="attr">#[derive(Clone, Copy, Debug)]
+<a href=#244 id=244 data-nosnippet>244</a></span><span class="kw">enum </span>NonFloatSample {
+<a href=#245 id=245 data-nosnippet>245</a>    <span class="doccomment">/// The vector is validated as float-only.
+<a href=#246 id=246 data-nosnippet>246</a>    </span>Impossible,
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="doccomment">/// The position yields nothing and the drop is reported, as Prometheus does for an operator
+<a href=#248 id=248 data-nosnippet>248</a>    /// undefined on histograms.
+<a href=#249 id=249 data-nosnippet>249</a>    </span>Drop,
+<a href=#250 id=250 data-nosnippet>250</a>}
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a><span class="doccomment">/// Calls `calculate(left, right, vector_sample)` at each position where both operands exist.
+<a href=#253 id=253 data-nosnippet>253</a></span><span class="kw">fn </span>map_grid_scalar(
+<a href=#254 id=254 data-nosnippet>254</a>    schema: <span class="kw-2">&amp;</span>Arc&lt;SeriesSchema&gt;,
+<a href=#255 id=255 data-nosnippet>255</a>    vector: <span class="kw-2">&amp;</span>Series,
+<a href=#256 id=256 data-nosnippet>256</a>    scalar: ScalarSeriesOperand&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#257 id=257 data-nosnippet>257</a>    metric: SeriesLabels,
+<a href=#258 id=258 data-nosnippet>258</a>    non_float: NonFloatSample,
+<a href=#259 id=259 data-nosnippet>259</a>    calculate: <span class="kw">impl </span>Fn(f64, f64, f64) -&gt; <span class="prelude-ty">Option</span>&lt;f64&gt;,
+<a href=#260 id=260 data-nosnippet>260</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="prelude-ty">Option</span>&lt;Series&gt;, bool)&gt; {
+<a href=#261 id=261 data-nosnippet>261</a>    <span class="kw">let </span>vector_time = <span class="kw">match </span>non_float {
+<a href=#262 id=262 data-nosnippet>262</a>        NonFloatSample::Impossible =&gt; validate_float_series(schema, vector)<span class="question-mark">?</span>,
+<a href=#263 id=263 data-nosnippet>263</a>        NonFloatSample::Drop =&gt; validate_grid_series(schema, vector)<span class="question-mark">?</span>,
+<a href=#264 id=264 data-nosnippet>264</a>    };
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">let </span>(scalar_series, scalar_left) = <span class="kw">match </span>scalar {
+<a href=#266 id=266 data-nosnippet>266</a>        ScalarSeriesOperand::Left(s) =&gt; (s, <span class="bool-val">true</span>),
+<a href=#267 id=267 data-nosnippet>267</a>        ScalarSeriesOperand::Right(s) =&gt; (s, <span class="bool-val">false</span>),
+<a href=#268 id=268 data-nosnippet>268</a>    };
+<a href=#269 id=269 data-nosnippet>269</a>    <span class="kw">let </span>scalar_time = validate_scalar(schema, scalar_series)<span class="question-mark">?</span>;
+<a href=#270 id=270 data-nosnippet>270</a>    <span class="kw">let </span><span class="kw-2">mut </span>builder = GridSeriesBuilder::try_new(schema.clone())<span class="question-mark">?</span>;
+<a href=#271 id=271 data-nosnippet>271</a>    <span class="comment">// Each operand reads its own row from the shared run; positions only one side carries yield
+<a href=#272 id=272 data-nosnippet>272</a>    // nothing, so they are skipped.
+<a href=#273 id=273 data-nosnippet>273</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>scalar_samples = scalar_series.fields.as_slice()[<span class="number">0</span>].cursor();
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">let </span><span class="kw-2">mut </span>field_samples = vector
+<a href=#275 id=275 data-nosnippet>275</a>        .fields
+<a href=#276 id=276 data-nosnippet>276</a>        .iter()
+<a href=#277 id=277 data-nosnippet>277</a>        .map(|field| field.cursor())
+<a href=#278 id=278 data-nosnippet>278</a>        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+<a href=#279 id=279 data-nosnippet>279</a>    <span class="kw">let </span><span class="kw-2">mut </span>row = Vec::with_capacity(field_samples.len());
+<a href=#280 id=280 data-nosnippet>280</a>    <span class="kw">let </span><span class="kw-2">mut </span>dropped_histogram = <span class="bool-val">false</span>;
+<a href=#281 id=281 data-nosnippet>281</a>    <span class="kw">for </span>pair <span class="kw">in </span>vector_time.intersect_runs(scalar_time) {
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">for </span>offset <span class="kw">in </span><span class="number">0</span>..pair.len {
+<a href=#283 id=283 data-nosnippet>283</a>            <span class="kw">let </span>scalar = float_sample(
+<a href=#284 id=284 data-nosnippet>284</a>                scalar_samples
+<a href=#285 id=285 data-nosnippet>285</a>                    .at(pair.other_row + offset)
+<a href=#286 id=286 data-nosnippet>286</a>                    .expect(<span class="string">"the shared run lies inside the scalar axis"</span>),
+<a href=#287 id=287 data-nosnippet>287</a>            );
+<a href=#288 id=288 data-nosnippet>288</a>            row.clear();
+<a href=#289 id=289 data-nosnippet>289</a>            <span class="kw">for </span>field <span class="kw">in </span><span class="kw-2">&amp;mut </span>field_samples {
+<a href=#290 id=290 data-nosnippet>290</a>                <span class="kw">let </span>sample = <span class="kw">match </span>field
+<a href=#291 id=291 data-nosnippet>291</a>                    .at(pair.row + offset)
+<a href=#292 id=292 data-nosnippet>292</a>                    .expect(<span class="string">"the shared run lies inside the vector axis"</span>)
+<a href=#293 id=293 data-nosnippet>293</a>                {
+<a href=#294 id=294 data-nosnippet>294</a>                    SampleRef::Float(value) =&gt; <span class="prelude-val">Some</span>(value),
+<a href=#295 id=295 data-nosnippet>295</a>                    SampleRef::Missing =&gt; <span class="prelude-val">None</span>,
+<a href=#296 id=296 data-nosnippet>296</a>                    SampleRef::Histogram(<span class="kw">_</span>) =&gt; {
+<a href=#297 id=297 data-nosnippet>297</a>                        <span class="kw">match </span>non_float {
+<a href=#298 id=298 data-nosnippet>298</a>                            NonFloatSample::Drop =&gt; dropped_histogram = <span class="bool-val">true</span>,
+<a href=#299 id=299 data-nosnippet>299</a>                            NonFloatSample::Impossible =&gt; {
+<a href=#300 id=300 data-nosnippet>300</a>                                <span class="macro">unreachable!</span>(<span class="string">"validated as float"</span>)
+<a href=#301 id=301 data-nosnippet>301</a>                            }
+<a href=#302 id=302 data-nosnippet>302</a>                        }
+<a href=#303 id=303 data-nosnippet>303</a>                        <span class="prelude-val">None
+<a href=#304 id=304 data-nosnippet>304</a>                    </span>}
+<a href=#305 id=305 data-nosnippet>305</a>                };
+<a href=#306 id=306 data-nosnippet>306</a>                row.push(scalar.zip(sample).and_then(|(scalar, sample)| {
+<a href=#307 id=307 data-nosnippet>307</a>                    <span class="kw">if </span>scalar_left {
+<a href=#308 id=308 data-nosnippet>308</a>                        calculate(scalar, sample, sample)
+<a href=#309 id=309 data-nosnippet>309</a>                    } <span class="kw">else </span>{
+<a href=#310 id=310 data-nosnippet>310</a>                        calculate(sample, scalar, sample)
+<a href=#311 id=311 data-nosnippet>311</a>                    }
+<a href=#312 id=312 data-nosnippet>312</a>                }));
+<a href=#313 id=313 data-nosnippet>313</a>            }
+<a href=#314 id=314 data-nosnippet>314</a>            builder.push(pair.position + offset, <span class="kw-2">&amp;</span>row)<span class="question-mark">?</span>;
+<a href=#315 id=315 data-nosnippet>315</a>        }
+<a href=#316 id=316 data-nosnippet>316</a>    }
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="prelude-val">Ok</span>((builder.finish(metric)<span class="question-mark">?</span>, dropped_histogram))
+<a href=#318 id=318 data-nosnippet>318</a>}
+<a href=#319 id=319 data-nosnippet>319</a>
+<a href=#320 id=320 data-nosnippet>320</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>validate_scalar&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#321 id=321 data-nosnippet>321</a>    schema: <span class="kw-2">&amp;</span>SeriesSchema,
+<a href=#322 id=322 data-nosnippet>322</a>    scalar: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>Series,
+<a href=#323 id=323 data-nosnippet>323</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>TimeAxis&gt; {
+<a href=#324 id=324 data-nosnippet>324</a>    <span class="kw">if </span>scalar.metric.name().is_some() || !scalar.metric.tags().is_empty() {
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(DataFusionError::Execution(
+<a href=#326 id=326 data-nosnippet>326</a>            <span class="string">"grid scalar must be unlabelled"</span>.into(),
+<a href=#327 id=327 data-nosnippet>327</a>        ));
+<a href=#328 id=328 data-nosnippet>328</a>    }
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="kw">let </span>schema = SeriesSchema {
+<a href=#330 id=330 data-nosnippet>330</a>        fields: <span class="macro">vec!</span>[FieldSpec {
+<a href=#331 id=331 data-nosnippet>331</a>            name: <span class="string">"scalar"</span>.into(),
+<a href=#332 id=332 data-nosnippet>332</a>        }]
+<a href=#333 id=333 data-nosnippet>333</a>        .into(),
+<a href=#334 id=334 data-nosnippet>334</a>        eval_grid: schema.eval_grid.clone(),
+<a href=#335 id=335 data-nosnippet>335</a>    };
+<a href=#336 id=336 data-nosnippet>336</a>    validate_float_series(<span class="kw-2">&amp;</span>schema, scalar)
+<a href=#337 id=337 data-nosnippet>337</a>}
+</code></pre></div></section></main></body></html>

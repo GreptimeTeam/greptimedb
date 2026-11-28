@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_override","deep_merge","default_entries","entry_path","group_entries","invalid_default","is_index_like","json_to_value","merge","merge_at","nest","not_a_table","overrides_conflict","single_tag","take_entries"],"struct":["TaggedSeqEnvSource","Target"]};

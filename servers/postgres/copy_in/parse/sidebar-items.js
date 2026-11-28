@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CopyInScan"],"fn":["expect_ident","parse_column_list","parse_object_name","parse_option_list","scan_copy_from_stdin"],"struct":["RawCopyFromStdin","Tokens"]};

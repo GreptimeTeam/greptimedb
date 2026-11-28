@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MERGE_FAN_IN"],"enum":["SeriesIndexCommand"],"fn":["pick_index_merge","spawn_series_index_tasks"],"struct":["IndexMerge","MergeRank","SeriesIndexTask","SeriesIndexTaskState"]};

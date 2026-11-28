@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["METRIC_NAME","RAW_SERIES_ORDERING_KEY"],"fn":["explicit_label_frame_ordering","normalize_raw_union","plan_fused_series","plan_raw_series_source","series_scan","weakest_union_ordering"],"struct":["PromExtensionPlanner"]};

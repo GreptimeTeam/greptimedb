@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["conflicting_points","prepare_metrics","scalar_attribute_names"],"struct":["MetricWriter","PreparedMetrics","PreparedPoint"]};

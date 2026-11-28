@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["index_target_data_type"],"mod":["builder"],"struct":["InvertedIndexApplier","InvertedIndexApplyMetrics","SstApplyPlan"],"type":["InvertedIndexApplierRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SimplifiedPartitionExpr"],"fn":["partition_column_types","physical_regions_disjoint","simplify_metric_partition_expr","simplify_metric_partitions"],"struct":["DistExtensionPlanner","MergeSortExtensionPlanner","TableScanExtractor"]};

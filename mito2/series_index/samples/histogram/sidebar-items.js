@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CHILD_FRAMING_BOUND","DECODED_VALUE_BYTES","ENCODING","HEADER_BOUND","ROW_FRAMING_BOUND","VALUE_BOUND"],"enum":["Child","Scalar","Values"],"fn":["check_array_sample_sizes","check_sample_size","decode","decoded_bytes","encode","layout","list_items","list_value_count","put_nullable","row_bytes","take_nullable"],"struct":["ChunkBound"]};

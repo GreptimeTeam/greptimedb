@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SeriesChunk"],"fn":["checked_error","checked_series_stream","series_execution_plan"],"struct":["CheckedSeries","HandedSeriesChunk","SeriesCharge"],"trait":["SeriesExecutionPlan"],"type":["SendableSeriesStream"]};

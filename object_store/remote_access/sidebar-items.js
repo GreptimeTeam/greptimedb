@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["HostPattern"],"fn":["parse_allowed_host"],"struct":["AllowedHost","AllowlistTransport","HostAllowlist","RemoteStorageAccess"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["append_unique","promql_annotation_collector"],"static":["PROMQL_ANNOTATION_REGISTRY"],"struct":["PromqlAnnotationCollector","PromqlAnnotationState"],"type":["PromqlAnnotationStateRef"]};

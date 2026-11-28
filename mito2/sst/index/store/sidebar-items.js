@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FETCH_CONCURRENCY"],"enum":["IndexWriteBuffer"],"struct":["CounterGuard","InstrumentedAsyncRead","InstrumentedAsyncWrite","InstrumentedRangeReader","InstrumentedStore"],"type":["IndexObjectWriter"]};

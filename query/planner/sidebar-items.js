@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["contains_native_fused","is_regionless_fused_chain","is_regionless_fused_plan","normalize_field_access_after_subscript","publish_legacy_schema","publishes_columns","publishes_series_frame","remote_native_raw_plan_supported","strips_only_tsid","unwrap_dictionary"],"struct":["DfLogicalPlanner"],"trait":["LogicalPlanner"]};

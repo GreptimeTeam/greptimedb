@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["init_factory","new_table_schema_cache"],"type":["TableSchemaCache","TableSchemaCacheRef"]};

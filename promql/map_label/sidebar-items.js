@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Change"],"fn":["expand","label_join","label_replace","rewrite_all","set_label"],"static":["GROUP_NAME"],"struct":["LabelRewrite"]};

@@ -1,0 +1,28 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Rewrites the matched `AVG(value * weight)` or `SUM(value * weight)` aggregate into a join of two partial aggregates whose projection reconstructs the payload function from them."><title>rewrite_payload in query::optimizer::factorized_join_agg - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="query" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">rewrite_payload</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../query/index.html">query</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In query::<wbr>optimizer::<wbr>factorized_<wbr>join_<wbr>agg</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">query</a>::<wbr><a href="../index.html">optimizer</a>::<wbr><a href="index.html">factorized_join_agg</a></div><h1>Function <span class="fn">rewrite_<wbr>payload</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/query/optimizer/factorized_join_agg.rs.html#138-250">Source</a> </span></div><pre class="rust item-decl"><code>fn rewrite_payload(
+    agg: &amp;Aggregate,
+    matched: &amp;<a class="struct" href="struct.PayloadMatch.html" title="struct query::optimizer::factorized_join_agg::PayloadMatch">PayloadMatch</a>&lt;'_&gt;,
+    function: <a class="enum" href="enum.PayloadFunction.html" title="enum query::optimizer::factorized_join_agg::PayloadFunction">PayloadFunction</a>,
+    config: &amp;dyn OptimizerConfig,
+) -&gt; Result&lt;Transformed&lt;LogicalPlan&gt;&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Rewrites the matched <code>AVG(value * weight)</code> or <code>SUM(value * weight)</code>
+aggregate into a join of two partial aggregates whose projection
+reconstructs the payload function from them.</p>
+<p>The projection computes, from the branch <code>nv</code>/<code>sv</code> (fact) and <code>nw</code>/<code>sw</code>
+(dim) outputs:</p>
+<div class="example-wrap"><pre class="language-text"><code>no_products = (nv = 0) OR (nw = 0)
+total       = CASE WHEN sv * sw = 0.0 THEN 0.0 ELSE sv * sw END
+AVG         = CASE WHEN no_products THEN NULL ELSE total / (CAST(nv AS Float64) * CAST(nw AS Float64)) END
+SUM         = CASE WHEN no_products THEN NULL ELSE total END</code></pre></div>
+<p>Both reconstructions return <code>NULL</code> for a group without a single non-null
+product, which is exactly when either payload count is zero. <code>AVG</code> over an
+empty pair set is <code>NULL</code> and so is <code>SUM</code>. Counts are never multiplied as
+<code>Int64</code>: <code>AVG</code> casts each count before multiplication, and <code>SUM</code> does not
+compute a count product.</p>
+<p><code>total</code> normalizes a zero numerator to <code>+0.0</code> because the pairwise numerator
+it must match can only cancel to <code>+0.0</code>: for facts <code>[1, -1]</code> with weight
+<code>[-1]</code>, the baseline sums the products <code>-1</code> and <code>+1</code> into <code>+0.0</code>, while
+<code>SUM(value)</code> is <code>+0.0</code>, <code>SUM(weight)</code> is <code>-1.0</code> and their naive product is
+<code>-0.0</code>, which would divide into <code>-0.0</code> instead of the baseline’s <code>+0.0</code>. The
+normalization is free and shape-level: it removes that mismatch without
+looking at any data. Every other difference between the factorized and the
+pairwise result is the approximation the module documentation accepts.</p>
+</div></details></section></div></main></body></html>

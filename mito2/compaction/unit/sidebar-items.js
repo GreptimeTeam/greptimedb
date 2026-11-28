@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["max_row_group_bytes","output_memory_bytes","root","widest_rows_bytes"],"struct":["CompactionUnit","RowGroupShape"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HEX_LIMIT"],"enum":["IdentityEncoding"],"fn":["decode_series_id","decode_series_identity"],"struct":["ExactSeriesKey","Hex"]};

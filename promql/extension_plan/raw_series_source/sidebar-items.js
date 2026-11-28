@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ORDERING","WIRE_VERSION"],"fn":["frame_schema","is_series_scan","pass_through_frame","series_schema"],"struct":["DeclaredSeries","RawSeriesSource","RawSeriesSourceExec"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLOCK_GUARD","GET_TIMEOUT","LEASE","QUEUE_CAPACITY","RENEW_INTERVAL"],"enum":["Admission","AuthorityMutation","AuthorityPrecondition","AuthorityStatus","SnapshotFloor","TakeoverOutcome"],"fn":["closed","invalid_snapshot","rejected","timeout"],"mod":["writer"],"struct":["Authority","Control","FencingToken","Inner"]};

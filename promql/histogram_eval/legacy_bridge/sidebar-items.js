@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add","bucket_counts","bucket_total","combine","divide_by","field_divided","field_scaled","float_histogram","fraction_with_info","legacy_histogram","legacy_spans","nan_observation_info","quantile_with_info","scale","span_columns","steps_backwards","sub"],"struct":["LegacyView"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Sample"],"fn":["edges","evaluate","function_name","has_contradictory_reset_hints","histogram_rate","last_two","merged","record_histogram_flavor_warning","record_histogram_pair_annotations","record_info","record_mixed_last_two","record_warning"],"type":["Histograms"]};

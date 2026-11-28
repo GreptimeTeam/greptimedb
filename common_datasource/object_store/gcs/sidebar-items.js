@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CREDENTIAL","ENDPOINT","SCOPE"],"enum":["CredentialFile"],"fn":["build_gcs_backend","is_supported_in_gcs","service_account_credential"],"struct":["ServiceAccountKey"]};

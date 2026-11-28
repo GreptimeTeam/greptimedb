@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["field_id","invalid","validate_sample_schema","validate_series_schema"],"struct":["SamplesBatch","SamplesReadRequest","SeriesFormats","SeriesReadRequest"],"trait":["FormatReader","FormatWriter","SamplesFormat","SamplesFormatReader","SeriesIndexFormat"]};

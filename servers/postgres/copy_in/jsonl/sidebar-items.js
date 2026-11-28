@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TOP_LEVEL_ARRAY_HINT"],"fn":["build_jsonl_codec","decode_error","is_json_whitespace"],"struct":["JsonlCodec","JsonlRecordParser"]};

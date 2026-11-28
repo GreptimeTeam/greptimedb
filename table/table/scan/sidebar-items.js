@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REGION_SCAN_EXEC_NAME"],"fn":["assign_partition_ranges","same_label_source"],"struct":["RegionScanExec","SeriesScanExec","StreamWithMetricWrapper"]};

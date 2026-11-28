@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["record_failure"],"struct":["TrackedBatch","TrackedWrite"]};

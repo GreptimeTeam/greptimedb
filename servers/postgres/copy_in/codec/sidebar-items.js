@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CopyFormat"],"fn":["check_arrow_column_type"],"trait":["RecordParser","TableBoundCodec"],"type":["ParsedRow"]};

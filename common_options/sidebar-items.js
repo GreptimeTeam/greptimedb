@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["datanode","memory","plugin_options"]};

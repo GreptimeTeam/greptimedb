@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_csv_codec","decode_error","parse_pg_bool"],"struct":["CsvCodec","CsvRecordParser"]};

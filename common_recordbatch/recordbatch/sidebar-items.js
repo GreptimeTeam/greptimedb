@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fixed_width_slice_memory_size","flat_slice_memory_size","logical_column_memory_size","merge_record_batches","offset_slice_memory_size"],"struct":["RecordBatch"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["NonFloatSample","ParameterizedMath","PointMath","ScalarFunction","ScalarSeriesOperand"],"fn":["map_arithmetic_series","map_compare_series","map_grid_scalar","map_math_with_parameters","validate_scalar"]};

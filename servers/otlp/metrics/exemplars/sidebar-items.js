@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["append","value"],"struct":["RowExemplars"]};

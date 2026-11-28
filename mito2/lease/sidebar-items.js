@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["lease_nanos"],"static":["LEASE_EPOCH"],"struct":["Deadline","GrantedLease","GrantedLeases","NodeLease"]};

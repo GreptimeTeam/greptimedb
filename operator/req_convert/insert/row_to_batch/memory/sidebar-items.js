@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ARRAY_OVERHEAD","VALUE_SCRATCH_BYTES","VIEW_BLOCK_BYTES"],"enum":["PathComponent"],"fn":["array_bytes","estimated_record_batch_bytes"],"struct":["ValueSize"]};

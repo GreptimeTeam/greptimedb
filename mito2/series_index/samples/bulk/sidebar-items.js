@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["NarthexBulkColumn"],"fn":["histogram_bounds"],"struct":["NarthexBulkBlock","NarthexBulkPart"]};

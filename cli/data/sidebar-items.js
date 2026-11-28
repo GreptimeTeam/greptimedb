@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COPY_PATH_PLACEHOLDER"],"enum":["DataCommand"],"fn":["collect_schema_job_results","default_database"],"mod":["export","export_v2","import","import_v2","path","progress","schema_export","snapshot_storage","sql","storage_export"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["multiple_value_stream"],"struct":["CollectingState"],"type":["Upstream"]};

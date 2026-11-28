@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_histogram_extension_type"],"struct":["HistogramExtensionType"]};

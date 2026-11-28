@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_LIMIT","COLUMN_STORED_LIMIT","DICTIONARY","INTEGER","MODERN_FRAME_MAGIC","RELEASED_OUTPUT_BYTES"],"enum":["Compression"],"fn":["checksum","compress","decode_dictionary","decode_integers","decompress","encode_dictionary","encode_integers","put_string","put_u32","put_u64","put_varint"],"struct":["Cursor","Dictionary","PayloadDecoder"]};

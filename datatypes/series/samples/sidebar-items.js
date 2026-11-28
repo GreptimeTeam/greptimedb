@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DenseSamplesRef","Fields","SampleRef","SampleStorage"],"fn":["invalid"],"struct":["FieldSpec","HistogramSamples","MixedSamples","RowCursor","Samples","SamplesIter","Series","SeriesFields","SeriesSchema"]};

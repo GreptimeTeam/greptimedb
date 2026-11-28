@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["narthex_series_entry"],"struct":["SeriesIndexFileHandle","SeriesIndexFileHandleInner","SeriesIndexVersion","SeriesIndexVersionControl"]};

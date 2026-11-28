@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_fs_object_store"],"macro":[["gen_object_store_builder",1],["validate_backend",1],["wrap_with_clap_prefix",1]],"struct":["ObjectStoreConfig","PrefixedAzblobConnection","PrefixedGcsConnection","PrefixedOssConnection","PrefixedS3Connection"],"trait":["FieldValidator","IntoField"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["discard_pending_tails","signature"],"struct":["DiscardPendingTailsFunction"]};

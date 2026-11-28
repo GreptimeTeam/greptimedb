@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["index_needs_rebuild","needs_background_indexes","select_whole_region_builds","validate_rebuild_plan"],"struct":["IndexBuildSnapshot"]};

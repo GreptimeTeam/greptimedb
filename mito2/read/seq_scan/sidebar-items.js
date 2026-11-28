@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FlatReadMode"],"fn":["build_flat_sources","compaction_input_channel_size","get_scanner_type"],"struct":["SeqScan"]};

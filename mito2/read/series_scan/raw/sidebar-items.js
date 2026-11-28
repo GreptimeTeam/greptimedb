@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PREDICATE_BATCH_ROWS"],"fn":["boxed","chunk","continues_series","from_stream","invalid","make_stream","primary_key_at_row","with_series_labels"],"struct":["IncomingRecord","RawStream"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Operand","RestrictedOp"],"fn":["col","plan_physical_expr"],"struct":["PartitionExpr"]};

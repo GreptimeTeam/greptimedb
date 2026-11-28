@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CATALOG","CLIENT","ELAPSED_TIME","FRONTEND","ID","QUERY","SCHEMAS","START_TIMESTAMP"],"fn":["make_process_list"],"struct":["InformationSchemaProcessList"]};

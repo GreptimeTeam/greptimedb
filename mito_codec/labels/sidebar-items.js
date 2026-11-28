@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Layout"],"fn":["invalid_binding_error"],"struct":["BoundLabel","KeyColumn","KeyLayout","PrimaryKeyLabelDecoder"]};

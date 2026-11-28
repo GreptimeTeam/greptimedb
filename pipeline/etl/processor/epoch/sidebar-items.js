@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROCESSOR_EPOCH","RESOLUTION_NAME"],"enum":["Resolution"],"struct":["EpochProcessor"]};

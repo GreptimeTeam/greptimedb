@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["json_inverted_targets"],"struct":["InvertedPlan"]};

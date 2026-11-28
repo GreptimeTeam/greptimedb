@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ErrorKind","TextNumber"],"fn":["parse_decimal128","parse_digits","parse_number_array","parse_number_batch","parse_number_columns","parse_uint64"]};

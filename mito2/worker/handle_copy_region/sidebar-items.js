@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["file_descriptors_for_meta","prepare_narthex_copy","remap_copied_file_meta"],"struct":["CopyRegionGuard","CopyRegionLock","CopyRegionLocks"]};

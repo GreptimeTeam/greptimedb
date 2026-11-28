@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["calc_trend_value","double_exponential_smoothing_impl"],"struct":["DoubleExponentialSmoothing","FactorIterator"]};

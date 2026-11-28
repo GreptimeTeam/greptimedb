@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The `jsonl` format: newline-delimited JSON objects, one per record."><title>servers::postgres::copy_in::jsonl - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="servers" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module jsonl</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../servers/index.html">servers</a><span class="version">1.4.0-alpha.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module jsonl</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In servers::<wbr>postgres::<wbr>copy_<wbr>in</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">servers</a>::<wbr><a href="../../index.html">postgres</a>::<wbr><a href="../index.html">copy_in</a></div><h1>Module <span>jsonl</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/servers/postgres/copy_in/jsonl.rs.html#15-619">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The <code>jsonl</code> format: newline-delimited JSON objects, one per record.</p>
+<p>Parsing and typed conversion both reuse arrow-json’s incremental
+<a href="arrow::json::reader::Decoder"><code>Decoder</code></a> — the engine behind
+GreptimeDB’s file-based <code>COPY ... FROM 'file.json'</code> (see
+<code>common-datasource</code>‘s <code>json</code> file format) — so both COPY routes
+accept identical data. The decoder splits records (objects may span
+chunk boundaries; pretty-printed multi-line objects and concatenated
+<code>{...}{...}</code> streams are accepted too) and converts fields against
+the targeted columns’ schema in one pass; a record is one JSON
+object whose keys address the columns <strong>by name</strong> (the COPY column
+list fixes the target order, as with csv).</p>
+<p>What the engine actually accepts, so the rules match the behavior
+rather than a strict reading of the column types:</p>
+<ul>
+<li>Numeric columns take JSON numbers <strong>or numeric strings</strong>
+(<code>"val": 1.5</code> and <code>"val": "1.5"</code> both decode); booleans must be
+JSON booleans (<code>"b": "true"</code> is rejected).</li>
+<li>Timestamps are date-time strings (RFC 3339; offset-free ones parse
+in the session timezone, like SQL INSERT) <strong>or numbers</strong>, taken as
+the column’s time unit verbatim: <code>"ts": 1704067200000</code> is an epoch
+in milliseconds for a millisecond column — there is no unit
+conversion, and <code>"ts": 1704067200</code> means 1970-01-20 in that column.
+A quoted number is parsed as a date-time string and so fails.</li>
+<li>Keys outside the column list are ignored, so a misspelled key
+(<code>"hots"</code>) yields NULL in its column instead of an error, and
+records may carry more keys than a column subset selects.
+(arrow-json’s strict mode would change the first half of that but
+also reject the second, so it stays off.)</li>
+<li>Absent keys become NULL; a NULL in a non-nullable column (such as
+the time index) is rejected with a message naming the column.</li>
+<li>Column types arrow-json cannot decode (JSON, Binary) are rejected
+up front.</li>
+</ul>
+<p>The format is table-bound like <code>csv</code> and takes no options; the
+file-based json format’s layout options are writer-side only, and
+arrow-json’s reader parses date-time strings natively (RFC 3339,
+with the schema’s timezone for offset-free strings). <code>json</code> is an
+alias for <code>jsonl</code>, matching the file-based format’s name; it still
+means newline-delimited objects — a top-level JSON array <code>[{...}]</code>
+is rejected with a specific hint.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.JsonlCodec.html" title="struct servers::postgres::copy_in::jsonl::JsonlCodec">Jsonl<wbr>Codec</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The validated <code>jsonl</code> format configuration.</dd><dt><a class="struct" href="struct.JsonlRecordParser.html" title="struct servers::postgres::copy_in::jsonl::JsonlRecordParser">Jsonl<wbr>Record<wbr>Parser</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Incremental parser backed by arrow-json’s decoder. Unlike
+arrow-csv, a record finalizes as soon as its closing <code>}</code> is parsed,
+and a single <code>flush</code> drains and clears the buffered tape — so there
+is no EOF signal to send at <code>CopyDone</code>.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.TOP_LEVEL_ARRAY_HINT.html" title="constant servers::postgres::copy_in::jsonl::TOP_LEVEL_ARRAY_HINT">TOP_<wbr>LEVEL_<wbr>ARRAY_<wbr>HINT</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.build_jsonl_codec.html" title="fn servers::postgres::copy_in::jsonl::build_jsonl_codec">build_<wbr>jsonl_<wbr>codec</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Builds the codec from the parsed options.</dd><dt><a class="fn" href="fn.decode_error.html" title="fn servers::postgres::copy_in::jsonl::decode_error">decode_<wbr>error</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Maps arrow-json errors to PostgreSQL’s COPY error classes, the
+way <code>csv.rs</code> does. A field value that does not decode against its
+column type is an invalid text representation (22P02): arrow-json
+wraps those as <code>JsonError("whilst decoding field '&lt;name&gt;': …")</code> (see
+its <code>struct_array.rs</code>), since it has no separate <code>ParseError</code> for
+them. JSON syntax errors (truncated records, unexpected tokens) and
+anything else is bad copy data (22P04) — never an internal <code>XX000</code>.</dd><dt><a class="fn" href="fn.is_json_whitespace.html" title="fn servers::postgres::copy_in::jsonl::is_json_whitespace">is_<wbr>json_<wbr>whitespace</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>arrow-json’s whitespace set, which <code>Decoder::decode</code> skips freely.</dd></dl></section></div></main></body></html>

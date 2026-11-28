@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TARGET_BATCH_BYTES"],"fn":["estimate_batch_size","estimate_row_width","row_group_statistics","widest_row_group_statistic"]};

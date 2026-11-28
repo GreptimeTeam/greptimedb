@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_SYMLINK_HOPS"],"fn":["entry_key","is_relevant_event","rearm_watches","resolve_one","resolve_watch_targets","warn_if_root"],"struct":["FileWatcherBuilder","FileWatcherConfig","WatchTargets"]};

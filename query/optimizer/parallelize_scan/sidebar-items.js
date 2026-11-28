@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["assign_partition_ranges","assign_partition_ranges_by_time"],"struct":["ParallelizeScan"]};

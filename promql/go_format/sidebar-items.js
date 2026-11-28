@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["format_float_f","format_float_g","format_open_metrics_float","positional","shortest","special"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE","DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY"],"fn":["group_create_logical_region_requests_by_physical_region_id","is_metric_name_col","is_tsid_col","parse_physical_region_id","region_options_for_metadata_region","table_id_col","tsid_col"],"mod":["extract_new_columns"]};

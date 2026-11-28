@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INDEX_CONTENT_TYPE","INDEX_METADATA_TYPE"],"mod":["bloom_filter_index","inverted_index","result_cache"],"struct":["IndexCache","IndexCacheMetrics","IndexPageReader"]};

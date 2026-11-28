@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IDENTIFYING_LABELS","KEPT_POINT_BYTES","PATTERN_BYTES","SIGNATURE_BYTES"],"fn":["add_data_labels","column_bytes","effective_name_matchers","identifying_values","info","info_inner","info_with_reservation","result_set_bytes","row_bytes"],"struct":["Choice","FirstError","InfoSelector","NameMatcher"],"type":["Row","Signature"]};

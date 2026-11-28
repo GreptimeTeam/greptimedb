@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_LISTED_OFFENDERS"],"fn":["collect_foreign_files","describe_offenders","ensure_region_owns_its_files"],"struct":["RemapManifest","RemapResult","RemapStats"]};

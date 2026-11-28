@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ArtifactFormat","SamplesLifetime"],"fn":["samples_cover_file"],"struct":["ArtifactMetadata","ArtifactObject","SamplesEntry","SamplesFileHandle","SamplesFileInner"]};

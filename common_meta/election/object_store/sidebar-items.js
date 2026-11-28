@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HEAD_FORMAT_VERSION"],"enum":["AuthorityMutation","AuthorityPrecondition","AuthorityStatus","TakeoverOutcome"],"mod":["authority","head","probe","store"],"struct":["Authority","AuthorityHead","AuthorityState","FencingToken","HeadStore","NodeIdentity"]};

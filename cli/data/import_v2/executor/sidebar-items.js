@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["classify","parse_ddl"],"struct":["DdlExecutor","DdlStatement","LogicalBatch","LogicalTable"]};

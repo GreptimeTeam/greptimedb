@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_GLOBAL_TOPK_FETCH"],"fn":["filtered_scan_below_topk","one_heap_below_merge"],"struct":["GlobalTopKOverFilteredScan"]};

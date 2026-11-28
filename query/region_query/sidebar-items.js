@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["RegionQueryTarget","RegionReadLimiter"],"trait":["RegionQueryHandler","RegionQueryHandlerFactory"],"type":["RegionQueryHandlerFactoryRef","RegionQueryHandlerRef"]};
