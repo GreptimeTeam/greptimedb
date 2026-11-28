@@ -209,7 +209,9 @@ where
         Ok(cached.clone())
     }
 
-    async fn puffin_reader(&self) -> Result<PuffinFileReader<F::Reader>> {
+    /// Opens this immutable file for multiple raw blob reads using its footer metadata.
+    /// The caller handles compression when reading raw blobs.
+    pub async fn puffin_reader(&self) -> Result<PuffinFileReader<F::Reader>> {
         let mut reader = self.puffin_file_accessor.reader(&self.handle).await?;
         if let Some(file_size_hint) = self.file_size_hint {
             reader.with_file_size_hint(file_size_hint);

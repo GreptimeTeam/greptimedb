@@ -75,20 +75,22 @@ impl Default for KllOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct MgOptions {
-    /// Maximum number of counters, greater than zero; defaults to 64.
-    #[serde(deserialize_with = "deserialize_mg_max_counters")]
-    pub max_counters: u32,
+    /// Sketch capacity, a power of two from 8 through 2^30.
+    /// The sketch retains at most `3 * capacity / 4` distinct items.
+    /// The default capacity of 64 allows up to 48 items.
+    #[serde(deserialize_with = "deserialize_mg_capacity")]
+    pub capacity: u32,
 }
 
 impl MgOptions {
     /// Validates the supported algorithm parameter range.
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.max_counters > 0,
+            self.capacity.is_power_of_two() && (8..=1 << 30).contains(&self.capacity),
             InvalidSketchOptionSnafu {
                 msg: format!(
-                    "MG max_counters must be positive, got {}",
-                    self.max_counters
+                    "MG capacity must be a power of two between 8 and 2^30, got {}",
+                    self.capacity
                 )
             }
         );
@@ -98,7 +100,7 @@ impl MgOptions {
 
 impl Default for MgOptions {
     fn default() -> Self {
-        Self { max_counters: 64 }
+        Self { capacity: 64 }
     }
 }
 
@@ -122,14 +124,14 @@ fn deserialize_kll_capacity<'de, D: Deserializer<'de>>(
     Ok(capacity)
 }
 
-fn deserialize_mg_max_counters<'de, D: Deserializer<'de>>(
+fn deserialize_mg_capacity<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<u32, D::Error> {
-    let max_counters = u32::deserialize(deserializer)?;
-    MgOptions { max_counters }
+    let capacity = u32::deserialize(deserializer)?;
+    MgOptions { capacity }
         .validate()
         .map_err(serde::de::Error::custom)?;
-    Ok(max_counters)
+    Ok(capacity)
 }
 
 #[cfg(test)]
@@ -174,8 +176,12 @@ mod tests {
                     .is_err()
             );
         }
-        assert!(serde_json::from_str::<MgOptions>(r#"{"max-counters":0}"#).is_err());
-        assert!(serde_json::from_str::<MgOptions>(r#"{"max-counters":4294967296}"#).is_err());
+        for size in [0u32, 7, 9, 1 << 31] {
+            assert!(
+                serde_json::from_str::<MgOptions>(&format!(r#"{{"capacity":{size}}}"#)).is_err()
+            );
+        }
+        assert!(serde_json::from_str::<MgOptions>(r#"{"capacity":4294967296}"#).is_err());
         for capacity in [8, u16::MAX] {
             let options = KllOptions { capacity };
             assert_eq!(
@@ -184,10 +190,8 @@ mod tests {
                     .unwrap()
             );
         }
-        for capacity in [1, u32::MAX] {
-            let options = MgOptions {
-                max_counters: capacity,
-            };
+        for capacity in [8, 1 << 30] {
+            let options = MgOptions { capacity };
             assert_eq!(
                 options,
                 serde_json::from_str::<MgOptions>(&serde_json::to_string(&options).unwrap())
@@ -212,7 +216,7 @@ mod tests {
         let field = Field::try_from(&column).unwrap();
         assert_eq!(field.metadata()[HLL_KEY], r#"{"precision":10}"#);
         assert_eq!(field.metadata()[KLL_KEY], r#"{"capacity":64}"#);
-        assert_eq!(field.metadata()[MG_KEY], r#"{"max-counters":64}"#);
+        assert_eq!(field.metadata()[MG_KEY], r#"{"capacity":64}"#);
         assert_eq!(column, ColumnSchema::try_from(&field).unwrap());
         assert_eq!(
             column,
@@ -225,11 +229,7 @@ mod tests {
                 .is_err()
         );
         assert!(column.set_kll_options(&KllOptions { capacity: 7 }).is_err());
-        assert!(
-            column
-                .set_mg_options(&MgOptions { max_counters: 0 })
-                .is_err()
-        );
+        assert!(column.set_mg_options(&MgOptions { capacity: 0 }).is_err());
         assert_eq!(before, column);
         column
             .set_hll_options(&HllOptions { precision: 12 })
@@ -237,9 +237,7 @@ mod tests {
         column
             .set_kll_options(&KllOptions { capacity: 128 })
             .unwrap();
-        column
-            .set_mg_options(&MgOptions { max_counters: 256 })
-            .unwrap();
+        column.set_mg_options(&MgOptions { capacity: 256 }).unwrap();
         assert_eq!(
             Some(HllOptions { precision: 12 }),
             column.hll_options().unwrap()
@@ -249,7 +247,7 @@ mod tests {
             column.kll_options().unwrap()
         );
         assert_eq!(
-            Some(MgOptions { max_counters: 256 }),
+            Some(MgOptions { capacity: 256 }),
             column.mg_options().unwrap()
         );
         column.unset_hll_options();
@@ -259,13 +257,13 @@ mod tests {
             column.kll_options().unwrap()
         );
         assert_eq!(
-            Some(MgOptions { max_counters: 256 }),
+            Some(MgOptions { capacity: 256 }),
             column.mg_options().unwrap()
         );
         column.unset_kll_options();
         assert_eq!(None, column.kll_options().unwrap());
         assert_eq!(
-            Some(MgOptions { max_counters: 256 }),
+            Some(MgOptions { capacity: 256 }),
             column.mg_options().unwrap()
         );
         column.unset_mg_options();
@@ -290,17 +288,17 @@ mod tests {
     }
 
     #[test]
-    fn test_mg_max_counters_serialization() {
-        let expected = MgOptions { max_counters: 128 };
+    fn test_mg_capacity_serialization() {
+        let expected = MgOptions { capacity: 128 };
         assert_eq!(
             expected,
-            serde_json::from_str::<MgOptions>(r#"{"max-counters":128}"#).unwrap()
+            serde_json::from_str::<MgOptions>(r#"{"capacity":128}"#).unwrap()
         );
         assert_eq!(
-            r#"{"max-counters":128}"#,
+            r#"{"capacity":128}"#,
             serde_json::to_string(&expected).unwrap()
         );
-        assert!(serde_json::from_str::<MgOptions>(r#"{"max-counters":0}"#).is_err());
+        assert!(serde_json::from_str::<MgOptions>(r#"{"capacity":0}"#).is_err());
     }
 
     #[test]
@@ -308,7 +306,7 @@ mod tests {
         for (error, value) in [
             (HllOptions { precision: 19 }.validate().unwrap_err(), "19"),
             (KllOptions { capacity: 7 }.validate().unwrap_err(), "7"),
-            (MgOptions { max_counters: 0 }.validate().unwrap_err(), "0"),
+            (MgOptions { capacity: 0 }.validate().unwrap_err(), "0"),
         ] {
             assert!(error.to_string().contains(value), "{error}");
         }

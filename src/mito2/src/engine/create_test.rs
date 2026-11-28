@@ -175,7 +175,7 @@ async fn test_engine_create_rejects_missing_sketch_provider_before_manifest() {
     for (key, value) in [
         (datatypes::schema::HLL_KEY, r#"{"precision":10}"#),
         (datatypes::schema::KLL_KEY, r#"{"capacity":64}"#),
-        (datatypes::schema::MG_KEY, r#"{"max-counters":64}"#),
+        (datatypes::schema::MG_KEY, r#"{"capacity":64}"#),
         (datatypes::schema::HLL_KEY, "invalid"),
     ] {
         let mut request = CreateRequestBuilder::new().build();

@@ -1510,10 +1510,7 @@ mod tests {
                 r#"{"precision":10}"#.to_string(),
             ),
             ("greptime:kll".to_string(), r#"{"capacity":64}"#.to_string()),
-            (
-                "greptime:mg".to_string(),
-                r#"{"max-counters":64}"#.to_string(),
-            ),
+            ("greptime:mg".to_string(), r#"{"capacity":64}"#.to_string()),
         ]);
         let column = ColumnSchema::new("v", ConcreteDataType::int64_datatype(), true)
             .with_metadata(metadata.clone());
