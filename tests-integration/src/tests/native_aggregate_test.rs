@@ -2490,70 +2490,65 @@ async fn native_aggregate_topk_over_global_partitions() {
     expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
     assert_native_schema(&native, &expression_name(&promql), &expected, &sql);
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
-    // `topk` above a global aggregate is not split, so the scan side answers the rate it reads and
-    // the ranking runs above the merged groups. The route lays that out as fused pieces, and the
-    // metadata drop each of them performs is judged by its labels alone: nothing is collected
-    // between the fold and the ranking, so those two are one piece rather than a chain of three.
-    // Each piece is classified by what it reads and by its own tree, never by a rendered plan's text
-    // (that text includes the pieces below it, so an ancestor would look like the scan reader).
-    let producers: Vec<_> = capture
-        .fused
-        .iter()
-        .filter(|node| reads_raw_scan(node))
-        .collect();
-    assert_eq!(
-        1,
-        producers.len(),
-        "one piece reads the scan; fused pieces:\n{}",
-        capture
-            .fused
-            .iter()
-            .map(own_tree)
-            .collect::<Vec<_>>()
-            .join("\n=====\n")
+    // `topk` above a global aggregate is split: the scan side folds the rate it reads into a
+    // `Partial` state per partition and the ranking runs once above the `Final` fold that merges
+    // those states. Ranking composes over a union of groups - the `k` largest of the union are the
+    // `k` largest of each group's `k` largest - so the answer the split publishes is the one the
+    // legacy plan computes over the whole vector, which the row comparison above pins.
+    let context = format!("native `{sql}`");
+    let shape = native_shape(&capture, &context);
+    let producer = shape.producer;
+    let finalize = shape
+        .finalize
+        .unwrap_or_else(|| panic!("{context}: `topk` above the fold must run over merged state"));
+    // The producer folds the rate it read per series and exports that fold's state; each piece is
+    // classified by what it reads and by its own tree, never by a rendered plan's text (that text
+    // includes the pieces below it, so an ancestor would look like the scan reader).
+    let producer_tree = own_tree(producer);
+    assert!(
+        reads_raw_scan(producer) && producer_tree.contains("Aggregate: sum by [hostname] partial"),
+        "{context}: the split's producer must fold the series it reads into Partial state:\n\
+         {producer_tree}"
     );
-    for producer in &producers {
-        assert!(
-            !own_tree(producer).to_ascii_lowercase().contains("topk"),
-            "the ranking is not part of the piece that reads the scan:\n{}",
-            own_tree(producer)
-        );
-    }
+    assert!(
+        !producer_tree.to_ascii_lowercase().contains("topk"),
+        "{context}: the ranking is not part of the piece that reads the scan:\n{producer_tree}"
+    );
+    // The ranking is the Final node's own root, reading the state every partition exported. It
+    // therefore ranks the merged vector rather than one partition's share of it, and the `k` it
+    // applies is the query's own - the split rewrites neither the ranking nor its bound `k`.
+    let finalize_tree = own_tree(finalize);
+    assert!(
+        finalize_tree.contains("Vector: topk 10 by []")
+            && finalize_tree.contains("Aggregate: sum by [hostname] final")
+            && finalize_tree.contains("Input: aggregate state"),
+        "{context}: the ranking must run once above the fold of the merged state:\n{finalize_tree}"
+    );
     let ranked: Vec<_> = capture
         .fused
         .iter()
         .chain(capture.finalize.iter())
         .filter(|node| own_tree(node).to_ascii_lowercase().contains("topk"))
         .collect();
-    assert_eq!(1, ranked.len(), "topk runs once, above the merged groups");
-    let ranked_text = own_tree(ranked[0]);
-    assert!(
-        ranked_text.contains("Vector: topk 10 by []")
-            && ranked_text.contains("Input: evaluated samples source=0, contiguous"),
-        "the ranking reads the fold's answer whole, with nothing below it re-read:\n{ranked_text}"
+    assert_eq!(
+        1,
+        ranked.len(),
+        "{context}: the ranking runs once, above the merged groups; the pieces were:\n{}",
+        capture
+            .fused
+            .iter()
+            .chain(capture.finalize.iter())
+            .map(own_tree)
+            .collect::<Vec<_>>()
+            .join("\n=====\n")
     );
-    // The ranking ranks the fold's whole answer rather than one partition's share of it. No
-    // canonical merge sits between them - `topk` drops a label set the fold already answered one
-    // series of per group, which its labels prove - so the fold is in the ranking's own tree; when a
-    // collection does sit between two such pieces, the fold is the piece directly below instead.
-    let ranked_tree = own_tree(ranked[0]);
-    let fold_tree = if ranked_tree.contains("Aggregate: sum by [hostname] complete") {
-        ranked_tree
-    } else {
-        let fold = ranked[0]
-            .children()
-            .into_iter()
-            .find(|child| child.downcast_ref::<FusedSeriesExec>().is_some())
-            .unwrap_or_else(|| panic!("the ranking must read the fold's piece: {ranked_tree}"));
-        own_tree(fold)
-    };
-    assert!(
-        fold_tree.contains("Aggregate: sum by [hostname] complete"),
-        "the fold answers the merged sources below the ranking:\n{fold_tree}"
-    );
-    // The cross-producer requirement lives in the deterministic fixtures instead, which pin which
-    // suffixes the split accepts above the cut and which it declines
-    // (`native_fused_split_declines_a_whole_vector_suffix`).
+    // The ranking reads the whole vector, so the state router gathers every group's rows onto the
+    // one owner that ranks them: ranking one owner's share would answer a union of per-owner
+    // rankings instead of the whole vector's.
+    assert_finalize_routes_partial_state(finalize, producer, true, &context);
+    // Which suffixes the split carries above the cut, and which it still declines, is pinned by the
+    // deterministic fixtures instead (`native_fused_topk_above_aggregate_splits_in_every_form`,
+    // `native_fused_split_declines_a_whole_vector_suffix`).
     // Which producer holds which series follows from the storage scheduler and a legal schedule can
     // hand one partition every series but two, so asserting it here would pin a scheduling accident
     // rather than the merge.
