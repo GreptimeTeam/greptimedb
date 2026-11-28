@@ -2077,7 +2077,7 @@ impl<'a> Operand<'a> {
 }
 
 /// The operator symbol when `op` has no histogram form for these operand types, for the legacy
-/// dropped-sample info. Supported operations declined for other reasons (incompatible bucket
+/// dropped-sample info. Supported operations refused for other reasons (incompatible bucket
 /// layouts) return `None`.
 fn unsupported_histogram_arithmetic(
     op: BinaryOp,

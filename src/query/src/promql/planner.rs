@@ -351,8 +351,8 @@ pub struct PromPlanner {
     /// An offer compiles a whole tree, so it is made where it covers the most: the statement root,
     /// and the topmost binary below a node this route does not answer. Once a binary node has spent
     /// the offer, the operands below it are planned by the existing path without offering
-    /// themselves again - re-offering each operand of a refused chain of n operators compiles its
-    /// subtrees again and costs O(n^2) passes instead of O(n).
+    /// themselves again: a refused offer is reported, so a chain of n operators never reaches the
+    /// O(n^2) passes that re-offering every operand would cost.
     native_binary_offer: bool,
 }
 
@@ -371,8 +371,9 @@ impl PromPlanner {
     /// Plans a PromQL statement and passes the optional collector to histogram UDFs.
     ///
     /// `native_fused` enables the native fused-series route: the statement is offered to
-    /// [`compile`](crate::promql::native_compile::compile) first, and whatever that compiler does
-    /// not accept is planned by the existing path, unchanged. See
+    /// [`compile`](crate::promql::native_compile::compile) first, and a shape that compiler does not
+    /// accept is reported as `Error::UnsupportedNativeShape` naming the cause of the refusal. With
+    /// it off the statement is planned by the existing path unchanged. See
     /// [`Self::try_plan_native_fused`].
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
@@ -393,12 +394,16 @@ impl PromPlanner {
 
         // The whole statement is offered to the native compiler first, because that compiler folds
         // a range function and the math functions over it into one tree: offered any later, the
-        // expression has already been split into the nodes those functions would have shared. A
-        // shape it does not accept is planned by the existing path exactly as if it were not here.
-        if let Some(plan) = planner
-            .try_plan_native_fused(&stmt.expr, query_engine_state)
-            .await?
-        {
+        // expression has already been split into the nodes those functions would have shared.
+        //
+        // A root wrapper - `EXPLAIN`, `ANALYZE`, an alias - is not a shape of its own: what it wraps
+        // is the expression this route answers, and `prom_ext_expr_to_plan` offers that one instead
+        // of the wrapper. Offering the wrapper here would refuse the statement for a cause that is
+        // not the query's, so those roots go straight to the walk that dispatches them.
+        if planner.native_fused && !matches!(stmt.expr, PromExpr::Extension(_)) {
+            let plan = planner
+                .try_plan_native_fused(&stmt.expr, query_engine_state)
+                .await?;
             return planner.strip_tsid_column(plan);
         }
         let plan = planner
@@ -1296,7 +1301,8 @@ impl PromPlanner {
         }
 
         // The same whole native binary the statement root was offered can sit below a
-        // legacy-only wrapper. A nested retry is valid only on the statement's own grid.
+        // wrapper that route does not answer itself. A nested retry is valid only on the
+        // statement's own grid.
         if self.native_fused
             && offer
             && self.ctx.start == self.ctx.stmt_start
@@ -1307,26 +1313,25 @@ impl PromPlanner {
                 .try_plan_native_fused(&PromExpr::Binary(binary_expr.clone()), query_engine_state)
                 .await;
             self.ctx = saved;
-            if let Some(plan) = native? {
-                let mut fields = plan.schema().fields().iter();
-                if let Some(time) = fields.next().map(|field| field.name().clone()) {
-                    let values = fields
-                        .clone()
-                        .filter(|field| field.data_type() != &ArrowDataType::Utf8)
-                        .map(|field| field.name().clone())
-                        .collect();
-                    let tags = fields
-                        .filter(|field| field.data_type() == &ArrowDataType::Utf8)
-                        .map(|field| field.name().clone())
-                        .collect();
-                    self.ctx.reset();
-                    self.ctx.reset_table_name_and_schema();
-                    self.ctx.aggregation_field_labels.clear();
-                    self.ctx.time_index_column = Some(time);
-                    self.ctx.field_columns = values;
-                    self.ctx.tag_columns = tags;
-                    return Ok(plan);
-                }
+            let plan = native?;
+            let mut fields = plan.schema().fields().iter();
+            if let Some(time) = fields.next().map(|field| field.name().clone()) {
+                let values = fields
+                    .clone()
+                    .filter(|field| field.data_type() != &ArrowDataType::Utf8)
+                    .map(|field| field.name().clone())
+                    .collect();
+                let tags = fields
+                    .filter(|field| field.data_type() == &ArrowDataType::Utf8)
+                    .map(|field| field.name().clone())
+                    .collect();
+                self.ctx.reset();
+                self.ctx.reset_table_name_and_schema();
+                self.ctx.aggregation_field_labels.clear();
+                self.ctx.time_index_column = Some(time);
+                self.ctx.field_columns = values;
+                self.ctx.tag_columns = tags;
+                return Ok(plan);
             }
         }
 
@@ -1520,7 +1525,7 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                // A declined binary uses the existing planner for its operands.
+                // A refused binary uses the existing planner for its operands.
                 let (mut left_input, mut left_context, mut right_input, mut right_context) = {
                     let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                     let left_ctx = self.ctx.clone();
@@ -2598,15 +2603,22 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        let native_plan = match expr.name() {
+        // `EXPLAIN` and `ANALYZE` publish a plan of the expression they wrap, so the expression is
+        // what this route is offered: every other wrapper is the existing planner's to answer.
+        let publishes_a_plan = matches!(
+            expr.name(),
             ANALYZE_NODE_NAME
-            | ANALYZE_VERBOSE_NODE_NAME
-            | EXPLAIN_NODE_NAME
-            | EXPLAIN_VERBOSE_NODE_NAME => {
+                | ANALYZE_VERBOSE_NODE_NAME
+                | EXPLAIN_NODE_NAME
+                | EXPLAIN_VERBOSE_NODE_NAME
+        );
+        let native_plan = if publishes_a_plan && self.native_fused {
+            Some(
                 self.try_plan_native_fused(&children[0], query_engine_state)
-                    .await?
-            }
-            _ => None,
+                    .await?,
+            )
+        } else {
+            None
         };
         let plan = match native_plan {
             Some(plan) => plan,
@@ -4498,7 +4510,7 @@ impl PromPlanner {
         Self::validate_label_name(&dst_label)?;
         // A destination label is a tag, and a tag is published under its own name. A value field
         // of that name would have to be dropped or renamed to make room, so report the collision
-        // before any no-op path below can silently decline the rewrite.
+        // before any no-op path below can silently refuse the rewrite.
         if self
             .ctx
             .field_columns

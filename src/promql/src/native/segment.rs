@@ -473,7 +473,7 @@ pub fn canonical_boundary_stages(
         .collect::<Vec<_>>();
     let output_tags = output_tags_of(tree.root(), source_tags)?;
     let row_tags = with_row_name_column(tree.root(), output_tags.clone());
-    // A column-name collision declines, so the caller keeps its plan.
+    // A column-name collision is refused, so the caller keeps its plan.
     let value_names = field_names(&promql, &fields);
     let output_schema = fused_output_schema(&value_names, &row_tags, time_index, root_kind).ok()?;
 

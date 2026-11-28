@@ -2040,7 +2040,7 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
-/// Built directly, because every public constructor declines this node.
+/// Built directly, because every public constructor refuses this node.
 #[test]
 fn a_scalar_root_claiming_samples_is_refused() {
     let statement_grid = grid(0, 60_000, 4);
@@ -3116,7 +3116,7 @@ fn window_with(
 }
 
 #[test]
-fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
+fn native_tree_supported_excludes_the_shapes_the_runtime_refuses() {
     use crate::select::SortOrder;
 
     let out = grid(0, 60_000, 4);
@@ -3338,7 +3338,7 @@ fn native_tree_supported_declines_the_shapes_the_runtime_refuses() {
 /// Each case nests an aggregate grouped by a value field under a node the runtime builds, so
 /// admission must recurse into every input and parameter.
 #[test]
-fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
+fn native_tree_supported_excludes_a_refused_shape_nested_under_another() {
     let out = grid(0, 60_000, 4);
     let one_field = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
     let refused = || {
@@ -3439,7 +3439,7 @@ fn native_tree_supported_declines_a_refused_shape_nested_under_another() {
 
 /// Not shapes: the `@` fold offset or the `predict_linear` instants overflow `i64`.
 #[test]
-fn native_tree_supported_declines_the_instants_that_overflow() {
+fn native_tree_supported_refuses_the_instants_that_overflow() {
     // `predict_linear(some_metric[1m] @ 0, 60)` over a grid starting at 5e18 ms.
     let far = grid(5_000_000_000_000_000_000, 5_000, 3);
     let window = |function: RangeFunction, anchor_ms: Option<i64>, out: Arc<EvalGrid>| NativeNode {

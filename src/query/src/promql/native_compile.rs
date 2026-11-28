@@ -288,6 +288,7 @@ pub(crate) fn compile_statement_with_grid(
         output_field,
         Some(grid),
         None,
+        None,
     )?;
     Ok(compiled.tree)
 }
@@ -325,6 +326,45 @@ pub(crate) fn compile_selectors_with_grid(
         Arc::from(VECTOR_FIELD),
         Some(grid),
         source_kind,
+        None,
+    )
+}
+
+/// A node bound where the compiler would have compiled one subexpression.
+///
+/// A binary the planner composed from two planned frames is compiled once more, inside the
+/// functions that wrap it: those functions are pointwise, so their kernels apply to the answer the
+/// composition gives rather than to a tree this compiler would have built for the binary itself.
+/// The substituted node's own inputs stay the composition's, so the caller validates them, not this
+/// pass.
+pub(crate) struct Substitution<'a> {
+    /// The subexpression to replace, as the statement's own AST holds it.
+    pub target: &'a PromExpr,
+    /// The node bound where that subexpression is reached.
+    pub node: NativeNode,
+}
+
+/// Compiles `stmt` with the pointwise functions above `substitute.target` applied to
+/// `substitute.node`.
+///
+/// `source_kind` is the kind of the substituted node's samples: the functions above it are
+/// functions of that one vector, so it is what a kind asked of the resulting tree resolves to.
+pub(crate) fn compile_selectors_with_grid_and_substitution(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+    grid: Arc<EvalGrid>,
+    source_kind: Option<FieldKind>,
+    substitute: &Substitution<'_>,
+) -> Result<CompiledTree> {
+    compile_selectors_with_grid_and_value_field(
+        stmt,
+        bindings,
+        ordering,
+        Arc::from(VECTOR_FIELD),
+        Some(grid),
+        source_kind,
+        Some(substitute),
     )
 }
 
@@ -342,9 +382,11 @@ fn compile_selectors_with_value_field(
         value_field,
         None,
         source_kind,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_selectors_with_grid_and_value_field(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
@@ -352,6 +394,7 @@ fn compile_selectors_with_grid_and_value_field(
     value_field: Arc<str>,
     grid: Option<Arc<EvalGrid>>,
     source_kind: Option<FieldKind>,
+    substitute: Option<&Substitution<'_>>,
 ) -> Result<CompiledTree> {
     if ordering == SeriesOrdering::Interleaved {
         return Err(not_implemented(
@@ -383,10 +426,15 @@ fn compile_selectors_with_grid_and_value_field(
         },
         value_field,
         source_kind,
+        substitute,
     };
     let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
     let inputs = inputs.into_inner();
-    validate_inputs(tree.root(), &inputs)?;
+    // A substituted tree's inputs belong to the node the caller built, which that caller validated
+    // against the frames it composed; this pass bound none of them.
+    if substitute.is_none() {
+        validate_inputs(tree.root(), &inputs)?;
+    }
     Ok(CompiledTree {
         tree,
         inputs: inputs.into(),
@@ -429,9 +477,18 @@ struct Context<'a> {
     value_field: Arc<str>,
     /// The field kind of the statement's sources; `None` for a statement without sources.
     source_kind: Option<FieldKind>,
+    /// The node bound where one subexpression is reached, for a tree compiled over a tree someone
+    /// else built. `None` for an ordinary compile.
+    substitute: Option<&'a Substitution<'a>>,
 }
 
 fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
+    // The planner composed this subtree itself; the functions above it apply to that answer.
+    if let Some(substitute) = context.substitute
+        && std::ptr::eq(expr, substitute.target)
+    {
+        return Ok(substitute.node.clone());
+    }
     // Constants fold first, so `x * (1 + 2)` binds `3` and no shape below handles a constant
     // operand.
     if let Some(value) = constant_value(expr) {
@@ -794,7 +851,7 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
     let output = input.output.clone();
     let op = BoundAggregate {
         kind,
-        group: grouping(modifier.as_ref()),
+        group: grouping(modifier.as_ref(), &value_columns(&input)),
         stage: AggregateStage::Complete,
         field_kind,
     };
@@ -831,7 +888,13 @@ fn vector_aggregate(context: &Context, aggregate: &AggregateExpr) -> Result<Nati
             "the aggregate `{op}` in `{aggregate}`, which takes a parameter as its first argument"
         ))
     })?;
-    let group = grouping(modifier.as_ref());
+    let group = grouping(
+        modifier.as_ref(),
+        // The vector operations group by the labels a series carries; `count_values` also writes its
+        // destination label, which may share a name with a value column, so a name here is left as
+        // written.
+        &[],
+    );
     if matches!(op.id(), token::T_TOPK | token::T_BOTTOMK) && constant_value(param).is_none() {
         let input = compile_expr(context, expr)?;
         let output = input.output.clone();
@@ -881,8 +944,11 @@ fn vector_aggregate(context: &Context, aggregate: &AggregateExpr) -> Result<Nati
 
 /// How a `by` or `without` modifier identifies a group, in the tree's own terms.
 ///
-/// Labels keep their written order.
-fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
+/// Labels keep their written order. A `by` label naming one of `value_columns` is dropped: a value
+/// column is a sample's value, not a label of its series, so the grouping names no label the input
+/// carries and every series falls in one group - which is what Prometheus answers for a label the
+/// series do not have.
+fn grouping(modifier: Option<&LabelModifier>, value_columns: &[&str]) -> Grouping {
     fn labels(labels: &[String]) -> Arc<[Arc<str>]> {
         labels
             .iter()
@@ -892,8 +958,27 @@ fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
     match modifier {
         // No modifier means `by()`: one group.
         None => Grouping::By(Arc::new([])),
-        Some(LabelModifier::Include(by)) => Grouping::By(labels(&by.labels)),
+        Some(LabelModifier::Include(by)) => Grouping::By(
+            by.labels
+                .iter()
+                .filter(|label| !value_columns.contains(&label.as_str()))
+                .map(|label| Arc::<str>::from(label.as_str()))
+                .collect(),
+        ),
+        // `without` names labels to drop, and a name the input does not carry is already absent.
         Some(LabelModifier::Exclude(without)) => Grouping::Without(labels(&without.labels)),
+    }
+}
+
+/// The value columns `node` produces, which a grouping label names only as a sample's value.
+fn value_columns(node: &NativeNode) -> Vec<&str> {
+    match &node.output {
+        NativeType::Samples(schema) => schema
+            .fields
+            .iter()
+            .map(|field| field.name.as_ref())
+            .collect(),
+        NativeType::Scalar(_) | NativeType::AggregateState(_) => Vec::new(),
     }
 }
 
@@ -914,9 +999,11 @@ fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNod
     let NativeType::Samples(schema) = &input.output else {
         return Err(not_implemented("timestamp argument is not a vector"));
     };
-    if schema.fields.len() != 1 {
+    // Every value column is timestamped on its own: a point one field holds no sample for reports
+    // none for it, which is what `timestamp_of_evaluated` projects.
+    if schema.eval_grid.is_none() {
         return Err(not_implemented(
-            "timestamp() over a multi-value input is not supported natively",
+            "timestamp() over an unevaluated vector, whose values carry no evaluation time",
         ));
     }
     let output = input.output.clone();
@@ -1181,6 +1268,29 @@ fn match_op(op: &ParserMatchOp) -> MatchOp {
         ParserMatchOp::Re(_) => MatchOp::Regex,
         ParserMatchOp::NotRe(_) => MatchOp::NotRegex,
     }
+}
+
+/// The vector argument of a call this compiler binds as one map over it, when `call` is one.
+///
+/// Those calls answer their one vector point by point - a math function, a native histogram
+/// function, a label function, `round`/`clamp` with a parameter read per point, or `timestamp` - so
+/// a tree compiled over whatever produced that vector means the same thing. A call that reads its
+/// vector some other way (an aggregate folds a group, a vector operation reorders or drops series,
+/// a window rewinds time) is not one of them and answers `None`.
+pub(crate) fn pointwise_vector_argument(call: &Call) -> Option<&PromExpr> {
+    let name = call.func.name;
+    let args = &call.args.args;
+    let vector = args.first()?;
+    if vector.value_type() != ValueType::Vector {
+        return None;
+    }
+    // These take their vector and nothing else.
+    if name == "timestamp" || histogram_function(name).is_some() {
+        return (args.len() == 1).then(|| vector.as_ref());
+    }
+    let math = math_signature(name).is_some();
+    let rewrite = matches!(name, "label_replace" | "label_join");
+    (math || rewrite).then(|| vector.as_ref())
 }
 
 /// Compiles a function call by looking its name up in each function table; an unknown name is
@@ -1858,6 +1968,7 @@ fn subquery_window(
             grid: Arc::clone(&child_grid),
             value_field: Arc::clone(&context.value_field),
             source_kind: context.source_kind,
+            substitute: context.substitute,
         },
         expr,
     )?;
@@ -1913,11 +2024,9 @@ fn instant_selection_of(
             timing: SelectorTiming::Instant { lookback_ms },
         },
     )?;
-    if value == InstantValue::Timestamp && schema.fields.len() != 1 {
-        return Err(not_implemented(
-            "timestamp() over a multi-value input is not supported natively",
-        ));
-    }
+    // Every value column of the selection is timestamped on its own: `timestamp_of_selection`
+    // reports the selected row's own time for each field that row holds a sample for, so a
+    // multi-field selection needs no layout of its own.
     let output = NativeType::Samples(Arc::new(SeriesSchema {
         fields: Arc::clone(&schema.fields),
         eval_grid: Some(Arc::clone(&output_grid)),
