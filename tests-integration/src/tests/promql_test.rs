@@ -2714,11 +2714,7 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
                 .await
                 .remove(0)
                 .unwrap();
-            let batches = match output.data {
-                OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-                OutputData::RecordBatches(batches) => batches,
-                _ => unreachable!("a query returns record batches"),
-            };
+            let batches = rows_batches(output).await;
             let batches = batches
                 .iter()
                 .map(|batch| {
@@ -4793,11 +4789,7 @@ async fn native_promql_float_function_over_split_histogram_sum_matches_legacy() 
 
 /// How many rows `output` answers, whatever its columns hold.
 async fn answer_rows(output: Output) -> usize {
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("PromQL answers record batches"),
-    };
+    let batches = rows_batches(output).await;
     batches.iter().map(|batch| batch.num_rows()).sum()
 }
 
@@ -9397,16 +9389,6 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
             1,
         ),
     ];
-    // The nodes named `name` reachable from `plan`.
-    let count_nodes = |plan: &Arc<dyn ExecutionPlan>, name: &str| {
-        let mut stack = vec![Arc::clone(plan)];
-        let mut count = 0;
-        while let Some(node) = stack.pop() {
-            count += usize::from(node.name() == name);
-            stack.extend(node.children().into_iter().cloned());
-        }
-        count
-    };
     let mut answers = Vec::new();
     for (query, empty_selectors) in queries {
         // TQL does not prepare discovery scope itself; provide the same authorized scope that the
@@ -9438,7 +9420,7 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
             .unwrap_or_else(|| panic!("`{query}` did not take the native route"));
         assert_eq!(
             empty_selectors,
-            count_nodes(&fused, "EmptyExec"),
+            count_plan_nodes(&fused, "EmptyExec"),
             "`{query}` does not read every zero-match selector as the node's input: {fused:?}"
         );
         if empty_selectors > 0 {
@@ -9510,7 +9492,7 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
         if has_empty {
             assert_eq!(
                 1,
-                count_nodes(&fused, "EmptyExec"),
+                count_plan_nodes(&fused, "EmptyExec"),
                 "`{query}` does not read the subquery's zero-match selector: {fused:?}"
             );
             let mut region_inputs = Vec::new();
@@ -13479,11 +13461,7 @@ struct Answer {
 /// Reads a TQL answer into an [`Answer`].
 async fn native_answer(output: Output) -> Answer {
     use datafusion::arrow::util::display::array_value_to_string;
-    let batches = match output.data {
-        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-        OutputData::RecordBatches(batches) => batches,
-        _ => unreachable!("TQL EVAL returns record batches"),
-    };
+    let batches = rows_batches(output).await;
     let mut value_types: Option<Vec<DataType>> = None;
     let mut rows = Vec::new();
     for batch in batches.iter() {
