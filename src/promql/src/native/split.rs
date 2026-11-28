@@ -48,7 +48,8 @@ pub(crate) struct Split {
     schema: Arc<SeriesSchema>,
     /// The suffix reads whole histograms rather than individual groups.
     histogram: bool,
-    /// The suffix rewrites at least one label of the histogram routing key.
+    /// The suffix rewrites at least one label of the histogram routing key, below every histogram
+    /// function admitted so far: the rewrites a function above them has to weigh.
     label_rewrite: bool,
 }
 
@@ -63,12 +64,13 @@ pub(crate) fn histogram_group_is_single(group: &Grouping) -> bool {
 ///
 /// `Ok(None)` is a subtree holding no aggregate. Point-wise operations can run where their groups
 /// are owned. Histogram functions can also run there when the state router co-locates every bucket
-/// and every histogram whose output labels collide. A label rewrite may change that key, so it is
-/// only admitted alongside a partitioned histogram when it cannot change a label in the cut's
-/// routing key. A single-owner histogram needs no such restriction. A histogram parameter is
-/// answered above the cut, so it has to read no series: one that does would be silently replaced by
-/// the merged values. `topk`, a second aggregate and vector-vector matching still need a whole-vector
-/// boundary.
+/// and every histogram whose output labels collide. A label rewrite *below* a histogram function may
+/// change which rows that function folds into one histogram, so it is only admitted alongside a
+/// partitioned histogram when it cannot change a label in the cut's routing key; a rewrite above the
+/// function renames the answer it already folded and is admitted either way. A single-owner
+/// histogram needs no such restriction. A histogram parameter is answered above the cut, so it has
+/// to read no series: one that does would be silently replaced by the merged values. `topk`, a
+/// second aggregate and vector-vector matching still need a whole-vector boundary.
 ///
 /// An instant selection or a window over raw samples above the cut cannot be applied to the merged
 /// values under the tree's current binding: the cut output is evaluated, whereas these nodes consume
@@ -100,11 +102,15 @@ pub(crate) fn split(
                         }
                     }
             });
-            if changes_key && inner.histogram && !histogram_group_is_single(&inner.op.group) {
-                return Err(declined(
-                    "a routing-label rewrite around a partitioned histogram",
-                ));
-            }
+            // A rewrite is refused only where it can change which rows a histogram function folds
+            // into one histogram, and that is below the function: a label the function groups by
+            // that the rewrite renames splits one histogram into two. Here the rewrite sits *above*
+            // every histogram the subtree below it answered - `split` walks from the root down, so
+            // the nodes it has already folded into `inner` are the ones below this map - and a
+            // function's output is one row per group already. The rewrite therefore renames a label
+            // of that answer and reaches neither the key the state was routed by nor the rows a
+            // later fold reads. The flag records it all the same, so a histogram function *above*
+            // this map still sees a rewrite below itself and refuses where that matters.
             inner.label_rewrite |= changes_key;
             inner.suffix = NativeNode {
                 expr: NativeExpr::Map {

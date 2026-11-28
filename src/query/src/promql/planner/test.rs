@@ -9092,6 +9092,60 @@ async fn native_fused_histogram_above_aggregate_splits_with_bucket_routing() {
     );
 }
 
+/// A rewrite above a histogram fold reaches the split; the same rewrite below it does not.
+///
+/// A histogram function answers one row per group, so a rewrite above it renames that answer's label
+/// and reaches neither the rows a fold reads nor the grouping it folds by. Below the function the
+/// rewrite names the sibling buckets of one histogram differently, and the function above it would
+/// fold one histogram per rewritten key: refused, which is what sends the statement to the plan that
+/// folds it whole.
+///
+/// The destination is a label the fold's rows do not carry, because a rewrite that writes one they
+/// do carry is collected by the canonical pass first (`duplicates_canonical_labels`) and the split
+/// declines a merge. The `sum without (host)` spelling is what makes the destination part of the
+/// cut's identity - the same grouping written `sum by (le)` was already admitted, and the two forms
+/// have to take the same route. The rewrite's source label is gone once the function folded it,
+/// which this test does not read: the shape is the destination, and the values are pinned by
+/// `histogram_split_carries_a_rewrite_above_the_histogram` (`promql`).
+#[tokio::test]
+async fn native_fused_label_rewrite_above_a_histogram_fold_splits() {
+    let fold = "sum without (host) (rate(m[5m]))";
+    let above = format!(
+        r#"label_replace(histogram_quantile(0.99, {fold}), "route", "$1", "le", "(.*)")"#
+    );
+    let plan =
+        build_native_fused_plan_with_provider(&above, true, native_classic_histogram_provider().await)
+            .await;
+    let display = plan.display_indent().to_string();
+    let final_node = find_final_split(&plan)
+        .unwrap_or_else(|| panic!("`{above}` must split: {display}"));
+    let NativeExpr::Map { input, .. } = &final_node.tree().root().expr else {
+        panic!("`{above}`: the rewrite runs above the folded answer: {display}");
+    };
+    assert!(
+        matches!(
+            &input.expr,
+            NativeExpr::Vector {
+                op: BoundVectorOp::Histogram(_),
+                ..
+            }
+        ),
+        "`{above}`: the rewrite reads the histogram function: {display}"
+    );
+
+    // The control: the same rewrite *below* the function relabels one histogram's buckets apart.
+    let below =
+        format!(r#"histogram_quantile(0.99, label_replace({fold}, "route", "$1", "le", "(.*)"))"#);
+    let plan =
+        build_native_fused_plan_with_provider(&below, true, native_classic_histogram_provider().await)
+            .await;
+    assert!(
+        find_final_split(&plan).is_none(),
+        "`{below}` must not split: {}",
+        plan.display_indent()
+    );
+}
+
 /// The native route can plan a reversed clamp range without consulting the existing planner,
 /// which has no clamp kernel.
 #[tokio::test]

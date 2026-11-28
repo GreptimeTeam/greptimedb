@@ -8918,57 +8918,233 @@ fn histogram_split_declines_only_rewrites_that_change_the_routing_key() {
     }
 }
 
+/// A rewrite of a routing label is refused only where it can change the rows a histogram folds.
+///
+/// Below the function, the rewrite `job` <- `le` names the sibling buckets of one histogram
+/// differently, so the function above it folds one histogram per rewritten key rather than one per
+/// histogram the aggregate folded: refused, unless the cut's whole grouping is the partition key
+/// itself, in which case one owner holds every row whatever the rewrite says. Above the function
+/// there are no sibling rows left - it answered one row per group already - so the same rewrite
+/// renames that answer's label and is admitted for every grouping.
 #[test]
-fn histogram_split_allows_single_owner_routing_label_rewrites() {
-    for (group, accepted) in [
-        (Grouping::By(Arc::from([Arc::from("le")])), true),
-        (
-            Grouping::By(Arc::from([Arc::from("le"), Arc::from("__type__")])),
-            true,
-        ),
-        (
-            Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
-            false,
-        ),
-        (Grouping::Without(Arc::from([Arc::from(HOST)])), false),
+fn histogram_split_refuses_a_routing_rewrite_only_below_the_histogram() {
+    for group in [
+        Grouping::By(Arc::from([Arc::from("le")])),
+        Grouping::By(Arc::from([Arc::from("le"), Arc::from("__type__")])),
+        Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+        Grouping::Without(Arc::from([Arc::from(HOST)])),
     ] {
         let base = histogram_over_sum_tree(group.clone(), HistogramFunction::Quantile(0.99));
         let NativeExpr::Vector { input, op } = &base.root().expr else {
             unreachable!()
         };
-        for before_histogram in [true, false] {
-            // Rewriting the routing label from `le` can assign different keys to sibling buckets.
-            let map = |input: NativeNode| NativeNode {
-                output: input.output.clone(),
-                expr: NativeExpr::Map {
-                    input: Box::new(input),
-                    op: BoundMap {
-                        ops: vec![MapOp::Label(Arc::new(
-                            LabelRewrite::join(JOB, "", &["le"]).unwrap(),
-                        ))]
-                        .into(),
-                    },
+        let map = |input: NativeNode| NativeNode {
+            output: input.output.clone(),
+            expr: NativeExpr::Map {
+                input: Box::new(input),
+                op: BoundMap {
+                    ops: vec![MapOp::Label(Arc::new(
+                        LabelRewrite::join(JOB, "", &["le"]).unwrap(),
+                    ))]
+                    .into(),
                 },
-            };
-            let root = if before_histogram {
-                NativeNode {
-                    expr: NativeExpr::Vector {
-                        input: Box::new(map((**input).clone())),
-                        op: op.clone(),
-                    },
-                    output: base.root().output.clone(),
-                }
-            } else {
-                map(base.root().clone())
-            };
-            let tree = NativeTree::try_new(root).unwrap();
-            assert_eq!(
-                FusedSeries::split_aggregate(&tree, TIME).unwrap().is_some(),
-                accepted,
-                "group {group:?}, before histogram: {before_histogram}"
+            },
+        };
+        // Below the function: the buckets it folds are relabelled one by one.
+        let below = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Vector {
+                input: Box::new(map((**input).clone())),
+                op: op.clone(),
+            },
+            output: base.root().output.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            FusedSeries::split_aggregate(&below, TIME).unwrap().is_some(),
+            crate::native::split::histogram_group_is_single(&group),
+            "below the histogram, group {group:?}"
+        );
+        // Above it: one histogram is already one row, so the rewrite renames the answer.
+        let above = NativeTree::try_new(map(base.root().clone())).unwrap();
+        let (_, final_tree) = FusedSeries::split_aggregate(&above, TIME)
+            .unwrap()
+            .unwrap_or_else(|| panic!("above the histogram, group {group:?}: {above}"));
+        let NativeExpr::Map { input, .. } = &final_tree.root().expr else {
+            panic!(
+                "the rewrite must run above the folded answer, group {group:?}: {final_tree}"
             );
-        }
+        };
+        let NativeExpr::Vector {
+            input: folded,
+            op: BoundVectorOp::Histogram(_),
+        } = &input.expr
+        else {
+            panic!(
+                "the rewrite must read the histogram function, group {group:?}: {final_tree}"
+            );
+        };
+        assert!(
+            matches!(
+                &folded.expr,
+                NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final
+            ),
+            "the function must fold the Final's state, group {group:?}: {final_tree}"
+        );
     }
+}
+
+/// A rewrite above the fold runs after it, so the split answers what one node answers.
+///
+/// `label_replace(histogram_quantile(0.5, sum by (le, job) (rate(x[5m]))), "job", "$1-x", "job",
+/// "(.*)")`: the two partitions each fold part of one histogram - the bounds arrive from different
+/// scans - and the rewrite renames the single series the function answers. The reference is the same
+/// tree over one input holding both scans' chunks, which is the plan the statement had before the
+/// split carried a rewrite above the fold.
+#[tokio::test]
+async fn histogram_split_carries_a_rewrite_above_the_histogram() {
+    let base = histogram_over_sum_tree(
+        Grouping::By(Arc::from([Arc::from("le"), Arc::from(JOB)])),
+        HistogramFunction::Quantile(0.5),
+    );
+    let tree = NativeTree::try_new(NativeNode {
+        output: base.root().output.clone(),
+        expr: NativeExpr::Map {
+            input: Box::new(base.root().clone()),
+            op: BoundMap {
+                ops: vec![MapOp::Label(Arc::new(
+                    LabelRewrite::replace(JOB, "$1-x", JOB, "(.*)").unwrap(),
+                ))]
+                .into(),
+            },
+        },
+    })
+    .unwrap();
+    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
+        .unwrap()
+        .expect("a rewrite above the fold must split");
+    let partitions = vec![
+        frames(&[
+            labelled_chunk(
+                "a-1",
+                &[("le", "1"), (JOB, "api")],
+                &series_samples(1.0),
+                true,
+            ),
+            labelled_chunk(
+                "a-inf",
+                &[("le", "+Inf"), (JOB, "api")],
+                &series_samples(4.0),
+                true,
+            ),
+        ]),
+        frames(&[
+            labelled_chunk(
+                "b-1",
+                &[("le", "1"), (JOB, "api")],
+                &series_samples(2.0),
+                true,
+            ),
+            labelled_chunk(
+                "b-inf",
+                &[("le", "+Inf"), (JOB, "api")],
+                &series_samples(4.0),
+                true,
+            ),
+        ]),
+    ];
+    let reference_frames = [partitions[0].clone(), partitions[1].clone()].concat();
+    let partial_node = FusedSeries::try_new_state_export(
+        Arc::from("partial"),
+        partial.clone(),
+        binding(&partial),
+        vec![input_plan(frame_schema())],
+    )
+    .unwrap();
+    let producer = partial_node
+        .to_execution_plan(vec![(
+            memory_exec_partitioned(partitions),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )])
+        .unwrap();
+    let final_node = FusedSeries::try_new_with_format(
+        Arc::from("final"),
+        final_tree.clone(),
+        binding(&final_tree),
+        vec![input_plan(
+            canonical_state_frame_schema(&partial).inner().clone(),
+        )],
+        canonical_frame_schema(&final_tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let split = plan_of(final_node, producer).unwrap();
+    let reference_node = FusedSeries::try_new_with_format(
+        Arc::from("reference"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        canonical_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let reference = plan_of(reference_node, memory_exec(reference_frames)).unwrap();
+    let decode = |batches: Vec<RecordBatch>| async move {
+        let schema = batches[0].schema();
+        unpack_evaluated_series(
+            Box::pin(RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::iter(batches.into_iter().map(Ok)),
+            )),
+            None,
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+    };
+    let answers = |decoded: &[(Series, bool)]| {
+        let mut rows = decoded
+            .iter()
+            .map(|(series, _)| {
+                let values = series
+                    .fields
+                    .get(0)
+                    .unwrap()
+                    .iter()
+                    .filter_map(|sample| match sample {
+                        SampleRef::Float(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    series.metric.get("le").map(str::to_owned),
+                    series.metric.get(JOB).unwrap_or_default().to_string(),
+                    values,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.1.cmp(&right.1));
+        rows
+    };
+    let got = answers(
+        &decode(collect(split, SessionContext::default().task_ctx()).await.unwrap()).await,
+    );
+    let expected = answers(
+        &decode(
+            collect(reference, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        )
+        .await,
+    );
+    assert_eq!(got, expected, "the split answers the rewrite over one node");
+    // The buckets summed to 3 and 8, so the median lies in the infinite one and answers its highest
+    // finite bound; the rewrite is the only thing that names the series, and it renamed `job`.
+    assert_eq!(
+        got,
+        vec![(None, "api-x".to_string(), vec![1.0; GRID_LEN as usize])]
+    );
 }
 
 #[test]
