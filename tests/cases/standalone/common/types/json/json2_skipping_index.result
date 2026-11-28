@@ -207,7 +207,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.service.
 |_|_|_|
 | 1_| 0_|_FilterExec: json_get(attrs@1, $.service.name, NULL) = absent, projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":0,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -239,7 +239,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.status::
 |_|_|_|
 | 1_| 0_|_FilterExec: json_get(attrs@1, $.status, NULL) IN (SET) ([900, 901]), projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.status\"), Int64(NULL)) IN ([Int64(900), Int64(901)])"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.status\"), Int64(NULL)) IN ([Int64(900), Int64(901)])"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":0,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -271,7 +271,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.service.
 |_|_|_|
 | 1_| 0_|_FilterExec: json_get(attrs@1, $.service.name, NULL) = absent, projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":0,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -323,7 +323,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.service.
 |_|_|_|
 | 1_| 0_|_FilterExec: json_get(attrs@1, $.service.name, NULL) = absent, projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":5,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":5,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":5} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":5,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":1,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":5,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":5} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -529,7 +529,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_evolution WHERE json_get(j
 |_|_|_|
 | 1_| 0_|_FilterExec: json_get(j@1, $.n, NULL) = 99, projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "j"], "filters": ["json_get(j, Utf8(\"$.n\"), Float64(NULL)) = Float64(99)"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":3,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":3,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":3} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "j"], "filters": ["json_get(j, Utf8(\"$.n\"), Float64(NULL)) = Float64(99)"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":3,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":1,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":3,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":3} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
