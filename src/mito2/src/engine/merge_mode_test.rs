@@ -520,6 +520,73 @@ async fn test_merge_mode_write_query_with_format(flat_format: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
+#[rstest::rstest]
+#[tokio::test]
+async fn test_last_non_null_reinsert_after_delete(#[values(false, true)] flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .field_num(2)
+        .insert_option("merge_mode", "last_non_null")
+        .build();
+    let column_schemas = rows_schema(&request);
+    let delete_schema = delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_with_fields("a", &[1], &[(Some(1), Some(100))]),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, None).await;
+
+    // Deletes the flushed row and writes it again with a null field before the next flush.
+    let rows = Rows {
+        schema: delete_schema,
+        rows: build_delete_rows_for_key("a", 1, 2),
+    };
+    delete_rows(&engine, region_id, rows).await;
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_with_fields("a", &[1], &[(Some(2), None)]),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // field_1 must stay null instead of coming back from the deleted row.
+    let expected = "\
++-------+---------+---------+---------------------+
+| tag_0 | field_0 | field_1 | ts                  |
++-------+---------+---------+---------------------+
+| a     | 2.0     |         | 1970-01-01T00:00:01 |
++-------+---------+---------+---------------------+";
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
+
+    flush_region(&engine, region_id, None).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
 #[tokio::test]
 async fn test_merge_mode_compaction() {
     test_merge_mode_compaction_with_format(false).await;

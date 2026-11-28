@@ -504,6 +504,10 @@ impl Batch {
     /// This method deduplicates rows with the same timestamp (keeping the first row in each
     /// timestamp range as the base row) and fills null fields from subsequent rows until all
     /// fields are filled or a delete operation is encountered.
+    ///
+    /// If a Put base row has a delete under it, the delete row is kept right after the merged
+    /// row. Readers then stop filling null fields at the delete instead of taking values from
+    /// older versions in other sources.
     pub(crate) fn merge_last_non_null(&mut self) -> Result<()> {
         let num_rows = self.num_rows();
         if num_rows < 2 {
@@ -581,6 +585,17 @@ impl Batch {
                             }
                         }
                     }
+                }
+            }
+
+            // Keeps the first delete under a Put base row as a barrier.
+            if op_types[start] != OpType::Delete as u8
+                && let Some(delete_idx) =
+                    ((start + 1)..end).find(|&i| op_types[i] == OpType::Delete as u8)
+            {
+                base_indices.push(delete_idx as u32);
+                for idx in &mut field_indices {
+                    idx.push(delete_idx as u32);
                 }
             }
 
@@ -1596,7 +1611,7 @@ mod tests {
     #[test]
     fn test_merge_last_non_null_stop_at_delete_row() {
         // A delete row in older duplicates should stop filling to avoid resurrecting values before
-        // deletion.
+        // deletion. The delete is kept so readers don't fill fields from other sources either.
         let mut batch = new_batch_with_u64_fields(
             &[1, 1, 1],
             &[3, 2, 1],
@@ -1609,10 +1624,10 @@ mod tests {
         batch.merge_last_non_null().unwrap();
 
         let expect = new_batch_with_u64_fields(
-            &[1],
-            &[3],
-            &[OpType::Put],
-            &[(1, &[None]), (2, &[Some(100)])],
+            &[1, 1],
+            &[3, 2],
+            &[OpType::Put, OpType::Delete],
+            &[(1, &[None, Some(10)]), (2, &[Some(100), Some(200)])],
         );
         assert_eq!(expect, batch);
     }
