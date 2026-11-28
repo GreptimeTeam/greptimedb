@@ -16,8 +16,6 @@
 
 use std::ops::Range;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use common_query::prometheus::is_prometheus_stale_nan;
 use common_query::promql_annotations::PromqlAnnotationCollector;
@@ -289,13 +287,8 @@ impl PendingBatch {
     }
 }
 
-#[cfg(test)]
-static POSITION_COMPARISONS: AtomicU64 = AtomicU64::new(0);
-
 #[inline]
 fn timestamp_le(timestamp: i64, eval_ts: i64) -> bool {
-    #[cfg(test)]
-    POSITION_COMPARISONS.fetch_add(1, Ordering::Relaxed);
     timestamp <= eval_ts
 }
 

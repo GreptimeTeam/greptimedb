@@ -27,16 +27,6 @@ use crate::map::drop_metric_name;
 #[cfg(test)]
 mod tests;
 
-/// Source rows [`select_instants`] examined, so tests can assert it makes one pass over the axis.
-#[cfg(test)]
-pub(crate) static AXIS_ROWS_READ: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-fn row_read() {
-    #[cfg(test)]
-    AXIS_ROWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Selects the one source row an anchored instant reads, with the lookback, offset and staleness
 /// rules of [`select_instants`]: the last sample at or before `at_ms` (shifted by `offset_ms`) and
 /// not more than the lookback before it, unless a stale marker is the latest sample there.
@@ -180,7 +170,6 @@ pub fn select_instants(
                 };
                 current_stale |= stale;
             }
-            row_read();
             cursor += 1;
         }
         let Some(candidate) = cursor.checked_sub(1) else {
