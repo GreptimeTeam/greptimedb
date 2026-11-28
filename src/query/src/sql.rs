@@ -846,19 +846,27 @@ pub async fn show_charsets_dataframe(
     .await
 }
 
-/// Shows one supported query optimizer option, returning `None` for legacy SHOW handling.
-pub fn show_query_option(
-    stmt: ShowVariables,
+/// Resolves the value `SHOW <name>` would report for a supported query option.
+///
+/// Returns `Ok(None)` when `name` is not a query option at all, so callers can
+/// fall through to the legacy `SHOW` handling. The value comes from the
+/// engine's effective configuration, so an option the session never set reports
+/// the engine default rather than nothing.
+///
+/// Split out of [`show_query_option`] so that
+/// `information_schema.session_variables` can report the same values without
+/// depending on this crate's output types.
+pub fn effective_query_option_value(
+    name: &str,
     query_ctx: QueryContextRef,
     engine: &dyn crate::QueryEngine,
-) -> Result<Option<Output>> {
-    let name = sql::ast::object_name_to_string_unquoted(&stmt.variable);
-    let Some(canonical) = session::query_options::canonical_query_option_name(&name) else {
+) -> Result<Option<String>> {
+    let Some(canonical) = session::query_options::canonical_query_option_name(name) else {
         if name.to_ascii_lowercase().starts_with("query.")
             || name.to_ascii_lowercase().starts_with("datafusion.")
         {
             session::query_options::parse_query_option(
-                &name,
+                name,
                 "",
                 session::query_options::MAX_PUBLIC_PARALLELISM,
             )
@@ -933,8 +941,21 @@ pub fn show_query_option(
                 .build()
             })?,
     };
+    Ok(Some(value))
+}
+
+/// Shows one supported query optimizer option, returning `None` for legacy SHOW handling.
+pub fn show_query_option(
+    stmt: ShowVariables,
+    query_ctx: QueryContextRef,
+    engine: &dyn crate::QueryEngine,
+) -> Result<Option<Output>> {
+    let name = sql::ast::object_name_to_string_unquoted(&stmt.variable);
+    let Some(value) = effective_query_option_value(&name, query_ctx, engine)? else {
+        return Ok(None);
+    };
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-        name.clone(),
+        name,
         ConcreteDataType::string_datatype(),
         false,
     )]));

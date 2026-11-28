@@ -1,0 +1,196 @@
+--- test information_schema.session_variables ----
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+-- The table reports the session's own state, using the column names TiDB
+-- documents for `information_schema.session_variables`.
+DESC TABLE SESSION_VARIABLES;
+
++----------------+--------+-----+------+---------+---------------+
+| Column         | Type   | Key | Null | Default | Semantic Type |
++----------------+--------+-----+------+---------+---------------+
+| variable_name  | String |     | NO   |         | FIELD         |
+| variable_value | String |     | NO   |         | FIELD         |
++----------------+--------+-----+------+---------+---------------+
+
+-- Defaults before anything is set on the session.
+SELECT VARIABLE_NAME, VARIABLE_VALUE
+FROM SESSION_VARIABLES
+ORDER BY VARIABLE_NAME;
+
++---------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+
+| variable_name                               | variable_value                                                                                                        |
++---------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+
+| interactive_timeout                         | 31536000                                                                                                              |
+| max_allowed_packet                          | 134217728                                                                                                             |
+| max_execution_time                          | 0                                                                                                                     |
+| net_write_timeout                           | 31536000                                                                                                              |
+| query.allow_query_fallback                  | false                                                                                                                 |
+| query.enable_remote_dynamic_filter_pushdown | true                                                                                                                  |
+| query.experimental_native_promql            | false                                                                                                                 |
+| query.parallelism                           | 4                                                                                                                     |
+| read_preference                             | LEADER                                                                                                                |
+| skip_wal                                    | false                                                                                                                 |
+| sql_mode                                    | ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION |
+| time_zone                                   | UTC                                                                                                                   |
+| transaction_isolation                       | REPEATABLE-READ                                                                                                       |
+| transaction_read_only                       | 0                                                                                                                     |
+| version_comment                             | GreptimeDB                                                                                                            |
+| wait_timeout                                | 31536000                                                                                                              |
++---------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+
+
+-- `SET` on the same connection is reflected in the table, and agrees with the
+-- `@@` lookup that already worked. MySQL is the channel that supports
+-- `max_execution_time`, and it keeps one session across statements.
+-- SQLNESS PROTOCOL MYSQL
+SET SESSION max_execution_time = 2000;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT @@session.max_execution_time;
+
++------------------------------+
+| @@session.max_execution_time |
++------------------------------+
+| 2000                         |
++------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT VARIABLE_VALUE
+FROM INFORMATION_SCHEMA.SESSION_VARIABLES
+WHERE VARIABLE_NAME = 'max_execution_time';
+
++----------------+
+| variable_value |
++----------------+
+| 2000           |
++----------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET SESSION time_zone = 'Asia/Shanghai';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT VARIABLE_VALUE
+FROM INFORMATION_SCHEMA.SESSION_VARIABLES
+WHERE VARIABLE_NAME = 'time_zone';
+
++----------------+
+| variable_value |
++----------------+
+| Asia/Shanghai  |
++----------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET SESSION skip_wal = 'true';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT VARIABLE_VALUE
+FROM INFORMATION_SCHEMA.SESSION_VARIABLES
+WHERE VARIABLE_NAME = 'skip_wal';
+
++----------------+
+| variable_value |
++----------------+
+| true           |
++----------------+
+
+-- MySQL compatibility values come from the same definitions the protocol
+-- answers `@@` from, so the table and the protocol agree. Before this shared
+-- definition existed, `@@sql_mode` reported `0` while `SHOW VARIABLES` reported
+-- the real mode; both now report the real mode.
+-- SQLNESS PROTOCOL MYSQL
+SELECT @@sql_mode;
+
++-----------------------------------------------------------------------------------------------------------------------+
+| @@sql_mode                                                                                                            |
++-----------------------------------------------------------------------------------------------------------------------+
+| ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION |
++-----------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT VARIABLE_VALUE
+FROM INFORMATION_SCHEMA.SESSION_VARIABLES
+WHERE VARIABLE_NAME = 'sql_mode';
+
++-----------------------------------------------------------------------------------------------------------------------+
+| variable_value                                                                                                        |
++-----------------------------------------------------------------------------------------------------------------------+
+| ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION |
++-----------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT @@wait_timeout;
+
++----------------+
+| @@wait_timeout |
++----------------+
+| 31536000       |
++----------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT VARIABLE_VALUE
+FROM INFORMATION_SCHEMA.SESSION_VARIABLES
+WHERE VARIABLE_NAME = 'wait_timeout';
+
++----------------+
+| variable_value |
++----------------+
+| 31536000       |
++----------------+
+
+-- `query.*` options report the engine's effective value, so an option the
+-- session never set shows its default instead of going missing.
+SELECT VARIABLE_NAME, VARIABLE_VALUE
+FROM SESSION_VARIABLES
+WHERE VARIABLE_NAME = 'query.parallelism';
+
++-------------------+----------------+
+| variable_name     | variable_value |
++-------------------+----------------+
+| query.parallelism | 4              |
++-------------------+----------------+
+
+-- A variable the table does not report yields no row rather than an error.
+SELECT VARIABLE_NAME, VARIABLE_VALUE
+FROM SESSION_VARIABLES
+WHERE VARIABLE_NAME = 'not_a_variable';
+
++---------------+----------------+
+| variable_name | variable_value |
++---------------+----------------+
++---------------+----------------+
+
+-- The table is listed among the information_schema tables.
+SELECT table_schema, table_name
+FROM TABLES
+WHERE table_schema = 'information_schema' AND table_name = 'session_variables';
+
++--------------------+-------------------+
+| table_schema       | table_name        |
++--------------------+-------------------+
+| information_schema | session_variables |
++--------------------+-------------------+
+
+-- Both columns are registered in `information_schema.columns`.
+SELECT column_name, data_type, is_nullable
+FROM COLUMNS
+WHERE table_schema = 'information_schema' AND table_name = 'session_variables'
+ORDER BY column_name;
+
++----------------+-----------+-------------+
+| column_name    | data_type | is_nullable |
++----------------+-----------+-------------+
+| variable_name  | string    | NO          |
+| variable_value | string    | NO          |
++----------------+-----------+-------------+
+
+use public;
+
+Affected Rows: 0
+

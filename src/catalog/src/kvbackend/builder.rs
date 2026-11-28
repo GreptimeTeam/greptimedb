@@ -102,6 +102,7 @@ impl KvBackendCatalogManagerBuilder {
         Arc::new_cyclic(|me| KvBackendCatalogManager {
             information_extension,
             entity_graph_provider: Arc::new(std::sync::OnceLock::new()),
+            query_option_value_provider: Arc::new(std::sync::OnceLock::new()),
             partition_manager: Arc::new(PartitionRuleManager::new(
                 backend.clone(),
                 cache_registry

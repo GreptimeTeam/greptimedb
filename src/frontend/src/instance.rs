@@ -29,6 +29,7 @@ mod opentsdb;
 mod otlp;
 pub mod prom_store;
 mod promql;
+mod query_option_value;
 mod region_query;
 mod schema_selection;
 

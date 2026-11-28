@@ -81,7 +81,7 @@ trait SystemSchemaProviderInner {
     fn system_table(&self, name: &str) -> Option<SystemTableRef>;
 }
 
-fn build_system_table(
+pub(crate) fn build_system_table(
     catalog_name: String,
     schema_name: &str,
     table: SystemTableRef,

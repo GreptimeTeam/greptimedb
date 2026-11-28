@@ -383,6 +383,17 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
             vec![],
         ),
 
+        // The static registration carries the column shape only; the real rows
+        // are produced by the context-bound instance that the system catalog
+        // builds per resolution (see `session_variables.rs`).
+        SESSION_VARIABLES => (
+            vec![
+                string_column("VARIABLE_NAME"),
+                string_column("VARIABLE_VALUE"),
+            ],
+            vec![],
+        ),
+
         // GreptimeDB has no pluggable components.
         PLUGINS => (
             string_columns(&[

@@ -29,6 +29,7 @@ mod region_info;
 pub mod region_peers;
 mod region_statistics;
 pub mod schemata;
+mod session_variables;
 mod ssts;
 pub mod statistics;
 mod table_constraints;
@@ -73,6 +74,9 @@ pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
+pub use self::session_variables::{
+    InformationSchemaSessionVariables, QueryOptionValueProvider, QueryOptionValueProviderRef,
+};
 use crate::CatalogManager;
 use crate::error::Error;
 use crate::process_manager::ProcessManagerRef;
@@ -136,6 +140,7 @@ lazy_static! {
         TABLE_PRIVILEGES,
         GLOBAL_STATUS,
         SESSION_STATUS,
+        SESSION_VARIABLES,
         PLUGINS,
         USER_PRIVILEGES,
         PROCESSLIST,
@@ -257,6 +262,7 @@ impl InformationSchemaProvider {
             TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES, Global),
             GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS, Global),
             SESSION_STATUS => setup_memory_table!(SESSION_STATUS, Global),
+            SESSION_VARIABLES => setup_memory_table!(SESSION_VARIABLES, Global),
             PLUGINS => setup_memory_table!(PLUGINS, Global),
             USER_PRIVILEGES => setup_memory_table!(USER_PRIVILEGES, Global),
             PROCESSLIST => setup_memory_table!(PROCESSLIST, Global),
@@ -714,8 +720,13 @@ mod tests {
             }
             // An extension replacing a built-in supplies the replacement table's scope.
             let provider = provider.with_extra_table_factories(factories.clone());
+            // 46 = `MEMORY_TABLES` (22) + always-registered tables (12) + tables
+            // only in the default catalog (9) + the three `future_*` factories
+            // registered above. The two `usize::from` terms add `PROCESS_LIST`
+            // and, under the `enterprise` feature, `RECYCLE_BIN`; non-default
+            // catalogs miss the default-catalog-only nine.
             let expected_count =
-                45 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
+                46 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
                     - if catalog == DEFAULT_CATALOG_NAME {
                         0
                     } else {
