@@ -225,18 +225,18 @@ The leader row is the single row of the region whose `role` starts with
 A failed detection changes nothing and can be retried.
 
 A region that is closed or still reopening during step 2 returns no rows, which
-looks the same as a region without files. An empty listing is accepted directly
-only when `F(r) = W(r)`, with a missing watermark read as 0. The watermark then
-does not move, so a file that was not listed is still above it, or still
-unknown, in the next run. When the listing is empty and `F(r) > W(r)`, the
-region was truncated or lost all of its files, or it was not listed, and
-advancing the watermark could hide a file. The CLI then repeats steps 1 to 3 for
-that region after a pause and accepts the empty listing only if the repeat gives
-the same leader node, the same `F(r)` and again no file.
+looks the same as a region without files. A run therefore never advances a
+region on an empty listing. When step 2 returns no file for a region from its
+leader node, the run keeps the stored state of that region as it is: its
+watermark, its list of known `NULL`-sequence files and its recorded table name.
+A region without stored state stays without it. A file that was not listed is
+then still above the watermark, or still unknown, in the next run. A region that
+really has no files, after a `TRUNCATE` for example, keeps its old watermark at
+no cost, because every file it gets later has a sequence above it.
 
-The new watermark is the `F(r)` of step 1. The new list of known
-`NULL`-sequence files is the set of listed files with a `NULL` sequence and
-`visible = true`.
+For every other region, the new watermark is the `F(r)` of step 1, and the new
+list of known `NULL`-sequence files is the set of listed files with a `NULL`
+sequence and `visible = true`.
 
 Rows still in a memtable are not detected by this run. They are exported anyway
 if their chunk is exported for another reason; otherwise a later run detects
@@ -283,6 +283,12 @@ Reading the watermark before listing the files matters. A file flushed between
 the two steps is listed in this run and has a sequence above the new watermark,
 so it is also detected in the next run. It is exported twice, never zero times.
 
+A watermark is stored only by a run that listed files for the region. The
+listing of a region is taken from one view of its manifest, so it is complete
+whenever it is not empty. A run with an empty listing stores nothing for the
+region, and the next run compares the files with the older watermark, which can
+make more files dirty but cannot hide one.
+
 The watermark must be `flushed_sequence`, not the largest file sequence. By (4),
 an admitted file can carry a sequence above rows that are still in a memtable.
 
@@ -292,7 +298,7 @@ an admitted file can carry a sequence above rows that are still in a memtable.
 | --- | --- |
 | A datanode's registration expired and its regions are absent from the result | The region has no leader row; detection fails |
 | Follower rows for the same region | Only rows from the leader's node are used |
-| The region is closed or reopening while its files are listed | An empty listing with `F(r) > W(r)` is not accepted without a repeat |
+| The region is closed or reopening while its files are listed | The listing is empty, so the stored state of the region is kept and a later run finds the files |
 | `min_ts` or `max_ts` is `NULL` (the value does not fit in nanoseconds) | Unbounded on that side |
 | `NULL`-sequence file that is listed but not yet visible to scans | Not recorded as known, so it stays dirty in the next run |
 | Staging files listed with `visible = false` | Counted like any other file; the files admitted later get a sequence above the watermark |
@@ -434,8 +440,9 @@ the rules of this RFC.
 
 `chunks` only ever contains `Completed` and `Skipped` chunks; chunks being
 exported live in `pending`. `regions` is keyed by region id; `schema` and
-`table` are recorded for regions of ordinary tables. `pending` is `null` between
-runs.
+`table` are recorded for regions of ordinary tables. `pending.regions` holds the
+state to commit for every region in scope, including the unchanged entry of a
+region whose listing was empty. `pending` is `null` between runs.
 
 ## Run lifecycle and interruption
 
@@ -599,22 +606,16 @@ Rejected for the reasons given in [Replacing a chunk](#replacing-a-chunk).
    edit is applied, and that the manifest time range of a flushed file covers
    every row in it, including delete tombstones, were inferred from the code and
    not confirmed by a test. Both are covered by the acceptance tests below.
-2. **The closed-region check.** Repeating the listing makes a missed region
-   very unlikely but does not exclude it: the region would have to be closed
-   during both listings and open at all four reads around them. Reporting the
-   number of SST files in `region_info` would let the CLI compare it with the
-   listing and close the gap. That is a small server change and the only one
-   this design would benefit from.
-3. **Column changes between runs.** Whether `COPY DATABASE FROM` accepts a file
+2. **Column changes between runs.** Whether `COPY DATABASE FROM` accepts a file
    written before a column was added, dropped or retyped must be confirmed for
    each kind of change. The same question arises for a table that was dropped
    and created again with different columns. A change that import does not
    accept must be handled by exporting the table again in full.
-4. **Pending WAL tails.** Tail replay publishes files with sequences that can be
+3. **Pending WAL tails.** Tail replay publishes files with sequences that can be
    at or below a stored watermark. No code path in this repository creates
    pending tails. A deployment that has them needs a guard that fails detection
    while a region has pending tails.
-5. **Replacement granularity.** Replacing a chunk for all schemas is simple but
+4. **Replacement granularity.** Replacing a chunk for all schemas is simple but
    exports schemas that did not change. Per-schema replacement would need chunk
    metadata per schema.
 
@@ -629,9 +630,10 @@ Rejected for the reasons given in [Replacing a chunk](#replacing-a-chunk).
 - A write during repartition staging, flushed after the staging manifest is
   applied, is exported.
 - Detection fails without changing the snapshot when a region in scope has no
-  leader row and when its leader changes between the two reads. A truncated
-  region, which has an advanced flushed sequence and no files, is accepted after
-  the repeat.
+  leader row and when its leader changes between the two reads.
+- A region whose listing is empty keeps its stored watermark, and a file that
+  was flushed before that run is exported by the next run that lists it. A
+  truncated region is exported correctly after it is written again.
 - A table created, dropped, renamed, and dropped and created again between runs
   each leaves a snapshot that imports successfully and contains the expected
   tables, in both layouts. The same for a created and a dropped Metric logical
