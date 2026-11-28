@@ -5503,7 +5503,6 @@ async fn native_fused_composes_independent_histogram_binary_frames() {
         "hist * on(tag_0) floats",
         "floats * on(tag_0) hist",
         "hist / on(tag_0) floats",
-        "hist - on(tag_0) other_hist",
         "clamp(floats, 1, 2) * on(tag_0) hist",
     ] {
         let plan =
@@ -5537,13 +5536,86 @@ async fn native_fused_composes_independent_histogram_binary_frames() {
     }
 }
 
+/// A pair of two histogram metrics runs in one native node over both sources.
+///
+/// `histogram - histogram` and a filled `*` answer histograms; an unfilled `histogram * histogram`
+/// answers nothing, which keeps the legacy float layout.
+#[tokio::test]
+async fn a_pair_of_histogram_metrics_runs_natively() {
+    for (query, fills_left, fills_right, histogram) in [
+        ("hist - on(tag_0) other_hist", false, false, true),
+        ("hist * on(tag_0) other_hist", false, false, false),
+        ("hist * on(tag_0) fill(0) other_hist", true, true, true),
+        (
+            "hist * on(tag_0) fill_left(0) other_hist",
+            true,
+            false,
+            true,
+        ),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        assert_eq!(None, take_reported_decline(), "{query}: {display}");
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } = &fused.tree().root().expr
+        else {
+            panic!("expected Binary for {query}: {display}");
+        };
+        assert_eq!(
+            (fills_left, fills_right),
+            (matching.fill.lhs.is_some(), matching.fill.rhs.is_some()),
+            "{query}: {display}"
+        );
+        assert!(!display.contains("Join:"), "{display}");
+        // The composed route also roots a Binary, but over bare `Input`s reading one evaluated
+        // frame per operand; this route selects each operand itself, straight from its raw source.
+        for side in [left, right] {
+            assert!(
+                matches!(&side.expr, NativeExpr::Instant { input, .. }
+                    if matches!(input.expr, NativeExpr::Input(_))),
+                "{query}: {display}"
+            );
+        }
+        assert_eq!(2, fused.inputs().len(), "{query}: {display}");
+        for input in fused.inputs() {
+            assert!(
+                matches!(input, LogicalPlan::Extension(extension)
+                    if extension.node.as_any().is::<RawSeriesSource>()),
+                "{query}: {display}"
+            );
+        }
+        let expression = parser::parse(query).unwrap().to_string();
+        let fields = plan.schema().fields();
+        let field = fields
+            .iter()
+            .find(|field| field.name() == &expression)
+            .unwrap_or_else(|| panic!("`{query}` names its value after the statement: {display}"));
+        let expected = if histogram {
+            native_histogram_value_type().as_arrow_type()
+        } else {
+            ArrowDataType::Float64
+        };
+        assert_eq!(field.data_type(), &expected, "{query}: {display}");
+        assert_eq!(
+            expected_native_column_names(query, &["tag_0", "__name__"]),
+            sorted_column_names(&plan),
+            "{display}"
+        );
+    }
+}
+
 /// Unsupported histogram arithmetic still runs the native matcher and declares an empty float.
 #[tokio::test]
 async fn native_composed_invalid_histogram_arithmetic_declares_float() {
     for query in [
         "clamp(floats, 1, 2) + on(tag_0) hist",
         "hist + on(tag_0) clamp(floats, 1, 2)",
-        "hist * on(tag_0) other_hist",
     ] {
         let plan =
             build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
@@ -5581,9 +5653,6 @@ async fn native_composed_binary_admits_fill() {
         // A filled right side is a float meeting a histogram here, and `histogram * float` answers a
         // histogram: the same column carries the matched rows and the filled ones.
         ("hist * on(tag_0) fill_right(0) floats", false, true),
-        // Both sides carry a histogram, so either fill keeps the column a histogram.
-        ("hist * on(tag_0) fill(0) other_hist", true, true),
-        ("hist * on(tag_0) fill_left(0) other_hist", true, false),
     ] {
         let plan =
             build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
@@ -6024,7 +6093,7 @@ async fn native_composed_binary_admits_complex_operands() {
         assert!(!display.contains("Join:"), "{query}: {display}");
     }
 
-    // An operand that folds a histogram column composes too, even when the pair itself answers
+    // An operand that folds a histogram column runs natively too, even when the pair itself answers
     // nothing: `histogram * histogram` is not an error in Prometheus. The operator is restricted
     // to `+` and `-`, and any other one removes the element and files an info annotation
     // (`vector_match::unsupported_histogram_arithmetic`), which is what the native matcher answers
@@ -6045,22 +6114,9 @@ async fn native_composed_binary_admits_complex_operands() {
     let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{fused_query}: {display}"));
     assert!(
         matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
-        "{fused_query}: the statement root matches two frames: {display}"
+        "{fused_query}: the statement root is the pairing: {display}"
     );
-    assert_eq!(2, fused.children().len(), "{fused_query}: {display}");
     assert!(!display.contains("Join:"), "{fused_query}: {display}");
-    let operand = find_fused_series(&fused.children()[1])
-        .unwrap_or_else(|| panic!("{fused_query}: missing aggregate operand frame: {display}"));
-    assert_eq!(
-        promql::extension_plan::FusedOutputFormat::SeriesFrame,
-        operand.format(),
-        "{fused_query}: {display}"
-    );
-    // The operand is the split's `Final` half: it merges the state the `Partial` half exported.
-    assert!(
-        operand.reads_aggregate_state(),
-        "{fused_query}: the operand must be the Final half: {display}"
-    );
     // Both operands answer histograms - `hist` is one and `sum` folds one - so a float column here
     // is the empty layout itself rather than a float sample: a pair that answered a histogram would
     // declare the histogram struct instead.
@@ -6070,37 +6126,22 @@ async fn native_composed_binary_admits_complex_operands() {
         "{fused_query}: the empty answer keeps the legacy float layout: {display}"
     );
 
-    // A fold above a fold is still refused, and not because the inner one has no histogram state:
-    // `sum(sum(hist))` is an aggregate over a split aggregate, which the split declines
-    // ("an aggregate above a split aggregate"), so the state that inner fold exports cannot cross
-    // the boundary. A tree that binds histogram state anywhere and whose split declined keeps the
-    // existing plan, so the whole statement is answered there rather than segmented.
-    let refused_query = "hist * on(tag_0) sum by (tag_0) (sum(hist))";
+    // A fold above a fold runs natively too: the split declines `sum(sum(hist))`, so the tree is
+    // segmented and the outer fold runs once over the inner one's frames.
+    let segmented_query = "hist * on(tag_0) sum by (tag_0) (sum(hist))";
     let plan = build_native_fused_plan_with_provider(
-        refused_query,
+        segmented_query,
         true,
         native_mixed_kind_provider().await,
     )
     .await;
     let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{segmented_query}: {display}"));
     assert!(
-        find_fused_series(&plan).is_none(),
-        "`{refused_query}` has no composed answer: {display}"
+        matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
+        "{segmented_query}: the statement root is the pairing: {display}"
     );
-    let legacy = PromPlanner::stmt_to_plan_with_annotations(
-        native_mixed_kind_provider().await,
-        &build_eval_stmt(refused_query),
-        &build_query_engine_state(),
-        None,
-        false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        legacy.display_indent().to_string(),
-        display,
-        "`{refused_query}` must keep the existing plan"
-    );
+    assert!(!display.contains("Join:"), "{segmented_query}: {display}");
 }
 
 /// A composed binary that meets a shape its kernels refuse keeps the existing plan.
@@ -12288,13 +12329,12 @@ async fn native_histogram_plan(query: &str) -> String {
     plan.display_indent_schema().to_string()
 }
 
-/// A histogram-consuming aggregate remains a legacy fold even if its child is native.
+/// A histogram fold over a set operation runs natively; one over a collected rewrite does not.
 ///
-/// A label rewrite or a set expression can pass histograms to the aggregate. Admitting that fold
-/// natively would send histograms into a float-only kernel, but independently supported child
-/// expressions may still have their own native producers below the legacy histogram aggregate.
+/// A set operation hands its fold histograms of a kind its two sides agree on, so the fold binds
+/// histogram state and runs once above the set's frames.
 #[tokio::test]
-async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
+async fn histogram_folds_over_sets_and_collected_rewrites() {
     for query in [
         "sum(some_metric or some_metric)",
         "sum(some_metric and some_metric)",
@@ -12304,27 +12344,20 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         assert!(
-            display.contains("Aggregate: groupBy=")
-                && display.contains("prom_native_histogram_agg_sum("),
-            "{query} did not retain the legacy histogram aggregate: {display}"
+            !display.contains("prom_native_histogram_agg_sum("),
+            "{query} kept the legacy histogram aggregate: {display}"
         );
-        // Inspect every fused node's complete native tree, not just its root: a set child and its
-        // frame producers may be native, but none may perform this histogram fold.
-        let mut pending = vec![&plan];
-        while let Some(node) = pending.pop() {
-            if let LogicalPlan::Extension(Extension { node }) = node
-                && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
-            {
-                let tree = fused.tree().to_string();
-                assert!(
-                    !tree
-                        .lines()
-                        .any(|line| line.split_whitespace().nth(1) == Some("Aggregate")),
-                    "{query} ran a native aggregate: {tree}\n{display}"
-                );
-            }
-            pending.extend(node.inputs());
-        }
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the native route: {display}"));
+        assert!(
+            matches!(fused.tree().root().expr, NativeExpr::Aggregate { .. }),
+            "{query} does not fold natively: {display}"
+        );
+        assert_eq!(
+            &native_histogram_value_type().as_arrow_type(),
+            native_value_field(fused, query).data_type(),
+            "{query} answers the histograms it folded: {display}"
+        );
     }
     // `sum(label_replace(...))` is one of the shapes above. The rewrite collapses every series onto
     // one `tag_0`, so the canonical pass collects it with a `Merge` on the fold's own input side -
@@ -12332,11 +12365,9 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     // set are collected a partition at a time: two colliding series that landed in different
     // partitions are each folded apart, their states are added above the router, and the statement
     // answers a value where Prometheus reports `vector cannot contain metrics with the same
-    // labelset`. The split therefore refuses a merge, and no other execution of this route folds a
-    // histogram state: the chain built above a boundary folds floats, and what carries a histogram
-    // fold across a partition boundary is the split's state alone. So the statement keeps the
-    // existing plan - the plan it had before the split carried a merge - and the collision is the
-    // existing route's to report.
+    // labelset`. The split therefore refuses a merge, and a tree over one input that folds
+    // histogram state is not segmented either, so the statement keeps the existing plan and the
+    // collision is the existing route's to report.
     let table_provider =
         build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
@@ -18293,8 +18324,7 @@ async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
     );
     // Two histogram tables are a multi-input tree, but each fold is its own subtree: the binary
     // above them combines two already-folded histograms, so no aggregate state crosses the pairing
-    // and the statement runs. The state gate is about an aggregate reading several inputs, not
-    // about a value built from two of them.
+    // and the statement runs.
     let provider = build_test_native_histogram_tables(&["some_metric", "other_metric"]).await;
     let plan = build_native_fused_plan_with_provider(
         "sum(some_metric) + sum(other_metric)",
@@ -18387,5 +18417,39 @@ async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vect
         .unwrap_or_else(|error| panic!("`{query}` is not planned at all: {error}"));
         let (_, batches) = execute(plan, &state).await;
         assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
+    }
+}
+
+/// A fold over a pairing of two histogram metrics runs natively.
+///
+/// The pairing is segmented into a frame of its own and the fold runs once above it, so every
+/// contribution meets in one execution.
+#[tokio::test]
+async fn a_histogram_fold_over_several_inputs_runs_natively() {
+    for query in [
+        "sum(some_metric + other_metric)",
+        "avg by (tag_0) (some_metric - other_metric)",
+        "count(some_metric + other_metric)",
+        "histogram_count(sum(some_metric + other_metric))",
+        "sum without (tag_0) (some_metric or other_metric)",
+    ] {
+        let provider = build_test_native_histogram_tables(&["some_metric", "other_metric"]).await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        let display = plan.display_indent_schema().to_string();
+        assert_eq!(None, take_reported_decline(), "{query}: {display}");
+        let LogicalPlan::Extension(Extension { node }) = &plan else {
+            panic!("{query} is not answered by a native node: {display}");
+        };
+        let fused = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| panic!("{query} is not answered by a native node: {display}"));
+        assert!(
+            fused
+                .tree()
+                .root()
+                .any(&|node| matches!(node.expr, NativeExpr::Aggregate { .. })),
+            "{query} left its fold to the existing plan: {display}"
+        );
     }
 }

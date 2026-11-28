@@ -1450,11 +1450,11 @@ impl PromPlanner {
         } else {
             None
         };
-        // Neither the aggregate split nor a node over several sources can fold histogram state. The
-        // kind entering each aggregate decides, not the root's shape: `sum(h) * 2` has a binary
-        // root.
+        // A tree over several inputs folds every partition in one node above them, histograms
+        // included. The kind entering each aggregate decides, not the root's shape: `sum(h) * 2` has
+        // a binary root.
         if let Some(kind @ FieldKind::Histogram) = statement_kind
-            && ((multi_input && per_source_inputs) || aggregate_reads_histogram(root, kind))
+            && aggregate_reads_histogram(root, kind)
         {
             return Ok(declined("histogram_aggregate_needs_state_this_route_lacks"));
         }
@@ -1550,9 +1550,10 @@ impl PromPlanner {
                     grid,
                 )));
             }
-            // A segment reads assembled frames, and no histogram fold here runs over those; every
-            // histogram fold reads its own scan.
-            if binds_histogram_state_anywhere(root) {
+            // A segment reads assembled frames, and no single-input histogram fold runs over those.
+            // A tree over several inputs is segmented below its fold, which runs once above every
+            // operand's frames.
+            if !multi_input && binds_histogram_state_anywhere(root) {
                 return Ok(declined("histogram_state_above_a_segment_boundary"));
             }
         }
@@ -2032,6 +2033,8 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
     // `count` and `group` count a histogram as one sample; `min`, `max`, `stddev`, `stdvar` and
     // `quantile` skip it as Prometheus does (legacy: `create_native_histogram_aggregate_expr`).
+    // `sum` and `avg` fold the payload only when they bind histogram state. A kind the walk cannot
+    // name, such as a set operation whose sides disagree, is refused.
     node.any(&|node| {
         matches!(
             &node.expr,

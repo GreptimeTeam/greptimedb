@@ -202,6 +202,7 @@ macro_rules! http_tests {
                 test_remote_write_v2_histogram_sum_over_range,
                 test_remote_write_v2_histogram_sum_and_avg_native_route,
                 test_remote_write_v2_histogram_avg_native_partitions,
+                test_remote_write_v2_histogram_multi_input_aggregate_native_route,
                 test_remote_write_v2_histogram_sum_incompatible_layouts_warns,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
@@ -7475,6 +7476,50 @@ fn assert_histogram_fields_close(
     }
 }
 
+/// One Prometheus API answer's `data` object, with its series sorted by their labels so that two
+/// routes' answers compare equal whatever order each returned them in.
+async fn sorted_prom_query(
+    client: &TestClient,
+    endpoint: &str,
+    query: &str,
+    params: &str,
+    hints: &str,
+) -> Value {
+    let response = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/{endpoint}?query={}&{params}",
+            encode(query)
+        ))
+        .header("x-greptime-hints", hints)
+        .send()
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "`{query}` failed with {hints}"
+    );
+    let body: Value = response.json().await;
+    let mut data = body["data"].clone();
+    if matches!(
+        body["data"]["resultType"].as_str(),
+        Some("vector" | "matrix")
+    ) && let Some(results) = data["result"].as_array_mut()
+    {
+        results.sort_by_key(|result| result["metric"].to_string());
+    }
+    data
+}
+
+/// The `(count, sum)` of every histogram an instant vector answer holds, in its order.
+fn vector_histogram_fields(data: &Value) -> Vec<(f64, f64)> {
+    data["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no vector in {data}"))
+        .iter()
+        .map(histogram_fields)
+        .collect()
+}
+
 /// `sum` and `avg` over native histograms run natively, and agree with the existing path on a
 /// fixture whose arithmetic is well conditioned.
 ///
@@ -7813,6 +7858,204 @@ pub async fn test_remote_write_v2_histogram_sum_incompatible_layouts_warns(
             .as_str()
             .is_some_and(|text| text.contains("incompatible native histogram layouts"))),
         "the removed point did not report its layout: {body}"
+    );
+}
+
+/// A tree that reads several native-histogram metrics and folds or reduces what it pairs runs
+/// natively and answers what the existing path answers.
+///
+/// The fold reads histograms that only exist once both inputs are paired, and it runs once above
+/// every operand's frame. The series are flushed one by one and read over four partitions. The
+/// counts and sums are small integers in one schema, so both routes agree exactly;
+/// `nh_right{job="c"}` has no partner, which `+` drops and `or` keeps.
+pub async fn test_remote_write_v2_histogram_multi_input_aggregate_native_route(
+    store_type: StorageType,
+) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_multi_input_aggregate",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        parallelism: 4,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    for (metric, job, count, sum) in [
+        ("nh_left", "a", 2, 1.0),
+        ("nh_left", "b", 4, 2.0),
+        ("nh_right", "a", 6, 3.0),
+        ("nh_right", "b", 8, 4.0),
+        ("nh_right", "c", 10, 5.0),
+    ] {
+        write_native_histogram_sample(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, metric),
+                ("job", job),
+                ("instance", "x"),
+            ],
+            1,
+            vec![],
+            2_000,
+            count,
+            sum,
+        )
+        .await;
+        tests_integration::test_util::execute_sql(
+            instance.fe_instance(),
+            &format!("ADMIN FLUSH_TABLE('{metric}')"),
+        )
+        .await;
+    }
+
+    let histograms = |fields: &[(f64, f64)]| Some(fields.to_vec());
+    for (query, expected_histograms, expected_floats) in [
+        ("sum(nh_left + nh_right)", histograms(&[(20.0, 10.0)]), None),
+        (
+            "sum(nh_left + nh_right) * 2",
+            histograms(&[(40.0, 20.0)]),
+            None,
+        ),
+        (
+            "nh_left + nh_right",
+            histograms(&[(8.0, 4.0), (12.0, 6.0)]),
+            None,
+        ),
+        ("sum(nh_left and nh_right)", histograms(&[(6.0, 3.0)]), None),
+        (
+            "sum by (job) (nh_left + nh_right)",
+            histograms(&[(8.0, 4.0), (12.0, 6.0)]),
+            None,
+        ),
+        ("avg(nh_left + nh_right)", histograms(&[(10.0, 5.0)]), None),
+        (
+            "sum without (instance) (nh_left or nh_right)",
+            histograms(&[(2.0, 1.0), (4.0, 2.0), (10.0, 5.0)]),
+            None,
+        ),
+        ("count(nh_left + nh_right)", None, Some(vec![2.0])),
+        (
+            "histogram_count(nh_left + nh_right)",
+            None,
+            Some(vec![8.0, 12.0]),
+        ),
+        (
+            "histogram_count(sum(nh_left + nh_right))",
+            None,
+            Some(vec![20.0]),
+        ),
+    ] {
+        observer.clear();
+        let native = sorted_prom_query(
+            &client,
+            "query",
+            query,
+            "time=2",
+            "query.experimental_native_promql=true,query_parallelism=4",
+        )
+        .await;
+        // The pairing and everything above it ran natively, rather than a native pairing under an
+        // aggregate or a function the existing path runs.
+        let described = describe_nodes(&observer.take_all(query));
+        let runs = |node: &str| {
+            described.iter().any(|description| {
+                description
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(node))
+            })
+        };
+        assert!(
+            runs("Binary:") || runs("Set:"),
+            "`{query}` did not pair natively: {described:?}"
+        );
+        let folds = ["sum", "avg", "count"]
+            .iter()
+            .any(|operator| query.starts_with(operator))
+            || query.contains("(sum(");
+        assert!(
+            !folds || runs("Aggregate:"),
+            "`{query}` left its fold to the existing plan: {described:?}"
+        );
+        assert!(
+            !query.starts_with("histogram_count") || runs("Map:"),
+            "`{query}` left `histogram_count` to the existing plan: {described:?}"
+        );
+        let legacy = sorted_prom_query(
+            &client,
+            "query",
+            query,
+            "time=2",
+            "query.experimental_native_promql=false",
+        )
+        .await;
+        assert_eq!(
+            native, legacy,
+            "`{query}`: native and existing answers differ"
+        );
+        if let Some(expected) = expected_histograms {
+            assert_eq!(
+                expected,
+                vector_histogram_fields(&native),
+                "`{query}`: {native}"
+            );
+        }
+        if let Some(expected) = expected_floats {
+            let values = native["result"]
+                .as_array()
+                .unwrap_or_else(|| panic!("`{query}`: no vector in {native}"))
+                .iter()
+                .map(|result| {
+                    result["value"][1]
+                        .as_str()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or_else(|| panic!("`{query}`: no float in {result}"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(expected, values, "`{query}`: {native}");
+        }
+    }
+
+    // A bare `or` runs as one node over both metrics. Each sample keeps the metric name of the side
+    // it came from, as Prometheus answers; the existing path names the right side's unmatched
+    // series after the left metric, so the two routes are not compared here.
+    let query = "nh_left or nh_right";
+    observer.clear();
+    let native = sorted_prom_query(
+        &client,
+        "query",
+        query,
+        "time=2",
+        "query.experimental_native_promql=true,query_parallelism=4",
+    )
+    .await;
+    observer.take_all(query);
+    assert_eq!(
+        vec![(2.0, 1.0), (4.0, 2.0), (10.0, 5.0)],
+        vector_histogram_fields(&native),
+        "`{query}`: {native}"
+    );
+    let names = native["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`{query}`: no vector in {native}"))
+        .iter()
+        .map(|result| result["metric"]["__name__"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec!["nh_left", "nh_left", "nh_right"],
+        names,
+        "`{query}`: {native}"
     );
 }
 
