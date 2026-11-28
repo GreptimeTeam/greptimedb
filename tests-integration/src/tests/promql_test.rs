@@ -42,7 +42,7 @@ use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::{MetricDiscoveryScope, QueryContext};
+use session::context::QueryContext;
 use sql::ast::{Ident, ObjectName, ObjectNamePart};
 use sql::statements::create::CreateView;
 use sql::statements::statement::Statement as SqlStatement;
@@ -2400,6 +2400,59 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
     }
 }
 
+/// TQL answers a selector that names no metric as the Prometheus handler does, with no scope
+/// supplied by the caller: authorizing the statement prepares it.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_tql_discovers_metrics_like_the_prometheus_handler() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_tql_discovery")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE tql_disc_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE tql_disc_a (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'tql_disc_phy'); \
+         CREATE TABLE tql_disc_b (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'tql_disc_phy'); \
+         INSERT INTO tql_disc_a (host, ts, v) VALUES ('a', 0, 2); \
+         INSERT INTO tql_disc_b (host, ts, v) VALUES ('b', 0, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    for query in [
+        r#"{__name__=~"tql_disc_a|tql_disc_b"}"#,
+        r#"{host=~"a|b"}"#,
+        r#"sum by (__name__) ({host=~"a|b"})"#,
+    ] {
+        observer.clear();
+        let output =
+            native_tql_output(&instance, &format!("TQL EVAL (0, 0, '1s') {query}"), true).await;
+        assert_native_rows_plan(&observer);
+        let rows = native_rows(output, None).await;
+        assert_eq!(2, rows.len(), "{query}: {rows:?}");
+        let expected = native_rows(discovery_query(&instance, query).await, None).await;
+        assert_eq!(expected, rows, "{query}");
+    }
+
+    let output = native_tql_output(
+        &instance,
+        r#"WITH t AS (TQL EVAL (0, 0, '1s') {host=~"a|b"}) SELECT * FROM t"#,
+        true,
+    )
+    .await;
+    let rows = rows_batches(output)
+        .await
+        .iter()
+        .map(|batch| batch.num_rows())
+        .sum::<usize>();
+    assert_eq!(2, rows);
+}
+
 /// A native rows result names each row after the metric it came from.
 ///
 /// The name is part of what the statement answers, not of how a result is displayed: `sum by
@@ -2440,25 +2493,11 @@ async fn native_promql_rows_name_each_row_after_its_metric() {
     // right side's series, so each row keeps the labels its own selector read - `host` among them -
     // and reports the name of the metric it came from.
     // A selector that names no metric is answered from the metric tables discovery is authorized to
-    // read, and a caller prepares that scope for the statement: the Prometheus handler passes the
-    // schema's tables, and this fixture passes its two. Without a scope the planner declines the
-    // selector, so the statement would keep the existing plan, which refuses it outright.
+    // read; authorizing the statement prepares that scope.
     let scoped = || {
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
         ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
-        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_name_demo".to_string(),
-            ),
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_name_other".to_string(),
-            ),
-        ]));
         Arc::new(ctx)
     };
     for (query, expected, native) in [
@@ -3019,24 +3058,11 @@ async fn native_promql_field_selector_over_no_table_answers_empty() {
     )
     .await;
     // A selector that names no metric is answered from the metric tables discovery is authorized to
-    // read, which the caller states: this fixture passes its two, and the selector's own name
-    // matcher is what leaves it with no table at all.
+    // read, and the selector's own name matcher is what leaves it with no table at all.
     let scoped = || {
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
         ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
-        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_fs_demo".to_string(),
-            ),
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_fs_other".to_string(),
-            ),
-        ]));
         Arc::new(ctx)
     };
     for (query, answered) in [
@@ -7131,14 +7157,11 @@ async fn native_promql_rewrites_the_metric_name() {
         }
     };
     // A nameless selector is answered by enumerating the schema's metric tables, which the
-    // frontend's PromQL entry point bounds by the caller's grants before it plans. A SQL
-    // `TQL EVAL` statement prepares no such scope, so the test states the unrestricted one a
-    // caller with every grant would get.
+    // frontend bounds by the caller's grants before it plans.
     let discovery_ctx = Arc::new({
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, 4.to_string());
         ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true");
-        ctx.set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
         ctx
     });
     let run_discovery = |expr: &str, range: &str| {
@@ -7460,12 +7483,8 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     }
 }
 
-/// `promql` over `start..=end` at `step`, through the Prometheus handler.
-///
-/// The handler is the path that authorizes and plans a selector naming no metric: a `TQL EVAL`
-/// statement reaches the planner through the statement executor instead, and that path prepares no
-/// discovery scope, so it keeps declining such a selector. Its times are Prometheus timestamps, so
-/// a bare number is a count of seconds.
+/// `promql` over `start..=end` at `step`, through the Prometheus handler. Its times are Prometheus
+/// timestamps, so a bare number is a count of seconds.
 async fn promql_output(
     instance: &Arc<Instance>,
     promql: &str,
@@ -9269,16 +9288,9 @@ async fn native_promql_zero_match_or_real_tql() {
         (r#"{__name__=~"no_such_metric_.+"} or alpha_total"#, 0),
         (r#"alpha_total or {__name__=~"no_such_metric_.+"}"#, 1),
     ] {
-        // TQL does not prepare discovery scope itself; provide the same authorized scope that
-        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
         ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
-        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
-            DEFAULT_CATALOG_NAME.to_string(),
-            DEFAULT_SCHEMA_NAME.to_string(),
-            "alpha_total".to_string(),
-        )]));
         let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
         observer.clear();
         let output = instance
@@ -9338,16 +9350,9 @@ async fn native_promql_zero_match_or_real_tql() {
         r#"{__name__=~"no_such_metric_.+"} + on(host) alpha_total"#,
         r#"alpha_total * on(host) group_left {__name__=~"no_such_metric_.+"}"#,
     ] {
-        // TQL does not prepare discovery scope itself; provide the same authorized scope that
-        // the Prometheus handler would provide, without comparing to the unsupported legacy path.
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
         ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
-        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
-            DEFAULT_CATALOG_NAME.to_string(),
-            DEFAULT_SCHEMA_NAME.to_string(),
-            "alpha_total".to_string(),
-        )]));
         let sql = format!("TQL EVAL (0, 2, '1s', '1s') {query}");
         observer.clear();
         let output = instance
@@ -9496,23 +9501,9 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
     };
     let mut answers = Vec::new();
     for (query, empty_selectors) in queries {
-        // TQL does not prepare discovery scope itself; provide the same authorized scope that the
-        // Prometheus handler would provide, without comparing to the unsupported legacy path.
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
         ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
-        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_local_wide".to_string(),
-            ),
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_local_narrow".to_string(),
-            ),
-        ]));
         let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
         observer.clear();
         let output = instance
@@ -9572,18 +9563,6 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
         let mut ctx = QueryContext::with_db_name(None);
         ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
         ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
-        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_local_wide".to_string(),
-            ),
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-                "native_local_narrow".to_string(),
-            ),
-        ]));
         let sql = format!("TQL EVAL (1, 2, '1s', '1s') {query}");
         observer.clear();
         let output = instance
@@ -9616,12 +9595,8 @@ async fn native_promql_zero_match_takes_the_layout_of_its_operand() {
     );
 }
 
-/// `promql` evaluated at one instant through the Prometheus handler, which is the path that
-/// authorizes and plans a discovered selector.
-///
-/// A `TQL EVAL` statement reaches the planner through the statement executor instead, and that path
-/// prepares no discovery scope, so it keeps declining a selector that names no metric. The trait is
-/// named in full because this module already calls the SQL handler's `do_query`.
+/// `promql` evaluated at one instant through the Prometheus handler. The trait is named in full
+/// because this module already calls the SQL handler's `do_query`.
 async fn discovery_query(instance: &Arc<Instance>, promql: &str) -> Output {
     let query = PromQuery {
         query: promql.to_string(),

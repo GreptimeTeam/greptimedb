@@ -235,6 +235,42 @@ pub fn extract_tables_from_statement_checked(
     extract_tables_from_statement(stmt, &mut names).then_some(names.into_iter())
 }
 
+/// Extracts the tables referenced by a [`Statement`] that can be resolved statically,
+/// ignoring the ones that cannot.
+pub fn extract_tables_from_statement_partial(stmt: &Statement) -> Vec<ObjectName> {
+    let mut names = HashSet::new();
+    extract_tables_from_statement(stmt, &mut names);
+    names.into_iter().collect()
+}
+
+/// The PromQL expressions a query statement evaluates through TQL: its own, or those of its TQL
+/// CTEs, looking through `EXPLAIN`. Returns `None` when one of them does not parse.
+pub fn extract_tql_exprs_from_statement(stmt: &Statement) -> Option<Vec<PromExpr>> {
+    fn parse(tql: &Tql) -> Option<PromExpr> {
+        let promql = match tql {
+            Tql::Eval(eval) => &eval.query,
+            Tql::Explain(explain) => &explain.query,
+            Tql::Analyze(analyze) => &analyze.query,
+        };
+        promql_parser::parser::parse(promql).ok()
+    }
+
+    match stmt {
+        Statement::Tql(tql) => parse(tql).map(|expr| vec![expr]),
+        Statement::Query(query) => query
+            .hybrid_cte
+            .iter()
+            .flat_map(|hybrid_cte| &hybrid_cte.cte_tables)
+            .filter_map(|cte| match &cte.content {
+                CteContent::Tql(tql) => Some(parse(tql)),
+                CteContent::Sql(_) => None,
+            })
+            .collect(),
+        Statement::Explain(explain) => extract_tql_exprs_from_statement(&explain.statement),
+        _ => Some(Vec::new()),
+    }
+}
+
 fn extract_tables_from_statement(stmt: &Statement, names: &mut HashSet<ObjectName>) -> bool {
     match stmt {
         Statement::Tql(tql) => extract_tables_from_tql(tql, names),
