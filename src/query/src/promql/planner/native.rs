@@ -1550,11 +1550,6 @@ impl PromPlanner {
                     grid,
                 )));
             }
-            // A segment reads assembled frames, and no histogram fold here runs over those; every
-            // histogram fold reads its own scan.
-            if binds_histogram_state_anywhere(root) {
-                return Ok(declined("histogram_state_above_a_segment_boundary"));
-            }
         }
         let output_tags = match &tree.root().output {
             NativeType::Scalar(_) => Vec::new(),
@@ -2050,18 +2045,6 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
 /// table the compiler and the split bind from.
 fn binds_histogram_state(op: &BoundAggregate) -> bool {
     aggregate_state_binding(op.kind, op.field_kind).is_some_and(|(kind, _)| kind.is_histogram())
-}
-
-/// Whether any aggregate in `node` binds a state that carries a native histogram.
-///
-/// Only the aggregate split carries histogram state across a partition boundary.
-fn binds_histogram_state_anywhere(node: &NativeNode) -> bool {
-    node.any(&|node| {
-        matches!(
-            &node.expr,
-            NativeExpr::Aggregate { op, .. } if binds_histogram_state(op)
-        )
-    })
 }
 
 /// Whether the state a split tree exports is a native histogram's.

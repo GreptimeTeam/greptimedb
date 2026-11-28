@@ -203,6 +203,7 @@ macro_rules! http_tests {
                 test_remote_write_v2_histogram_sum_and_avg_native_route,
                 test_remote_write_v2_histogram_avg_native_partitions,
                 test_remote_write_v2_histogram_sum_incompatible_layouts_warns,
+                test_remote_write_v2_histogram_fold_above_split_native_route,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
                 test_remote_write_v2_histogram_native_composition,
@@ -7475,6 +7476,50 @@ fn assert_histogram_fields_close(
     }
 }
 
+/// One Prometheus API answer's `data` object, with its series sorted by their labels so that two
+/// routes' answers compare equal whatever order each returned them in.
+async fn sorted_prom_query(
+    client: &TestClient,
+    endpoint: &str,
+    query: &str,
+    params: &str,
+    hints: &str,
+) -> Value {
+    let response = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/{endpoint}?query={}&{params}",
+            encode(query)
+        ))
+        .header("x-greptime-hints", hints)
+        .send()
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "`{query}` failed with {hints}"
+    );
+    let body: Value = response.json().await;
+    let mut data = body["data"].clone();
+    if matches!(
+        body["data"]["resultType"].as_str(),
+        Some("vector" | "matrix")
+    ) && let Some(results) = data["result"].as_array_mut()
+    {
+        results.sort_by_key(|result| result["metric"].to_string());
+    }
+    data
+}
+
+/// The `(count, sum)` of every histogram an instant vector answer holds, in its order.
+fn vector_histogram_fields(data: &Value) -> Vec<(f64, f64)> {
+    data["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no vector in {data}"))
+        .iter()
+        .map(histogram_fields)
+        .collect()
+}
+
 /// `sum` and `avg` over native histograms run natively, and agree with the existing path on a
 /// fixture whose arithmetic is well conditioned.
 ///
@@ -7724,6 +7769,238 @@ pub async fn test_remote_write_v2_histogram_avg_native_partitions(store_type: St
         observer.take_all("avg over one partition").len(),
         2,
         "the single-partition query still runs the split"
+    );
+}
+
+/// A native-histogram fold whose answer is finished above the fold runs natively.
+///
+/// Every statement here folds histograms and then does something else with the result: a second
+/// aggregate, a histogram function, a ranking, `sort`, `scalar` or `absent`. The four series are
+/// flushed one by one and read over four partitions, so the fold below has contributions from
+/// several partitions. The expectations are Prometheus's: `sort`, `topk`, `min` and
+/// `max_over_time` ignore histogram samples, and `scalar` of a vector without a float is `NaN`.
+pub async fn test_remote_write_v2_histogram_fold_above_split_native_route(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_fold_above_split",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        parallelism: 4,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "nh_seg";
+    for (job, host, count, sum) in [
+        ("a", "x", 2, 1.0),
+        ("a", "y", 4, 2.0),
+        ("b", "x", 6, 3.0),
+        ("b", "y", 8, 4.0),
+    ] {
+        write_native_histogram_sample(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, metric),
+                ("job", job),
+                ("instance", host),
+            ],
+            1,
+            vec![],
+            2_000,
+            count,
+            sum,
+        )
+        .await;
+        tests_integration::test_util::execute_sql(
+            instance.fe_instance(),
+            &format!("ADMIN FLUSH_TABLE('{metric}')"),
+        )
+        .await;
+    }
+
+    let histograms = |fields: &[(f64, f64)]| Some(fields.to_vec());
+    for (query, expected_histograms, expected_floats) in [
+        (
+            "sum(sum by (job) (nh_seg))",
+            histograms(&[(20.0, 10.0)]),
+            None,
+        ),
+        (
+            "avg(sum by (job) (nh_seg))",
+            histograms(&[(10.0, 5.0)]),
+            None,
+        ),
+        ("count(sum by (job) (nh_seg))", None, Some(vec![2.0])),
+        (
+            r#"sum by (team) (label_replace(nh_seg, "team", "t-$1", "job", "(.*)"))"#,
+            histograms(&[(6.0, 3.0), (14.0, 7.0)]),
+            None,
+        ),
+        ("histogram_count(sum(nh_seg))", None, Some(vec![20.0])),
+        ("histogram_sum(sum(nh_seg))", None, Some(vec![10.0])),
+        ("histogram_quantile(0.5, sum(nh_seg))", None, None),
+        ("histogram_fraction(0, 2, sum(nh_seg))", None, None),
+        (
+            "max_over_time(sum(nh_seg)[1s:1s])",
+            None,
+            Some(Vec::<f64>::new()),
+        ),
+        ("sort(sum by (job) (nh_seg))", None, Some(Vec::<f64>::new())),
+        (
+            "topk(1, sum by (job) (nh_seg))",
+            None,
+            Some(Vec::<f64>::new()),
+        ),
+        ("min(sum by (job) (nh_seg))", None, Some(Vec::<f64>::new())),
+        ("absent(sum(nh_seg))", None, Some(Vec::<f64>::new())),
+        ("scalar(sum(nh_seg))", None, None),
+    ] {
+        observer.clear();
+        let native = sorted_prom_query(
+            &client,
+            "query",
+            query,
+            "time=2",
+            "query.experimental_native_promql=true,query_parallelism=4",
+        )
+        .await;
+        let described = describe_nodes(&observer.take_all(query));
+        assert!(
+            described.iter().any(|node| node
+                .lines()
+                .any(|line| line.trim_start().starts_with("Aggregate:"))),
+            "`{query}` did not fold natively: {described:?}"
+        );
+        let legacy = sorted_prom_query(
+            &client,
+            "query",
+            query,
+            "time=2",
+            "query.experimental_native_promql=false",
+        )
+        .await;
+        assert_eq!(
+            native, legacy,
+            "`{query}`: native and existing answers differ"
+        );
+        if let Some(expected) = expected_histograms {
+            assert_eq!(
+                expected,
+                vector_histogram_fields(&native),
+                "`{query}`: {native}"
+            );
+        }
+        if let Some(expected) = expected_floats {
+            let values = native["result"]
+                .as_array()
+                .unwrap_or_else(|| panic!("`{query}`: no vector in {native}"))
+                .iter()
+                .map(|result| {
+                    result["value"][1]
+                        .as_str()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or_else(|| panic!("`{query}`: no float in {result}"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(expected, values, "`{query}`: {native}");
+        }
+    }
+    let scalar = sorted_prom_query(
+        &client,
+        "query",
+        "scalar(sum(nh_seg))",
+        "time=2",
+        "query.experimental_native_promql=true",
+    )
+    .await;
+    assert_eq!(
+        "NaN", scalar["result"][1],
+        "a histogram is not a float: {scalar}"
+    );
+    // Rewriting `instance` away gives two series of each job one label set. Prometheus refuses
+    // that before anything folds them, and both routes report the collision.
+    let collapsed = r#"sum(label_replace(nh_seg, "instance", "z", "instance", ".*"))"#;
+    for (hints, native) in [
+        (
+            "query.experimental_native_promql=true,query_parallelism=4",
+            true,
+        ),
+        ("query.experimental_native_promql=false", false),
+    ] {
+        observer.clear();
+        let response = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=2",
+                encode(collapsed)
+            ))
+            .header("x-greptime-hints", hints)
+            .send()
+            .await;
+        let status = response.status();
+        let body = response.text().await;
+        assert!(
+            status != StatusCode::OK
+                && body.contains("vector cannot contain metrics with the same labelset"),
+            "`{collapsed}` with {hints}: {status} {body}"
+        );
+        if native {
+            assert_outer_sum_folded_natively(&observer.take_all(collapsed), collapsed);
+        }
+    }
+    // The same folds over a range: every step folds all four series once.
+    for query in ["sum(sum by (job) (nh_seg))", "histogram_count(sum(nh_seg))"] {
+        observer.clear();
+        let native = sorted_prom_query(
+            &client,
+            "query_range",
+            query,
+            "start=0&end=4&step=1",
+            "query.experimental_native_promql=true,query_parallelism=4",
+        )
+        .await;
+        assert_outer_sum_folded_natively(&observer.take_all(query), query);
+        let legacy = sorted_prom_query(
+            &client,
+            "query_range",
+            query,
+            "start=0&end=4&step=1",
+            "query.experimental_native_promql=false",
+        )
+        .await;
+        assert_eq!(
+            native, legacy,
+            "`{query}` over a range: native and existing answers differ"
+        );
+        assert_eq!(
+            Some(3),
+            native["result"][0]["histograms"]
+                .as_array()
+                .or(native["result"][0]["values"].as_array())
+                .map(Vec::len),
+            "`{query}` answers steps 2, 3 and 4: {native}"
+        );
+    }
+}
+
+/// Asserts that the statement's outermost `sum` ran in a fused node, not only a fold below it.
+fn assert_outer_sum_folded_natively(fused: &[Arc<dyn ExecutionPlan>], query: &str) {
+    let described = describe_nodes(fused);
+    assert!(
+        described.iter().any(|node| node
+            .lines()
+            .any(|line| line.trim_start().starts_with("Aggregate: sum by [] "))),
+        "`{query}` did not run its outer fold natively: {described:?}"
     );
 }
 
