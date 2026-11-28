@@ -61,7 +61,7 @@ use query::QueryEngineRef;
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
-use query::options::should_collect_region_watermark_from_extensions;
+use query::options::should_collect_region_watermark_for_region_from_extensions;
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -1010,8 +1010,10 @@ fn wrap_flow_region_watermark_stream(
     region_id: RegionId,
     query_ctx: &QueryContextRef,
 ) -> SendableRecordBatchStream {
-    if should_collect_region_watermark_from_extensions(&query_ctx.extensions())
-        && let Some(seq) = query_ctx.get_snapshot(region_id.as_u64())
+    if should_collect_region_watermark_for_region_from_extensions(
+        &query_ctx.extensions(),
+        region_id,
+    ) && let Some(seq) = query_ctx.get_snapshot(region_id.as_u64())
     {
         Box::pin(RegionWatermarkStream::new(stream, region_id, seq)) as SendableRecordBatchStream
     } else {
@@ -4135,6 +4137,180 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_flow_table_scoped_snapshot_and_incremental_mito_scans() {
+        use datafusion::execution::context::SessionContext;
+        use datafusion::physical_plan::collect;
+        use query::options::{
+            FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE,
+            FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SNAPSHOT_TABLE_IDS,
+        };
+
+        let mut env = TestEnv::with_prefix("region-server-flow-table-scoped-scans").await;
+        let engine = Arc::new(env.create_engine(MitoConfig::default()).await);
+        let snapshot_region = RegionId::new(100, 0);
+        let incremental_region = RegionId::new(200, 0);
+        let plain_region = RegionId::new(300, 0);
+        let regions = [snapshot_region, incremental_region, plain_region];
+
+        for region_id in regions {
+            let create = CreateRequestBuilder::new()
+                .table_dir(&format!("flow-table-scoped/{}/", region_id.table_id()))
+                .insert_option("append_mode", "true")
+                .insert_option("preserve_row_sequence", "true")
+                .build();
+            let schema = rows_schema(&create);
+            engine
+                .handle_request(region_id, RegionRequest::Create(create))
+                .await
+                .unwrap();
+            mito2::test_util::put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema,
+                    rows: build_rows(0, 3),
+                },
+            )
+            .await;
+        }
+
+        // Snapshot rows span SST and memtable storage: pruning the older SST
+        // would incorrectly reduce the snapshot to the two later rows.
+        mito2::test_util::flush_region(&engine, snapshot_region, None).await;
+
+        let checkpoint = engine
+            .get_committed_sequence(incremental_region)
+            .await
+            .unwrap();
+        assert!(checkpoint > 0);
+        for region_id in regions {
+            let create = CreateRequestBuilder::new().build();
+            mito2::test_util::put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: rows_schema(&create),
+                    rows: build_rows(3, 5),
+                },
+            )
+            .await;
+        }
+        let snapshot_sequence = engine
+            .get_committed_sequence(snapshot_region)
+            .await
+            .unwrap();
+        let incremental_sequence = engine
+            .get_committed_sequence(incremental_region)
+            .await
+            .unwrap();
+        assert!(incremental_sequence > checkpoint);
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .extensions(HashMap::from([
+                    (FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[100]".to_string()),
+                    (
+                        FLOW_INCREMENTAL_MODE.to_string(),
+                        FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                    ),
+                    (
+                        FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                        format!(r#"{{"{}":{checkpoint}}}"#, incremental_region.as_u64()),
+                    ),
+                ]))
+                // This legacy/enterprise pruning hint would hide the first SST;
+                // table-scoped snapshots must ignore it.
+                .sst_min_sequences(Arc::new(std::sync::RwLock::new(HashMap::from([(
+                    snapshot_region.as_u64(),
+                    u64::MAX,
+                )]))))
+                .build(),
+        );
+        let df_ctx = SessionContext::new();
+        for (region_id, expected_count, expected_snapshot) in [
+            (snapshot_region, 5, Some(snapshot_sequence)),
+            (incremental_region, 2, Some(incremental_sequence)),
+            (plain_region, 5, None),
+        ] {
+            let provider = DummyTableProviderFactory
+                .create_table_provider(region_id, engine.clone(), Some(query_ctx.clone()))
+                .await
+                .unwrap();
+            assert_eq!(query_ctx.get_snapshot(region_id.as_u64()), None);
+            let plan = provider
+                .scan(&df_ctx.state(), None, &[], None)
+                .await
+                .unwrap();
+            assert_eq!(
+                query_ctx.get_snapshot(region_id.as_u64()),
+                expected_snapshot
+            );
+            if region_id == snapshot_region {
+                // A write after opening the scan must not enter this snapshot,
+                // nor a later scan reusing its bound.
+                let create = CreateRequestBuilder::new().build();
+                mito2::test_util::put_rows(
+                    &engine,
+                    region_id,
+                    Rows {
+                        schema: rows_schema(&create),
+                        rows: build_rows(5, 7),
+                    },
+                )
+                .await;
+            }
+
+            let batches = collect(plan, df_ctx.task_ctx()).await.unwrap();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                expected_count,
+                "unexpected rows for {region_id}"
+            );
+            let mut timestamps = batches
+                .iter()
+                .flat_map(|batch| {
+                    let values = batch
+                        .column(2)
+                        .as_any()
+                        .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
+                        .unwrap();
+                    (0..values.len())
+                        .map(|index| values.value(index))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            timestamps.sort();
+            let expected_timestamps = if region_id == incremental_region {
+                vec![3000, 4000]
+            } else {
+                vec![0, 1000, 2000, 3000, 4000]
+            };
+            assert_eq!(
+                timestamps, expected_timestamps,
+                "unexpected rows for {region_id}"
+            );
+            if region_id == snapshot_region {
+                let rescan = provider
+                    .scan(&df_ctx.state(), None, &[], None)
+                    .await
+                    .unwrap();
+                let batches = collect(rescan, df_ctx.task_ctx()).await.unwrap();
+                assert_eq!(
+                    batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                    expected_count,
+                    "rescan must reuse the original snapshot"
+                );
+                assert_eq!(
+                    query_ctx.get_snapshot(region_id.as_u64()),
+                    expected_snapshot
+                );
+            }
+        }
+
+        engine.stop().await.unwrap();
     }
 
     #[tokio::test]

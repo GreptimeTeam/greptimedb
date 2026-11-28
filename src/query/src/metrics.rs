@@ -314,17 +314,18 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
-        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
-            && !merge_scan.is_flow_sink_scan()
-        {
-            merge_merge_scan_region_watermarks(
-                &mut merged,
-                merge_scan
-                    .regions()
-                    .iter()
-                    .map(|region_id| region_id.as_u64()),
-                merge_scan.sub_stage_metrics(),
-            );
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
+            // Only snapshot-read and incrementally replayed tables can prove a
+            // scan-open watermark; plain reads are skipped so their unrelated
+            // bounds never leak into the merged result.
+            let participating = merge_scan.flow_watermark_regions();
+            if !participating.is_empty() {
+                merge_merge_scan_region_watermarks(
+                    &mut merged,
+                    participating.iter().map(|region_id| region_id.as_u64()),
+                    merge_scan.sub_stage_metrics(),
+                );
+            }
         }
         stack.extend(plan.children().into_iter().cloned());
     }
@@ -449,6 +450,7 @@ mod tests {
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::union::UnionExec;
     use datafusion_expr::LogicalPlanBuilder;
     use session::ReadPreference;
     use session::context::QueryContextBuilder;
@@ -457,7 +459,10 @@ mod tests {
 
     use super::*;
     use crate::dist_plan::RemoteDynFilterProducerId;
-    use crate::options::{FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID};
+    use crate::options::{
+        FLOW_INCREMENTAL_AFTER_SEQS, FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
+        FLOW_SNAPSHOT_TABLE_IDS,
+    };
     use crate::region_query::RegionQueryHandler;
 
     struct NoopRegionQueryHandler;
@@ -534,6 +539,54 @@ mod tests {
         )
     }
 
+    fn test_merge_scan_exec_with_regions(
+        regions: Vec<RegionId>,
+        query_ctx: QueryContextRef,
+    ) -> Arc<MergeScanExec> {
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let plan = LogicalPlanBuilder::empty(false).build().unwrap();
+        let schema = ArrowSchema::empty();
+
+        Arc::new(
+            MergeScanExec::new(
+                &session_state,
+                TableName::new("greptime", "public", "test"),
+                regions,
+                plan,
+                &schema,
+                Arc::new(NoopRegionQueryHandler),
+                query_ctx,
+                1,
+                Some(RemoteDynFilterProducerId::new(0)),
+                false,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn flow_table_scoped_query_ctx(
+        snapshot_table_ids: &[u32],
+        incremental_regions: &[RegionId],
+    ) -> QueryContextRef {
+        let after_seqs = incremental_regions
+            .iter()
+            .map(|region_id| (region_id.as_u64().to_string(), 10_u64))
+            .collect::<BTreeMap<_, _>>();
+
+        Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+                    serde_json::to_string(snapshot_table_ids).unwrap(),
+                )
+                .set_extension(
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    serde_json::to_string(&after_seqs).unwrap(),
+                )
+                .build(),
+        )
+    }
+
     fn flow_query_ctx_with_sink_table_id(sink_table_id: u32) -> QueryContextRef {
         Arc::new(
             QueryContextBuilder::default()
@@ -568,6 +621,71 @@ mod tests {
                 .region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: RegionId::new(43, 0).as_u64(),
+                watermark: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn terminal_metrics_include_snapshot_and_incremental_regions_and_skip_plain() {
+        let snapshot_region = RegionId::new(100, 0);
+        let incremental_region = RegionId::new(200, 1);
+        let plain_region = RegionId::new(300, 0);
+        let query_ctx = flow_table_scoped_query_ctx(&[100], &[incremental_region]);
+        let plan = UnionExec::try_new(vec![
+            test_merge_scan_exec_with_regions(vec![snapshot_region], query_ctx.clone())
+                as Arc<dyn ExecutionPlan>,
+            test_merge_scan_exec_with_regions(vec![incremental_region], query_ctx.clone())
+                as Arc<dyn ExecutionPlan>,
+            test_merge_scan_exec_with_regions(vec![plain_region], query_ctx)
+                as Arc<dyn ExecutionPlan>,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            terminal_recordbatch_metrics_from_plan(plan)
+                .unwrap()
+                .region_watermarks,
+            vec![
+                RegionWatermarkEntry {
+                    region_id: snapshot_region.as_u64(),
+                    watermark: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: incremental_region.as_u64(),
+                    watermark: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_metrics_skip_all_plain_regions_in_table_scoped_query() {
+        let query_ctx = flow_table_scoped_query_ctx(&[], &[]);
+        let plan = test_merge_scan_exec_with_regions(vec![RegionId::new(300, 0)], query_ctx);
+
+        assert!(terminal_recordbatch_metrics_from_plan(plan).is_none());
+    }
+
+    #[test]
+    fn terminal_metrics_unlisted_table_does_not_contribute_missing_watermark() {
+        let snapshot_region = RegionId::new(100, 0);
+        let plain_region = RegionId::new(300, 0);
+        let query_ctx = flow_table_scoped_query_ctx(&[100], &[]);
+        let plan = UnionExec::try_new(vec![
+            test_merge_scan_exec_with_regions(vec![snapshot_region], query_ctx.clone())
+                as Arc<dyn ExecutionPlan>,
+            test_merge_scan_exec_with_regions(vec![plain_region], query_ctx)
+                as Arc<dyn ExecutionPlan>,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            terminal_recordbatch_metrics_from_plan(plan)
+                .unwrap()
+                .region_watermarks,
+            vec![RegionWatermarkEntry {
+                region_id: snapshot_region.as_u64(),
                 watermark: None,
             }]
         );

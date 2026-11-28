@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -29,7 +29,18 @@ use crate::error::{Error, InvalidQueryContextExtensionSnafu, Result};
 pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
+/// Legacy sink table id used to keep the sink table out of the flow snapshot.
+/// Kept for old callers only; new callers use [`FLOW_SNAPSHOT_TABLE_IDS`].
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
+/// Table-scoped snapshot read set of a Flow query.
+///
+/// The wire value is a JSON array of numeric table ids. Presence of this key
+/// (including an empty array) selects the table-scoped semantics: every table in
+/// the set is read as one bound snapshot, every table referenced by
+/// [`FLOW_INCREMENTAL_AFTER_SEQS`] is replayed incrementally, and any other table
+/// keeps plain query semantics. When the key is absent, the legacy
+/// [`FLOW_SINK_TABLE_ID`] semantics apply.
+pub const FLOW_SNAPSHOT_TABLE_IDS: &str = "flow.snapshot_table_ids";
 /// Flow scheduler binding for the logical time of one scheduled attempt.
 /// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
 /// execution read this extension so `now()` is stable for the whole attempt.
@@ -188,15 +199,37 @@ pub enum FlowIncrementalMode {
     SequenceRange,
 }
 
+/// How one table participates in a single Flow query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowTableScanKind {
+    /// The table is read as one bound snapshot.
+    Snapshot,
+    /// The table is replayed incrementally from its after-sequence bounds.
+    Incremental,
+    /// The table is not part of the flow read and keeps plain query semantics.
+    Plain,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FlowQueryExtensions {
     /// Maps region id -> lower exclusive sequence bound for incremental reads.
+    /// Parsed options are treated as immutable after construction so the derived
+    /// incremental table membership remains valid.
     pub incremental_after_seqs: Option<HashMap<u64, u64>>,
+    /// Table membership derived once from the incremental region keys.
+    incremental_table_ids: BTreeSet<TableId>,
     /// Incremental read mode requested by the caller.
     pub incremental_mode: Option<FlowIncrementalMode>,
     /// Whether the caller expects per-region watermark metadata in terminal metrics.
     pub return_region_seq: bool,
-    /// Optional sink table id used to distinguish source scans from sink reads.
+    /// Table-scoped snapshot read set.
+    ///
+    /// `None` keeps the legacy [`FLOW_SINK_TABLE_ID`] semantics; `Some(_)`
+    /// (including an empty set) selects the table-scoped semantics described by
+    /// [`FLOW_SNAPSHOT_TABLE_IDS`].
+    pub snapshot_table_ids: Option<BTreeSet<TableId>>,
+    /// Legacy sink table id used to distinguish source scans from sink reads.
+    /// Only honored when [`Self::snapshot_table_ids`] is absent.
     pub sink_table_id: Option<TableId>,
 }
 
@@ -210,7 +243,8 @@ impl FlowQueryExtensions {
         let has_flow_context = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS)
             || extensions.contains_key(FLOW_INCREMENTAL_MODE)
             || extensions.contains_key(FLOW_RETURN_REGION_SEQ)
-            || extensions.contains_key(FLOW_SINK_TABLE_ID);
+            || extensions.contains_key(FLOW_SINK_TABLE_ID)
+            || extensions.contains_key(FLOW_SNAPSHOT_TABLE_IDS);
 
         if !has_flow_context {
             return Ok(None);
@@ -243,6 +277,11 @@ impl FlowQueryExtensions {
             .transpose()?
             .unwrap_or(false);
 
+        let snapshot_table_ids = extensions
+            .get(FLOW_SNAPSHOT_TABLE_IDS)
+            .map(|value| parse_snapshot_table_ids(value.as_str()))
+            .transpose()?;
+
         let sink_table_id = extensions
             .get(FLOW_SINK_TABLE_ID)
             .map(|value| {
@@ -254,6 +293,15 @@ impl FlowQueryExtensions {
                 })
             })
             .transpose()?;
+
+        // The legacy sink key and the table-scoped snapshot key encode the same
+        // intent in two incompatible ways; refuse to guess which one wins.
+        if snapshot_table_ids.is_some() && sink_table_id.is_some() {
+            return Err(invalid_query_context_extension(format!(
+                "{} and {} cannot be set together; use {} for table-scoped snapshot reads.",
+                FLOW_SINK_TABLE_ID, FLOW_SNAPSHOT_TABLE_IDS, FLOW_SNAPSHOT_TABLE_IDS
+            )));
+        }
 
         if matches!(
             incremental_mode,
@@ -278,14 +326,98 @@ impl FlowQueryExtensions {
             }
         }
 
+        let incremental_table_ids = incremental_table_ids(incremental_after_seqs.as_ref());
+        if let Some(snapshot_table_ids) = &snapshot_table_ids
+            && let Some(overlap) = snapshot_table_ids
+                .iter()
+                .find(|table_id| incremental_table_ids.contains(table_id))
+        {
+            return Err(invalid_query_context_extension(format!(
+                "Table {} appears in both {} and {}; snapshot and incremental tables must be disjoint.",
+                overlap, FLOW_SNAPSHOT_TABLE_IDS, FLOW_INCREMENTAL_AFTER_SEQS
+            )));
+        }
+
         Ok(Some(Self {
             incremental_after_seqs,
+            incremental_table_ids,
             incremental_mode,
             return_region_seq,
+            snapshot_table_ids,
             sink_table_id,
         }))
     }
 
+    /// Returns whether the table-scoped snapshot read semantics are active.
+    ///
+    /// An absent [`FLOW_SNAPSHOT_TABLE_IDS`] key keeps the legacy sink-table
+    /// semantics; a present key (even `[]`) selects per-table classification.
+    pub fn is_table_scoped(&self) -> bool {
+        self.snapshot_table_ids.is_some()
+    }
+
+    /// Returns whether `table_id` must be read as one bound snapshot.
+    pub fn is_snapshot_table(&self, table_id: TableId) -> bool {
+        self.snapshot_table_ids
+            .as_ref()
+            .is_some_and(|table_ids| table_ids.contains(&table_id))
+    }
+
+    /// Returns whether `table_id` is replayed incrementally.
+    fn is_incremental_table(&self, table_id: TableId) -> bool {
+        self.incremental_table_ids.contains(&table_id)
+    }
+
+    /// Classifies how `table_id` participates in this Flow query.
+    ///
+    /// Table-scoped semantics decide purely by membership: snapshot tables are
+    /// listed in [`FLOW_SNAPSHOT_TABLE_IDS`], incrementally replayed tables are
+    /// referenced by [`FLOW_INCREMENTAL_AFTER_SEQS`], and everything else is a
+    /// plain read. The legacy path keeps the sink table plain and reads the
+    /// remaining tables as flow sources.
+    pub fn classify_table(&self, table_id: TableId) -> FlowTableScanKind {
+        if self.is_table_scoped() {
+            if self.is_snapshot_table(table_id) {
+                FlowTableScanKind::Snapshot
+            } else if self.is_incremental_table(table_id) {
+                FlowTableScanKind::Incremental
+            } else {
+                FlowTableScanKind::Plain
+            }
+        } else if self.sink_table_id == Some(table_id) {
+            FlowTableScanKind::Plain
+        } else if self.incremental_mode.is_some() || self.is_incremental_table(table_id) {
+            FlowTableScanKind::Incremental
+        } else {
+            FlowTableScanKind::Snapshot
+        }
+    }
+
+    /// Returns the exclusive lower sequence bound of an incrementally replayed region.
+    ///
+    /// Fails closed when the region belongs to a table classified as
+    /// [`FlowTableScanKind::Incremental`] but carries no bound.
+    pub fn incremental_after_seq_for_region(&self, source_region_id: RegionId) -> Result<u64> {
+        self.incremental_after_seqs
+            .as_ref()
+            .and_then(|seqs| seqs.get(&source_region_id.as_u64()).copied())
+            .ok_or_else(|| {
+                invalid_query_context_extension(format!(
+                    "Missing region {} in {} for incrementally replayed table {}.",
+                    source_region_id,
+                    FLOW_INCREMENTAL_AFTER_SEQS,
+                    source_region_id.table_id()
+                ))
+            })
+    }
+
+    /// Legacy sink-key scan validation, kept for old callers only.
+    ///
+    /// New callers classify tables with [`Self::classify_table`] and use
+    /// [`Self::incremental_after_seq_for_region`] for incremental tables. Unlike
+    /// table-scoped classification, this legacy check fails closed for *any*
+    /// scanned region missing from [`FLOW_INCREMENTAL_AFTER_SEQS`] whenever an
+    /// incremental mode is set, and treats the legacy sink table as plain.
     pub fn validate_for_scan(&self, source_region_id: RegionId) -> Result<bool> {
         if self.sink_table_id.is_some() && self.sink_table_id == Some(source_region_id.table_id()) {
             return Ok(false);
@@ -319,6 +451,17 @@ impl FlowQueryExtensions {
     }
 
     pub fn should_collect_region_watermark(&self) -> bool {
+        if self.is_table_scoped() {
+            return self
+                .snapshot_table_ids
+                .as_ref()
+                .is_some_and(|table_ids| !table_ids.is_empty())
+                || self
+                    .incremental_after_seqs
+                    .as_ref()
+                    .is_some_and(|seqs| !seqs.is_empty());
+        }
+
         should_collect_region_watermark(
             self.return_region_seq,
             self.incremental_after_seqs.is_some(),
@@ -353,8 +496,32 @@ pub fn should_collect_region_watermark_from_extensions(
         .get(FLOW_RETURN_REGION_SEQ)
         .is_some_and(|value| value.eq_ignore_ascii_case("true"));
     let has_incremental_after_seqs = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS);
+    let has_snapshot_table_ids = extensions.contains_key(FLOW_SNAPSHOT_TABLE_IDS);
 
-    should_collect_region_watermark(return_region_seq, has_incremental_after_seqs)
+    should_collect_region_watermark(
+        return_region_seq,
+        has_incremental_after_seqs || has_snapshot_table_ids,
+    )
+}
+
+/// Returns whether the region's table participates in terminal region watermark
+/// collection for the given raw Flow query extensions.
+///
+/// Snapshot-read and incrementally replayed tables participate; plain reads
+/// (including the legacy sink table and unlisted tables) do not. Malformed
+/// extensions yield `false`, so a broken request can never fabricate a proof.
+pub fn should_collect_region_watermark_for_region_from_extensions(
+    extensions: &HashMap<String, String>,
+    region_id: RegionId,
+) -> bool {
+    if !should_collect_region_watermark_from_extensions(extensions) {
+        return false;
+    }
+
+    FlowQueryExtensions::parse_flow_extensions(extensions)
+        .ok()
+        .flatten()
+        .is_some_and(|flow| flow.classify_table(region_id.table_id()) != FlowTableScanKind::Plain)
 }
 
 fn should_collect_region_watermark(
@@ -362,6 +529,52 @@ fn should_collect_region_watermark(
     has_incremental_after_seqs: bool,
 ) -> bool {
     return_region_seq || has_incremental_after_seqs
+}
+
+fn incremental_table_ids(after_seqs: Option<&HashMap<u64, u64>>) -> BTreeSet<TableId> {
+    after_seqs
+        .into_iter()
+        .flat_map(|seqs| seqs.keys())
+        .map(|region_id| RegionId::from_u64(*region_id).table_id())
+        .collect()
+}
+
+/// Parses the table-scoped snapshot read set from a JSON array of numeric table ids.
+fn parse_snapshot_table_ids(value: &str) -> Result<BTreeSet<TableId>> {
+    let raw = serde_json::from_str::<Vec<serde_json::Value>>(value).map_err(|e| {
+        invalid_query_context_extension(format!(
+            "Invalid JSON for {}: {} ({})",
+            FLOW_SNAPSHOT_TABLE_IDS, value, e
+        ))
+    })?;
+
+    raw.into_iter()
+        .map(|raw_table_id| {
+            let raw_table_id = match raw_table_id {
+                serde_json::Value::Number(num) => num,
+                _ => {
+                    return Err(invalid_query_context_extension(format!(
+                        "Invalid table id type in {}: {}; expected a numeric table id",
+                        FLOW_SNAPSHOT_TABLE_IDS, raw_table_id
+                    )));
+                }
+            };
+
+            let table_id = raw_table_id.as_u64().ok_or_else(|| {
+                invalid_query_context_extension(format!(
+                    "Invalid table id in {}: {}",
+                    FLOW_SNAPSHOT_TABLE_IDS, raw_table_id
+                ))
+            })?;
+
+            TableId::try_from(table_id).map_err(|_| {
+                invalid_query_context_extension(format!(
+                    "Table id {} in {} overflows the table id range",
+                    table_id, FLOW_SNAPSHOT_TABLE_IDS
+                ))
+            })
+        })
+        .collect()
 }
 
 fn parse_incremental_after_seqs(value: &str) -> Result<HashMap<u64, u64>> {
@@ -873,6 +1086,277 @@ mod flow_extension_tests {
             parsed.incremental_after_seqs,
             Some(HashMap::from([(1, 10)]))
         );
+    }
+
+    // --- table-scoped snapshot read tests ---
+
+    #[test]
+    fn test_parse_flow_extensions_snapshot_table_ids_absent_keeps_legacy_semantics() {
+        let exts = HashMap::from([(FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string())]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert!(!parsed.is_table_scoped());
+        assert_eq!(parsed.snapshot_table_ids, None);
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_snapshot_table_ids_empty_is_table_scoped() {
+        let exts = HashMap::from([(FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[]".to_string())]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert!(parsed.is_table_scoped());
+        assert_eq!(parsed.snapshot_table_ids, Some(BTreeSet::new()));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_snapshot_table_ids_populated() {
+        let exts = HashMap::from([(
+            FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+            "[1024, 7, 7]".to_string(),
+        )]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert!(parsed.is_table_scoped());
+        assert_eq!(parsed.snapshot_table_ids, Some(BTreeSet::from([7, 1024])));
+        assert_eq!(parsed.classify_table(1024), FlowTableScanKind::Snapshot);
+        assert_eq!(parsed.classify_table(7), FlowTableScanKind::Snapshot);
+        assert_eq!(parsed.classify_table(8), FlowTableScanKind::Plain);
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_snapshot_table_ids_rejects_malformed() {
+        for raw in [
+            "not-json",
+            "1024",
+            r#"{"1024":true}"#,
+            r#"["1024"]"#,
+            "[1.5]",
+            "[-1]",
+            "[null]",
+        ] {
+            let exts = HashMap::from([(FLOW_SNAPSHOT_TABLE_IDS.to_string(), raw.to_string())]);
+
+            let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+            assert!(
+                format!("{err}").contains(FLOW_SNAPSHOT_TABLE_IDS),
+                "{raw}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_snapshot_table_ids_rejects_overflow() {
+        let overflow = u64::from(TableId::MAX) + 1;
+        let exts = HashMap::from([(FLOW_SNAPSHOT_TABLE_IDS.to_string(), format!("[{overflow}]"))]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains("overflows the table id range"));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_rejects_snapshot_incremental_overlap() {
+        let incremental_region = RegionId::new(1024, 1);
+        let exts = HashMap::from([
+            (FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[1024]".to_string()),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                format!(r#"{{"{}":10}}"#, incremental_region.as_u64()),
+            ),
+        ]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        let message = format!("{err}");
+        assert!(message.contains(FLOW_SNAPSHOT_TABLE_IDS), "{message}");
+        assert!(message.contains(FLOW_INCREMENTAL_AFTER_SEQS), "{message}");
+        assert!(message.contains("both"), "{message}");
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_rejects_sink_and_snapshot_table_ids() {
+        let exts = HashMap::from([
+            (FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[1024]".to_string()),
+            (FLOW_SINK_TABLE_ID.to_string(), "2048".to_string()),
+        ]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        let message = format!("{err}");
+        assert!(message.contains(FLOW_SINK_TABLE_ID), "{message}");
+        assert!(message.contains(FLOW_SNAPSHOT_TABLE_IDS), "{message}");
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_legacy_sink_key_still_supported() {
+        let exts = HashMap::from([
+            (FLOW_SINK_TABLE_ID.to_string(), "2048".to_string()),
+            (FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string()),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert!(!parsed.is_table_scoped());
+        assert_eq!(parsed.sink_table_id, Some(2048));
+        assert_eq!(parsed.snapshot_table_ids, None);
+        assert_eq!(parsed.classify_table(2048), FlowTableScanKind::Plain);
+        assert_eq!(parsed.classify_table(1), FlowTableScanKind::Snapshot);
+    }
+
+    #[test]
+    fn test_classify_table_table_scoped_uses_membership_only() {
+        let snapshot_region = RegionId::new(2048, 1);
+        let incremental_region = RegionId::new(1024, 3);
+        let second_region = RegionId::new(1024, 4);
+        let other_incremental_region = RegionId::new(1025, 0);
+        let exts = HashMap::from([
+            (FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[2048]".to_string()),
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                format!(
+                    r#"{{"{}":10,"{}":20,"{}":30}}"#,
+                    incremental_region.as_u64(),
+                    second_region.as_u64(),
+                    other_incremental_region.as_u64()
+                ),
+            ),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert!(parsed.is_table_scoped());
+        assert_eq!(
+            parsed.incremental_table_ids,
+            BTreeSet::from([1024, 1025]),
+            "incremental table ids are derived from after-seq region keys"
+        );
+        assert_eq!(
+            parsed.classify_table(snapshot_region.table_id()),
+            FlowTableScanKind::Snapshot
+        );
+        assert_eq!(
+            parsed.classify_table(incremental_region.table_id()),
+            FlowTableScanKind::Incremental
+        );
+        assert_eq!(
+            parsed.classify_table(other_incremental_region.table_id()),
+            FlowTableScanKind::Incremental
+        );
+        assert_eq!(parsed.classify_table(9), FlowTableScanKind::Plain);
+    }
+
+    #[test]
+    fn test_incremental_after_seq_for_region_fails_closed_when_missing() {
+        let listed_region = RegionId::new(1024, 1);
+        let exts = HashMap::from([
+            (FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[]".to_string()),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                format!(r#"{{"{}":10}}"#, listed_region.as_u64()),
+            ),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            parsed
+                .incremental_after_seq_for_region(listed_region)
+                .unwrap(),
+            10
+        );
+        let err = parsed
+            .incremental_after_seq_for_region(RegionId::new(1024, 2))
+            .unwrap_err();
+        assert!(format!("{err}").contains("Missing region"));
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_table_scoped() {
+        let parsed = FlowQueryExtensions {
+            snapshot_table_ids: Some(BTreeSet::new()),
+            ..Default::default()
+        };
+        assert!(!parsed.should_collect_region_watermark());
+
+        let parsed = FlowQueryExtensions {
+            snapshot_table_ids: Some(BTreeSet::from([1024])),
+            ..Default::default()
+        };
+        assert!(parsed.should_collect_region_watermark());
+
+        let parsed = FlowQueryExtensions {
+            snapshot_table_ids: Some(BTreeSet::new()),
+            incremental_after_seqs: Some(HashMap::from([(1, 10)])),
+            ..Default::default()
+        };
+        assert!(parsed.should_collect_region_watermark());
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_for_region_from_extensions() {
+        let snapshot_table = 1024;
+        let incremental_region = RegionId::new(2048, 1);
+        let exts = HashMap::from([
+            (
+                FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+                format!("[{snapshot_table}]"),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                format!(r#"{{"{}":10}}"#, incremental_region.as_u64()),
+            ),
+        ]);
+
+        assert!(should_collect_region_watermark_for_region_from_extensions(
+            &exts,
+            RegionId::new(snapshot_table, 0)
+        ));
+        assert!(should_collect_region_watermark_for_region_from_extensions(
+            &exts,
+            incremental_region
+        ));
+        assert!(!should_collect_region_watermark_for_region_from_extensions(
+            &exts,
+            RegionId::new(4096, 0)
+        ));
+
+        // Legacy: the sink table never participates, source tables do.
+        let legacy = HashMap::from([
+            (FLOW_SINK_TABLE_ID.to_string(), "2048".to_string()),
+            (FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string()),
+        ]);
+        assert!(!should_collect_region_watermark_for_region_from_extensions(
+            &legacy,
+            RegionId::new(2048, 0)
+        ));
+        assert!(should_collect_region_watermark_for_region_from_extensions(
+            &legacy,
+            RegionId::new(1, 0)
+        ));
+
+        // Malformed extensions never fabricate a proof.
+        let malformed =
+            HashMap::from([(FLOW_SNAPSHOT_TABLE_IDS.to_string(), "not-json".to_string())]);
+        assert!(!should_collect_region_watermark_for_region_from_extensions(
+            &malformed,
+            RegionId::new(snapshot_table, 0)
+        ));
     }
 
     // --- scheduled time helper tests ---

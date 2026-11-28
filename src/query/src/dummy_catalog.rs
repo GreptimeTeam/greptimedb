@@ -46,7 +46,7 @@ use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictio
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
-use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
+use crate::options::{FlowIncrementalMode, FlowQueryExtensions, FlowTableScanKind};
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -136,6 +136,7 @@ pub struct DummyTableProvider {
     /// Keeping a mutable request makes it possible to change in the optimize phase.
     scan_request: Arc<Mutex<ScanRequest>>,
     query_ctx: Option<QueryContextRef>,
+    snapshot_required: bool,
 }
 
 impl fmt::Debug for DummyTableProvider {
@@ -176,9 +177,12 @@ impl TableProvider for DummyTableProvider {
         request.filters = filters.to_vec();
         request.limit = limit;
         if let Some(query_ctx) = &self.query_ctx {
-            let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            apply_cached_snapshot_to_request(query_ctx, self.region_id, is_sink_scan, &mut request);
+            apply_cached_snapshot_to_request(
+                query_ctx,
+                self.region_id,
+                self.snapshot_required,
+                &mut request,
+            );
         }
 
         let scanner = self
@@ -259,6 +263,7 @@ impl DummyTableProvider {
                 ..Default::default()
             })),
             query_ctx: None,
+            snapshot_required: false,
         }
     }
 
@@ -330,10 +335,14 @@ impl DummyTableProviderFactory {
                     region_id,
                 })?;
 
-        let mut scan_request = if let Some(ctx) = query_ctx.as_ref() {
-            scan_request_from_query_context(region_id, ctx)?
+        let (mut scan_request, snapshot_required) = if let Some(ctx) = query_ctx.as_ref() {
+            let decision = decide_flow_scan(ctx, region_id)?;
+            (
+                build_scan_request(ctx, region_id, &decision),
+                decision.snapshot_required,
+            )
         } else {
-            ScanRequest::default()
+            (ScanRequest::default(), false)
         };
         scan_request.preserve_pk_dictionary_encoding =
             supports_pk_dictionary_encoding(engine.name());
@@ -344,10 +353,12 @@ impl DummyTableProviderFactory {
             metadata,
             scan_request: Arc::new(Mutex::new(scan_request)),
             query_ctx,
+            snapshot_required,
         })
     }
 }
 
+#[cfg(test)]
 fn scan_request_from_query_context(
     region_id: RegionId,
     query_ctx: &QueryContext,
@@ -358,9 +369,16 @@ fn scan_request_from_query_context(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowScanDecision {
-    /// Whether this region is the flow sink-table scan.
-    /// Sink scans intentionally bypass incremental and snapshot-binding semantics.
-    is_sink_scan: bool,
+    /// Whether this scan reads a Flow-participating table, that is a table-scoped
+    /// snapshot table or an incrementally replayed table. Such a scan binds or
+    /// reuses a per-region snapshot and participates in terminal watermark
+    /// collection. Plain reads (including the legacy sink table) do not.
+    snapshot_required: bool,
+    /// Whether this scan reads one whole-table snapshot only, without any
+    /// checkpoint derived pruning hint such as `sst_min_sequence`. Such a scan
+    /// must see every row under the bound, including rows already covered by an
+    /// SST-level lower bound.
+    snapshot_only: bool,
     /// Whether this scan should bind a memtable upper bound when opening the scan.
     /// This is only the initial intent; if a cached bound already exists in `query_ctx`,
     /// we reuse that cached bound instead and clear this flag.
@@ -381,7 +399,8 @@ struct FlowScanDecision {
 impl FlowScanDecision {
     fn plain_scan() -> Self {
         Self {
-            is_sink_scan: true,
+            snapshot_required: false,
+            snapshot_only: false,
             snapshot_on_scan: false,
             memtable_min_sequence: None,
             memtable_max_sequence: None,
@@ -395,8 +414,14 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
     let Some(flow_extensions) =
         FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())?
     else {
+        // No flow extensions at all: an ordinary query. It keeps the legacy
+        // behavior: the cached per-region bound is reused (and refreshed at scan
+        // time), but no bound is ever bound on scan open and no watermark is
+        // claimed. `snapshot_only` stays false so an explicit `sst_min_sequence`
+        // is preserved.
         return Ok(FlowScanDecision {
-            is_sink_scan: false,
+            snapshot_required: true,
+            snapshot_only: false,
             snapshot_on_scan: false,
             memtable_min_sequence: None,
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
@@ -405,48 +430,77 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         });
     };
 
-    // Sink-table scans intentionally bypass all flow scan semantics. They should
-    // behave like plain reads and must not participate in incremental lower bounds
-    // or per-region snapshot binding/reuse.
-    if flow_extensions.sink_table_id == Some(region_id.table_id()) {
-        return Ok(FlowScanDecision::plain_scan());
+    match flow_extensions.classify_table(region_id.table_id()) {
+        // Plain reads (the legacy sink table, or a table outside the table-scoped
+        // snapshot/incremental sets) never join the flow snapshot: no incremental
+        // bounds, no snapshot binding and no per-region watermark.
+        FlowTableScanKind::Plain => Ok(FlowScanDecision::plain_scan()),
+        // A snapshot table reads one whole-table snapshot: it binds an upper
+        // bound on scan open (or reuses the cached one), carries no lower bound,
+        // and keeps SSTs in the scan so mito can reject stale upper bounds after
+        // the snapshot has been flushed into SSTs.
+        FlowTableScanKind::Snapshot => {
+            let memtable_max_sequence = query_ctx.get_snapshot(region_id.as_u64());
+
+            // The table-scoped flag states the intent directly; the legacy
+            // source-scan path keeps gating on the watermark request.
+            let bind_snapshot_on_scan = flow_extensions.is_table_scoped()
+                || flow_extensions.should_collect_region_watermark();
+
+            Ok(FlowScanDecision {
+                snapshot_required: true,
+                // A table-scoped snapshot table is read as one complete snapshot,
+                // so checkpoint-style SST pruning must not apply to it.
+                snapshot_only: flow_extensions.is_snapshot_table(region_id.table_id()),
+                snapshot_on_scan: bind_snapshot_on_scan && memtable_max_sequence.is_none(),
+                memtable_min_sequence: None,
+                memtable_max_sequence,
+                skip_sst_files: false,
+                exact_sequence_range: false,
+            })
+        }
+        // An incremental table keeps the sequence-range replay semantics: an
+        // exclusive lower bound per region and a snapshot upper bound.
+        FlowTableScanKind::Incremental => {
+            let memtable_min_sequence = if flow_extensions.is_table_scoped() {
+                Some(flow_extensions.incremental_after_seq_for_region(region_id)?)
+            } else {
+                // Legacy callers fail closed when a listed incremental region is
+                // scanned without a bound.
+                flow_extensions.validate_for_scan(region_id)?;
+                flow_extensions
+                    .incremental_after_seqs
+                    .as_ref()
+                    .and_then(|seqs| seqs.get(&region_id.as_u64()))
+                    .copied()
+            };
+
+            let memtable_max_sequence = query_ctx.get_snapshot(region_id.as_u64());
+
+            // `skip_sst_files` is only valid for memtable-only incremental
+            // deltas, identified by a lower checkpoint bound. A snapshot upper
+            // bound without an incremental lower bound is a fenced full-snapshot
+            // read and must keep SSTs in the scan so mito can reject stale upper
+            // bounds after H has been flushed into SSTs, instead of silently
+            // bypassing the stale-fence check. If a future incremental delta also
+            // carries an upper bound, the lower-bound stale check still proves
+            // whether memtable-only is safe.
+            let skip_sst_files = memtable_min_sequence.is_some()
+                && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
+
+            Ok(FlowScanDecision {
+                snapshot_required: true,
+                snapshot_only: false,
+                snapshot_on_scan: memtable_max_sequence.is_none()
+                    && flow_extensions.should_collect_region_watermark(),
+                memtable_min_sequence,
+                memtable_max_sequence,
+                skip_sst_files,
+                exact_sequence_range: flow_extensions.incremental_mode
+                    == Some(FlowIncrementalMode::SequenceRange),
+            })
+        }
     }
-
-    let apply_incremental = flow_extensions.validate_for_scan(region_id)?;
-
-    let memtable_min_sequence = if apply_incremental {
-        flow_extensions
-            .incremental_after_seqs
-            .as_ref()
-            .and_then(|seqs| seqs.get(&region_id.as_u64()))
-            .copied()
-    } else {
-        None
-    };
-
-    let memtable_max_sequence = query_ctx.get_snapshot(region_id.as_u64());
-
-    // `skip_sst_files` is only valid for memtable-only incremental deltas,
-    // identified by a lower checkpoint bound. A snapshot upper bound without an
-    // incremental lower bound is a fenced full-snapshot read and must keep SSTs
-    // in the scan so mito can reject stale upper bounds after H has been flushed
-    // into SSTs, instead of silently bypassing the stale-fence check. If a future
-    // incremental delta also carries an upper bound, the lower-bound stale check
-    // still proves whether memtable-only is safe.
-    let skip_sst_files = apply_incremental
-        && memtable_min_sequence.is_some()
-        && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
-
-    Ok(FlowScanDecision {
-        is_sink_scan: false,
-        snapshot_on_scan: memtable_max_sequence.is_none()
-            && flow_extensions.should_collect_region_watermark(),
-        memtable_min_sequence,
-        memtable_max_sequence,
-        skip_sst_files,
-        exact_sequence_range: apply_incremental
-            && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange),
-    })
 }
 
 fn build_scan_request(
@@ -458,7 +512,14 @@ fn build_scan_request(
     // time. A later scan may still refresh `memtable_max_sequence` if another source scan
     // has bound a snapshot into `query_ctx` after this provider was created.
     ScanRequest {
-        sst_min_sequence: (!decision.is_sink_scan && !decision.exact_sequence_range)
+        // `sst_min_sequence` is a checkpoint-style SST pruning hint: it may drop
+        // SST files whose rows are older than the checkpoint. A pure snapshot read
+        // must see every row under its bound, so it never takes the hint.
+        // Incremental (and legacy source) reads keep it. The `sst_min_sequences`
+        // populator is enterprise/legacy, not an OSS producer.
+        sst_min_sequence: (decision.snapshot_required
+            && !decision.snapshot_only
+            && !decision.exact_sequence_range)
             .then(|| query_ctx.sst_min_sequence(region_id.as_u64()))
             .flatten(),
         skip_sst_files: decision.skip_sst_files,
@@ -470,20 +531,21 @@ fn build_scan_request(
     }
 }
 
-fn is_sink_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<bool> {
-    Ok(
-        FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())?
-            .is_some_and(|exts| exts.sink_table_id == Some(region_id.table_id())),
-    )
+/// Returns whether a scan of `region_id` binds or reuses a per-region snapshot.
+#[cfg(test)]
+fn flow_scan_requires_snapshot(query_ctx: &QueryContext, region_id: RegionId) -> Result<bool> {
+    Ok(decide_flow_scan(query_ctx, region_id)?.snapshot_required)
 }
 
 fn apply_cached_snapshot_to_request(
     query_ctx: &QueryContext,
     region_id: RegionId,
-    is_sink_scan: bool,
+    snapshot_required: bool,
     scan_request: &mut ScanRequest,
 ) {
-    if is_sink_scan {
+    // Plain reads never join the flow snapshot, so their cached request keeps
+    // whatever the provider captured at creation time.
+    if !snapshot_required {
         return;
     }
 
@@ -661,7 +723,7 @@ mod tests {
     use crate::error::Error;
     use crate::options::{
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
-        FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
+        FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID, FLOW_SNAPSHOT_TABLE_IDS,
     };
 
     #[test]
@@ -862,6 +924,94 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, None);
         assert!(!request.snapshot_on_scan);
         assert!(!request.skip_sst_files);
+
+        let decision = decide_flow_scan(&query_ctx, region_id).unwrap();
+        assert!(decision.snapshot_required);
+        assert!(!decision.snapshot_only);
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_reuses_bound_installed_after_creation() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default().build();
+
+        // Provider request built before any snapshot exists in `query_ctx`.
+        let mut request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert_eq!(request.memtable_max_sequence, None);
+        assert!(!request.snapshot_on_scan);
+        assert!(flow_scan_requires_snapshot(&query_ctx, region_id).unwrap());
+
+        // Another scan of the same query binds the region snapshot later on; the
+        // cached request must pick it up instead of binding a new bound.
+        query_ctx.set_snapshot(region_id.as_u64(), 55);
+        let snapshot_required = flow_scan_requires_snapshot(&query_ctx, region_id).unwrap();
+        apply_cached_snapshot_to_request(&query_ctx, region_id, snapshot_required, &mut request);
+
+        assert_eq!(request.memtable_max_sequence, Some(55));
+        assert!(!request.snapshot_on_scan);
+    }
+
+    #[test]
+    fn test_scan_request_from_snapshot_table_ignores_cached_sst_min_sequence() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(snapshot_table_context(&[region_id.table_id()]))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                77_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        // A pure snapshot read keeps every SST under the bound and must not take
+        // the checkpoint-style SST pruning hint.
+        assert!(request.snapshot_on_scan);
+        assert_eq!(request.memtable_max_sequence, None);
+        assert_eq!(request.memtable_min_sequence, None);
+        assert_eq!(request.sst_min_sequence, None);
+        assert!(!request.skip_sst_files);
+        assert!(!request.exact_sequence_range);
+
+        let decision = decide_flow_scan(&query_ctx, region_id).unwrap();
+        assert!(decision.snapshot_required);
+        assert!(decision.snapshot_only);
+    }
+
+    #[test]
+    fn test_scan_request_from_incremental_table_keeps_cached_sst_min_sequence() {
+        let incremental_region = test_region_id();
+        let snapshot_table_id: TableId = incremental_region.table_id() + 1;
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+                    format!("[{snapshot_table_id}]"),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, incremental_region.as_u64()),
+                ),
+            ]))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                incremental_region.as_u64(),
+                77_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(incremental_region, &query_ctx).unwrap();
+
+        // Incremental replay keeps the SST pruning hint derived from the
+        // checkpoint, because rows at or below it were already consumed.
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(request.sst_min_sequence, Some(77));
+        assert!(request.snapshot_on_scan);
+        assert!(!request.exact_sequence_range);
+        assert!(!request.skip_sst_files);
+
+        let decision = decide_flow_scan(&query_ctx, incremental_region).unwrap();
+        assert!(decision.snapshot_required);
+        assert!(!decision.snapshot_only);
     }
 
     #[test]
@@ -906,7 +1056,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_cached_snapshot_to_request(&query_ctx, region_id, false, &mut request);
+        apply_cached_snapshot_to_request(&query_ctx, region_id, true, &mut request);
 
         assert_eq!(request.memtable_max_sequence, Some(88));
         assert!(!request.snapshot_on_scan);
@@ -928,7 +1078,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_cached_snapshot_to_request(&query_ctx, region_id, false, &mut request);
+        apply_cached_snapshot_to_request(&query_ctx, region_id, true, &mut request);
 
         assert_eq!(request.memtable_min_sequence, Some(10));
         assert_eq!(request.memtable_max_sequence, Some(10));
@@ -939,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_cached_snapshot_to_request_skips_sink_scan() {
+    fn test_apply_cached_snapshot_to_request_skips_plain_scan() {
         let region_id = test_region_id();
         let query_ctx = QueryContextBuilder::default()
             .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
@@ -952,10 +1102,159 @@ mod tests {
             ..Default::default()
         };
 
-        apply_cached_snapshot_to_request(&query_ctx, region_id, true, &mut request);
+        apply_cached_snapshot_to_request(&query_ctx, region_id, false, &mut request);
 
         assert_eq!(request.memtable_max_sequence, None);
         assert!(request.snapshot_on_scan);
+    }
+
+    fn snapshot_table_context(table_ids: &[TableId]) -> HashMap<String, String> {
+        HashMap::from([(
+            FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+            serde_json::to_string(table_ids).unwrap(),
+        )])
+    }
+
+    #[test]
+    fn test_scan_request_from_snapshot_table_reuses_cached_bound() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(snapshot_table_context(&[region_id.table_id()]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                42_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(!request.snapshot_on_scan);
+        assert_eq!(request.memtable_max_sequence, Some(42));
+        assert_eq!(request.memtable_min_sequence, None);
+        assert!(!request.exact_sequence_range);
+        assert!(!request.skip_sst_files);
+    }
+
+    #[test]
+    fn test_scan_request_from_table_scoped_incremental_keeps_exact_replay() {
+        let incremental_region = test_region_id();
+        let snapshot_table_id: TableId = incremental_region.table_id() + 1;
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+                    format!("[{snapshot_table_id}]"),
+                ),
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, incremental_region.as_u64()),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(incremental_region, &query_ctx).unwrap();
+
+        assert!(request.exact_sequence_range);
+        assert!(request.snapshot_on_scan);
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(request.memtable_max_sequence, None);
+        assert!(!request.skip_sst_files);
+        assert!(flow_scan_requires_snapshot(&query_ctx, incremental_region).unwrap());
+    }
+
+    #[test]
+    fn test_scan_request_from_table_scoped_incremental_missing_region_errors() {
+        let scanned_region = test_region_id();
+        let listed_region = RegionId::new(scanned_region.table_id(), 7);
+        let snapshot_table_id: TableId = scanned_region.table_id() + 1;
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+                    format!("[{snapshot_table_id}]"),
+                ),
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, listed_region.as_u64()),
+                ),
+            ]))
+            .build();
+
+        let err = scan_request_from_query_context(scanned_region, &query_ctx).unwrap_err();
+
+        assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
+        assert!(format!("{err}").contains("Missing region"));
+    }
+
+    #[test]
+    fn test_scan_request_from_unlisted_table_stays_plain() {
+        let region_id = test_region_id();
+        let incremental_region = RegionId::new(region_id.table_id() + 1, 1);
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (FLOW_SNAPSHOT_TABLE_IDS.to_string(), "[]".to_string()),
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, incremental_region.as_u64()),
+                ),
+            ]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                88_u64,
+            )]))))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                77_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(!request.snapshot_on_scan);
+        assert_eq!(request.memtable_min_sequence, None);
+        assert_eq!(request.memtable_max_sequence, None);
+        assert_eq!(request.sst_min_sequence, None);
+        assert!(!request.exact_sequence_range);
+        assert!(!request.skip_sst_files);
+        assert!(!flow_scan_requires_snapshot(&query_ctx, region_id).unwrap());
+    }
+
+    #[test]
+    fn test_scan_request_from_table_scoped_snapshot_overlap_errors() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_SNAPSHOT_TABLE_IDS.to_string(),
+                    format!("[{}]", region_id.table_id()),
+                ),
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":10}}"#, region_id.as_u64()),
+                ),
+            ]))
+            .build();
+
+        let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
+
+        assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 
     #[test]
