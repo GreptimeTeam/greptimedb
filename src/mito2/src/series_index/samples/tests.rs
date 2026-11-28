@@ -35,12 +35,13 @@ use super::metadata::{
     Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PayloadReference, TRAILER_SIZE, Trailer,
 };
 use super::*;
-use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::columnar::codec as columnar_codec;
-use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
-use crate::series_index::purger::series_index_channel;
-use crate::sst::file::RegionFileId;
+use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesReadRequest};
+use crate::series_index::identity::ExactSeriesKey;
+use crate::sst::file::{
+    FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSamplesMeta, RegionFileId,
+};
+use crate::test_util::new_noop_file_purger;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
 type Sample = (u32, u64, i64, u64, u8, Option<u64>);
@@ -195,42 +196,87 @@ fn sample_batch(
     )
     .unwrap()
 }
+const REGION_DIR: &str = "table/region/";
+
+impl ColumnarSamplesFormat {
+    async fn reader(
+        &self,
+        store: ObjectStore,
+        handle: FileHandle,
+    ) -> Result<Box<dyn SamplesFormatReader>> {
+        Ok(Box::new(
+            reader::SamplesReader::open(store, handle, REGION_DIR).await?,
+        ))
+    }
+}
+
+fn samples_handle(
+    id: RegionFileId,
+    manifest_size: u64,
+    parts: impl Iterator<Item = u64>,
+) -> FileHandle {
+    let samples = NarthexSamplesMeta {
+        manifest_size,
+        parts: parts
+            .map(|file_size| NarthexPartMeta { file_size })
+            .collect(),
+    };
+    FileHandle::new(
+        FileMeta {
+            region_id: id.region_id(),
+            file_id: id.file_id(),
+            file_size: manifest_size + samples.parts.iter().map(|p| p.file_size).sum::<u64>(),
+            format: FileFormat::NarthexSamples(Box::new(samples)),
+            ..Default::default()
+        },
+        new_noop_file_purger(),
+    )
+}
+
 async fn build(
     format: &ColumnarSamplesFormat,
     store: &ObjectStore,
     meta: RegionMetadataRef,
     batches: &[RecordBatch],
-) -> SamplesFileHandle {
+) -> FileHandle {
     let file_id = FileId::random();
-    let generation = FileId::random();
-    let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
+    let prefix = location::narthex_file_dir(REGION_DIR, file_id);
     let mut writer = format
-        .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
-        .await
+        .writer(meta.clone(), store.clone(), &prefix, file_id, file_id)
         .unwrap();
     for batch in batches {
         writer.write(batch).await.unwrap();
     }
     let artifact = writer.finish().await.unwrap();
-    let (purger, _) = series_index_channel(store.clone());
-    SamplesFileHandle::new(
+    let (manifest, parts) = artifact.objects.split_first().unwrap();
+    samples_handle(
         RegionFileId::new(meta.region_id, file_id),
-        SamplesEntry {
-            file_id,
-            artifact,
-            source_file_ids: Vec::new(),
-            window: None,
-            source_windows: Default::default(),
-        },
-        purger,
+        manifest.file_size,
+        parts.iter().map(|part| part.file_size),
     )
 }
+/// Replaces a single part and updates the manifest and SST sizes to match.
+async fn rewrite_part(
+    store: &ObjectStore,
+    handle: FileHandle,
+    mut manifest: Manifest,
+    bytes: Vec<u8>,
+) -> FileHandle {
+    manifest.files[0].file_size = bytes.len() as u64;
+    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    let json = serde_json::to_vec(&manifest).unwrap();
+    let manifest_size = json.len() as u64;
+    store.write(&manifest.path(), json).await.unwrap();
+    samples_handle(
+        handle.file_id(),
+        manifest_size,
+        manifest.files.iter().map(|part| part.file_size),
+    )
+}
+
 /// Reads the descriptor and root page of a one-part artifact, plus the part's bytes. Tests
 /// use it to inspect what the reader decodes and to rewrite a stored page.
-async fn root_page(
-    store: &ObjectStore,
-    handle: &SamplesFileHandle,
-) -> (Manifest, Trailer, Page, Vec<u8>) {
+async fn root_page(store: &ObjectStore, handle: &FileHandle) -> (Manifest, Trailer, Page, Vec<u8>) {
     let manifest = manifest(store, handle).await;
     assert_eq!(
         1,
@@ -259,16 +305,13 @@ async fn root_page(
     (manifest, trailer, page, bytes)
 }
 
-async fn manifest(store: &ObjectStore, handle: &SamplesFileHandle) -> Manifest {
-    let path = &handle
-        .entry()
-        .artifact
-        .objects
-        .iter()
-        .find(|o| o.path.ends_with("manifest.json"))
-        .unwrap()
-        .path;
-    serde_json::from_slice(&store.read(path).await.unwrap().to_bytes()).unwrap()
+async fn manifest(store: &ObjectStore, handle: &FileHandle) -> Manifest {
+    let prefix = location::narthex_file_dir(REGION_DIR, handle.meta_ref().file_id);
+    let path = location::narthex_manifest_path(&prefix);
+    let mut manifest: Manifest =
+        serde_json::from_slice(&store.read(&path).await.unwrap().to_bytes()).unwrap();
+    manifest.prefix = prefix;
+    manifest
 }
 fn request(names: &[&str]) -> SamplesReadRequest {
     SamplesReadRequest {
@@ -433,7 +476,7 @@ async fn lossless_round_trip_all_units_and_input_batches() {
             no_columns.iter().map(|b| b.num_rows()).sum::<usize>(),
             rows.len()
         );
-        for object in &handle.entry().artifact.objects {
+        for object in handle.meta_ref().narthex_objects(REGION_DIR).unwrap() {
             assert_eq!(
                 store.read(&object.path).await.unwrap().len() as u64,
                 object.file_size
@@ -733,7 +776,6 @@ async fn out_of_order_series_are_refused() {
     let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
     let mut writer = format
         .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
-        .await
         .unwrap();
     writer
         .write(&keyed_batch(
@@ -762,7 +804,6 @@ async fn out_of_order_series_are_refused() {
             FileId::random(),
             generation,
         )
-        .await
         .unwrap();
     writer
         .write(&keyed_batch(
@@ -789,7 +830,10 @@ async fn empty_selection_and_validation() {
     let format = ColumnarSamplesFormat::default();
     let handle = build(&format, &store, m, &[]).await;
     assert!(manifest(&store, &handle).await.files.is_empty());
-    assert_eq!(handle.entry().artifact.objects.len(), 1);
+    assert_eq!(
+        handle.meta_ref().narthex_objects(REGION_DIR).unwrap().len(),
+        1
+    );
     let reader = format.reader(store, handle).await.unwrap();
     assert!(
         reader
@@ -833,7 +877,6 @@ async fn failed_writer_and_abort_remove_outputs() {
         let prefix = format!("{}/samples/{generation}/", m.region_id.as_u64());
         let mut writer = format
             .writer(m.clone(), store.clone(), &prefix, id, generation)
-            .await
             .unwrap();
         writer
             .write(&batch(
@@ -875,7 +918,6 @@ async fn failed_writer_and_abort_remove_outputs() {
     assert!(
         format
             .writer(m, store, "wrong", FileId::random(), FileId::random())
-            .await
             .is_err()
     );
 }
@@ -903,7 +945,7 @@ async fn selective_reads_pin_the_artifact() {
     let store = store();
     let m = metadata();
     let format = ColumnarSamplesFormat::default();
-    let built = build(
+    let handle = build(
         &format,
         &store,
         m.clone(),
@@ -914,9 +956,6 @@ async fn selective_reads_pin_the_artifact() {
         )],
     )
     .await;
-    let (purger, mut purges) = series_index_channel(store.clone());
-    let handle = SamplesFileHandle::new(built.file_id(), built.entry().clone(), purger);
-    drop(built);
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
     let layer = MockLayerBuilder::default()
@@ -937,14 +976,14 @@ async fn selective_reads_pin_the_artifact() {
     let mut req = request(&["field_0"]);
     req.table_id = Some(2);
     let stream = reader.read(req).unwrap();
-    handle.mark_deleted();
+
     drop(handle);
     drop(reader);
-    assert!(purges.try_recv().is_err());
+
     let result = stream.try_collect::<Vec<_>>().await.unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].column(0).null_count(), 1);
-    assert!(purges.try_recv().is_ok());
+
     // Header, trailer, one leaf/root, and the selected block's key from the key area. The
     // all-null projected field has no payload.
     assert_eq!(reads.lock().unwrap().len(), 4);
@@ -1069,399 +1108,22 @@ async fn malformed_framing_and_payload_corruption() {
             .is_err()
         );
     }
-    let mut entry = handle.entry().clone();
-    entry
-        .artifact
-        .objects
-        .push(entry.artifact.objects[0].clone());
-    let (purger, _) = series_index_channel(store.clone());
-    let bad = SamplesFileHandle::new(handle.file_id(), entry, purger);
+    let mut file = handle.meta_ref().clone();
+    let FileFormat::NarthexSamples(samples) = &mut file.format else {
+        unreachable!()
+    };
+    samples.parts.clear();
+    let bad = FileHandle::new(file, new_noop_file_purger());
     assert!(format.reader(store, bad).await.is_err());
 }
 
-#[rstest::rstest]
-#[case(vec![1000, 2000], 1, true)]
-#[case(vec![-1, 0, 86_399_999, 86_400_000], 3, true)]
-#[case(vec![86_399_999, 86_400_000], 2, false)]
-#[case((1000..1065).collect(), 2, true)]
-#[tokio::test]
-async fn real_samples_reconcile_reopen_and_retire(
-    #[case] expected_times: Vec<i64>,
-    #[case] windows: usize,
-    #[case] flush_each: bool,
-) {
-    use crate::config::MitoConfig;
-    use crate::series_index::format::SeriesFormats;
-    use crate::series_index::maintenance::reconcile_series_indexes;
-    use crate::test_util::TestEnv;
-    let mut env = TestEnv::with_prefix("columnar-samples-reconcile").await;
-    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
-        &mut env,
-        &expected_times,
-        MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-            min_compaction_interval: Duration::from_secs(3600),
-            ..Default::default()
-        },
-        metadata(),
-        flush_each,
-    )
-    .await;
-    if !flush_each {
-        assert!(
-            region
-                .version()
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|l| l.files())
-                .any(|f| {
-                    let (a, b) = f.time_range();
-                    crate::series_index::builder::sample_day(a)
-                        != crate::series_index::builder::sample_day(b)
-                })
-        );
-    }
-    let format = Arc::new(ColumnarSamplesFormat::default());
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        samples: Some(format.clone()),
-        ..Default::default()
-    });
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, mut purges) = series_index_channel(store.clone());
-    let reconcile = || {
-        reconcile_series_indexes(
-            0,
-            store.clone(),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true,
-        )
-    };
-    assert_eq!(reconcile().await.unwrap().built_samples, windows);
-    assert_eq!(reconcile().await.unwrap().built_samples, 0);
-    let reopened =
-        crate::series_index::catalog::load_version_control(&store, region.region_id, &purger).await;
-    assert_eq!(reopened.current().samples.len(), windows);
-    let mut timestamps = Vec::new();
-    for handle in reopened.current().samples.values() {
-        let day = handle.entry().window.unwrap();
-        let manifest_path = format!(
-            "{}manifest.json",
-            samples_prefix(
-                region.region_id.as_u64(),
-                handle.entry().artifact.generation
-            )
-        );
-        let manifest: Manifest =
-            serde_json::from_slice(&store.read(&manifest_path).await.unwrap().to_bytes()).unwrap();
-        // All source chunks for this series/day are repacked into one block.
-        assert_eq!(manifest.files.iter().map(|p| p.num_blocks).sum::<u64>(), 1);
-        assert!(
-            manifest
-                .files
-                .iter()
-                .all(|p| p.min_timestamp.div_euclid(86_400_000) == day
-                    && p.max_timestamp.div_euclid(86_400_000) == day)
-        );
-        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
-        let batches = reader
-            .read(full_request())
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        timestamps.extend(collect_rows(&batches).into_iter().map(|row| row.2));
-    }
-    timestamps.sort_unstable();
-    assert_eq!(timestamps, expected_times);
-    // A missing artifact triggers rebuilding; failure to publish its replacement
-    // must retain the prior snapshot/catalog and retire only the new generation.
-    let before = region.series_index_version();
-    let catalog_path = crate::series_index::catalog::samples_catalog_path(region.region_id);
-    let catalog = store.read(&catalog_path).await.unwrap().to_bytes();
-    let old = before.samples.values().next().unwrap();
-    store
-        .delete(&old.entry().artifact.objects[0].path)
-        .await
-        .unwrap();
-    let layer = MockLayerBuilder::default()
-        .writer_factory(Arc::new(|path, _, inner| {
-            if path.ends_with("samples.json") {
-                Box::new(FaultyWriter {
-                    inner,
-                    fail_write: true,
-                    closing: None,
-                })
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap();
-    assert!(
-        reconcile_series_indexes(
-            0,
-            store.clone().layer(layer),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true
-        )
-        .await
-        .is_err()
-    );
-    assert!(Arc::ptr_eq(&before, &region.series_index_version()));
-    assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
-    let rebuilt_days = before
-        .samples
-        .values()
-        .filter(|h| h.entry().source_file_ids == old.entry().source_file_ids)
-        .count();
-    for _ in 0..rebuilt_days {
-        let cleanup = purges.try_recv().unwrap().objects.unwrap();
-        assert_eq!(cleanup.len(), 2);
-        assert!(cleanup.iter().all(|path| before.samples.values().all(|h| {
-            h.entry()
-                .artifact
-                .objects
-                .iter()
-                .all(|object| object.path != *path)
-        })));
-    }
-    assert!(purges.try_recv().is_err());
-
-    // A successful rebuild replaces the generation it supersedes, and that generation is retired:
-    // the published snapshot keeps its objects alive, so it is purged only once the last reader of
-    // the superseded generation is dropped. This pass also rebuilds the day whose generation the
-    // failed publish above left behind.
-    drop(before);
-    let current = region.series_index_version();
-    let retired = current.samples.values().next().unwrap().clone();
-    let retired_paths: BTreeSet<String> = retired
-        .entry()
-        .artifact
-        .objects
-        .iter()
-        .map(|object| object.path.clone())
-        .collect();
-    store
-        .delete(&retired.entry().artifact.objects[0].path)
-        .await
-        .unwrap();
-    let rebuilt = reconcile().await.unwrap();
-    assert!(rebuilt.built_samples > 0);
-    let next = region.series_index_version();
-    assert!(!Arc::ptr_eq(&current, &next));
-    assert!(
-        next.samples
-            .values()
-            .all(|handle| handle.entry().file_id != retired.entry().file_id)
-    );
-    assert!(next.samples.values().all(|handle| {
-        handle
-            .entry()
-            .artifact
-            .objects
-            .iter()
-            .all(|object| !retired_paths.contains(&object.path))
-    }));
-    // Nothing is released while the superseded snapshot and its handle are still alive.
-    assert!(purges.try_recv().is_err());
-    // A reader outlives the snapshot it was taken from, so hold a handle on every generation the
-    // superseded snapshot published: a rebuild can replace several of them at once, and releasing
-    // the snapshot must release none while those handles are alive.
-    let readers: Vec<_> = current
-        .samples
-        .values()
-        .filter(|handle| handle.entry().file_id != retired.entry().file_id)
-        .cloned()
-        .collect();
-    drop(current);
-    // The purge follows the last reader handle, not the snapshot: `retired` and `readers` still
-    // hold the superseded generations, so dropping the published snapshot that owned one of their
-    // handles each must not release them.
-    assert!(purges.try_recv().is_err());
-    drop(retired);
-    let mut purged = BTreeSet::new();
-    while let Ok(request) = purges.try_recv() {
-        purged.extend(request.objects.unwrap());
-    }
-    assert!(retired_paths.is_subset(&purged));
-    // The generations kept alive above are superseded as well, so they are released with their
-    // last reader handle, not with the snapshot.
-    drop(readers);
-    while let Ok(request) = purges.try_recv() {
-        purged.extend(request.objects.unwrap());
-    }
-    // Only superseded generations are released; nothing the snapshot still points at is purged.
-    assert!(
-        region
-            .series_index_version()
-            .samples
-            .values()
-            .all(|handle| handle
-                .entry()
-                .artifact
-                .objects
-                .iter()
-                .all(|object| !purged.contains(&object.path)))
-    );
-    use store_api::region_engine::RegionEngine;
-    engine.stop().await.unwrap();
-}
-
-/// An artifact written by the previous layout keeps its key in every block descriptor and names
-/// that older encoding in its manifest.
-///
-/// Nothing else separates it from a current artifact: it is structurally valid, ordered, and has
-/// the same version. Without the layout in `identity_encoding`, maintenance opens it, finds it
-/// sound, and keeps it - and only the first part read fails. The manifest must be refused instead,
-/// so an unreadable artifact is rebuilt before it is ever marked reusable.
-#[tokio::test]
-async fn inline_key_artifact_is_rebuilt_not_reused() {
-    use std::collections::HashMap;
-
-    use crate::config::MitoConfig;
-    use crate::series_index::format::SeriesFormats;
-    use crate::series_index::maintenance::reconcile_series_indexes;
-    use crate::series_index::version::SeriesIndexVersion;
-    use crate::test_util::TestEnv;
-
-    let mut env = TestEnv::with_prefix("columnar-samples-inline-keys").await;
-    let (engine, region) = crate::series_index::tests::prepare_region_with_metadata_and_flush(
-        &mut env,
-        &[1000, 2000],
-        MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-            min_compaction_interval: Duration::from_secs(3600),
-            ..Default::default()
-        },
-        metadata(),
-        true,
-    )
-    .await;
-    let format = Arc::new(ColumnarSamplesFormat::default());
-    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-        samples: Some(format.clone()),
-        ..Default::default()
-    });
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, _purges) = series_index_channel(store.clone());
-    let reconcile = || {
-        reconcile_series_indexes(
-            0,
-            store.clone(),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            true,
-        )
-    };
-    assert_eq!(1, reconcile().await.unwrap().built_samples);
-
-    // Rewrite every samples manifest to the value an artifact written before the key area carries.
-    let current = region.series_index_version();
-    let mut samples = HashMap::new();
-    for (id, handle) in &current.samples {
-        let mut entry = handle.entry().clone();
-        for object in &mut entry.artifact.objects {
-            if !object.path.ends_with("manifest.json") {
-                continue;
-            }
-            let bytes = store.read(&object.path).await.unwrap().to_bytes();
-            let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            manifest["identity_encoding"] = serde_json::json!("exact-sparse-key");
-            let rewritten = serde_json::to_vec(&manifest).unwrap();
-            object.file_size = rewritten.len() as u64;
-            store.write(&object.path, rewritten).await.unwrap();
-        }
-        entry.artifact.file_size = entry
-            .artifact
-            .objects
-            .iter()
-            .map(|object| object.file_size)
-            .sum();
-        samples.insert(
-            *id,
-            SamplesFileHandle::new(handle.file_id(), entry, purger.clone()),
-        );
-    }
-    region
-        .series_index_version_control
-        .publish(Arc::new(SeriesIndexVersion {
-            samples: samples.clone(),
-            range_indexes: current.range_indexes.clone(),
-            series_indexes: current.series_indexes.clone(),
-            index_buckets: current.index_buckets.clone(),
-        }));
-
-    // The manifest alone refuses it: no part has to be read to see the old layout.
-    let legacy = samples.values().next().unwrap().clone();
-    let error = format
-        .reader(store.clone(), legacy.clone())
-        .await
-        .err()
-        .expect("an inline-key artifact must be refused at open");
-    let message = error.to_string();
-    assert!(message.contains("rebuild"), "{message}");
-
-    // Maintenance must rebuild it, not mark it reusable and fail on the first read.
-    let stats = reconcile().await.unwrap();
-    assert_eq!(
-        1, stats.built_samples,
-        "an artifact the format refuses must be rebuilt"
-    );
-    let rebuilt = region.series_index_version();
-    assert_eq!(1, rebuilt.samples.len());
-    for handle in rebuilt.samples.values() {
-        assert_ne!(
-            handle.entry().artifact.generation,
-            legacy.entry().artifact.generation,
-            "the refused artifact must be replaced"
-        );
-        let manifest = manifest(&store, handle).await;
-        assert_eq!(
-            IdentityEncoding::CURRENT_SAMPLES,
-            manifest.identity_encoding
-        );
-        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
-        let batches = reader
-            .read(full_request())
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        let mut times = collect_rows(&batches)
-            .into_iter()
-            .map(|row| row.2)
-            .collect::<Vec<_>>();
-        times.sort_unstable();
-        assert_eq!(vec![1000, 2000], times);
-    }
-    use store_api::region_engine::RegionEngine;
-    engine.stop().await.unwrap();
-}
-
-/// Fields the frozen v1 manifest still has; unknown-to-the-current-format ones are
-/// deliberately not parsed, so the artifact reaches the reader's rejection path.
 #[derive(serde::Deserialize)]
 struct FrozenV1Manifest {
     region_id: u64,
     source_file_id: FileId,
-    generation: FileId,
 }
 
-async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
+async fn frozen_v1_handle(store: &ObjectStore) -> FileHandle {
     let bytes =
         include_str!("../../../../../tests/compatibility/wire/mito_columnar_samples/v1-part.hex")
             .split_whitespace()
@@ -1474,41 +1136,19 @@ async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
         "../../../../../tests/compatibility/wire/mito_columnar_samples/v1-manifest.json"
     );
     let frozen: FrozenV1Manifest = serde_json::from_str(json).unwrap();
-    let prefix = crate::series_index::samples::samples_prefix(frozen.region_id, frozen.generation);
-    let manifest_path = format!("{prefix}manifest.json");
+    let prefix = location::narthex_file_dir(REGION_DIR, frozen.source_file_id);
+    let manifest_path = location::narthex_manifest_path(&prefix);
     let part_path = format!("{prefix}part-0.samples");
-    store.write(&part_path, bytes.clone()).await.unwrap();
+    let part_size = bytes.len() as u64;
+    store.write(&part_path, bytes).await.unwrap();
     store.write(&manifest_path, json).await.unwrap();
-    let objects = vec![
-        crate::series_index::artifact::ArtifactObject {
-            path: manifest_path,
-            file_size: json.len() as u64,
-        },
-        crate::series_index::artifact::ArtifactObject {
-            path: part_path,
-            file_size: bytes.len() as u64,
-        },
-    ];
-    let artifact = crate::series_index::artifact::ArtifactMetadata {
-        format: ArtifactFormat::ColumnarSamples,
-        generation: frozen.generation,
-        file_size: (json.len() + bytes.len()) as u64,
-        objects,
-    };
-    let (purger, _) = series_index_channel(store.clone());
-    SamplesFileHandle::new(
+    samples_handle(
         RegionFileId::new(
             store_api::storage::RegionId::from_u64(frozen.region_id),
             frozen.source_file_id,
         ),
-        SamplesEntry {
-            source_file_ids: Vec::new(),
-            window: None,
-            source_windows: Default::default(),
-            file_id: frozen.source_file_id,
-            artifact,
-        },
-        purger,
+        json.len() as u64,
+        std::iter::once(part_size),
     )
 }
 
@@ -1533,8 +1173,8 @@ async fn frozen_v1_samples_fixture_is_rejected() {
 
 /// Rewrites the stored root page so every field column carries an unknown codec, and returns a
 /// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
-async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
-    let (mut manifest, mut trailer, page, mut bytes) = root_page(store, &handle).await;
+async fn unknown_field_codec(store: &ObjectStore, handle: FileHandle) -> FileHandle {
+    let (manifest, mut trailer, page, mut bytes) = root_page(store, &handle).await;
     let Page::Leaf(mut blocks) = page else {
         panic!("the root page must be a leaf")
     };
@@ -1562,25 +1202,7 @@ async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> 
     // file length change.
     trailer.file_length = (bytes.len() + TRAILER_SIZE as usize) as u64;
     bytes.extend_from_slice(&trailer.encode());
-    let part_path = manifest.part_path(0);
-    store.write(&part_path, bytes.clone()).await.unwrap();
-    manifest.files[0].file_size = bytes.len() as u64;
-    let manifest_path = manifest.path();
-    let json = serde_json::to_vec(&manifest).unwrap();
-    store.write(&manifest_path, json.clone()).await.unwrap();
-    let mut entry = handle.entry().clone();
-    for object in &mut entry.artifact.objects {
-        if object.path == part_path {
-            object.file_size = bytes.len() as u64;
-        } else if object.path == manifest_path {
-            object.file_size = json.len() as u64;
-        } else {
-            panic!("unexpected samples object {}", object.path);
-        }
-    }
-    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    SamplesFileHandle::new(handle.file_id(), entry, purger)
+    rewrite_part(store, handle, manifest, bytes).await
 }
 
 /// A column whose codec the format does not know can only be skipped: a query that does not
@@ -1673,12 +1295,10 @@ async fn wide_schema_byte_bound_and_unsupported_input() {
     assert!(
         format
             .writer(wrong, store.clone(), &prefix, id, generation)
-            .await
             .is_err()
     );
     let mut writer = format
         .writer(m.clone(), store, &prefix, id, generation)
-        .await
         .unwrap();
     let mut bad = (*m).clone();
     bad.column_metadatas
@@ -1763,7 +1383,6 @@ async fn output_failures_and_cancelled_finish_clean_up() {
                 id,
                 generation,
             )
-            .await
             .unwrap();
         writer
             .write(&batch(&m, &[(1, 1, 0, 1, 1, Some(7))], false))
@@ -1817,14 +1436,10 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
         (1, 1, 30, 1, 1, Some(10)),
     ];
     let handle = build(&format, &store, m.clone(), &[batch(&m, &input, false)]).await;
-    let part_size = handle
-        .entry()
-        .artifact
-        .objects
-        .iter()
-        .find(|object| object.path.ends_with(".samples"))
-        .unwrap()
-        .file_size;
+    let FileFormat::NarthexSamples(samples) = &handle.meta_ref().format else {
+        unreachable!()
+    };
+    let part_size = samples.parts[0].file_size;
     let reads = Arc::new(Mutex::new(Vec::new()));
     let creations = Arc::new(AtomicUsize::new(0));
     let observed = reads.clone();
@@ -2428,7 +2043,9 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
         &[batch(&m, &input, false)],
     )
     .await;
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let reader = reader::SamplesReader::open(store, handle, REGION_DIR)
+        .await
+        .unwrap();
     let pool = Arc::new(GreedyMemoryPool::new(capacity));
     let mut request = full_request();
     request.memory_pool = Some(pool.clone());
@@ -2457,10 +2074,9 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
 
 mod keys;
 
-/// Narthex readers use the SST lifetime, not the local sidecar purger.
+/// Narthex readers pin the samples SST until the stream is dropped.
 #[tokio::test]
 async fn narthex_file_reader_pins_sst_lifetime() {
-    use crate::sst::file::{FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSamplesMeta};
     use crate::sst::file_purger::FilePurger;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2473,54 +2089,34 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     }
     let store = store();
     let meta = metadata();
-    let id = FileId::random();
-    let prefix = format!("table/region/{id}/");
     let rows = vec![
         (1, 2, 100, 7, 0, Some(1.5f64.to_bits())),
         (1, 2, 101, 8, 0, None),
     ];
-    let mut writer = ColumnarSamplesFormat::default()
-        .writer(meta.clone(), store.clone(), &prefix, id, id)
-        .await
-        .unwrap();
-    writer.write(&batch(&meta, &rows, false)).await.unwrap();
-    let artifact = writer.finish().await.unwrap();
-    let (manifest, parts) = artifact.objects.split_first().unwrap();
-    let narthex = NarthexSamplesMeta {
-        manifest_size: manifest.file_size,
-        parts: parts
-            .iter()
-            .map(|part| NarthexPartMeta {
-                file_size: part.file_size,
-            })
-            .collect(),
-    };
-    let file_meta = FileMeta {
-        region_id: meta.region_id,
-        file_id: id,
-        file_size: artifact.file_size,
-        num_rows: rows.len() as u64,
-        format: FileFormat::NarthexSamples(Box::new(narthex)),
-        ..Default::default()
-    };
+    let built = build(
+        &ColumnarSamplesFormat::default(),
+        &store,
+        meta.clone(),
+        &[batch(&meta, &rows, false)],
+    )
+    .await;
+    let file_meta = built.meta_ref();
     let restored: FileMeta =
-        serde_json::from_str(&serde_json::to_string(&file_meta).unwrap()).unwrap();
-    assert_eq!(file_meta, restored);
+        serde_json::from_str(&serde_json::to_string(file_meta).unwrap()).unwrap();
+    assert_eq!(file_meta, &restored);
+    drop(built);
     let purged = Arc::new(AtomicUsize::new(0));
     let file = FileHandle::new(restored, Arc::new(CountingPurger(purged.clone())));
-    let handle = SamplesFileHandle::from_narthex(file.clone(), "table/region/").unwrap();
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
-    file.mark_deleted();
-    drop(file);
-    assert_eq!(0, purged.load(Ordering::Relaxed));
-    let batches: Vec<_> = reader
-        .read(full_request())
-        .unwrap()
-        .try_collect()
+    let reader = reader::SamplesReader::open(store, file.clone(), REGION_DIR)
         .await
         .unwrap();
-    assert_eq!(rows, collect_rows(&batches));
+    file.mark_deleted();
+    drop(file);
+    let stream = reader.read(full_request()).unwrap();
     drop(reader);
+    assert_eq!(0, purged.load(Ordering::Relaxed));
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+    assert_eq!(rows, collect_rows(&batches));
     assert_eq!(1, purged.load(Ordering::Relaxed));
 }
 
@@ -2554,7 +2150,6 @@ async fn narthex_write_error_cleans_completed_parts_before_returning() {
             FileId::random(),
             FileId::random(),
         )
-        .await
         .unwrap();
     writer
         .write(&batch(
@@ -2618,7 +2213,9 @@ async fn narthex_prepared_discovery_empty_projection_skips_payload() {
             .build()
             .unwrap(),
     );
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let reader = reader::SamplesReader::open(store, handle, REGION_DIR)
+        .await
+        .unwrap();
     let discovered = reader
         .read(SamplesReadRequest::default())
         .unwrap()
@@ -2731,7 +2328,7 @@ async fn native_histogram_fields_round_trip_and_split_by_chunk_limit() {
         &[input.slice(0, 10), input.slice(10, input.num_rows() - 10)],
     )
     .await;
-    let read = |handle: SamplesFileHandle| {
+    let read = |handle: FileHandle| {
         let store = store.clone();
         let format = format.clone();
         async move {
@@ -2763,17 +2360,12 @@ async fn native_histogram_fields_round_trip_and_split_by_chunk_limit() {
     stored.fields[0].data_type = FLOAT64_TYPE.to_string();
     let json = serde_json::to_vec(&stored).unwrap();
     store.write(&stored.path(), json.clone()).await.unwrap();
-    let mut entry = handle.entry().clone();
-    for object in &mut entry.artifact.objects {
-        if object.path == stored.path() {
-            object.file_size = json.len() as u64;
-        }
-    }
-    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    let error = read(SamplesFileHandle::new(handle.file_id(), entry, purger))
-        .await
-        .unwrap_err();
+    let handle = samples_handle(
+        handle.file_id(),
+        json.len() as u64,
+        stored.files.iter().map(|part| part.file_size),
+    );
+    let error = read(handle).await.unwrap_err();
     assert!(
         error.to_string().contains("does not match its field type"),
         "{error}"

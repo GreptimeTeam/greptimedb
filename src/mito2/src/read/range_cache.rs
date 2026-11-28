@@ -23,7 +23,6 @@ use async_stream::try_stream;
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use datafusion::execution::memory_pool::MemoryPool;
 use datafusion_expr::expr::Expr;
 use datafusion_expr::{Between, BinaryExpr, Operator};
 #[cfg(test)]
@@ -37,7 +36,6 @@ use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector}
 use table::predicate::is_string_timestamp_literal;
 
 use crate::cache::CacheStrategy;
-use crate::cache::range_cache::RangeCacheScope;
 #[cfg(test)]
 use crate::cache::range_cache::{RANGE_CACHE_COMPACT_THRESHOLD_BYTES, RangeScanCacheValue};
 use crate::error::Result;
@@ -46,7 +44,6 @@ use crate::read::pruner::PartitionPruner;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
-use crate::read::series_reader::SeriesRange;
 use crate::region::options::MergeMode;
 #[cfg(any(test, feature = "test"))]
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -86,8 +83,6 @@ enum RangeScanStage {
     /// Source batches may be split for a later cross-range merge. Keep their
     /// cached batch boundaries separate from ordinary sequential scans.
     DataForCrossRangeMerge,
-    CandidateSeries,
-    SeriesData(SeriesRange),
 }
 
 #[derive(Debug)]
@@ -196,36 +191,6 @@ impl ScanRequestFingerprint {
             sequence_range: self.sequence_range,
             file_reads: self.file_reads.clone(),
             stage: self.stage,
-            partition_expr_version: self.partition_expr_version,
-        }
-    }
-
-    fn for_candidate_series(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            time_filters: self.time_filters.clone(),
-            series_row_selector: self.series_row_selector,
-            append_mode: self.append_mode,
-            filter_deleted: self.filter_deleted,
-            merge_mode: self.merge_mode,
-            sequence_range: self.sequence_range,
-            file_reads: self.file_reads.clone(),
-            stage: RangeScanStage::CandidateSeries,
-            partition_expr_version: self.partition_expr_version,
-        }
-    }
-
-    fn for_series_data(&self, range: SeriesRange) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            time_filters: self.time_filters.clone(),
-            series_row_selector: self.series_row_selector,
-            append_mode: self.append_mode,
-            filter_deleted: self.filter_deleted,
-            merge_mode: self.merge_mode,
-            sequence_range: self.sequence_range,
-            file_reads: self.file_reads.clone(),
-            stage: RangeScanStage::SeriesData(range),
             partition_expr_version: self.partition_expr_version,
         }
     }
@@ -461,44 +426,6 @@ pub(crate) fn build_range_cache_key(
     part_range: &PartitionRange,
     partition_pruner: Option<&PartitionPruner>,
 ) -> Option<RangeScanCacheKey> {
-    build_range_cache_key_inner(stream_ctx, part_range, None, partition_pruner)
-}
-
-/// Builds a cache key for a candidate-series partition-range result.
-pub(crate) fn build_candidate_range_cache_key(
-    stream_ctx: &StreamContext,
-    part_range: &PartitionRange,
-    partition_pruner: &PartitionPruner,
-) -> Option<RangeScanCacheKey> {
-    build_range_cache_key_inner(
-        stream_ctx,
-        part_range,
-        Some(RangeScanStage::CandidateSeries),
-        Some(partition_pruner),
-    )
-}
-
-/// Builds a cache key for a two-phase series-data partition-range result.
-pub(crate) fn build_series_range_cache_key(
-    stream_ctx: &StreamContext,
-    part_range: &PartitionRange,
-    range: SeriesRange,
-    partition_pruner: &PartitionPruner,
-) -> Option<RangeScanCacheKey> {
-    build_range_cache_key_inner(
-        stream_ctx,
-        part_range,
-        Some(RangeScanStage::SeriesData(range)),
-        Some(partition_pruner),
-    )
-}
-
-fn build_range_cache_key_inner(
-    stream_ctx: &StreamContext,
-    part_range: &PartitionRange,
-    stage: Option<RangeScanStage>,
-    partition_pruner: Option<&PartitionPruner>,
-) -> Option<RangeScanCacheKey> {
     if !stream_ctx.input.cache_strategy.has_range_result_cache() {
         return None;
     }
@@ -569,22 +496,11 @@ fn build_range_cache_key_inner(
         }
         _ => false,
     };
-    let scan = if covers {
+    let mut scan = if covers {
         fingerprint.without_time_filters()
     } else {
         fingerprint.clone()
     };
-    let mut scan = match stage {
-        Some(RangeScanStage::CandidateSeries) => scan.for_candidate_series(),
-        Some(RangeScanStage::SeriesData(assignment)) => scan.for_series_data(assignment),
-        Some(RangeScanStage::DataForCrossRangeMerge) => {
-            let mut scan = scan;
-            scan.stage = RangeScanStage::DataForCrossRangeMerge;
-            scan
-        }
-        Some(RangeScanStage::Data) | None => scan,
-    };
-
     scan.file_reads = Some(Arc::new(file_reads));
     Some(RangeScanCacheKey {
         region_id: stream_ctx.input.region_metadata().region_id,
@@ -607,32 +523,6 @@ impl CachedRangeReader<'_> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
     {
-        self.build_in_scope(RangeCacheScope::default(), build).await
-    }
-
-    /// Shares active scans only with readers using the same query memory pool.
-    pub(crate) async fn build_with_memory_pool<F, Fut>(
-        self,
-        memory_pool: &Arc<dyn MemoryPool>,
-        build: F,
-    ) -> Result<(BoxedRecordBatchStream, usize)>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
-    {
-        self.build_in_scope(RangeCacheScope::for_memory_pool(memory_pool), build)
-            .await
-    }
-
-    async fn build_in_scope<F, Fut>(
-        self,
-        scope: RangeCacheScope,
-        build: F,
-    ) -> Result<(BoxedRecordBatchStream, usize)>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
-    {
         let Some(key) = self.key else {
             return build().await;
         };
@@ -646,7 +536,6 @@ impl CachedRangeReader<'_> {
             key,
             self.metrics,
             files,
-            scope,
             build,
         )
         .await
@@ -665,31 +554,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
 {
-    get_or_load_range_result_in_scope(
-        strategy,
-        key,
-        part_metrics,
-        RangeCacheScope::default(),
-        build,
-    )
-    .await
-}
-
-/// Isolates active sources that reserve memory from a query-specific pool.
-/// Pool identity affects active sharing only, never completed-result reuse.
-#[cfg(any(test, feature = "test"))]
-pub(crate) async fn get_or_load_range_result_in_scope<F, Fut>(
-    strategy: &CacheStrategy,
-    key: RangeScanCacheKey,
-    part_metrics: &PartitionMetrics,
-    scope: RangeCacheScope,
-    build: F,
-) -> Result<(BoxedRecordBatchStream, usize)>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
-{
-    load_shared_range(strategy, key, part_metrics, Vec::new(), scope, build).await
+    load_shared_range(strategy, key, part_metrics, Vec::new(), build).await
 }
 
 async fn load_shared_range<F, Fut>(
@@ -697,7 +562,6 @@ async fn load_shared_range<F, Fut>(
     key: RangeScanCacheKey,
     part_metrics: &PartitionMetrics,
     files: Vec<crate::sst::file::FileHandle>,
-    scope: RangeCacheScope,
     build: F,
 ) -> Result<(BoxedRecordBatchStream, usize)>
 where
@@ -712,7 +576,6 @@ where
             key,
             part_metrics.range_cache_metrics_reporter(),
             files,
-            scope,
             build,
         )
         .await
@@ -1212,30 +1075,11 @@ mod tests {
         let (ctx, part_range) =
             new_stream_context(vec![col("k0").eq(lit("foo"))], None, partition_range).await;
 
-        let ctx = Arc::new(ctx);
-        let pruner = Arc::new(crate::read::pruner::Pruner::new(ctx.clone(), 0));
-        let partition = PartitionPruner::new(pruner, std::slice::from_ref(&part_range));
         let data_key = build_range_cache_key(&ctx, &part_range, None).unwrap();
-        let candidate_key = build_candidate_range_cache_key(&ctx, &part_range, &partition).unwrap();
-        let range_0 = SeriesRange::new(0, 2).unwrap();
-        let range_1 = SeriesRange::new(1, 2).unwrap();
-        let series_key_0 =
-            build_series_range_cache_key(&ctx, &part_range, range_0, &partition).unwrap();
-        let series_key_1 =
-            build_series_range_cache_key(&ctx, &part_range, range_1, &partition).unwrap();
-
         let merge_key = data_key.clone().for_cross_range_merge();
         assert_ne!(merge_key, data_key);
-        assert_ne!(merge_key.scan, candidate_key.scan);
-        assert_ne!(merge_key.scan, series_key_0.scan);
         assert_eq!(merge_key.row_groups, data_key.row_groups);
         assert_eq!(merge_key, data_key.clone().for_cross_range_merge());
-        assert_ne!(data_key.scan, candidate_key.scan);
-        assert_ne!(candidate_key.scan, series_key_0.scan);
-        assert_eq!(data_key.row_groups, candidate_key.row_groups);
-        assert_ne!(data_key.scan, series_key_0.scan);
-        assert_ne!(series_key_0.scan, series_key_1.scan);
-        assert_eq!(data_key.row_groups, series_key_0.row_groups);
     }
 
     #[tokio::test]
@@ -1518,8 +1362,6 @@ mod tests {
         );
 
         let reset = fingerprint.without_time_filters();
-        let candidate = fingerprint.for_candidate_series();
-        let series_data = fingerprint.for_series_data(SeriesRange::new(0, 1).unwrap());
 
         assert_eq!(reset.read_columns(), fingerprint.read_columns());
         assert_eq!(reset.read_column_types(), fingerprint.read_column_types());
@@ -1529,14 +1371,6 @@ mod tests {
         assert_eq!(
             fingerprint.series_row_selector,
             Some(TimeSeriesRowSelector::LastRow { after_merge: true })
-        );
-        assert_eq!(
-            candidate.series_row_selector,
-            fingerprint.series_row_selector
-        );
-        assert_eq!(
-            series_data.series_row_selector,
-            fingerprint.series_row_selector
         );
         assert_eq!(reset.append_mode, fingerprint.append_mode);
         assert_eq!(reset.filter_deleted, fingerprint.filter_deleted);
@@ -1945,20 +1779,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_shared_stream_does_not_poison_a_later_request() {
-        let pool_a: Arc<dyn MemoryPool> =
-            Arc::new(datafusion::execution::memory_pool::UnboundedMemoryPool::default());
-        let pool_b: Arc<dyn MemoryPool> =
-            Arc::new(datafusion::execution::memory_pool::UnboundedMemoryPool::default());
-        let scope_a = RangeCacheScope::for_memory_pool(&pool_a);
-        let scope_b = RangeCacheScope::for_memory_pool(&pool_b);
         let strategy = test_cache_strategy();
         let (key, metrics) = test_cache_context(&strategy);
-        let (mut failed, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_a,
-            || async {
+        let (mut failed, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
                 let source = futures::stream::iter(vec![
                     Ok(make_batch(&[7])),
                     Err(crate::error::UnexpectedSnafu {
@@ -1967,29 +1791,16 @@ mod tests {
                     .build()),
                 ]);
                 Ok((Box::pin(source) as BoxedRecordBatchStream, 3))
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
         // Keep a second reader alive so the failed generation remains registered.
-        let (mut existing, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_a,
-            || async { panic!("existing reader must share the source") },
-        )
-        .await
-        .unwrap();
-        let (other_pool, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_b,
-            || async { Ok((source_stream(vec![make_batch(&[8])]), 1)) },
-        )
-        .await
-        .unwrap();
+        let (mut existing, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                panic!("existing reader must share the source")
+            })
+            .await
+            .unwrap();
         assert_eq!(failed.try_next().await.unwrap().unwrap(), make_batch(&[7]));
         let error = failed.try_next().await.unwrap_err();
         let crate::error::Error::LoadRangeResult { source, .. } = error else {
@@ -2000,22 +1811,14 @@ mod tests {
             if reason == "transient source error")
         );
         let expected = make_batch(&[1, 2, 3]);
-        let (mut retry, _) = get_or_load_range_result_in_scope(
-            &strategy,
-            key.clone(),
-            &metrics,
-            scope_a,
-            || async {
-                Ok((
-                    Box::pin(futures::stream::iter([Ok(expected.clone())]))
-                        as BoxedRecordBatchStream,
-                    3,
-                ))
-            },
-        )
+        // The failed source is still pinned by the existing reader. The retry opens its
+        // own ordinary stream when the failed source refuses new subscribers.
+        let (retry, _) = get_or_load_range_result(&strategy, key, &metrics, || async {
+            Ok((source_stream(vec![expected.clone()]), 3))
+        })
         .await
         .unwrap();
-        assert_eq!(retry.try_next().await.unwrap().unwrap(), expected);
+        assert_eq!(retry.try_collect::<Vec<_>>().await.unwrap(), vec![expected]);
         assert_eq!(
             existing.try_next().await.unwrap().unwrap(),
             make_batch(&[7])
@@ -2027,21 +1830,6 @@ mod tests {
         assert!(
             matches!(source.as_ref(), crate::error::Error::Unexpected { reason, .. }
             if reason == "transient source error")
-        );
-        assert_eq!(
-            other_pool.try_collect::<Vec<_>>().await.unwrap(),
-            vec![make_batch(&[8])]
-        );
-        wait_cached(&strategy, &key).await;
-        let (cached, _) =
-            get_or_load_range_result_in_scope(&strategy, key, &metrics, scope_a, || async {
-                panic!("completed result must be reusable across pools")
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            cached.try_collect::<Vec<_>>().await.unwrap(),
-            vec![make_batch(&[8])]
         );
     }
 

@@ -31,10 +31,8 @@ number alone does not reject it. The manifest carries no `identity_encoding`
 discriminator, and the part records only `(table_id, tsid)`, which is a hash: a
 part whose two series were merged is structurally valid and ordered exactly like a
 correct one. The test installs these exact bytes and recorded object sizes and
-asserts that opening them through `SamplesFormat` fails on the missing
-`identity_encoding` discriminator, which is what makes maintenance rebuild the
-artifact from its SSTs instead of reusing it. Legacy catalog identifier coverage
-remains in `series_index::catalog` tests.
+asserts that opening them through the samples reader fails on the missing
+`identity_encoding` discriminator.
 
 The part bytes above also predate two later version-1 shapes, neither of which is
 migrated: block descriptors now carry a fixed-size key reference into a separate key
@@ -47,15 +45,4 @@ part layout and must not be regenerated to look like one.
 Do not regenerate this fixture just to make a reader change pass. Preserve its
 bytes for future reader compatibility; introduce a separate versioned fixture
 when the approved format changes. This is a frozen-byte compatibility check,
-not a cross-binary upgrade/downgrade test. Older binaries are not promised to
-understand the new opt-in `columnar-samples` catalog identifier.
-
-`legacy-catalog-entry.json` and `daily-catalog-entry.json` freeze the optional
-source-coverage extension, exercised by `frozen_sample_catalog_coverage`. Empty
-object lists isolate catalog decoding; the existing part fixture tests actual
-payload reads. Legacy entries cover one SST. Daily entries cover the entire
-listed source set and become ineligible if any source disappears.
-
-`sparse-daily-catalog-entry.json` freezes explicit populated-day coverage per source.
-Older daily catalogs decode with empty coverage and are rebuilt before reuse.
-The source Parquet files and sample payload encoding are unchanged.
+not a cross-binary upgrade/downgrade test.

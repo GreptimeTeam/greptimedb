@@ -35,7 +35,6 @@ use crate::error::{
 use crate::read::scan_region::StreamContext;
 use crate::read::series_scan::prepared::{SeriesDiscovery, invalid};
 use crate::series_index::ROW_COUNT_COLUMN;
-use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::format::{
     FormatReader, SamplesBatch, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
 };
@@ -49,10 +48,7 @@ use store_api::metric_engine_consts::{
 
 /// Validates every assignment before opening authoritative objects. Missing support is an
 /// error, never permission to read narthex files through the legacy adapter.
-pub(crate) fn file_indices(
-    context: &StreamContext,
-    ranges: &[PartitionRange],
-) -> Result<BTreeSet<usize>> {
+fn file_indices(context: &StreamContext, ranges: &[PartitionRange]) -> Result<BTreeSet<usize>> {
     let mut files = BTreeSet::new();
     for range in ranges {
         let range = context
@@ -65,7 +61,7 @@ pub(crate) fn file_indices(
             }
             if !context.is_file_range_index(*index) {
                 return Err(invalid(
-                    "narthex preparation requires a prepared memtable source",
+                    "Narthex prepared scans support only SST and memtable ranges",
                 ));
             }
             let i = index.index - context.input.num_memtables();
@@ -127,13 +123,11 @@ pub(crate) async fn open_sources(
         }
         let mut reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
             context.input.access_layer.object_store().clone(),
-            crate::series_index::SeriesIndexFileHandle::from_narthex(
-                file.clone(),
-                &context
-                    .input
-                    .access_layer
-                    .build_region_dir(file.meta_ref().region_id),
-            )?,
+            file.clone(),
+            &context
+                .input
+                .access_layer
+                .build_region_dir(file.region_id()),
             context
                 .input
                 .cache_strategy
@@ -168,13 +162,11 @@ pub(crate) async fn open_sources(
         let namespace = file.meta_ref().file_id;
         let reader = SamplesReader::open_cached(
             context.input.access_layer.object_store().clone(),
-            SamplesFileHandle::from_narthex(
-                file.clone(),
-                &context
-                    .input
-                    .access_layer
-                    .build_region_dir(file.meta_ref().region_id),
-            )?,
+            file.clone(),
+            &context
+                .input
+                .access_layer
+                .build_region_dir(file.region_id()),
             context.input.cache_strategy.columnar_metadata(namespace),
         )
         .await?;

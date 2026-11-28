@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +39,7 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
         CREATE TABLE series_physical (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE)
         PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')
         ENGINE = metric WITH (
-            physical_metric_table = 'true', 'compaction.type' = 'twcs',
+            physical_metric_table = 'true', 'sst_format' = 'narthex', 'compaction.type' = 'twcs',
             'compaction.twcs.time_window' = '1h',
             'compaction.twcs.active_window.trigger_file_num' = '100',
             'compaction.twcs.inactive_window.trigger_file_num' = '100'
@@ -56,7 +55,7 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
     "#,
     )
     .await;
-    // Reconciliation requires at least four SSTs in each bucket.
+    // The default build threshold is four SSTs per window.
     for timestamp in [1000, 2000, 3000, 4000] {
         execute_sql(
             frontend,
@@ -83,6 +82,11 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
     ] {
         assert!(try_execute_sql(frontend, sql).await.is_err(), "{sql}");
     }
+    execute_sql(frontend, "CREATE TABLE parquet_physical (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE = metric WITH (physical_metric_table = 'true', sst_format = 'flat')").await;
+    let error = try_execute_sql(frontend, "ADMIN BUILD_SERIES_INDEX('parquet_physical')")
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("Narthex"), "{error:?}");
     execute_sql(frontend, "CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX)").await;
     assert!(
         try_execute_sql(frontend, "ADMIN BUILD_SERIES_INDEX('ordinary')")
@@ -94,15 +98,6 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
     assert!(output.data.pretty_print().await.contains("| 8"));
 }
 
-fn catalog_count(home: &str) -> usize {
-    let root = Path::new(home).join("series_index");
-    std::fs::read_dir(root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.join("series-index.json").is_file())
-        .count()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_series_index_standalone() {
     let standalone = GreptimeDbStandaloneBuilder::new("build-series-index")
@@ -110,7 +105,6 @@ async fn test_build_series_index_standalone() {
         .build()
         .await;
     exercise_admin(standalone.fe_instance()).await;
-    assert_eq!(2, catalog_count(&standalone.opts.storage.data_home));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -137,12 +131,4 @@ async fn test_build_series_index_distributed() {
     }
     let cluster = builder.build_with(options, false, guards).await;
     exercise_admin(cluster.fe_instance()).await;
-    assert_eq!(
-        2,
-        cluster
-            .datanode_options
-            .iter()
-            .map(|opts| catalog_count(&opts.storage.data_home))
-            .sum::<usize>()
-    );
 }

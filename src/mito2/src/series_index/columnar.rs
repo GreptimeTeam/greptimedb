@@ -23,21 +23,20 @@ mod writer;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use crate::sst::file::{FileMeta, WindowSequence};
+use crate::sst::location;
+use common_time::Timestamp;
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
 use crate::error::{InvalidMetaSnafu, Result};
 use crate::series_index::artifact::ArtifactFormat;
-use crate::series_index::catalog::SeriesIndexEntry;
-use crate::series_index::format::{FormatReader, FormatWriter, SeriesIndexFormat};
 use crate::series_index::identity::IdentityEncoding;
-use crate::series_index::{
-    MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
-};
+use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN};
 
 pub(crate) const VERSION: u32 = 1;
 pub(crate) const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
@@ -73,42 +72,16 @@ impl ColumnarSeriesFormat {
         &self,
         metadata: RegionMetadataRef,
         store: ObjectStore,
-        entry: &SeriesIndexEntry,
+        file: &FileMeta,
         prefix: String,
     ) -> Result<Box<writer::ColumnarWriter>> {
-        Ok(Box::new(
-            writer::ColumnarWriter::new(self.clone(), metadata, store, entry)?
-                .with_prefix(prefix)?,
-        ))
-    }
-}
-
-#[async_trait]
-impl SeriesIndexFormat for ColumnarSeriesFormat {
-    fn format(&self) -> ArtifactFormat {
-        ArtifactFormat::ColumnarSeries
-    }
-
-    async fn writer(
-        &self,
-        metadata: RegionMetadataRef,
-        store: ObjectStore,
-        entry: &SeriesIndexEntry,
-    ) -> Result<Box<dyn FormatWriter>> {
         Ok(Box::new(writer::ColumnarWriter::new(
             self.clone(),
             metadata,
             store,
-            entry,
+            file,
+            prefix,
         )?))
-    }
-
-    async fn reader(
-        &self,
-        store: ObjectStore,
-        handle: SeriesIndexFileHandle,
-    ) -> Result<Box<dyn FormatReader>> {
-        Ok(Box::new(reader::ColumnarReader::open(store, handle).await?))
     }
 }
 
@@ -130,7 +103,7 @@ pub(crate) struct Part {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     #[serde(skip)]
-    pub(crate) prefix: Option<String>,
+    pub(crate) prefix: String,
     pub(crate) format: ArtifactFormat,
     pub(crate) version: u32,
     /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
@@ -138,13 +111,47 @@ pub(crate) struct Manifest {
     pub(crate) region_id: u64,
     pub(crate) generation: FileId,
     pub(crate) tags: Vec<Tag>,
-    pub(crate) coverage: SeriesIndexEntry,
+    pub(crate) coverage: SeriesCoverage,
     pub(crate) files: Vec<Part>,
+}
+
+/// V1 series-file coverage header. The region manifest holds the certified window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SeriesCoverage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact: Option<crate::series_index::artifact::ArtifactMetadata>,
+    file_size: u64,
+    index_uuid: FileId,
+    bucket_start: Timestamp,
+    bucket_end: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_file_ids: Option<Vec<FileId>>,
+    min_file_sequence: u64,
+    max_file_sequence: u64,
+    compaction_window_secs: i64,
+    window_sequences: BTreeMap<i64, WindowSequence>,
+}
+
+impl SeriesCoverage {
+    fn from_file(file: &FileMeta) -> Self {
+        Self {
+            artifact: None,
+            file_size: 0,
+            index_uuid: file.file_id,
+            bucket_start: file.time_range.0,
+            bucket_end: file.time_range.1,
+            source_file_ids: None,
+            min_file_sequence: 0,
+            max_file_sequence: 0,
+            compaction_window_secs: 0,
+            window_sequences: BTreeMap::new(),
+        }
+    }
 }
 
 impl Manifest {
     fn retained_size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.prefix.as_ref().map_or(0, String::capacity) + self.files.capacity() * std::mem::size_of::<Part>()
+        std::mem::size_of::<Self>() + self.prefix.capacity() + self.files.capacity() * std::mem::size_of::<Part>()
             + self.tags.capacity() * std::mem::size_of::<Tag>()
             + self.tags.iter().map(|tag| tag.name.capacity()).sum::<usize>()
             + self.coverage.source_file_ids.as_ref().map_or(0, Vec::capacity) * std::mem::size_of::<FileId>()
@@ -153,16 +160,11 @@ impl Manifest {
             + self.coverage.window_sequences.len() * 128
     }
 
-    pub(crate) fn prefix(&self) -> String {
-        self.prefix
-            .clone()
-            .unwrap_or_else(|| format!("{}/series/{}/", self.region_id, self.generation))
-    }
     pub(crate) fn part_path(&self, id: u32) -> String {
-        format!("{}part-{id}.series", self.prefix())
+        format!("{}part-{id}.series", self.prefix)
     }
     pub(crate) fn path(&self) -> String {
-        format!("{}manifest.json", self.prefix())
+        location::narthex_manifest_path(&self.prefix)
     }
     pub(crate) fn schema(&self) -> SchemaRef {
         let mut fields = vec![

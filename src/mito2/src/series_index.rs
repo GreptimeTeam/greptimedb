@@ -14,71 +14,35 @@
 
 //! Series index construction, search, and maintenance.
 //!
-//! Under development. Index files are currently stored on the local filesystem.
+//! Narthex index artifacts are owned and published by the region manifest.
 
 pub(crate) mod artifact;
 mod artifact_writer;
-mod bucket;
-mod builder;
-mod catalog;
 pub(crate) mod columnar;
 pub(crate) mod format;
-#[cfg(test)]
-mod format_tests;
 pub(crate) mod identity;
-mod maintenance;
-mod purger;
 pub(crate) mod samples;
-mod searcher;
 mod task;
 #[cfg(test)]
 mod tests;
-mod version;
 mod writer;
 
 #[cfg(test)]
-pub(crate) use maintenance::reconcile_series_indexes_with_mode;
-#[cfg(test)]
 pub(crate) use tests::prepare_region_with_metadata;
 
-use std::sync::Arc;
-
-use futures::stream::BoxStream;
-use object_store::ObjectStore;
+use datatypes::prelude::ConcreteDataType;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
 };
+use store_api::storage::consts::ReservedColumnId;
 
-use crate::error::Result;
-#[cfg(test)]
-pub(crate) use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
-pub(crate) use crate::series_index::catalog::{
-    delete_catalogs, load_version_control, series_index_path,
-};
-pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
-pub use crate::series_index::searcher::SeriesIndexSearcher;
 pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
-pub(crate) use crate::series_index::version::{
-    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl, narthex_series_entry,
-};
-pub use crate::series_index::writer::{
-    SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
-};
-
-/// Index storage and pinned catalog snapshot for a query.
-#[derive(Clone)]
-pub(crate) struct SeriesIndexReadContext {
-    pub(crate) cache_namespace: store_api::storage::FileId,
-    pub(crate) format: crate::config::SeriesIndexFormat,
-    pub(crate) store: ObjectStore,
-    pub(crate) version: Arc<SeriesIndexVersion>,
-}
 
 pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
 pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";
 pub(crate) const ROW_COUNT_COLUMN: &str = "__series_row_count";
-pub(crate) const METRIC_SERIES_ID_BATCH_SIZE: usize = 500;
 
 /// Identifies one series in a physical metric region.
 #[derive(
@@ -91,5 +55,17 @@ pub struct MetricSeriesId {
     pub tsid: u64,
 }
 
-/// Stream of bounded batches of matching metric-series IDs.
-pub type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSeriesId>>>;
+pub(crate) fn is_sparse_metric_metadata(metadata: &store_api::metadata::RegionMetadataRef) -> bool {
+    let valid_prefix = metadata
+        .primary_key
+        .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]);
+    let valid_types = metadata
+        .column_by_id(ReservedColumnId::table_id())
+        .zip(metadata.column_by_id(ReservedColumnId::tsid()))
+        .is_some_and(|(table_id, tsid)| {
+            table_id.column_schema.data_type == ConcreteDataType::uint32_datatype()
+                && tsid.column_schema.data_type == ConcreteDataType::uint64_datatype()
+        });
+
+    metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse && valid_prefix && valid_types
+}

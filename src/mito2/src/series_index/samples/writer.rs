@@ -241,7 +241,7 @@ impl SamplesWriter {
             .collect::<Result<Vec<_>>>()?;
         let pending_fields = fields.iter().map(PendingField::new).collect();
         let manifest = Manifest {
-            prefix: Some(prefix.to_string()),
+            prefix: prefix.to_string(),
             format: ArtifactFormat::ColumnarSamples,
             version: VERSION,
             identity_encoding: IdentityEncoding::CURRENT_SAMPLES,

@@ -40,9 +40,9 @@ use crate::series_index::columnar::{
 };
 use crate::series_index::format::{FormatReader, SeriesReadRequest};
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
-use crate::series_index::{
-    MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
-};
+use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN};
+use crate::sst::file::{FileFormat, FileHandle};
+use crate::sst::location;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(crate) struct ColumnarReader {
@@ -50,7 +50,7 @@ pub(crate) struct ColumnarReader {
     manifest: Arc<Manifest>,
     schema: SchemaRef,
     cache: Option<MetadataCache>,
-    handle: SeriesIndexFileHandle,
+    handle: FileHandle,
 }
 impl ColumnarReader {
     /// Present newly added labels as absent. Block descriptors still use the on-disk schema.
@@ -83,10 +83,18 @@ impl ColumnarReader {
 
     pub(crate) async fn open_cached(
         store: ObjectStore,
-        handle: SeriesIndexFileHandle,
+        handle: FileHandle,
+        region_dir: &str,
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
-        let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let file = handle.meta_ref();
+        let identity = format!(
+            "{region_dir}/{:?}/{:?}/{:?}/{}",
+            handle.file_id(),
+            file.format,
+            file.time_range,
+            file.file_size
+        );
         let descriptor = metadata_cache::load(
             cache.as_ref(),
             identity,
@@ -101,7 +109,7 @@ impl ColumnarReader {
                         .sum::<usize>()
             },
             async {
-                let reader = Self::open(store.clone(), handle.clone()).await?;
+                let reader = Self::open(store.clone(), handle.clone(), region_dir).await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -115,31 +123,18 @@ impl ColumnarReader {
         })
     }
 
-    pub(crate) async fn open(store: ObjectStore, handle: SeriesIndexFileHandle) -> Result<Self> {
-        let entry = handle.entry();
-        let artifact = entry
-            .artifact
-            .as_ref()
-            .ok_or_else(|| invalid("missing columnar artifact"))?;
-        require(
-            artifact.format == ArtifactFormat::ColumnarSeries
-                && artifact.generation == entry.index_uuid,
-            "series artifact identity mismatch",
-        )?;
-        let region = handle.file_id().region_id().as_u64();
-        let path = handle.manifest_path();
-        let mut objects = HashMap::with_capacity(artifact.objects.len());
-        for object in &artifact.objects {
-            require(
-                objects
-                    .insert(object.path.as_str(), object.file_size)
-                    .is_none(),
-                "duplicate series artifact object",
-            )?;
-        }
-        let length = *objects
-            .get(path.as_str())
-            .ok_or_else(|| invalid("missing series manifest object"))?;
+    pub(crate) async fn open(
+        store: ObjectStore,
+        handle: FileHandle,
+        region_dir: &str,
+    ) -> Result<Self> {
+        let file = handle.meta_ref();
+        let FileFormat::NarthexSeriesIndex(index) = &file.format else {
+            return Err(invalid("expected Narthex series file"));
+        };
+        let prefix = location::narthex_file_dir(region_dir, file.file_id);
+        let path = location::narthex_manifest_path(&prefix);
+        let length = index.manifest_size;
         require(
             length <= MANIFEST_LIMIT as u64,
             "series manifest exceeds size limit",
@@ -152,11 +147,7 @@ impl ColumnarReader {
                 "series manifest is not readable; rebuild the index: {error}"
             ))
         })?;
-        manifest.prefix = Some(
-            path.strip_suffix("manifest.json")
-                .ok_or_else(|| invalid("invalid narthex series manifest path"))?
-                .to_string(),
-        );
+        manifest.prefix = prefix;
         if manifest.version != VERSION {
             return Err(unsupported("series manifest version"));
         }
@@ -169,15 +160,12 @@ impl ColumnarReader {
         }
         require(
             manifest.format == ArtifactFormat::ColumnarSeries
-                && manifest.region_id == region
-                && manifest.generation == entry.index_uuid,
+                && manifest.region_id == file.region_id.as_u64()
+                && manifest.generation == file.file_id,
             "series manifest identity mismatch",
         )?;
-        let mut coverage = entry.clone();
-        coverage.artifact = None;
-        coverage.file_size = 0;
         require(
-            manifest.coverage == coverage,
+            manifest.coverage == super::SeriesCoverage::from_file(file),
             "series manifest coverage mismatch",
         )?;
         let mut names = HashSet::from([
@@ -192,12 +180,15 @@ impl ColumnarReader {
                 "duplicate series tag name/id",
             )?;
         }
-        let mut paths = HashSet::from([path]);
+        require(
+            manifest.files.len() == index.parts.len(),
+            "series part count mismatch",
+        )?;
         let mut file_size = length;
         let mut previous = None;
-        for (index, part) in manifest.files.iter().enumerate() {
+        for (ordinal, part) in manifest.files.iter().enumerate() {
             require(
-                index as u64 == u64::from(part.part_id)
+                ordinal as u64 == u64::from(part.part_id)
                     && part.first <= part.last
                     && part.num_series > 0
                     && part.file_size >= metadata::HEADER_SIZE + metadata::TRAILER_SIZE,
@@ -208,28 +199,15 @@ impl ColumnarReader {
                 require(last <= part.first, "unordered series parts")?;
             }
             previous = Some(part.last);
-            let part_path = manifest.part_path(part.part_id);
             require(
-                objects.get(part_path.as_str()) == Some(&part.file_size),
+                index.parts[ordinal].file_size == part.file_size,
                 "series part length mismatch",
             )?;
-            paths.insert(part_path);
             file_size = file_size
                 .checked_add(part.file_size)
                 .ok_or_else(|| invalid("series artifact length overflow"))?;
         }
-        require(
-            paths.len() == artifact.objects.len()
-                && artifact
-                    .objects
-                    .iter()
-                    .all(|object| paths.contains(&object.path)),
-            "series artifact object set mismatch",
-        )?;
-        require(
-            file_size == artifact.file_size && file_size == entry.file_size,
-            "series artifact size mismatch",
-        )?;
+        require(file_size == file.file_size, "series artifact size mismatch")?;
         Ok(Self {
             store,
             schema: manifest.schema(),

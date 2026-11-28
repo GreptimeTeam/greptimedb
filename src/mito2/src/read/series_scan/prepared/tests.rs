@@ -19,38 +19,29 @@ use api::v1::helper::row;
 use api::v1::region::build_index_request;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Rows};
-use common_error::ext::ErrorExt;
-use common_query::series_frame::unpack_raw_series;
-use datafusion::execution::TaskContext;
-use datafusion::physical_plan::{ExecutionPlan, metrics::ExecutionPlanMetricsSet};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_expr::{col, lit};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SampleRef;
-use object_store::ObjectStore;
-use object_store::layers::mock::{self, MockLayerBuilder, oio};
+use std::collections::HashSet;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{
-    BoundTag, PartitionRange, PrepareRequest, QueryScanContext, RegionEngine, RegionScanner,
+    BoundTag, PrepareRequest, QueryScanContext, RegionEngine, RegionScanner,
 };
 use store_api::region_request::{
     RegionBuildIndexRequest, RegionDeleteRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
-use table::table::scan::RegionScanExec;
 
 use super::*;
-use crate::config::{MitoConfig, SeriesIndexFormat as SelectedFormat};
+use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::series_scan::SeriesScan;
 use crate::region::MitoRegionRef;
-use crate::series_index::SeriesIndexReadContext;
-use crate::series_index::columnar::ColumnarSeriesFormat;
-use crate::series_index::format::{SamplesFormat, SeriesIndexFormat};
-use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{TestEnv, flush_region};
 
@@ -74,10 +65,19 @@ fn narthex_partition_filter_ignores_empty_and_matching_rules() {
 }
 
 async fn fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
-    fixture_with(false).await
+    indexed_fixture("last_row").await
 }
 
-async fn fixture_with(experimental_series_scan_v2: bool) -> (TestEnv, MitoEngine, MitoRegionRef) {
+async fn indexed_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRegionRef) {
+    let (env, engine, region) = authoritative_fixture(merge_mode).await;
+    for ts in [1000, 1000, 2000] {
+        write(&engine, &region, 0, ts, Some(1.0)).await;
+        flush_region(&engine, region.region_id, None).await;
+    }
+    (env, engine, region)
+}
+
+async fn parquet_fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
     let mut env = TestEnv::with_prefix("prepared-columnar").await;
     let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
     metadata
@@ -92,8 +92,6 @@ async fn fixture_with(experimental_series_scan_v2: bool) -> (TestEnv, MitoEngine
         &[1000, 1000, 2000],
         MitoConfig {
             experimental_enable_series_index: true,
-            experimental_series_index_format: SelectedFormat::Columnar,
-            experimental_series_scan_v2,
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
             min_compaction_interval: Duration::from_secs(3600),
             ..Default::default()
@@ -210,96 +208,15 @@ async fn write_primary_key(
         .unwrap();
 }
 
-struct ReadRecorder {
-    inner: oio::Reader,
-    path: String,
-    reads: Arc<Mutex<Vec<(String, mock::BytesRange)>>>,
-}
-impl mock::Read for ReadRecorder {
-    async fn read(
-        &self,
-        range: mock::BytesRange,
-    ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
-        self.reads.lock().unwrap().push((self.path.clone(), range));
-        self.inner.read(range).await
-    }
-
-    async fn open(
-        &self,
-        range: mock::BytesRange,
-    ) -> object_store::Result<(mock::RpRead, Box<dyn oio::ReadStreamDyn>)> {
-        self.reads.lock().unwrap().push((self.path.clone(), range));
-        self.inner.open(range).await
-    }
-}
-
-/// Fails reads of the selected artifact paths so tests can prove that object-store failures
-/// surface as errors instead of being classified as not-ready fallbacks.
-struct FailingReader {
-    inner: oio::Reader,
-    fail: bool,
-}
-impl mock::Read for FailingReader {
-    async fn read(
-        &self,
-        range: mock::BytesRange,
-    ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
-        if self.fail {
-            return Err(injected_failure());
-        }
-        self.inner.read(range).await
-    }
-
-    async fn open(
-        &self,
-        range: mock::BytesRange,
-    ) -> object_store::Result<(mock::RpRead, Box<dyn oio::ReadStreamDyn>)> {
-        if self.fail {
-            return Err(injected_failure());
-        }
-        self.inner.open(range).await
-    }
-}
-
-fn injected_failure() -> mock::Error {
-    mock::Error::new(
-        mock::ErrorKind::Unexpected,
-        "injected series manifest read failure",
-    )
-}
-
-fn scanner(region: &MitoRegionRef, store: ObjectStore) -> SeriesScan {
-    scanner_with_format(region, store, SelectedFormat::Columnar)
-}
-
-fn scanner_with_format(
-    region: &MitoRegionRef,
-    store: ObjectStore,
-    format: SelectedFormat,
-) -> SeriesScan {
-    scanner_with_projection(
+fn scanner(region: &MitoRegionRef) -> SeriesScan {
+    SeriesScan::new(scan_input(
         region,
-        store,
-        format,
-        (0..region.version().metadata.column_metadatas.len()).collect(),
-    )
+        true,
+        (0..region.metadata().column_metadatas.len()).collect(),
+    ))
 }
 
-fn scanner_with_projection(
-    region: &MitoRegionRef,
-    store: ObjectStore,
-    format: SelectedFormat,
-    projection: Vec<usize>,
-) -> SeriesScan {
-    SeriesScan::new(scan_input(region, store, format, projection), false)
-}
-
-fn scan_input(
-    region: &MitoRegionRef,
-    store: ObjectStore,
-    format: SelectedFormat,
-    projection: Vec<usize>,
-) -> ScanInput {
+fn scan_input(region: &MitoRegionRef, use_indexes: bool, projection: Vec<usize>) -> ScanInput {
     let version = region.version();
     let mapper = FlatProjectionMapper::new(&version.metadata, projection).unwrap();
     ScanInput::builder(region.access_layer.clone(), mapper)
@@ -312,12 +229,13 @@ fn scan_input(
                 .cloned()
                 .collect(),
         )
-        .with_series_index(Some(SeriesIndexReadContext {
-            cache_namespace: store_api::storage::FileId::random(),
-            format,
-            store,
-            version: region.series_index_version(),
-        }))
+        .with_merge_mode(version.options.merge_mode())
+        .with_narthex_format(version.options.sst_format == Some(crate::sst::FormatType::Narthex))
+        .with_narthex_series_indexes(if use_indexes {
+            version.ssts.series_indexes().values().cloned().collect()
+        } else {
+            vec![]
+        })
         .with_predicate(
             PredicateGroup::new(
                 &version.metadata,
@@ -386,154 +304,8 @@ async fn all_raw_samples(
 }
 
 #[tokio::test]
-async fn prepared_sources_share_discovery_and_read_independently() {
-    let (_env, engine, region) = fixture().await;
-    // A second series and updates/deletes across SSTs exercise the merge adapter.
-    write(&engine, &region, 1, 1500, Some(2.0)).await;
-    write(&engine, &region, 0, 1000, Some(3.0)).await;
-    write(&engine, &region, 0, 2000, None).await;
-    flush_region(&engine, region.region_id, None).await;
-    build(&engine, &region).await;
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let observed = reads.clone();
-    let store = region.series_index_store.clone().unwrap().layer(
-        MockLayerBuilder::default()
-            .reader_factory(Arc::new(move |path, _, inner| {
-                Box::new(ReadRecorder {
-                    inner,
-                    path: path.to_owned(),
-                    reads: observed.clone(),
-                })
-            }))
-            .build()
-            .unwrap(),
-    );
-    let legacy = scanner_with_format(&region, store.clone(), SelectedFormat::Legacy);
-    let legacy_binding = labels(legacy.metadata());
-    let oracle = legacy
-        .scan_series_partition(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-            &legacy_binding,
-        )
-        .unwrap()
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    reads.lock().unwrap().clear();
-    let mut scanner = scanner(&region, store);
-    let binding = labels(scanner.metadata());
-    let ranges = scanner.properties().partitions[0].clone();
-    scanner
-        .prepare(PrepareRequest::default().with_ranges(vec![ranges, vec![], vec![]]))
-        .unwrap();
-    let ctx = QueryScanContext::default();
-    let metrics = ExecutionPlanMetricsSet::new();
-    let (a, b) = tokio::join!(
-        scanner.prepare_series(&ctx, &metrics, &binding),
-        scanner.prepare_series(&ctx, &metrics, &binding)
-    );
-    let source = a.unwrap().unwrap();
-    assert!(Arc::ptr_eq(&source, &b.unwrap().unwrap()));
-    assert_eq!(2, source.num_series());
-    let prepared = scanner.prepared.source.get().unwrap().as_ref().unwrap();
-    let merge_schema = prepared.sample_schema.as_ref().unwrap();
-    assert!(merge_schema.index_of("tag_0").is_err());
-    assert!(
-        merge_schema
-            .index_of(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
-            .is_err()
-    );
-    assert!(merge_schema.index_of(DATA_SCHEMA_TSID_COLUMN_NAME).is_err());
-    assert_eq!(1, prepared.raw.predicates.len()); // Only the field predicate remains.
-
-    assert!(
-        !reads
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(p, _)| p.ends_with(".samples"))
-    );
-    let left = source.read_series(0..2).unwrap();
-    assert!(left.label_decode_spec().is_none());
-    assert!(same_labels(left.label_source(), &binding));
-    for ordinal in 0..source.num_series() {
-        let info = source.series_info(ordinal).unwrap();
-        assert_eq!(info.primary_key, prepared.candidates[ordinal].key);
-        assert_eq!(info.metric, prepared.candidates[ordinal].metric);
-    }
-    let right = source.read_series(0..2).unwrap();
-    assert!(
-        !reads
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(p, _)| p.ends_with(".samples"))
-    );
-    let (left, right) = tokio::join!(left.try_collect::<Vec<_>>(), right.try_collect::<Vec<_>>());
-    let left = left.unwrap();
-    let mut decoder = mito_codec::labels::PrimaryKeyLabelDecoder::from_decode_spec(
-        &common_query::series_frame::label_decode_spec(&legacy_binding).unwrap(),
-    )
-    .unwrap();
-    for (actual, expected) in left.iter().zip(&oracle) {
-        assert_eq!(
-            actual.metric.as_ref().unwrap(),
-            &decoder.decode(expected.primary_key.as_slice()).unwrap()
-        );
-    }
-    let expected = rows(&left);
-    assert_eq!(rows(&oracle), expected);
-    assert_eq!(expected, rows(&right.unwrap()));
-    assert_eq!(
-        vec![(1000, 3.0), (1500, 2.0)],
-        expected
-            .iter()
-            .map(|(_, t, v)| (*t, *v))
-            .collect::<Vec<_>>()
-    );
-    let before = reads
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(p, _)| p.contains("/series/"))
-        .count();
-    let mut partition_rows = Vec::new();
-    for p in 0..3 {
-        let chunks = scanner
-            .scan_series_partition(&ctx, &metrics, p, &binding)
-            .unwrap()
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        partition_rows.extend(rows(&chunks));
-    }
-    assert_eq!(expected, partition_rows);
-    assert_eq!(
-        before,
-        reads
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(p, _)| p.contains("/series/"))
-            .count()
-    );
-    let survivor = source.read_series(0..2).unwrap();
-    drop(source);
-    drop(scanner);
-    assert_eq!(
-        expected,
-        rows(&survivor.try_collect::<Vec<_>>().await.unwrap())
-    );
-    engine.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn two_phase_raw_fallback_preserves_key_then_time_order() {
-    let (_env, engine, region) = fixture_with(true).await;
+async fn parquet_raw_scan_preserves_key_then_time_order() {
+    let (_env, engine, region) = parquet_fixture().await;
     for round in 0..3 {
         for tsid in 0..4 {
             for offset in 0..3 {
@@ -556,16 +328,12 @@ async fn two_phase_raw_fallback_preserves_key_then_time_order() {
     }
     flush_region(&engine, region.region_id, None).await;
 
-    let mut scanner = SeriesScan::new(
-        scan_input(
-            &region,
-            region.series_index_store.clone().unwrap(),
-            SelectedFormat::Columnar,
-            (0..region.version().metadata.column_metadatas.len()).collect(),
-        ),
+    let mut scanner = SeriesScan::new(scan_input(
+        &region,
         true,
-    );
-    assert_eq!("two_phase", scanner.mode.as_str());
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    ));
+    assert_eq!("legacy", scanner.mode.as_str());
     let binding = labels(scanner.metadata());
     assert_eq!(
         SeriesOrdering::KeyThenTime,
@@ -636,436 +404,6 @@ async fn two_phase_raw_fallback_preserves_key_then_time_order() {
     engine.stop().await.unwrap();
 }
 
-#[rstest::rstest]
-#[case::legacy(false)]
-#[case::two_phase(true)]
-#[tokio::test]
-async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v2: bool) {
-    let (_env, engine, region) = fixture_with(v2).await;
-    let request = ScanRequest {
-        distribution: Some(TimeSeriesDistribution::PerSeries),
-        ..Default::default()
-    };
-    let ctx = QueryScanContext::default();
-    let metrics = ExecutionPlanMetricsSet::new();
-    // The three flushed SSTs only have columnar artifacts after `build`.
-    let fallback_ordering = SeriesOrdering::KeyThenTime;
-    let raw_scanner = engine
-        .handle_query(region.region_id, request.clone())
-        .await
-        .unwrap();
-    let binding = labels(raw_scanner.metadata());
-    assert_eq!(
-        fallback_ordering,
-        raw_scanner.raw_series_ordering().unwrap()
-    );
-    assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
-    assert_eq!(
-        vec![(1000, 1.0), (2000, 1.0)],
-        all_raw_samples(
-            raw_scanner.as_ref(),
-            &ctx,
-            &metrics,
-            &binding,
-            fallback_ordering
-        )
-        .await
-    );
-    // Known unready coverage selects the ordinary scan instead of a prepared source.
-    assert!(
-        raw_scanner
-            .prepare_series(&ctx, &metrics, &binding)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    build(&engine, &region).await;
-    // A partial-day query still uses grouped samples when other sources were time-pruned.
-    let mut bounded_request = request.clone();
-    bounded_request.filters.push(col("ts").gt_eq(lit(
-        datafusion_common::ScalarValue::TimestampMillisecond(Some(1500), None),
-    )));
-    let bounded = engine
-        .handle_query(region.region_id, bounded_request)
-        .await
-        .unwrap();
-    let bounded_labels = labels(bounded.metadata());
-    let prepared = bounded
-        .prepare_series(&ctx, &metrics, &bounded_labels)
-        .await
-        .unwrap()
-        .expect("time-pruned daily sources remain prepared");
-    let chunks = prepared
-        .read_series(0..prepared.num_series())
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(samples(&chunks), vec![(2000, 1.0)]);
-
-    let mut raw_scanner = engine
-        .handle_query(region.region_id, request.clone())
-        .await
-        .unwrap();
-    // Move every assigned range into a new last partition: readiness, the ordering guarantee and
-    // the reader must all follow the new assignment, not the pre-prepare partition list.
-    let assigned = raw_scanner
-        .properties()
-        .partitions
-        .iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>();
-    raw_scanner
-        .prepare(PrepareRequest::default().with_ranges(vec![vec![], assigned]))
-        .unwrap();
-    assert_eq!(2, raw_scanner.properties().num_partitions());
-    let binding = labels(raw_scanner.metadata());
-    assert_eq!(
-        SeriesOrdering::KeyThenTime,
-        raw_scanner.raw_series_ordering().unwrap()
-    );
-    let source = raw_scanner
-        .prepare_series(&ctx, &metrics, &binding)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(1, source.num_series());
-    // The first partition owns no range and the second owns all of them.
-    assert_eq!(
-        vec![(1000, 1.0), (2000, 1.0)],
-        all_raw_samples(
-            raw_scanner.as_ref(),
-            &ctx,
-            &metrics,
-            &binding,
-            SeriesOrdering::KeyThenTime
-        )
-        .await
-    );
-    let plan = Arc::new(RegionScanExec::new(raw_scanner, request.clone(), None).unwrap())
-        .try_to_series_scan(binding.clone())
-        .unwrap()
-        .unwrap();
-    assert_eq!(SeriesOrdering::KeyThenTime, plan.raw_series_ordering());
-    let frame = plan.execute(1, Arc::new(TaskContext::default())).unwrap();
-    let unpacked = unpack_raw_series(frame, Some(plan.series_schema().clone())).unwrap();
-    // The packed frame declares the same guarantee the plan advertises.
-    assert_eq!(plan.raw_series_ordering(), unpacked.ordering());
-    assert_eq!(
-        vec![(1000, 1.0), (2000, 1.0)],
-        samples(&unpacked.try_collect::<Vec<_>>().await.unwrap())
-    );
-
-    // An assigned memtable is known unready, so the raw path keeps the ordinary scan and must
-    // still return the new row.
-    write(&engine, &region, 0, 3000, Some(4.0)).await;
-    let raw_scanner = engine
-        .handle_query(region.region_id, request)
-        .await
-        .unwrap();
-    let binding = labels(raw_scanner.metadata());
-    assert_eq!(
-        fallback_ordering,
-        raw_scanner.raw_series_ordering().unwrap()
-    );
-    assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
-    assert!(
-        raw_scanner
-            .prepare_series(&ctx, &metrics, &binding)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        vec![(1000, 1.0), (2000, 1.0), (3000, 4.0)],
-        all_raw_samples(
-            raw_scanner.as_ref(),
-            &ctx,
-            &metrics,
-            &binding,
-            fallback_ordering
-        )
-        .await
-    );
-    engine.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn manual_build_covers_unknown_sequences_without_a_compaction_window() {
-    use crate::region::options::CompactionOptions;
-    use crate::region::version::VersionBuilder;
-    use crate::series_index::reconcile_series_indexes_with_mode;
-    use crate::series_index::series_index_channel;
-
-    let (_env, engine, region) = fixture().await;
-    let original = region.version();
-    let mut options = original.options.clone();
-    let CompactionOptions::Twcs(twcs) = &mut options.compaction;
-    twcs.time_window = None;
-    // Keep the original version pinned while replacing handles to the same SSTs.
-    let originals: Vec<_> = original
-        .ssts
-        .levels()
-        .iter()
-        .flat_map(|level| level.files())
-        .map(|f| f.meta_ref().clone())
-        .collect();
-    let mut unknown = originals.clone();
-    for file in &mut unknown {
-        file.sequence = None;
-    }
-    let version = VersionBuilder::from_version(original.clone())
-        .options(options)
-        .compaction_time_window(None)
-        .remove_files(originals.into_iter())
-        .add_files(region.file_purger.clone(), unknown.into_iter())
-        .build();
-    region.version_control.overwrite_current(Arc::new(version));
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    let reconcile = |manual, capacity| {
-        reconcile_series_indexes_with_mode(
-            0,
-            store.clone(),
-            region.clone(),
-            Duration::from_secs(100),
-            0,
-            purger.clone(),
-            false,
-            capacity,
-            manual,
-        )
-    };
-    assert_eq!(0, reconcile(false, true).await.unwrap().built_series);
-    assert!(
-        reconcile(true, false)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("capacity")
-    );
-    assert_eq!(1, reconcile(true, true).await.unwrap().built_series);
-    assert_eq!(0, reconcile(true, true).await.unwrap().built_series);
-    let scanner = scanner(&region, store.clone());
-    let binding = labels(scanner.metadata());
-    let source = scanner
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let chunks = source
-        .read_series(0..source.num_series())
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(
-        vec![1000, 2000],
-        rows(&chunks).iter().map(|(_, t, _)| *t).collect::<Vec<_>>()
-    );
-    // Missing sample objects must fail even when capacity would otherwise make this a no-op.
-    let missing = region
-        .series_index_version()
-        .samples
-        .values()
-        .next()
-        .unwrap()
-        .entry()
-        .artifact
-        .objects[0]
-        .path
-        .clone();
-    store.delete(&missing).await.unwrap();
-    assert!(
-        reconcile(true, false)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("capacity")
-    );
-    engine.stop().await.unwrap();
-}
-
-#[rstest::rstest]
-#[case::field(SemanticType::Field)]
-#[case::tag(SemanticType::Tag)]
-#[tokio::test]
-async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType) {
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::{AddColumn, AlterKind, RegionAlterRequest};
-
-    use crate::series_index::{reconcile_series_indexes_with_mode, series_index_channel};
-
-    let (_env, engine, region) = fixture().await;
-    let store = region.series_index_store.clone().unwrap();
-    build(&engine, &region).await;
-    let original = region.series_index_version();
-    let projection = (0..region.version().metadata.column_metadatas.len()).collect::<Vec<_>>();
-    let query = || {
-        scanner_with_projection(
-            &region,
-            store.clone(),
-            SelectedFormat::Columnar,
-            projection.clone(),
-        )
-    };
-    let scan = query();
-    let source = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &labels(scan.metadata()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let expected = rows(
-        &source
-            .read_series(0..source.num_series())
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap(),
-    );
-    let data_type = if semantic_type == SemanticType::Field {
-        ConcreteDataType::float64_datatype()
-    } else {
-        ConcreteDataType::string_datatype()
-    };
-    engine
-        .handle_request(
-            region.region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::AddColumns {
-                    columns: vec![AddColumn {
-                        column_metadata: ColumnMetadata {
-                            column_schema: datatypes::schema::ColumnSchema::new(
-                                "added", data_type, true,
-                            ),
-                            semantic_type,
-                            column_id: 4,
-                        },
-                        location: None,
-                    }],
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    // Even a projection containing only the original fields must reject stale sidecars.
-    let scan = query();
-    let error = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &labels(scan.metadata()),
-        )
-        .await
-        .err()
-        .unwrap();
-    assert!(
-        error
-            .output_msg()
-            .contains(if semantic_type == SemanticType::Field {
-                "missing scan fields"
-            } else {
-                "missing scan tags"
-            }),
-        "{error}"
-    );
-    let (purger, _receiver) = series_index_channel(store.clone());
-    let error = reconcile_series_indexes_with_mode(
-        0,
-        store.clone(),
-        region.clone(),
-        Duration::from_secs(100),
-        0,
-        purger,
-        false,
-        false,
-        true,
-    )
-    .await
-    .unwrap_err();
-    assert!(error.to_string().contains("capacity"));
-    assert!(Arc::ptr_eq(&original, &region.series_index_version()));
-
-    build(&engine, &region).await;
-    let rebuilt = region.series_index_version();
-    for old in original.samples.values() {
-        let new = rebuilt
-            .samples
-            .values()
-            .find(|new| {
-                new.entry().window == old.entry().window
-                    && new.entry().source_file_ids == old.entry().source_file_ids
-            })
-            .unwrap();
-        assert_eq!(
-            semantic_type == SemanticType::Tag,
-            old.entry().artifact.generation == new.entry().artifact.generation
-        );
-        if semantic_type == SemanticType::Field {
-            let reader = ColumnarSamplesFormat::default()
-                .reader(store.clone(), new.clone())
-                .await
-                .unwrap();
-            let batches = reader
-                .read(crate::series_index::format::SamplesReadRequest {
-                    projection: vec!["added".to_string()],
-                    ..Default::default()
-                })
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap();
-            assert!(!batches.is_empty());
-            for batch in batches {
-                assert_eq!(batch.num_rows(), batch.column(0).null_count());
-            }
-        }
-    }
-    assert_eq!(
-        semantic_type == SemanticType::Field,
-        original.series_indexes.keys().collect::<HashSet<_>>()
-            == rebuilt.series_indexes.keys().collect::<HashSet<_>>()
-    );
-    let scan = query();
-    let source = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &labels(scan.metadata()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let actual = source
-        .read_series(0..source.num_series())
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(expected, rows(&actual));
-
-    build(&engine, &region).await;
-    let unchanged = region.series_index_version();
-    assert!(
-        rebuilt.series_indexes.keys().collect::<HashSet<_>>()
-            == unchanged.series_indexes.keys().collect::<HashSet<_>>()
-    );
-    for (id, old) in &rebuilt.samples {
-        assert_eq!(old.entry(), unchanged.samples[id].entry());
-    }
-    engine.stop().await.unwrap();
-}
-
 struct SamplesReadRecorder {
     inner: Arc<dyn SamplesFormatReader>,
     requests: Arc<Mutex<Vec<SamplesReadRequest>>>,
@@ -1098,25 +436,10 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     write(&engine, &region, 0, 2000, None).await;
     flush_region(&engine, region.region_id, None).await;
     build(&engine, &region).await;
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let observed = reads.clone();
-    let store = region.series_index_store.clone().unwrap().layer(
-        MockLayerBuilder::default()
-            .reader_factory(Arc::new(move |path, _, inner| {
-                Box::new(ReadRecorder {
-                    inner,
-                    path: path.to_owned(),
-                    reads: observed.clone(),
-                })
-            }))
-            .build()
-            .unwrap(),
-    );
-    let make_scan = |format| {
+    let make_scan = |use_indexes| {
         let mut input = scan_input(
             &region,
-            store.clone(),
-            format,
+            use_indexes,
             (0..region.version().metadata.column_metadatas.len()).collect(),
         );
         // Bounds in a finer unit must round up for both inclusive start and exclusive end.
@@ -1124,19 +447,19 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
             Timestamp::new_microsecond(1_000_001),
             Timestamp::new_microsecond(1_600_001),
         );
-        SeriesScan::new(input, false)
+        SeriesScan::new(input)
     };
-    let legacy = make_scan(SelectedFormat::Legacy);
+    let samples_only = make_scan(false);
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
-    let oracle = legacy
-        .scan_series_partition(&ctx, &metrics, 0, &labels(legacy.metadata()))
+    let oracle = samples_only
+        .scan_series_partition(&ctx, &metrics, 0, &labels(samples_only.metadata()))
         .unwrap()
         .unwrap()
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-    let scan = make_scan(SelectedFormat::Columnar);
+    let scan = make_scan(true);
     scan.prepare_series(&ctx, &metrics, &labels(scan.metadata()))
         .await
         .unwrap()
@@ -1203,15 +526,6 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
             assert_eq!(Some(1601), request.end);
         }
     }
-    // Each selected samples part opens its header once, even when it has multiple series.
-    let mut headers = HashMap::<String, usize>::new();
-    for (path, range) in reads.lock().unwrap().iter() {
-        if path.ends_with(".samples") && range.offset() == 0 {
-            *headers.entry(path.clone()).or_default() += 1;
-        }
-    }
-    assert!(!headers.is_empty());
-    assert!(headers.values().all(|count| *count == 1));
     requests.lock().unwrap().clear();
     assert!(
         source
@@ -1354,506 +668,6 @@ async fn visibility_uses_named_columns_and_region_time_unit(
     engine.stop().await.unwrap();
 }
 
-#[tokio::test]
-async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
-    use crate::read::range::RowGroupIndex;
-    use crate::series_index::SeriesIndexVersion;
-    use crate::sst::file::FileHandle;
-    use crate::sst::file_purger::NoopFilePurger;
-
-    let (_env, engine, region) = fixture().await;
-    build(&engine, &region).await;
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let observed = reads.clone();
-    let store = region.series_index_store.clone().unwrap().layer(
-        MockLayerBuilder::default()
-            .reader_factory(Arc::new(move |path, _, inner| {
-                Box::new(ReadRecorder {
-                    inner,
-                    path: path.to_owned(),
-                    reads: observed.clone(),
-                })
-            }))
-            .build()
-            .unwrap(),
-    );
-    let make_context = || {
-        StreamContext::seq_scan_ctx(scan_input(
-            &region,
-            store.clone(),
-            SelectedFormat::Columnar,
-            (0..region.version().metadata.column_metadatas.len()).collect(),
-        ))
-    };
-    let mut context = make_context();
-    let ranges = context.partition_ranges();
-    // Complete columnar coverage is the only ready answer.
-    assert!(validate_inputs(&context, &ranges).unwrap());
-    context.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
-        index: context.input.num_files(),
-        row_group_index: -1,
-    }]
-    .into();
-    assert!(
-        validate_inputs(&context, &ranges)
-            .unwrap_err()
-            .to_string()
-            .contains("extension ranges")
-    );
-
-    let mut context = make_context();
-    context.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
-        index: 0,
-        row_group_index: i64::MAX,
-    }]
-    .into();
-    assert!(
-        validate_inputs(&context, &ranges[..1])
-            .unwrap_err()
-            .to_string()
-            .contains("complete SST")
-    );
-
-    let mut context = make_context();
-    let mut meta = context.input.files[0].meta_ref().clone();
-    meta.region_id = store_api::storage::RegionId::new(123, 456);
-    context.input.files[0] = FileHandle::new(meta, Arc::new(NoopFilePurger));
-    assert!(
-        validate_inputs(&context, &ranges)
-            .unwrap_err()
-            .to_string()
-            .contains("foreign SST")
-    );
-
-    // A daily artifact cannot supply just one source from its grouped coverage.
-    let mut partial = make_context();
-    partial.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
-        index: 0,
-        row_group_index: -1,
-    }]
-    .into();
-    assert!(!validate_inputs(&partial, &ranges[..1]).unwrap());
-
-    // A catalog can outlive a source generation until reconciliation runs.
-    let mut stale = make_context();
-    let index = stale.input.series_index.as_mut().unwrap();
-    let (purger, _purges) = crate::series_index::series_index_channel(store.clone());
-    let samples = index
-        .version
-        .samples
-        .iter()
-        .map(|(id, handle)| {
-            let mut entry = handle.entry().clone();
-            entry.source_file_ids.push(FileId::random());
-            (
-                *id,
-                crate::series_index::artifact::SamplesFileHandle::new(
-                    handle.file_id(),
-                    entry,
-                    purger.clone(),
-                ),
-            )
-        })
-        .collect();
-    index.version = Arc::new(SeriesIndexVersion {
-        samples,
-        series_indexes: index.version.series_indexes.clone(),
-        ..Default::default()
-    });
-    assert!(!validate_inputs(&stale, &ranges).unwrap());
-
-    // Missing columnar samples are a not-ready answer, not an error.
-    let mut context = make_context();
-    let index = context.input.series_index.as_mut().unwrap();
-    index.version = Arc::new(SeriesIndexVersion {
-        series_indexes: index.version.series_indexes.clone(),
-        ..Default::default()
-    });
-    assert!(!validate_inputs(&context, &ranges).unwrap());
-    // Invalid assignments remain errors even when sample coverage is incomplete.
-    let mut invalid = ranges.clone();
-    invalid.push(PartitionRange {
-        identifier: ranges[0].identifier + ranges.len(),
-        ..ranges[0]
-    });
-    assert!(
-        validate_inputs(&context, &invalid)
-            .unwrap_err()
-            .to_string()
-            .contains("invalid prepared scan range")
-    );
-
-    // Ordering is independent of reader selection, but raw preflight and execution must still
-    // reject the same malformed assignments rather than falling back to the ordinary scan.
-    let mut scan = SeriesScan::new(make_context().input, false);
-    scan.prepare(PrepareRequest::default()).unwrap();
-    let malformed = PartitionRange {
-        identifier: ranges[0].identifier + ranges.len(),
-        ..ranges[0]
-    };
-    // Inject after valid preparation: prepare() also checks scan limits by indexing ranges.
-    scan.properties.partitions = vec![vec![malformed]];
-    let binding = labels(scan.metadata());
-    assert_eq!(
-        SeriesOrdering::KeyThenTime,
-        scan.raw_series_ordering().unwrap()
-    );
-    assert!(
-        scan.raw_series_schema(&binding)
-            .unwrap_err()
-            .to_string()
-            .contains("invalid prepared scan range")
-    );
-    assert!(
-        scan.scan_series_partition(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-            &binding,
-        )
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("invalid prepared scan range")
-    );
-
-    let scan = SeriesScan::new(context.input, false);
-    let binding = labels(scan.metadata());
-    // The raw path stays available for the ordinary scan and preparation is skipped.
-    assert!(scan.raw_series_schema(&binding).unwrap().is_some());
-    assert!(
-        scan.prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
-    assert!(reads.lock().unwrap().is_empty());
-    engine.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn series_artifact_read_failure_propagates() {
-    let (_env, engine, region) = fixture().await;
-    build(&engine, &region).await;
-    // The published catalog is complete; the injected manifest read failure must still propagate.
-    let store = region.series_index_store.clone().unwrap().layer(
-        MockLayerBuilder::default()
-            .reader_factory(Arc::new(|path, _, inner| {
-                Box::new(FailingReader {
-                    inner,
-                    fail: path.contains("/series/") && path.ends_with("/manifest.json"),
-                })
-            }))
-            .build()
-            .unwrap(),
-    );
-    let context = StreamContext::seq_scan_ctx(scan_input(
-        &region,
-        store,
-        SelectedFormat::Columnar,
-        (0..region.version().metadata.column_metadatas.len()).collect(),
-    ));
-    let ranges = context.partition_ranges();
-    assert!(validate_inputs(&context, &ranges).unwrap());
-    let scan = SeriesScan::new(context.input, false);
-    let binding = labels(scan.metadata());
-    assert!(scan.raw_series_schema(&binding).unwrap().is_some());
-    let error = scan
-        .prepare_series(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            &binding,
-        )
-        .await
-        .err()
-        .expect("a failed artifact read must not report a not-ready source");
-    assert!(error.output_msg().contains("injected"), "{error}");
-    engine.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn metadata_cache_reuses_structures_and_isolates_storage() {
-    use crate::cache::{CacheManager, CacheStrategy};
-    use crate::series_index::columnar::reader::ColumnarReader;
-    use crate::series_index::samples::reader::SamplesReader;
-    use store_api::storage::FileId;
-
-    let (_env, engine, region) = fixture().await;
-    build(&engine, &region).await;
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let observed = reads.clone();
-    let store = region.series_index_store.clone().unwrap().layer(
-        MockLayerBuilder::default()
-            .reader_factory(Arc::new(move |path, _, inner| {
-                Box::new(ReadRecorder {
-                    inner,
-                    path: path.to_owned(),
-                    reads: observed.clone(),
-                })
-            }))
-            .build()
-            .unwrap(),
-    );
-    let version = region.series_index_version();
-    let series = version.series_indexes.values().next().unwrap();
-    let samples = version.samples.values().next().unwrap();
-    let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder()
-            .sst_meta_cache_size(8 * 1024 * 1024)
-            .enable_columnar_meta_cache(true)
-            .build(),
-    ));
-    let namespace = FileId::random();
-    let contexts = [
-        strategy.columnar_metadata(namespace),
-        strategy.columnar_metadata(namespace),
-        strategy.columnar_metadata(FileId::random()),
-        None,
-    ];
-    let mut results = Vec::new();
-    let mut counts = Vec::new();
-    for context in contexts {
-        reads.lock().unwrap().clear();
-        let reader = ColumnarReader::open_cached(store.clone(), series.clone(), context.clone())
-            .await
-            .unwrap();
-        let request = SeriesReadRequest {
-            projection: reader
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .collect(),
-            ..Default::default()
-        };
-        let series_rows = reader
-            .read(request)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        let reader = SamplesReader::open_cached(store.clone(), samples.clone(), context)
-            .await
-            .unwrap();
-        // The exact key is returned with each batch, so it is never a projected column.
-        let request = SamplesReadRequest {
-            projection: reader
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .filter(|name| name != store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME)
-                .collect(),
-            ..Default::default()
-        };
-        let sample_rows = reader
-            .read(request)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        results.push((series_rows, sample_rows));
-        counts.push(reads.lock().unwrap().len());
-    }
-    assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
-    assert!(
-        counts[1] < counts[0],
-        "warm metadata should avoid reads: {counts:?}"
-    );
-    assert_eq!(counts[0], counts[2], "a new storage namespace must miss");
-    assert_eq!(counts[0], counts[3], "disabled caches must read metadata");
-    engine.stop().await.unwrap();
-}
-
-/// Local diagnostic benchmark, intentionally excluded from routine CI. No timing threshold:
-/// results depend on the machine, build profile, and filesystem page cache.
-#[tokio::test]
-#[ignore = "manual native preparation cold/warm measurement"]
-#[allow(clippy::print_stdout)] // This manual benchmark reports measurements to its caller.
-async fn native_preparation_metadata_benchmark() {
-    use crate::cache::{CacheManager, CacheStrategy};
-    use std::time::Instant;
-    use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::FileId;
-
-    // Keep wide-artifact setup small: this measures preparation, not sample writing.
-    for (series_count, field_count) in [(4096, 1), (64, 1024)] {
-        let tag_count = 78;
-        let mut env = TestEnv::with_prefix("native-metadata-bench").await;
-        let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
-        metadata
-            .column_metadatas
-            .iter_mut()
-            .find(|column| column.column_id == 2)
-            .unwrap()
-            .column_schema
-            .data_type = ConcreteDataType::float64_datatype();
-        for index in 2..tag_count {
-            let mut column = metadata
-                .column_metadatas
-                .iter()
-                .find(|column| column.column_id == 0)
-                .unwrap()
-                .clone();
-            column.column_id = 1000 + index;
-            column.column_schema.name = format!("tag_{index:04}");
-            metadata.primary_key.push(column.column_id);
-            metadata.column_metadatas.push(column);
-        }
-        let field = metadata
-            .column_metadatas
-            .iter()
-            .find(|column| column.column_id == 2)
-            .unwrap()
-            .clone();
-        for index in 1..field_count {
-            let mut column = field.clone();
-            column.column_id = 10000 + index;
-            column.column_schema.name = format!("field_{index}");
-            metadata.column_metadatas.push(column);
-        }
-        let metadata = Arc::new(
-            RegionMetadataBuilder::from_existing(metadata)
-                .build()
-                .unwrap(),
-        );
-        let (engine, region) = crate::series_index::prepare_region_with_metadata(
-            &mut env,
-            &[],
-            MitoConfig {
-                experimental_enable_series_index: true,
-                experimental_series_index_format: SelectedFormat::Columnar,
-                experimental_series_index_maintenance_interval: Duration::from_secs(3600),
-                min_compaction_interval: Duration::from_secs(3600),
-                ..Default::default()
-            },
-            metadata.clone(),
-        )
-        .await;
-        let mut schema = vec![
-            ColumnSchema {
-                column_name: "__primary_key".into(),
-                datatype: ColumnDataType::Binary as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: "ts".into(),
-                datatype: ColumnDataType::TimestampMillisecond as i32,
-                semantic_type: SemanticType::Timestamp as i32,
-                ..Default::default()
-            },
-        ];
-        schema.extend((0..field_count).map(|index| ColumnSchema {
-            column_name: format!("field_{index}"),
-            datatype: ColumnDataType::Float64 as i32,
-            semantic_type: SemanticType::Field as i32,
-            ..Default::default()
-        }));
-        let codec = SparsePrimaryKeyCodec::schemaless();
-        let mut rows = Vec::new();
-        for id in 0..series_count {
-            let mut key = Vec::new();
-            codec.encode_internal(10, id, &mut key).unwrap();
-            codec
-                .encode_to_vec(
-                    metadata
-                        .column_metadatas
-                        .iter()
-                        .filter(|column| {
-                            column.semantic_type == SemanticType::Tag && column.column_id < 10000
-                        })
-                        .map(|column| {
-                            (
-                                column.column_id,
-                                ValueRef::String(if column.column_id == 1 { "x" } else { "a" }),
-                            )
-                        }),
-                    &mut key,
-                )
-                .unwrap();
-            for timestamp in [1000, 2000] {
-                let mut values = vec![
-                    ValueData::BinaryValue(key.clone()),
-                    ValueData::TimestampMillisecondValue(timestamp),
-                ];
-                values.extend((0..field_count).map(|_| ValueData::F64Value(1.0)));
-                rows.push(row(values));
-            }
-        }
-        engine
-            .handle_request(
-                region.region_id,
-                RegionRequest::Put(RegionPutRequest {
-                    rows: Rows { schema, rows },
-                    skip_wal: false,
-                    hint: Some(api::v1::WriteHint {
-                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
-                    }),
-                    partition_expr_version: None,
-                }),
-            )
-            .await
-            .unwrap();
-        flush_region(&engine, region.region_id, None).await;
-        build(&engine, &region).await;
-        let store = region.series_index_store.clone().unwrap();
-        let namespace = FileId::random();
-        let mut cold = Vec::new();
-        let mut warm = Vec::new();
-        for _ in 0..7 {
-            let cache = CacheStrategy::EnableAll(Arc::new(
-                CacheManager::builder()
-                    .sst_meta_cache_size(256 * 1024 * 1024)
-                    .build(),
-            ));
-            for iteration in 0..8 {
-                let mut input = scan_input(
-                    &region,
-                    store.clone(),
-                    SelectedFormat::Columnar,
-                    (0..metadata.column_metadatas.len()).collect(),
-                );
-                input.cache_strategy = cache.clone();
-                input.series_index.as_mut().unwrap().cache_namespace = namespace;
-                let scanner = SeriesScan::new(input, false);
-                let binding = labels(scanner.metadata());
-                let start = Instant::now();
-                let source = scanner
-                    .prepare_series(
-                        &QueryScanContext::default(),
-                        &ExecutionPlanMetricsSet::new(),
-                        &binding,
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-                assert_eq!(series_count as usize, source.num_series());
-                if iteration == 0 {
-                    cold.push(elapsed);
-                } else if iteration >= 3 {
-                    warm.push(elapsed);
-                }
-            }
-        }
-        cold.sort_by(f64::total_cmp);
-        warm.sort_by(f64::total_cmp);
-        println!(
-            "native_prepare series={series_count} tags={tag_count} fields={field_count} cold_median_ms={:.3} warm_median_ms={:.3} cold_runs={} warm_runs={}",
-            cold[cold.len() / 2],
-            warm[warm.len() / 2],
-            cold.len(),
-            warm.len()
-        );
-        engine.stop().await.unwrap();
-    }
-}
-
 #[test]
 fn series_pushdown_preserves_predicate_semantics() {
     use datafusion_expr::{Expr, Operator};
@@ -1983,77 +797,6 @@ fn series_pushdown_preserves_predicate_semantics() {
 }
 
 #[tokio::test]
-async fn series_pushdown_skips_unrelated_table_payloads() {
-    let (_env, engine, region) = fixture().await;
-    build(&engine, &region).await;
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let observed = reads.clone();
-    let store = region.series_index_store.clone().unwrap().layer(
-        MockLayerBuilder::default()
-            .reader_factory(Arc::new(move |path, _, inner| {
-                Box::new(ReadRecorder {
-                    inner,
-                    path: path.to_owned(),
-                    reads: observed.clone(),
-                })
-            }))
-            .build()
-            .unwrap(),
-    );
-    let version = region.series_index_version();
-    let handle = version.series_indexes.values().next().unwrap().clone();
-    let reader = ColumnarSeriesFormat::default()
-        .reader(store, handle)
-        .await
-        .unwrap();
-    let schema = reader.schema();
-    reads.lock().unwrap().clear();
-    let unprojected = reader
-        .read(SeriesReadRequest {
-            projection: schema
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .collect(),
-            ..Default::default()
-        })
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    let reads_with_count = reads.lock().unwrap().len();
-    reads.lock().unwrap().clear();
-    let all = reader
-        .read(series_read_request(&schema, &predicate_conjuncts(None)).0)
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert!(all.iter().map(RecordBatch::num_rows).sum::<usize>() > 0);
-    let full_reads = reads.lock().unwrap().len();
-    assert!(full_reads < reads_with_count);
-    assert_eq!(
-        all.iter().map(RecordBatch::num_rows).sum::<usize>(),
-        unprojected.iter().map(RecordBatch::num_rows).sum::<usize>()
-    );
-    reads.lock().unwrap().clear();
-    let predicate = Predicate::new(vec![
-        col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(u32::MAX)),
-    ]);
-    let request = series_read_request(&schema, &predicate_conjuncts(Some(&predicate))).0;
-    let selected = reader
-        .read(request)
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert!(selected.is_empty());
-    assert!(reads.lock().unwrap().len() < full_reads);
-    engine.stop().await.unwrap();
-}
-
-/// Pushed conjuncts are already exact, so only the rejected ones may filter discovery.
-#[tokio::test]
 async fn residual_conjuncts_still_filter_discovered_series() {
     let (_env, engine, region) = fixture().await;
     // The first series has `tag_1 = "x"` and fails the residual; the second (`"y"`) survives.
@@ -2064,17 +807,16 @@ async fn residual_conjuncts_still_filter_discovered_series() {
         .eq(lit("a"))
         .and(Expr::Not(Box::new(col("tag_1").eq(lit("x")))));
     let mut results = Vec::new();
-    for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+    for use_indexes in [false, true] {
         let mut input = scan_input(
             &region,
-            region.series_index_store.clone().unwrap(),
-            format,
+            use_indexes,
             (0..region.version().metadata.column_metadatas.len()).collect(),
         );
         input.predicate =
             PredicateGroup::new(&region.version().metadata, std::slice::from_ref(&predicate))
                 .unwrap();
-        let scanner = SeriesScan::new(input, false);
+        let scanner = SeriesScan::new(input);
         let binding = labels(scanner.metadata());
         let stream = scanner
             .scan_series_partition(
@@ -2086,7 +828,7 @@ async fn residual_conjuncts_still_filter_discovered_series() {
             .unwrap()
             .unwrap();
         let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
-        if format == SelectedFormat::Columnar {
+        if use_indexes {
             let prepared = scanner.prepared.source.get().unwrap().as_ref().unwrap();
             // `tag_0 = 'a'` matches both series; only the residual drops `tag_1 = 'x'`.
             assert_eq!(1, prepared.candidates.len());
@@ -2099,116 +841,17 @@ async fn residual_conjuncts_still_filter_discovered_series() {
     engine.stop().await.unwrap();
 }
 
-/// Sparse timestamps must not create empty-day artifacts, and new SSTs must leave existing
-/// source groups intact. Reopening exercises the persisted explicit coverage used by preflight.
-#[tokio::test]
-async fn daily_samples_preserve_sparse_coverage_and_existing_groups() {
-    let (_env, engine, region) = fixture().await;
-    const LATER: i64 = 20_000 * 86_400_000;
-    write(&engine, &region, 0, 0, Some(1.0)).await;
-    write(&engine, &region, 0, LATER, Some(2.0)).await;
-    flush_region(&engine, region.region_id, None).await;
-    build(&engine, &region).await;
-    let original = region.series_index_version();
-    assert_eq!(original.samples.len(), 2);
-    assert_eq!(
-        original
-            .samples
-            .values()
-            .map(|h| h.entry().window.unwrap())
-            .collect::<std::collections::BTreeSet<_>>(),
-        [0, 20_000].into()
-    );
-    let store = region.series_index_store.clone().unwrap();
-    let (purger, _receiver) = crate::series_index::series_index_channel(store.clone());
-    let reopened =
-        crate::series_index::load_version_control(&store, region.region_id, &purger).await;
-    for file in region
-        .version()
-        .ssts
-        .levels()
-        .iter()
-        .flat_map(|level| level.files())
-    {
-        assert!(crate::series_index::artifact::samples_cover_file(
-            &reopened.current().samples,
-            file
-        ));
-    }
-    // Complete source coverage spans both days, but preparation must open only
-    // intersecting artifacts. Compare rows with the ordinary scanner as well.
-    for (start, end, expected_readers) in [
-        (0, 86_400_000, 1),
-        (86_400_000, LATER, 0),
-        (LATER, LATER + 1, 1),
-        (0, LATER + 1, 2),
-    ] {
-        let mut results = Vec::new();
-        for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
-            let mut input = scan_input(
-                &region,
-                store.clone(),
-                format,
-                (0..region.version().metadata.column_metadatas.len()).collect(),
-            );
-            input.time_range = common_time::range::TimestampRange::new(
-                common_time::Timestamp::new_millisecond(start),
-                common_time::Timestamp::new_millisecond(end),
-            );
-            input.predicate = PredicateGroup::new(
-                &region.version().metadata,
-                &[
-                    col("tag_0").eq(lit("a")),
-                    col("field_0").gt(lit(0.0)),
-                    col("ts").gt_eq(lit(datafusion_common::ScalarValue::TimestampMillisecond(
-                        Some(start),
-                        None,
-                    ))),
-                    col("ts").lt(lit(datafusion_common::ScalarValue::TimestampMillisecond(
-                        Some(end),
-                        None,
-                    ))),
-                ],
-            )
-            .unwrap();
-            let scan = SeriesScan::new(input, false);
-            let chunks = scan
-                .scan_series_partition(
-                    &QueryScanContext::default(),
-                    &ExecutionPlanMetricsSet::new(),
-                    0,
-                    &labels(scan.metadata()),
-                )
-                .unwrap()
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap();
-            if format == SelectedFormat::Columnar {
-                let prepared = scan.prepared.source.get().unwrap().as_ref().unwrap();
-                assert_eq!(prepared.samples.len(), expected_readers);
-            }
-            results.push(rows(&chunks));
-        }
-        assert_eq!(results[0], results[1]);
-    }
-    write(&engine, &region, 0, 3000, Some(3.0)).await;
-    flush_region(&engine, region.region_id, None).await;
-    build(&engine, &region).await;
-    let updated = region.series_index_version();
-    assert_eq!(updated.samples.len(), original.samples.len() + 1);
-    for (id, old) in &original.samples {
-        assert_eq!(updated.samples[id].entry(), old.entry());
-    }
-    engine.stop().await.unwrap();
-}
-
 #[rstest::rstest]
 #[case::last_row(false)]
 #[case::last_non_null(true)]
 #[tokio::test]
 async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null: bool) {
-    let (_env, engine, region) = fixture().await;
+    let mode = if last_non_null {
+        "last_non_null"
+    } else {
+        "last_row"
+    };
+    let (_env, engine, region) = indexed_fixture(mode).await;
     if last_non_null {
         // A newer null in the first field must recover the older value across SSTs.
         let metadata = region.version().metadata.clone();
@@ -2278,27 +921,20 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
     ];
     for (predicate, identity_only) in cases {
         let mut results = Vec::new();
-        for format in [SelectedFormat::Legacy, SelectedFormat::Columnar] {
+        for use_indexes in [false, true] {
             let mut input = scan_input(
                 &region,
-                region.series_index_store.clone().unwrap(),
-                format,
+                use_indexes,
                 (0..region.version().metadata.column_metadatas.len()).collect(),
             );
-            if last_non_null {
-                input.merge_mode = crate::region::options::MergeMode::LastNonNull;
-            }
             input.predicate =
                 PredicateGroup::new(&region.version().metadata, std::slice::from_ref(&predicate))
                     .unwrap();
-            let scanner = SeriesScan::new(input, false);
+            let scanner = SeriesScan::new(input);
             let binding = labels(scanner.metadata());
             let schema = scanner.raw_series_schema(&binding).unwrap().unwrap();
             let explicit = scanner.raw_series_has_explicit_labels(&binding).unwrap();
-            assert_eq!(
-                format == SelectedFormat::Columnar && identity_only,
-                explicit
-            );
+            assert_eq!(identity_only, explicit);
             let stream = scanner
                 .scan_series_partition(
                     &QueryScanContext::default(),
@@ -2319,7 +955,7 @@ async fn identity_merge_preserves_tag_and_mixed_predicates(#[case] last_non_null
                     .iter()
                     .all(|chunk| chunk.metric.is_some() == explicit)
             );
-            if format == SelectedFormat::Columnar {
+            if use_indexes {
                 let prepared = scanner
                     .prepared
                     .source
@@ -2351,8 +987,8 @@ async fn overlapping_buckets_retain_only_new_label_rows() {
     write_with_tags(&engine, &region, 33, LATER, Some(1.0), &["a", "tag-33"]).await;
     flush_region(&engine, region.region_id, None).await;
     build(&engine, &region).await;
-    assert!(region.series_index_version().series_indexes.len() >= 2);
-    let scan = scanner(&region, region.series_index_store.clone().unwrap());
+    assert!(region.version().ssts.series_indexes().len() >= 2);
+    let scan = scanner(&region);
     scan.prepare_series(
         &QueryScanContext::default(),
         &ExecutionPlanMetricsSet::new(),
@@ -2414,11 +1050,10 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
     .await;
     flush_region(&engine, region.region_id, None).await;
     build(&engine, &region).await;
-    assert!(region.series_index_version().series_indexes.len() >= 2);
+    assert!(region.version().ssts.series_indexes().len() >= 2);
     let mut input = scan_input(
         &region,
-        region.series_index_store.clone().unwrap(),
-        SelectedFormat::Columnar,
+        true,
         (0..region.version().metadata.column_metadatas.len()).collect(),
     );
     if mixed {
@@ -2428,7 +1063,7 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
         )
         .unwrap();
     }
-    let scan = SeriesScan::new(input, false);
+    let scan = SeriesScan::new(input);
     let mut binding = labels(scan.metadata());
     if let RawLabelSource::PrimaryKey { logical_tags, .. } = &mut binding {
         // The conflict is in an unbound physical tag, which must still be checked.
@@ -2524,8 +1159,7 @@ async fn colliding_tsids_isolate_samples_and_labels_per_candidate() {
     let make_scan = |predicates: Vec<datafusion_expr::Expr>, range: Option<TimestampRange>| {
         let mut input = scan_input(
             &region,
-            region.series_index_store.clone().unwrap(),
-            SelectedFormat::Columnar,
+            true,
             (0..metadata.column_metadatas.len()).collect(),
         );
         // Replace the fixture's default predicate, which would hide both hosts.
@@ -2533,7 +1167,7 @@ async fn colliding_tsids_isolate_samples_and_labels_per_candidate() {
         if let Some(range) = range {
             input.time_range = Some(range);
         }
-        SeriesScan::new(input, false)
+        SeriesScan::new(input)
     };
     // One colliding tsid keeps both series, and each ordinal owns only its own rows.
     let scan = make_scan(Vec::new(), None);
@@ -2622,13 +1256,12 @@ async fn long_keys_prepare_and_read() {
 
     let mut input = scan_input(
         &region,
-        region.series_index_store.clone().unwrap(),
-        SelectedFormat::Columnar,
+        true,
         (0..metadata.column_metadatas.len()).collect(),
     );
     // The fixture's default predicate would hide this series.
     input.predicate = PredicateGroup::new(&metadata, &[]).unwrap();
-    let scan = SeriesScan::new(input, false);
+    let scan = SeriesScan::new(input);
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
     let binding = labels(scan.metadata());
@@ -2780,7 +1413,7 @@ async fn preflight_runs_once_for_every_partition_of_one_execution() {
     flush_region(&engine, region.region_id, None).await;
     build(&engine, &region).await;
 
-    let mut scanner = scanner(&region, region.series_index_store.clone().unwrap());
+    let mut scanner = scanner(&region);
     let binding = labels(scanner.metadata());
     let ranges = scanner.properties().partitions[0].clone();
     scanner
@@ -2821,7 +1454,7 @@ async fn reset_state_and_other_bindings_drop_the_preflight_cache() {
     flush_region(&engine, region.region_id, None).await;
     build(&engine, &region).await;
 
-    let mut scanner = scanner(&region, region.series_index_store.clone().unwrap());
+    let mut scanner = scanner(&region);
     let binding = labels(scanner.metadata());
     assert!(scanner.raw_series_schema(&binding).unwrap().is_some());
     assert_eq!(1, scanner.preflight_runs());
@@ -2867,12 +1500,8 @@ async fn reset_state_and_other_bindings_drop_the_preflight_cache() {
 async fn added_dynamic_filters_drop_the_preflight_cache() {
     use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
 
-    let (_env, engine, region) = fixture().await;
-    write(&engine, &region, 0, 1000, Some(1.0)).await;
-    flush_region(&engine, region.region_id, None).await;
-    build(&engine, &region).await;
-
-    let mut scanner = scanner(&region, region.series_index_store.clone().unwrap());
+    let (_env, engine, region) = parquet_fixture().await;
+    let mut scanner = scanner(&region);
     let binding = labels(scanner.metadata());
     // The fixture's static filters pass the preflight, and the second ask is served from the cache
     // the first one filled.
@@ -2925,7 +1554,6 @@ async fn authoritative_narthex_preparation_without_sidecars(
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: false,
-            experimental_series_scan_v2: false,
             ..Default::default()
         })
         .await;
@@ -2966,7 +1594,6 @@ async fn authoritative_narthex_preparation_without_sidecars(
         .await
         .unwrap();
     let region = engine.get_region(id).unwrap();
-    assert!(region.series_index_store.is_none());
     let raw_count = 1;
     if encoded {
         write(&engine, &region, 7, 1000, Some(10.0)).await;
@@ -3110,6 +1737,9 @@ async fn authoritative_fixture_with(
     let engine = env
         .create_engine(MitoConfig {
             schedule_compaction_after_edit: false,
+            experimental_enable_series_index: true,
+            experimental_series_index_bucket_width: Duration::from_secs(100),
+            experimental_series_index_min_files: 1,
             ..Default::default()
         })
         .await;

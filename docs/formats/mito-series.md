@@ -56,16 +56,15 @@ from SSTs; there is no dual reader. For samples, see
 
 ## Artifact manifest
 
-The catalog format identifier is `columnar-series`. Its wire version is separate
-from that identifier and from all column-encoding and compression identifiers.
-Legacy catalog entries and the `parquet` identifier keep their existing meaning.
+The format identifier is `columnar-series`. Its wire version is separate
+from that identifier and from column-encoding and compression identifiers.
 
 One immutable artifact owns the following objects under a unique generation:
 
 ```text
-<region_id>/series/<index_uuid>/manifest.json
-<region_id>/series/<index_uuid>/part-0.series
-<region_id>/series/<index_uuid>/part-1.series
+<region_dir>/<file_id>/manifest.json
+<region_dir>/<file_id>/part-0.series
+<region_dir>/<file_id>/part-1.series
 ...
 ```
 
@@ -79,20 +78,20 @@ One immutable artifact owns the following objects under a unique generation:
 | `region_id` | Physical region ID |
 | `generation` | Index UUID, using the existing `FileId` serialization |
 | `tags` | Ordered objects with `column_id` and `name`; all are nullable UTF-8 |
-| `coverage` | Existing `SeriesIndexEntry` representation, with `artifact` omitted and `file_size` zero. Native artifacts omit `source_file_ids` |
+| `coverage` | Version 1 header with the file ID and time bounds. Size and sequence counters are zero, window summaries are empty, and optional source and artifact fields are omitted |
 | `files` | Ordered objects with `part_id`, `file_size`, `num_series`, `first`, and `last` |
 
 `part_id` is an unsigned 32-bit integer, starting at zero and increasing by one
 in file order. The object name is derived as `part-<part_id>.series`, using the
 decimal ID without leading zeros, under the artifact's generation prefix. No
 path is stored in a file entry. `first` and `last` are inclusive identifiers,
-represented as objects with `table_id` and `tsid`. Ranges are strictly ordered
-and disjoint. Coverage and generation must match the catalog entry.
+represented as objects with `table_id` and `tsid`. Ranges are ordered and may touch where distinct exact keys share a TSID.
+The time bounds and generation must match the region manifest.
 
 The tag list records the schema at build time, including tags currently absent
 from some logical tables. The logical Arrow schema is `__table_id`, `__tsid`,
 `__series_row_count`, followed by stored tags in manifest order. It has no
-timestamp columns and is separate from the existing Parquet index schema.
+timestamp columns.
 
 `ArtifactMetadata.objects` lists the manifest and every part as `{ path, file_size }`
 objects. The artifact-level `file_size` is their total stored size; the manifest
@@ -133,8 +132,7 @@ order are not wire contracts. Reject trailing bytes in decoded structures.
 
 ### Column payloads
 
-An artifact indexes the series in one Mito series-index bucket. In sidecar mode, authoritative
-data remains in Parquet SSTs and these indexes can be rebuilt. Each record contains:
+An artifact indexes series in one certified Narthex window. Each record contains the following fields.
 
 | Logical column | Type | Storage |
 | --- | --- | --- |
@@ -167,7 +165,7 @@ for that identifier under the uniqueness assumption. The count is not necessaril
 the query-visible row count after deduplication or snapshot filtering.
 
 No per-series or per-block timestamps or timestamp unit are stored. Time coverage
-is recorded only in the catalog bucket. Tags named `job` and `instance` are
+is recorded in the region manifest. Tags named `job` and `instance` are
 ordinary tag columns, not dedicated identifier components.
 
 #### Integer encoding 1

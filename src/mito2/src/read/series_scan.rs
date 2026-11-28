@@ -19,6 +19,7 @@ mod raw;
 
 use std::collections::HashSet;
 use std::fmt;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -31,7 +32,6 @@ use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::{debug, warn};
-use datafusion::execution::memory_pool::MemoryPool;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datafusion_common::tree_node::TreeNode;
@@ -65,73 +65,20 @@ use crate::error::{
 };
 use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::ScannerMetrics;
-use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
+use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
     compute_parallel_channel_size,
 };
 use crate::read::seq_scan::{FlatReadMode, SeqScan};
-use crate::read::series_candidate::{SeriesCandidateScanner, is_sparse_metric_metadata};
-use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, SeriesReader};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::series_index::is_sparse_metric_metadata;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
-/// Maximum number of candidate series retained before distributing assignments.
-const CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD: usize = 1_000_000;
-
-/// Test-only override of [`CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD`], where `0` means "use the
-/// production constant".
-///
-/// The production build compiles this static, the setter below and the private accessor out, so
-/// the shipped threshold is always the constant above.
-#[cfg(test)]
-static CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
-
-/// Test-only number of candidate assignment rounds sent since the override was last set.
-///
-/// A round is one `send_assignments` call, so a partition that received more than one assignment
-/// sees `>= 2` rounds here. Increments are compiled out of production builds.
-#[cfg(test)]
-static CANDIDATE_ASSIGNMENT_ROUNDS: AtomicUsize = AtomicUsize::new(0);
-
-/// Returns the candidate-series assignment threshold, honouring the test-only override.
-fn candidate_series_assignment_threshold() -> usize {
-    #[cfg(test)]
-    {
-        let threshold = CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.load(Ordering::Relaxed);
-        if threshold > 0 {
-            return threshold;
-        }
-    }
-    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD
-}
-
-/// Test-only: overrides the candidate-series assignment threshold and resets the round counter.
-///
-/// Pass `0` to restore the production threshold. Tests must reset the override before they
-/// return; a scope guard in `engine::scan_test` does that even on panic.
-#[cfg(test)]
-pub(crate) fn set_candidate_series_assignment_threshold(threshold: usize) {
-    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.store(threshold, Ordering::Relaxed);
-    CANDIDATE_ASSIGNMENT_ROUNDS.store(0, Ordering::Relaxed);
-}
-
-/// Test-only: returns the number of assignment rounds sent since the override was last set.
-#[cfg(test)]
-pub(crate) fn candidate_assignment_rounds() -> usize {
-    CANDIDATE_ASSIGNMENT_ROUNDS.load(Ordering::Relaxed)
-}
-
 /// Legacy data receivers for output partitions.
 type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
-
-/// Candidate assignment receivers for output partitions.
-type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
-
-/// Candidate assignment senders for output partitions.
-type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
 
 #[derive(Clone)]
 pub(crate) struct RawScanPreparation {
@@ -142,40 +89,13 @@ pub(crate) struct RawScanPreparation {
 
 /// Memoized raw-scan preflight: the label binding it was computed for, and its answer.
 ///
-/// The answer carries the preparation together with whether its data comes from the columnar
-/// prepared source; `None` means the raw path is unavailable for this scan.
-type PreflightCache = Option<(RawLabelSource, Option<(RawScanPreparation, bool)>)>;
-
-struct CandidateReceiver {
-    receiver: mpsc::UnboundedReceiver<Result<SeriesReaderInput>>,
-    active_receivers: Arc<AtomicUsize>,
-}
-
-impl CandidateReceiver {
-    async fn recv(&mut self) -> Option<Result<SeriesReaderInput>> {
-        self.receiver.recv().await
-    }
-}
-
-impl Drop for CandidateReceiver {
-    fn drop(&mut self) {
-        let previous = self.active_receivers.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(previous > 0);
-    }
-}
-
-/// Input required by a partition-local series reader.
-struct SeriesReaderInput {
-    assigned_series: AssignedSeriesBatch,
-    partition_pruner: Arc<PartitionPruner>,
-    range_semaphore: Arc<Semaphore>,
-}
+/// A cached `None` means the scan cannot serve this label binding.
+type PreflightCache = Option<(RawLabelSource, Option<RawScanPreparation>)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeriesScanMode {
     Prepared,
     Legacy,
-    TwoPhase,
 }
 
 impl SeriesScanMode {
@@ -183,7 +103,6 @@ impl SeriesScanMode {
         match self {
             Self::Prepared => "prepared",
             Self::Legacy => "legacy",
-            Self::TwoPhase => "two_phase",
         }
     }
 }
@@ -205,8 +124,6 @@ pub struct SeriesScan {
     pruner: Arc<Pruner>,
     /// Legacy data receivers for each partition.
     legacy_receivers: Mutex<LegacyReceiverList>,
-    /// Candidate assignment receivers for each partition.
-    candidate_receivers: Mutex<CandidateReceiverList>,
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: Arc<PartitionMetricsList>,
@@ -227,11 +144,9 @@ pub struct SeriesScan {
 
 impl SeriesScan {
     /// Creates a new [SeriesScan].
-    pub(crate) fn new(input: ScanInput, experimental_series_scan_v2: bool) -> Self {
+    pub(crate) fn new(input: ScanInput) -> Self {
         let mode = if input.requires_narthex_preparation() {
             SeriesScanMode::Prepared
-        } else if experimental_series_scan_v2 && Self::supports_two_phase(&input) {
-            SeriesScanMode::TwoPhase
         } else {
             SeriesScanMode::Legacy
         };
@@ -247,19 +162,7 @@ impl SeriesScan {
 
         // Create the shared pruner with number of workers equal to CPU cores.
         let num_workers = common_stat::get_total_cpu_cores().max(1);
-        let pruner = match mode {
-            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
-                Arc::new(Pruner::new(stream_ctx.clone(), num_workers))
-            }
-            SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
-                stream_ctx.clone(),
-                num_workers,
-                PrunerOptions {
-                    retain_builders: true,
-                    enable_predicate_prefilter: false,
-                },
-            )),
-        };
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
 
         Self {
             mode,
@@ -268,7 +171,6 @@ impl SeriesScan {
             stream_ctx,
             pruner,
             legacy_receivers: Mutex::new(Vec::new()),
-            candidate_receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
             preflight: Mutex::new(None),
             #[cfg(test)]
@@ -301,7 +203,7 @@ impl SeriesScan {
     fn cached_preflight(
         &self,
         label_source: &RawLabelSource,
-    ) -> Option<Option<(RawScanPreparation, bool)>> {
+    ) -> Option<Option<RawScanPreparation>> {
         let cache = self.preflight.lock().unwrap();
         let (cached_source, cached) = cache.as_ref()?;
         if !prepared::same_labels(cached_source, label_source) {
@@ -310,60 +212,7 @@ impl SeriesScan {
         Some(cached.clone())
     }
 
-    fn uses_columnar(&self) -> bool {
-        self.stream_ctx.input.requires_narthex_preparation()
-            || self
-                .stream_ctx
-                .input
-                .series_index
-                .as_ref()
-                .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
-    }
-
-    /// Whether every selected *field* is a `Float64` or a native histogram struct, which is all the
-    /// columnar prepared reader serves.
-    ///
-    /// Only field columns count: the projection also carries tags and the time index, and those are
-    /// no part of the samples the prepared reader hands over. Checking them here would send an
-    /// ordinary `Float64` query down the ordinary scan just because it projects a timestamp.
-    fn columnar_fields_supported(&self) -> bool {
-        let metadata = self.stream_ctx.input.mapper.metadata();
-        let selected = self.stream_ctx.input.mapper.output_schema();
-        selected
-            .column_schemas()
-            .iter()
-            .filter(|output| {
-                metadata.column_metadatas.iter().any(|column| {
-                    column.column_schema.name == output.name
-                        && column.semantic_type == SemanticType::Field
-                })
-            })
-            .all(|output| {
-                output.data_type == ConcreteDataType::float64_datatype()
-                    || is_native_histogram_value_type(&output.data_type)
-            })
-    }
-
-    /// Returns whether raw series come from the columnar prepared source.
-    ///
-    /// Derived only from the pinned series index version and every configured partition range, so
-    /// preflight, the partition reader and scanner-wide preparation agree.
-    /// `false` means the stored sources are read by the ordinary scan.
-    fn uses_prepared_columnar(&self) -> Result<bool, BoxedError> {
-        if !self.uses_columnar() {
-            return Ok(false);
-        }
-        let ranges = self
-            .properties
-            .partitions
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)
-    }
-
-    /// Prepares the raw scan and reports whether its data comes from the columnar prepared source.
+    /// Prepares the raw scan for the supplied label binding.
     ///
     /// The answer only depends on pinned scanner state plus the label binding, and an execution
     /// asks for it once per output partition, so it is memoized per binding. Only successful
@@ -372,14 +221,12 @@ impl SeriesScan {
     fn prepare_raw_scan(
         &self,
         label_source: &RawLabelSource,
-    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+    ) -> Result<Option<RawScanPreparation>, BoxedError> {
         if let Some(cached) = self.cached_preflight(label_source) {
             return Ok(cached);
         }
         let computed = self.prepare_raw_scan_uncached(label_source)?;
-        if self.stream_ctx.input.requires_narthex_preparation()
-            && !matches!(computed, Some((_, true)))
-        {
+        if self.stream_ctx.input.requires_narthex_preparation() && computed.is_none() {
             return Err(BoxedError::new(
                 InvalidRecordBatchSnafu {
                     reason: "Narthex raw scans require prepared-series support",
@@ -398,7 +245,7 @@ impl SeriesScan {
     fn prepare_raw_scan_uncached(
         &self,
         label_source: &RawLabelSource,
-    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
+    ) -> Result<Option<RawScanPreparation>, BoxedError> {
         #[cfg(test)]
         self.preflight_runs.fetch_add(1, Ordering::Relaxed);
         let input = &self.stream_ctx.input;
@@ -463,27 +310,13 @@ impl SeriesScan {
                 return Ok(None);
             }
         }
-        // The columnar prepared reader serves sparse metric regions only: another region on a store in
-        // that format has no columnar samples, and its SST rows are the sources the ordinary scan reads
-        // anyway. Missing columnar coverage is not a reason to refuse the raw path - see the
-        // `prepared_columnar` gate below - so such a scan keeps it and is served from the ordinary scan.
-        // Refusing here instead would be an error no caller can turn into a fallback: the logical plan
-        // above this leaf is already the fused node by the time the region is asked.
-        let columnar_region = self.uses_columnar() && is_sparse_metric_metadata(metadata);
-        // Narthex samples exist for sparse metric regions only, so a scan that requires them and is not
-        // one of those has nothing to read them from.
-        if !columnar_region && input.requires_narthex_preparation() {
+        let narthex = input.requires_narthex_preparation();
+        if narthex && !is_sparse_metric_metadata(metadata) {
             return Ok(None);
         }
         let selected = input.mapper.output_schema();
         let mut fields = Vec::new();
         let mut specs = Vec::new();
-        // The columnar prepared reader serves `Float64` and native histogram fields. A selection
-        // carrying another kind the raw path supports - a numeric field it casts - is read by the
-        // ordinary scan instead: the columnar samples are an artifact beside the SST rows, so the
-        // same sources are still reachable, and the frame schema and ordering follow the reader
-        // that actually answers.
-        let columnar_fields_supported = self.columnar_fields_supported();
         for output in selected.column_schemas() {
             let Some(column) = metadata.column_metadatas.iter().find(|column| {
                 column.column_schema.name == output.name
@@ -514,7 +347,12 @@ impl SeriesScan {
             };
             // The raw converter casts a numeric field to `Float64` and converts a native histogram
             // struct into histogram samples; nothing else has a raw representation.
-            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
+            let numeric = if narthex {
+                *data_type == ConcreteDataType::float64_datatype()
+            } else {
+                data_type.is_numeric()
+            };
+            if !numeric && !is_native_histogram_value_type(data_type) {
                 debug!(
                     "Raw series scan preflight rejected field type: region_id={}, column_id={}",
                     metadata.region_id, column.column_id,
@@ -528,7 +366,7 @@ impl SeriesScan {
         }
         let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
         if fields.is_empty()
-            || (input.append_mode && !input.requires_narthex_preparation())
+            || (input.append_mode && !narthex)
             || input.series_row_selector.is_some()
             || !time_is_millis
         {
@@ -542,17 +380,13 @@ impl SeriesScan {
             );
             return Ok(None);
         }
-        // Structural eligibility errors still reject the raw path; ordinary scans cover sources
-        // without columnar artifacts, so missing coverage is not an error here.
-        let prepared_columnar =
-            columnar_region && self.uses_prepared_columnar()? && columnar_fields_supported;
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
         });
         let typed_schema = input.mapper.input_arrow_schema(false);
         let mut predicates = Vec::new();
-        let predicate = if prepared_columnar {
+        let predicate = if narthex {
             input.predicate_group().predicate()
         } else {
             // The ordinary scan applies region predicates before this residual filtering.
@@ -603,14 +437,11 @@ impl SeriesScan {
                 predicates.push(physical);
             }
         }
-        Ok(Some((
-            RawScanPreparation {
-                schema,
-                fields,
-                predicates,
-            },
-            prepared_columnar,
-        )))
+        Ok(Some(RawScanPreparation {
+            schema,
+            fields,
+            predicates,
+        }))
     }
 
     /// Starts scanner-wide preparation from the preflight already performed by the caller.
@@ -619,7 +450,7 @@ impl SeriesScan {
         ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         label_source: &RawLabelSource,
-        preparation: Result<Option<(RawScanPreparation, bool)>, BoxedError>,
+        preparation: Result<Option<RawScanPreparation>, BoxedError>,
     ) -> futures::future::BoxFuture<
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
@@ -643,29 +474,14 @@ impl SeriesScan {
             &self.metrics_list,
         );
         Box::pin(async move {
-            let Some((preparation, prepared_columnar)) = preparation? else {
+            let Some(preparation) = preparation? else {
                 return Ok(None);
             };
-            if !prepared_columnar {
-                // Known unsupported coverage: the caller keeps the ordinary scan instead.
-                return Ok(None);
-            }
             state
                 .prepare(stream_ctx, ranges, labels, preparation, metrics, scan_pool)
                 .await
                 .map(Some)
         })
-    }
-
-    fn supports_two_phase(input: &ScanInput) -> bool {
-        if !is_sparse_metric_metadata(input.region_metadata()) {
-            return false;
-        }
-        #[cfg(feature = "enterprise")]
-        if !input.extension_ranges().is_empty() {
-            return false;
-        }
-        true
     }
 
     #[tracing::instrument(
@@ -757,9 +573,6 @@ impl SeriesScan {
                 metrics_set,
                 ctx.explain_verbose,
             ),
-            SeriesScanMode::TwoPhase => {
-                self.scan_two_phase_batch_in_partition(ctx, partition, part_metrics, metrics_set)
-            }
         }
     }
 
@@ -797,67 +610,6 @@ impl SeriesScan {
         Ok(Box::pin(stream))
     }
 
-    fn scan_two_phase_batch_in_partition(
-        &self,
-        ctx: &QueryScanContext,
-        partition: usize,
-        part_metrics: PartitionMetrics,
-        metrics_set: &ExecutionPlanMetricsSet,
-    ) -> Result<ScanBatchStream> {
-        self.maybe_start_candidate_distributor(ctx, metrics_set);
-        // Safety: `scan_batch_in_partition` validates the index, and the receiver
-        // list always contains one entry for each output partition.
-        let mut receiver = self.candidate_receivers.lock().unwrap()[partition]
-            .take()
-            .context(ScanMultiTimesSnafu { partition })?;
-        let stream_ctx = self.stream_ctx.clone();
-        let partition_ranges = self
-            .properties
-            .partitions
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        let stream = try_stream! {
-            part_metrics.on_first_poll();
-
-            let mut fetch_start = Instant::now();
-            let mut metrics = ScannerMetrics::default();
-            while let Some(input) = receiver.recv().await {
-                let input = input?;
-                metrics.scan_cost += fetch_start.elapsed();
-
-                let build_start = Instant::now();
-                let reader = SeriesReader::try_new(
-                    stream_ctx.clone(),
-                    partition_ranges.clone(),
-                    input.assigned_series,
-                    input.partition_pruner,
-                    input.range_semaphore,
-                    part_metrics.clone(),
-                )?;
-                let mut reader_stream = reader.build_stream().await?;
-                metrics.scan_cost += build_start.elapsed();
-                fetch_start = Instant::now();
-                while let Some(record_batch) = reader_stream.try_next().await? {
-                    metrics.scan_cost += fetch_start.elapsed();
-                    metrics.num_batches += 1;
-                    metrics.num_rows += record_batch.num_rows();
-
-                    let yield_start = Instant::now();
-                    yield ScanBatch::RecordBatch(record_batch);
-                    metrics.yield_cost += yield_start.elapsed();
-                    fetch_start = Instant::now();
-                }
-            }
-            metrics.scan_cost += fetch_start.elapsed();
-
-            part_metrics.merge_metrics(&metrics);
-            part_metrics.on_finish();
-        };
-        Ok(Box::pin(stream))
-    }
-
     fn maybe_start_legacy_distributor(
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
@@ -882,44 +634,6 @@ impl SeriesScan {
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
-        common_runtime::spawn_query(
-            async move {
-                distributor.execute().await;
-            }
-            .instrument(span),
-        );
-
-        *rx_list = receivers;
-    }
-
-    fn maybe_start_candidate_distributor(
-        &self,
-        ctx: &QueryScanContext,
-        metrics_set: &ExecutionPlanMetricsSet,
-    ) {
-        let mut rx_list = self.candidate_receivers.lock().unwrap();
-        if !rx_list.is_empty() {
-            return;
-        }
-
-        let (senders, receivers, active_receivers) =
-            new_candidate_channel_list(self.properties.num_partitions());
-        // Capture the first partition's runtime pool once for the shared distributor.
-        // reset_state clears the receivers so the next execution captures a fresh pool.
-        let mut distributor = SeriesCandidateDistributor {
-            memory_pool: ctx.memory_pool.clone(),
-            stream_ctx: self.stream_ctx.clone(),
-            range_semaphore: Arc::new(Semaphore::new(self.properties.num_partitions())),
-            partitions: self.properties.partitions.clone(),
-            pruner: self.pruner.clone(),
-            senders,
-            active_receivers,
-            metrics_set: metrics_set.clone(),
-            metrics_list: self.metrics_list.clone(),
-            explain_verbose: ctx.explain_verbose,
-        };
-        let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
-        let span = tracing::info_span!("SeriesScan::candidate_distributor", region_id = %region_id);
         common_runtime::spawn_query(
             async move {
                 distributor.execute().await;
@@ -1014,26 +728,6 @@ fn new_legacy_channel_list(num_partitions: usize) -> (SenderList, LegacyReceiver
     (SenderList::new(senders), receivers)
 }
 
-fn new_candidate_channel_list(
-    num_partitions: usize,
-) -> (CandidateSenderList, CandidateReceiverList, Arc<AtomicUsize>) {
-    let active_receivers = Arc::new(AtomicUsize::new(num_partitions));
-    let (senders, receivers) = (0..num_partitions)
-        .map(|_| {
-            // Partition streams can be consumed sequentially. A bounded channel for an unpolled
-            // partition could block the distributor and prevent it from sending more assignments
-            // to the partition currently being consumed, causing a deadlock.
-            let (sender, receiver) = mpsc::unbounded_channel();
-            let receiver = CandidateReceiver {
-                receiver,
-                active_receivers: active_receivers.clone(),
-            };
-            (Some(sender), Some(receiver))
-        })
-        .unzip();
-    (senders, receivers, active_receivers)
-}
-
 impl RegionScanner for SeriesScan {
     fn name(&self) -> &str {
         "SeriesScan"
@@ -1062,7 +756,7 @@ impl RegionScanner for SeriesScan {
     }
 
     fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
-        // Both prepared-columnar and ordinary (legacy or two-phase) scans guarantee key/time order.
+        // Both prepared-columnar and ordinary scans guarantee key/time order.
         Ok(SeriesOrdering::KeyThenTime)
     }
 
@@ -1072,14 +766,14 @@ impl RegionScanner for SeriesScan {
     ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
         Ok(self
             .prepare_raw_scan(label_source)?
-            .map(|(preparation, _)| preparation.schema))
+            .map(|preparation| preparation.schema))
     }
 
     fn raw_series_has_explicit_labels(&self, labels: &RawLabelSource) -> Result<bool, BoxedError> {
-        let Some((mut raw, columnar)) = self.prepare_raw_scan(labels)? else {
+        let Some(mut raw) = self.prepare_raw_scan(labels)? else {
             return Ok(false);
         };
-        Ok(columnar
+        Ok(self.mode == SeriesScanMode::Prepared
             && prepared::sample_merge_schema(&self.stream_ctx, &mut raw)
                 .map_err(BoxedError::new)?
                 .is_some())
@@ -1092,10 +786,10 @@ impl RegionScanner for SeriesScan {
         partition: usize,
         label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
-        let Some((preparation, prepared_columnar)) = self.prepare_raw_scan(label_source)? else {
+        let Some(preparation) = self.prepare_raw_scan(label_source)? else {
             return Ok(None);
         };
-        if prepared_columnar {
+        if self.mode == SeriesScanMode::Prepared {
             let partitions = self.properties.num_partitions().max(1);
             if partition >= partitions {
                 return Err(BoxedError::new(
@@ -1116,7 +810,7 @@ impl RegionScanner for SeriesScan {
             let preparation = self
                 .check_scan_limit()
                 .map_err(BoxedError::new)
-                .map(|_| Some((preparation, prepared_columnar)));
+                .map(|_| Some(preparation));
             let future = self.prepare_series_with_raw(ctx, metrics_set, label_source, preparation);
             let labels = label_source.clone();
             let stream = async_stream::try_stream! {
@@ -1135,8 +829,7 @@ impl RegionScanner for SeriesScan {
                 Box::pin(stream),
             )));
         }
-        // Stored sources without columnar artifacts (memtables, unindexed SSTs) are read by the
-        // ordinary scan, so the raw path stays available.
+        // Read Parquet regions through the ordinary per-series scan.
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -1167,7 +860,7 @@ impl RegionScanner for SeriesScan {
         'static,
         Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
     > {
-        if !self.uses_columnar() {
+        if !self.stream_ctx.input.requires_narthex_preparation() {
             return Box::pin(async { Ok(None) });
         }
         let preparation = self
@@ -1214,21 +907,8 @@ impl RegionScanner for SeriesScan {
         self.clear_preflight_cache();
         self.stream_ctx.input.predicate.clear_dyn_filters();
         let num_workers = common_stat::get_total_cpu_cores().max(1);
-        self.pruner = match self.mode {
-            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
-                Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers))
-            }
-            SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
-                self.stream_ctx.clone(),
-                num_workers,
-                PrunerOptions {
-                    retain_builders: true,
-                    enable_predicate_prefilter: false,
-                },
-            )),
-        };
+        self.pruner = Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers));
         self.legacy_receivers.lock().unwrap().clear();
-        self.candidate_receivers.lock().unwrap().clear();
         self.metrics_list = Arc::new(PartitionMetricsList::default());
     }
 
@@ -1466,117 +1146,6 @@ impl SeriesDistributor {
         part_metrics.on_finish();
 
         Ok(())
-    }
-}
-
-/// Discovers metric series and sends one reader assignment to each partition.
-struct SeriesCandidateDistributor {
-    memory_pool: Arc<dyn MemoryPool>,
-    stream_ctx: Arc<StreamContext>,
-    range_semaphore: Arc<Semaphore>,
-    partitions: Vec<Vec<PartitionRange>>,
-    pruner: Arc<Pruner>,
-    senders: CandidateSenderList,
-    active_receivers: Arc<AtomicUsize>,
-    metrics_set: ExecutionPlanMetricsSet,
-    metrics_list: Arc<PartitionMetricsList>,
-    explain_verbose: bool,
-}
-
-impl SeriesCandidateDistributor {
-    async fn execute(&mut self) {
-        if let Err(e) = self.distribute().await {
-            self.send_error(e);
-        }
-    }
-
-    async fn distribute(&mut self) -> Result<()> {
-        let part_metrics = new_partition_metrics(
-            &self.stream_ctx,
-            self.explain_verbose,
-            &self.metrics_set,
-            self.partitions.len(),
-            &self.metrics_list,
-        );
-        part_metrics.on_first_poll();
-
-        let candidate_scanner = SeriesCandidateScanner::try_new(
-            self.stream_ctx.clone(),
-            self.partitions.clone(),
-            self.pruner.clone(),
-            self.range_semaphore.clone(),
-            self.memory_pool.clone(),
-            self.metrics_set.clone(),
-            part_metrics.clone(),
-        )?;
-        let partition_pruner = candidate_scanner.partition_pruner();
-        let mut candidates = candidate_scanner.build_stream().await?;
-        let mut collector =
-            SeriesBatchCollector::new(self.partitions.len()).context(InvalidSenderSnafu)?;
-        let mut chunked = false;
-        while let Some(batch) = candidates.try_next().await? {
-            if !self.should_fetch_candidates() {
-                part_metrics.on_finish();
-                return Ok(());
-            }
-            collector.push(batch);
-            if collector.len() >= candidate_series_assignment_threshold() {
-                chunked = true;
-                self.send_assignments(collector.finish(false), &partition_pruner);
-                if !self.should_fetch_candidates() {
-                    part_metrics.on_finish();
-                    return Ok(());
-                }
-                collector =
-                    SeriesBatchCollector::new(self.partitions.len()).context(InvalidSenderSnafu)?;
-            }
-        }
-
-        if collector.len() > 0 {
-            self.send_assignments(collector.finish(!chunked), &partition_pruner);
-        }
-        part_metrics.on_finish();
-        Ok(())
-    }
-
-    fn send_assignments(
-        &mut self,
-        assignments: Vec<AssignedSeriesBatch>,
-        partition_pruner: &Arc<PartitionPruner>,
-    ) {
-        // One round of candidate collection; a partition that receives two assignments sees two.
-        #[cfg(test)]
-        CANDIDATE_ASSIGNMENT_ROUNDS.fetch_add(1, Ordering::Relaxed);
-        for (partition, assigned_series) in assignments.into_iter().enumerate() {
-            if assigned_series.series().is_empty() {
-                continue;
-            }
-            let Some(sender) = self.senders[partition].as_ref() else {
-                continue;
-            };
-            let sent = sender
-                .send(Ok(SeriesReaderInput {
-                    assigned_series,
-                    partition_pruner: partition_pruner.clone(),
-                    range_semaphore: self.range_semaphore.clone(),
-                }))
-                .is_ok();
-            if !sent {
-                self.senders[partition] = None;
-            }
-        }
-    }
-
-    fn should_fetch_candidates(&self) -> bool {
-        self.active_receivers.load(Ordering::Relaxed) > 0
-    }
-
-    fn send_error(&mut self, error: Error) {
-        let error = Arc::new(error);
-        for sender in self.senders.iter_mut().filter_map(Option::take) {
-            let result = Err(error.clone()).context(ScanSeriesSnafu);
-            let _ = sender.send(result);
-        }
     }
 }
 
@@ -1856,51 +1425,6 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
-    use crate::read::flat_projection::FlatProjectionMapper;
-    use crate::read::scan_region::PredicateGroup;
-    use crate::test_util::scheduler_util::SchedulerEnv;
-    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
-
-    #[tokio::test]
-    async fn two_phase_eligibility_allows_exact_sequence_range() {
-        let env = SchedulerEnv::new().await;
-        let metadata = Arc::new(sst_region_metadata_with_encoding(
-            store_api::codec::PrimaryKeyEncoding::Sparse,
-        ));
-        let predicate = PredicateGroup::default();
-
-        let eligible = ScanInput::builder(
-            env.access_layer.clone(),
-            FlatProjectionMapper::new(&metadata, [0]).unwrap(),
-        )
-        .with_predicate(predicate.clone())
-        .build();
-        assert!(SeriesScan::supports_two_phase(&eligible));
-
-        let exact_sequence = ScanInput::builder(
-            env.access_layer.clone(),
-            FlatProjectionMapper::new(&metadata, [0]).unwrap(),
-        )
-        .with_predicate(predicate)
-        .with_sequence_range(Some(store_api::storage::SequenceRange::GtLtEq {
-            min: 1,
-            max: 2,
-        }))
-        .build();
-        assert!(SeriesScan::supports_two_phase(&exact_sequence));
-    }
-
-    #[test]
-    fn candidate_distributor_stops_after_all_receivers_close() {
-        let (_senders, mut receivers, active_receivers) = new_candidate_channel_list(2);
-        assert_eq!(2, active_receivers.load(Ordering::Relaxed));
-
-        drop(receivers[0].take());
-        assert_eq!(1, active_receivers.load(Ordering::Relaxed));
-
-        drop(receivers[1].take());
-        assert_eq!(0, active_receivers.load(Ordering::Relaxed));
-    }
 
     #[tokio::test]
     async fn distributor_does_not_stall_on_partitions_read_one_after_another() {

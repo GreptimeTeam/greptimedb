@@ -31,7 +31,7 @@ An artifact written before exact identity has the same version number and record
 only `(table_id, tsid)`, a hash; it can be structurally valid and perfectly ordered
 while two distinct series were merged. Nothing in such an artifact proves
 otherwise, so a manifest without the `identity_encoding` discriminator is
-rejected, and its artifact rebuilt from SSTs; there is no dual reader. The same
+rejected when opened. The same
 applies to an artifact of the earlier layout of this format, whose keys sat inside
 the block descriptors: its `identity_encoding` value is the older
 `exact-sparse-key`, so it is refused when the manifest is opened rather than when a
@@ -43,40 +43,9 @@ and operation types in single-series blocks bounded by rows and decoded bytes.
 
 ## Artifact manifest
 
-The catalog identifier is `columnar-samples`. Its file and manifest version is 1,
-independent of the series format's version and both formats' codec identifiers.
-Existing `parquet` and `columnar-series` identifiers keep their meaning.
-
-An artifact is derived either from one immutable source SST (legacy) or from
-a bounded group of snapshot SSTs contributing to one UTC day. It owns
-these objects:
-
-```text
-<region_id>/samples/<generation>/manifest.json
-<region_id>/samples/<generation>/part-0.samples
-<region_id>/samples/<generation>/part-1.samples
-...
-```
-
-Daily catalog entries add `source_file_ids` (the complete, sorted source SST
-set) and `window` (signed UTC day number since the Unix epoch). Missing fields
-retain legacy whole-SST semantics. The catalog key and manifest owner ID for a
-daily artifact are its unique generation ID, not an individual source SST.
-Each source group is merged once and rows are routed to nonempty days; sequence numbers, deletion markers,
-and duplicate versions are preserved. Blocks and parts retain their existing
-size bounds. An SST crossing midnight contributes to multiple artifacts.
-
-Publication uses the existing atomic samples catalog, which also commits series
-and range indexes. Readers pin each generation once. A grouped artifact is
-ineligible if any source SST is absent from the query's data snapshot; exact
-sequence-range or SST-sequence-pruned scans fall back to the existing path.
-Maintenance retains complete visible groups and groups only uncovered sources,
-with at most 64 sources per merge. One anchor entry per group records `source_windows`, the
-actual populated days for every source in its group. Other daily entries share
-the same ordered source set without repeating the coverage map. Coverage checks use this
-record rather than enumerating the timestamp span. Earlier daily entries without
-this record require rebuilding. Publication commits all days together; retired
-objects remain pinned until readers release them. Source Parquet SSTs are unchanged.
+The region manifest publishes each samples file and its object sizes. The file's
+manifest and parts share its generation directory. Readers pin the SST while
+using those objects.
 
 The source file ID and generation use existing `FileId` serialization. The
 generation is unique for each build. A manifest contains:
@@ -87,8 +56,8 @@ generation is unique for each build. A manifest contains:
 | `version` | Integer 1 |
 | `identity_encoding` | String `exact-sparse-key-area`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable |
 | `region_id` | Physical region ID, u64 |
-| `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
-| `generation` | `FileId` matching the catalog artifact generation |
+| `source_file_id` | Physical samples SST file ID |
+| `generation` | Physical samples SST file ID, using `FileId` serialization |
 | `timestamp` | Object with `column_id`, `name`, and `unit` |
 | `fields` | Ordered objects with `column_id`, `name`, `type`, and `nullable` |
 | `files` | Ordered part descriptors, defined below |
@@ -136,7 +105,7 @@ Readers consider every matching part rather than choosing a unique owner.
 the artifact's `file_size` is their checked sum. An empty artifact has an empty
 file list and no part files. The manifest is at most 64 MiB.
 
-Region, source SST, and generation must match the catalog entry. The artifact
+Region, source SST, and generation must match the owning SST metadata. The artifact
 object list must contain exactly the derived manifest and part paths, without
 duplicates, extra objects, or inconsistent size totals. Part order comes from
 the manifest.
@@ -639,36 +608,3 @@ New column encodings or compression methods receive new IDs. Structural changes,
 changed field meanings, or incompatible limits require a new version. Deeper
 metadata trees require an explicit reader-support and rollout decision; an
 unchanged layout alone does not make them readable by version-1 implementations.
-
-The local cache root contains a layout-version marker. Startup clears the entire
-series-index cache when this marker is absent or incompatible, then rebuilds
-artifacts through existing maintenance. Source SST identity remains in metadata.
-
-### Local cache rollout
-
-Daily consolidation is the only layout the opt-in columnar samples backend
-writes, including manual reconciliation. Legacy-format defaults are unchanged. A day may
-contain several generations with disjoint source sets (at most 64 SSTs per merge),
-and each generation may contain multiple bounded part files. Source Parquet files
-are never rewritten.
-
-This branch has no deployments, so the local series-index cache token is pinned to
-`1`: a cache written by any other build is discarded on startup and rebuilt from
-the SSTs before regions open, and ordinary SST reads remain available meanwhile.
-That is the only cache migration this layout has. An artifact written by an earlier
-build of this branch — keys inside the block descriptors, a key area without stored
-checksums, a 112-byte trailer without `key_end` — carries a different
-`identity_encoding` value, `exact-sparse-key` instead of `exact-sparse-key-area`, so
-it is refused when its manifest is opened. Maintenance treats that refusal as "not
-reusable" and rebuilds the artifact, so an old artifact is never marked reusable and
-then fails on the first part read. A part reached without that check would also be
-rejected: the reader locates a trailer from the recorded object size, reads the last
-120 bytes of such a part, and refuses the shifted frame instead of decoding it.
-Allow for rebuild time and I/O in either direction; do not reuse daily catalogs with
-an older reader outside this startup check. Existing per-SST catalog entries remain
-readable by the new reader.
-
-A prepared scan uses a grouped artifact only when all of its sources belong to
-that scan's assignment or were excluded solely by its time filter. Partial coverage
-or a stale source set selects the
-ordinary SST path until reconciliation supplies complete valid coverage.

@@ -26,7 +26,6 @@ use std::time::Instant;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion_expr::{Expr, utils::split_conjunction};
 use datatypes::arrow::array::{
@@ -48,8 +47,8 @@ use store_api::metric_engine_consts::{
 use store_api::region_engine::{
     PartitionRange, PreparedSeriesSource, RawLabelSource, SendableRawSeriesStream, SeriesInfo,
 };
+use store_api::storage::SequenceRange;
 use store_api::storage::consts::{ReservedColumnId, SEQUENCE_COLUMN_NAME};
-use store_api::storage::{FileId, SequenceRange};
 use table::predicate::Predicate;
 use tokio::sync::OnceCell;
 
@@ -62,7 +61,6 @@ use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
-use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::format::{
     self, FormatReader, SamplesBatch, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
 };
@@ -187,124 +185,6 @@ pub(super) fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool
     }
 }
 
-/// Validates the pinned assignments and coverage without opening artifacts.
-///
-/// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
-/// error: the caller scans those sources with the ordinary reader instead.
-pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
-    if context.input.requires_narthex_preparation() {
-        narthex::file_indices(context, ranges)?;
-        return Ok(true);
-    }
-    collect_inputs(context, ranges).map(|inputs| inputs.is_some())
-}
-
-/// Collects the assigned SSTs and their covering columnar series indexes.
-///
-/// `None` means the assignments are structurally valid but not ready for columnar reads: an
-/// assigned memtable, an SST without columnar series coverage, or an SST without columnar
-/// samples. Structural corruption is still an error, and every assignment is validated before
-/// either answer is returned, so a later invalid assignment is never masked by missing artifacts.
-fn collect_inputs(
-    context: &StreamContext,
-    ranges: &[PartitionRange],
-) -> Result<Option<(Vec<usize>, HashSet<FileId>)>> {
-    let input = &context.input;
-    let metadata = input.region_metadata();
-    let index = input
-        .series_index
-        .as_ref()
-        .ok_or_else(|| invalid("missing columnar index context"))?;
-    let mut ready = true;
-    let mut files = BTreeMap::<usize, HashSet<i64>>::new();
-    for range in ranges {
-        let range = context
-            .ranges
-            .get(range.identifier)
-            .ok_or_else(|| invalid("invalid prepared scan range"))?;
-        for row_group in &range.row_group_indices {
-            if context.is_mem_range_index(*row_group) {
-                // Artifacts exist for flushed SSTs only.
-                ready = false;
-                continue;
-            }
-            if !context.is_file_range_index(*row_group) {
-                return Err(invalid(
-                    "columnar prepared reads do not support extension ranges",
-                ));
-            }
-            files
-                .entry(row_group.index - input.num_memtables())
-                .or_default()
-                .insert(row_group.row_group_index);
-        }
-    }
-    // Grouped artifacts may also contain sources excluded solely by time pruning.
-    // Sequence-pruned, unassigned, and retired sources remain ineligible.
-    let assigned: HashSet<_> = files
-        .keys()
-        .map(|i| input.files[*i].file_id().file_id())
-        .collect();
-    let allowed = assigned
-        .iter()
-        .chain(&input.time_pruned_files)
-        .copied()
-        .collect();
-    let eligible_samples = index
-        .version
-        .samples
-        .iter()
-        .filter(|(_, handle)| {
-            handle.entry().sources_visible(&allowed)
-                && assigned.iter().any(|id| handle.entry().covers(*id))
-        })
-        .map(|(id, handle)| (*id, handle.clone()))
-        .collect();
-    let mut indexes = HashSet::new();
-    let file_indices = files.keys().copied().collect();
-    for (file_idx, groups) in files {
-        let file = &input.files[file_idx];
-        if !groups.contains(&-1)
-            && (groups.len() as u64 != file.meta_ref().num_row_groups
-                || groups
-                    .iter()
-                    .any(|group| *group < 0 || *group as u64 >= file.meta_ref().num_row_groups))
-        {
-            return Err(invalid(
-                "columnar samples require complete SST range assignments",
-            ));
-        }
-        if file.meta_ref().region_id != metadata.region_id {
-            return Err(invalid(
-                "columnar prepared reads do not support foreign SSTs",
-            ));
-        }
-        let mut covered = false;
-        for handle in index.version.series_indexes.values() {
-            if handle.entry().format() == ArtifactFormat::ColumnarSeries
-                && handle
-                    .entry()
-                    .covers_file(file.meta_ref(), metadata.region_id)
-            {
-                indexes.insert(handle.entry().index_uuid);
-                covered = true;
-            }
-        }
-        if !covered {
-            ready = false;
-        }
-        if !crate::series_index::artifact::samples_cover_file(&eligible_samples, file)
-            || index.version.samples.values().any(|h| {
-                h.entry().covers(file.file_id().file_id())
-                    && h.entry().artifact.format != ArtifactFormat::ColumnarSamples
-            })
-        {
-            ready = false;
-        }
-    }
-    Ok(ready.then_some((file_indices, indexes)))
-}
-
 /// Pushes the supported conjuncts into the request.
 ///
 /// The second element reports, for every input conjunct, whether `ColumnarReader`
@@ -397,82 +277,6 @@ pub(crate) struct SeriesDiscovery {
     covered_samples: Vec<(FileTimeRange, usize)>,
 }
 
-/// Opens sidecar readers after validating their complete source coverage.
-async fn open_sidecar_sources(
-    context: &StreamContext,
-    ranges: &[PartitionRange],
-) -> Result<(Vec<Arc<dyn SamplesFormatReader>>, SeriesDiscovery)> {
-    let input = &context.input;
-    let metadata = input.region_metadata();
-    let index = input
-        .series_index
-        .as_ref()
-        .ok_or_else(|| invalid("missing columnar index context"))?;
-    let Some((files, indexes)) = collect_inputs(context, ranges)? else {
-        // Readiness was checked before preparation, so this is a real capability change.
-        return Err(invalid(
-            "columnar series coverage changed after series preparation",
-        ));
-    };
-    let cache = input
-        .cache_strategy
-        .columnar_metadata(index.cache_namespace);
-    let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-    let assigned: HashSet<_> = files
-        .iter()
-        .map(|i| input.files[*i].file_id().file_id())
-        .collect();
-    let allowed = assigned
-        .iter()
-        .chain(&input.time_pruned_files)
-        .copied()
-        .collect();
-    for handle in index.version.samples.values().filter(|h| {
-        if !h.entry().sources_visible(&allowed) || !assigned.iter().any(|id| h.entry().covers(*id))
-        {
-            return false;
-        }
-        // Coverage validation above still needs every day of each source. Only
-        // opening readers can omit daily artifacts outside the query range.
-        if let (Some(day), Some(range)) = (h.entry().window, input.time_range.as_ref()) {
-            let bounds = day
-                .checked_mul(86_400)
-                .zip(day.checked_add(1).and_then(|next| next.checked_mul(86_400)));
-            if let Some((start, end)) = bounds {
-                return range.intersects(
-                    &(Timestamp::new_second(start)..Timestamp::new_second(end)).into(),
-                );
-            }
-            // Retain extreme days whose bounds cannot be represented in seconds.
-        }
-        true
-    }) {
-        let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
-            index.store.clone(),
-            handle.clone(),
-            cache.clone(),
-        )
-        .await?;
-        format::validate_sample_schema(&reader.schema(), metadata)?;
-        samples.push(Arc::new(reader));
-    }
-    let mut series = SeriesDiscovery::default();
-    for id in indexes {
-        series.readers.push_back((
-            Box::new(
-                crate::series_index::columnar::reader::ColumnarReader::open_cached(
-                    index.store.clone(),
-                    index.version.series_indexes[&id].clone(),
-                    cache.clone(),
-                )
-                .await?,
-            ),
-            None,
-        ));
-    }
-    Ok((samples, series))
-}
-
 impl ColumnarPreparedSource {
     async fn prepare(
         context: Arc<StreamContext>,
@@ -490,11 +294,7 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
-        let (samples, mut series) = if context.input.requires_narthex_preparation() {
-            narthex::open_sources(&context, &ranges, &scan_pool).await?
-        } else {
-            open_sidecar_sources(&context, &ranges).await?
-        };
+        let (samples, mut series) = narthex::open_sources(&context, &ranges, &scan_pool).await?;
         preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
         preparation_metrics
             .counts
@@ -506,8 +306,7 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let mut raw = raw;
         let batch_output = matches!(labels, RawLabelSource::Explicit);
-        let dedup_append_raw =
-            input.requires_narthex_preparation() && input.append_mode && !batch_output;
+        let dedup_append_raw = input.append_mode && !batch_output;
         let sample_schema = if batch_output {
             Some(input.mapper.input_arrow_schema(input.compaction))
         } else {
@@ -534,11 +333,7 @@ impl ColumnarPreparedSource {
         preparation_metrics.counts.insert("prepare_batch_series", 0);
         let direct_labels = !batch_output && sample_schema.is_some();
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
-        let partition = if input.requires_narthex_preparation() {
-            narthex_partition_filter(metadata.partition_expr.as_deref(), None)?
-        } else {
-            None
-        };
+        let partition = narthex_partition_filter(metadata.partition_expr.as_deref(), None)?;
         // Series rows carry tags only, so a rule over any other column, such as the time index,
         // filters sample rows instead.
         let (series_partition, sample_partition) = match partition {

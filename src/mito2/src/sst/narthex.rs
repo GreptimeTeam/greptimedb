@@ -30,10 +30,9 @@ use store_api::storage::FileId;
 use crate::access_layer::SstInfoArray;
 use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
-use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::reader::ColumnarReader;
 use crate::series_index::columnar::{ColumnarSeriesFormat, invalid, require};
-use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
+use crate::series_index::format::{FormatWriter, SamplesFormatReader};
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::series_index::samples::reader::SamplesReader;
@@ -60,15 +59,13 @@ pub(crate) async fn write_samples(
             .await?;
     }
     let prefix = location::narthex_file_dir(&layer.build_region_dir(region_id), id);
-    let mut writer = ColumnarSamplesFormat::default()
-        .writer(
-            request.metadata.clone(),
-            layer.object_store().clone(),
-            &prefix,
-            id,
-            id,
-        )
-        .await?;
+    let mut writer = ColumnarSamplesFormat::default().writer(
+        request.metadata.clone(),
+        layer.object_store().clone(),
+        &prefix,
+        id,
+        id,
+    )?;
     let mut rows = 0;
     let mut series = 0;
     let mut previous_key = Vec::new();
@@ -178,11 +175,12 @@ async fn series_keys(
     source: &FileHandle,
     metadata: &RegionMetadata,
 ) -> Result<BoxStream<'static, Result<(ExactSeriesKey, u64)>>> {
-    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
+    let mut reader = ColumnarReader::open(
+        layer.object_store().clone(),
         source.clone(),
         &layer.build_region_dir(source.region_id()),
-    )?;
-    let mut reader = ColumnarReader::open(layer.object_store().clone(), handle).await?;
+    )
+    .await?;
     reader.adapt_tags(metadata)?;
     Ok(reader.read_full_keys())
 }
@@ -214,14 +212,10 @@ pub(crate) async fn write_series(
         })),
         ..Default::default()
     };
-    let entry = crate::series_index::narthex_series_entry(
-        &file,
-        &layer.build_region_dir(metadata.region_id),
-    )?;
     let mut writer = ColumnarSeriesFormat::default().narthex_writer(
         metadata.clone(),
         layer.object_store().clone(),
-        &entry,
+        &file,
         prefix,
     )?;
     let write_result: Result<()> = async {
@@ -230,17 +224,15 @@ pub(crate) async fn write_series(
         for source in sources {
             let mut stream = match &source.meta_ref().format {
                 FileFormat::NarthexSeriesIndex(_) => series_keys(layer, source, &metadata).await?,
-                FileFormat::NarthexSamples(_) => {
-                    let handle = SamplesFileHandle::from_narthex(
-                        source.clone(),
-                        &layer.build_region_dir(source.region_id()),
-                    )?;
-                    SamplesReader::open(layer.object_store().clone(), handle)
-                        .await?
-                        .read(Default::default())?
-                        .map_ok(|block| (block.key, block.batch.num_rows() as u64))
-                        .boxed()
-                }
+                FileFormat::NarthexSamples(_) => SamplesReader::open(
+                    layer.object_store().clone(),
+                    source.clone(),
+                    &layer.build_region_dir(source.region_id()),
+                )
+                .await?
+                .read(Default::default())?
+                .map_ok(|block| (block.key, block.batch.num_rows() as u64))
+                .boxed(),
                 FileFormat::Parquet => {
                     return Err(invalid("expected native series or samples"));
                 }

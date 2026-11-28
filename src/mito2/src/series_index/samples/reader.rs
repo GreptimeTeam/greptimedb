@@ -34,7 +34,7 @@ use tokio::sync::OnceCell;
 use crate::cache::columnar::{self as metadata_cache, MetadataCache};
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
-use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
+use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesReadRequest};
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::samples::metadata::{
@@ -44,6 +44,8 @@ use crate::series_index::samples::{
     MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, codec, histogram, invalid,
     require, unsupported,
 };
+use crate::sst::file::{FileFormat, FileHandle};
+use crate::sst::location;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(crate) struct SamplesReader {
@@ -51,16 +53,23 @@ pub(crate) struct SamplesReader {
     manifest: Arc<Manifest>,
     schema: SchemaRef,
     cache: Option<MetadataCache>,
-    handle: SamplesFileHandle,
+    handle: FileHandle,
     parts: Arc<Vec<OnceCell<Reader>>>,
 }
 impl SamplesReader {
     pub(crate) async fn open_cached(
         store: ObjectStore,
-        handle: SamplesFileHandle,
+        handle: FileHandle,
+        region_dir: &str,
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
-        let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let file = handle.meta_ref();
+        let identity = format!(
+            "{region_dir}/{:?}/{:?}/{}",
+            handle.file_id(),
+            file.format,
+            file.file_size
+        );
         let descriptor = metadata_cache::load(
             cache.as_ref(),
             identity,
@@ -75,7 +84,7 @@ impl SamplesReader {
                         .sum::<usize>()
             },
             async {
-                let reader = Self::open(store.clone(), handle.clone()).await?;
+                let reader = Self::open(store.clone(), handle.clone(), region_dir).await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -94,31 +103,18 @@ impl SamplesReader {
         })
     }
 
-    pub async fn open(store: ObjectStore, handle: SamplesFileHandle) -> Result<Self> {
-        let entry = handle.entry();
-        let artifact = &entry.artifact;
-        require(
-            artifact.format == ArtifactFormat::ColumnarSamples,
-            "samples artifact format mismatch",
-        )?;
-        let region = handle.file_id().region_id().as_u64();
-        require(
-            handle.file_id().file_id() == entry.file_id,
-            "samples source handle mismatch",
-        )?;
-        let path = handle.manifest_path();
-        let mut objects = HashMap::new();
-        for object in &artifact.objects {
-            require(
-                objects
-                    .insert(object.path.as_str(), object.file_size)
-                    .is_none(),
-                "duplicate sample artifact object",
-            )?;
-        }
-        let length = *objects
-            .get(path.as_str())
-            .ok_or_else(|| invalid("missing samples manifest"))?;
+    pub(crate) async fn open(
+        store: ObjectStore,
+        handle: FileHandle,
+        region_dir: &str,
+    ) -> Result<Self> {
+        let file = handle.meta_ref();
+        let FileFormat::NarthexSamples(samples) = &file.format else {
+            return Err(invalid("expected Narthex samples file"));
+        };
+        let prefix = location::narthex_file_dir(region_dir, file.file_id);
+        let path = location::narthex_manifest_path(&prefix);
+        let length = samples.manifest_size;
         require(
             length > 0 && length <= MANIFEST_LIMIT as u64,
             "samples manifest exceeds limit",
@@ -131,11 +127,7 @@ impl SamplesReader {
                 "samples manifest is not readable; rebuild the artifact: {error}"
             ))
         })?;
-        manifest.prefix = Some(
-            path.strip_suffix("manifest.json")
-                .ok_or_else(|| invalid("invalid narthex manifest path"))?
-                .to_string(),
-        );
+        manifest.prefix = prefix;
         if manifest.version != VERSION {
             return Err(unsupported("samples manifest version"));
         }
@@ -147,14 +139,17 @@ impl SamplesReader {
             ));
         }
         require(
-            manifest.format == artifact.format
-                && manifest.region_id == region
-                && manifest.source_file_id == entry.file_id
-                && manifest.generation == artifact.generation,
+            manifest.format == ArtifactFormat::ColumnarSamples
+                && manifest.region_id == file.region_id.as_u64()
+                && manifest.source_file_id == file.file_id
+                && manifest.generation == file.file_id,
             "samples manifest identity mismatch",
         )?;
         manifest.validate_schema()?;
-        let mut paths = HashSet::from([path]);
+        require(
+            manifest.files.len() == samples.parts.len(),
+            "sample part count mismatch",
+        )?;
         let mut total = length;
         let mut previous = None;
         for (index, part) in manifest.files.iter().enumerate() {
@@ -172,22 +167,15 @@ impl SamplesReader {
                 require(last <= part.first, "unordered sample parts")?;
             }
             previous = Some(part.last);
-            let part_path = manifest.part_path(part.part_id);
             require(
-                objects.get(part_path.as_str()) == Some(&part.file_size),
+                samples.parts[index].file_size == part.file_size,
                 "sample part size mismatch",
             )?;
-            paths.insert(part_path);
             total = total
                 .checked_add(part.file_size)
                 .ok_or_else(|| invalid("sample artifact size overflow"))?;
         }
-        require(
-            total == artifact.file_size
-                && paths.len() == artifact.objects.len()
-                && artifact.objects.iter().all(|o| paths.contains(&o.path)),
-            "sample artifact objects/size mismatch",
-        )?;
+        require(total == file.file_size, "sample artifact size mismatch")?;
         Ok(Self {
             store,
             parts: Arc::new((0..manifest.files.len()).map(|_| OnceCell::new()).collect()),

@@ -786,14 +786,17 @@ mod test {
                 options: Some(build_index_request::Options::SeriesIndex(Default::default())),
             })
         };
-        // Default Mito config disables series indexes: reaching that error proves forwarding.
+        // The physical region uses Parquet. Its Narthex-only error comes from Mito.
         let error = env
             .metric()
             .handle_request(env.default_physical_region_id(), request())
             .await
             .unwrap_err();
         let error = format!("{error:?}");
-        assert!(error.contains("series index is disabled"), "{error}");
+        assert!(
+            error.contains("series indexes require Narthex storage"),
+            "{error}"
+        );
         let error = env
             .metric()
             .handle_request(env.default_logical_region_id(), request())

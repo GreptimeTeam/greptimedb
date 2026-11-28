@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Columnar samples sidecars. Wire contract: `docs/formats/mito-samples.md`.
+//! Narthex samples files. Wire contract: `docs/formats/mito-samples.md`.
 
 pub(crate) mod bulk;
 mod codec;
@@ -28,7 +28,6 @@ mod writer;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datatypes::data_type::DataType as _;
@@ -38,11 +37,12 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
 use crate::error::Result;
-use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
+use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::{invalid, require, unsupported};
-use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
+use crate::series_index::format::FormatWriter;
 use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
+use crate::sst::location;
 
 /// Reject unsupported narthex schemas before accepting mutations that cannot flush.
 pub(crate) fn validate_narthex_metadata(
@@ -147,12 +147,8 @@ impl Default for ColumnarSamplesFormat {
         }
     }
 }
-#[async_trait]
-impl SamplesFormat for ColumnarSamplesFormat {
-    fn format(&self) -> ArtifactFormat {
-        ArtifactFormat::ColumnarSamples
-    }
-    async fn writer(
+impl ColumnarSamplesFormat {
+    pub(crate) fn writer(
         &self,
         metadata: RegionMetadataRef,
         store: ObjectStore,
@@ -168,13 +164,6 @@ impl SamplesFormat for ColumnarSamplesFormat {
             source_file_id,
             generation,
         )?))
-    }
-    async fn reader(
-        &self,
-        store: ObjectStore,
-        handle: SamplesFileHandle,
-    ) -> Result<Box<dyn SamplesFormatReader>> {
-        Ok(Box::new(reader::SamplesReader::open(store, handle).await?))
     }
 }
 
@@ -278,7 +267,7 @@ struct Part {
 struct Manifest {
     /// Resolved from the owning file, not persisted in the codec manifest.
     #[serde(skip)]
-    prefix: Option<String>,
+    prefix: String,
     format: ArtifactFormat,
     version: u32,
     /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
@@ -293,7 +282,7 @@ struct Manifest {
 impl Manifest {
     fn retained_size(&self) -> usize {
         std::mem::size_of::<Self>()
-            + self.prefix.as_ref().map_or(0, String::capacity)
+            + self.prefix.capacity()
             + self.timestamp.name.capacity()
             + self.files.capacity() * std::mem::size_of::<Part>()
             + self.fields.capacity() * std::mem::size_of::<ValueColumn>()
@@ -304,16 +293,11 @@ impl Manifest {
                 .sum::<usize>()
     }
 
-    fn prefix(&self) -> String {
-        self.prefix
-            .clone()
-            .unwrap_or_else(|| samples_prefix(self.region_id, self.generation))
-    }
     fn path(&self) -> String {
-        format!("{}manifest.json", self.prefix())
+        location::narthex_manifest_path(&self.prefix)
     }
     fn part_path(&self, id: u32) -> String {
-        format!("{}part-{id}.samples", self.prefix())
+        format!("{}part-{id}.samples", self.prefix)
     }
     fn validate_schema(&self) -> Result<()> {
         require(
@@ -379,9 +363,4 @@ fn valid_rows(rows: usize, fields: usize) -> bool {
     (1..=MAX_ROWS).contains(&rows)
         && (1..=MAX_FIELDS).contains(&fields)
         && rows * (17 + 8 * fields) + fields * rows.div_ceil(8) <= BLOCK_BYTES
-}
-
-/// Immutable samples output directory, independent of the source SST identity.
-pub(crate) fn samples_prefix(region_id: u64, generation: FileId) -> String {
-    format!("{region_id}/samples/{generation}/")
 }

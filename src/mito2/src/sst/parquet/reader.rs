@@ -64,7 +64,6 @@ use crate::error::{
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
-use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
@@ -81,7 +80,7 @@ use crate::sst::parquet::file_range::{
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
 use crate::sst::parquet::json_align::{AlignMode, JsonSchemaAligner, ProjectedRecordBatchStream};
-use crate::sst::parquet::metadata::{MetadataLoader, primary_key_leaf_index};
+use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
@@ -186,7 +185,6 @@ macro_rules! handle_index_error {
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
     /// Index snapshot and store used to determine range-index availability.
-    series_index: Option<SeriesIndexReadContext>,
     /// SST directory.
     table_dir: String,
     /// Path type for generating file paths.
@@ -245,7 +243,6 @@ impl ParquetReaderBuilder {
         object_store: ObjectStore,
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
-            series_index: None,
             memory_tracker: None,
             table_dir,
             path_type,
@@ -268,13 +265,6 @@ impl ParquetReaderBuilder {
             defer_optional_page_index: false,
             batch_size: DEFAULT_READ_BATCH_SIZE,
         }
-    }
-
-    /// Sets the captured series-index context for range-index reads.
-    #[must_use]
-    pub(crate) fn series_index(mut self, context: Option<SeriesIndexReadContext>) -> Self {
-        self.series_index = context;
-        self
     }
 
     /// Sets the scan-wide hint for rows in a decoded batch.
@@ -366,6 +356,7 @@ impl ParquetReaderBuilder {
     }
 
     /// Sets whether to run the reduced-column predicate prefilter pass.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn enable_predicate_prefilter(mut self, enable: bool) -> Self {
         self.enable_predicate_prefilter = enable;
@@ -664,19 +655,6 @@ impl ParquetReaderBuilder {
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
 
-        let range_index_store = self.series_index.as_ref().and_then(|context| {
-            let region_id = self
-                .expected_metadata
-                .as_ref()
-                .unwrap_or(&region_meta)
-                .region_id;
-            (self.file_handle.region_id() == region_id
-                && context
-                    .version
-                    .range_indexes
-                    .contains_key(&self.file_handle.file_id().file_id()))
-            .then(|| context.store.clone())
-        });
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
@@ -690,7 +668,6 @@ impl ParquetReaderBuilder {
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,
             },
-            range_index_store,
         );
 
         metrics.build_cost += start.elapsed();
@@ -1892,50 +1869,6 @@ impl RowGroupReaderBuilder {
             )
             .await?;
         self.make_projected_stream(stream)
-    }
-
-    /// Builds the normal projection without running the generic predicate prefilter.
-    ///
-    /// The series reader uses this after computing its own primary-key-only row
-    /// selection.
-    pub(crate) async fn build_without_prefilter(
-        &self,
-        build_ctx: RowGroupBuildContext<'_>,
-    ) -> Result<ProjectedRecordBatchStream> {
-        let stream = self
-            .build_with_projection(
-                build_ctx.row_group_idx,
-                build_ctx.row_selection,
-                self.projection.mask.clone(),
-                build_ctx.fetch_metrics,
-            )
-            .await?;
-        self.make_projected_stream(stream)
-    }
-
-    /// Builds a stream that reads only the encoded primary-key column.
-    ///
-    /// It preserves the normal reader's binary-or-dictionary decision. This path deliberately
-    /// skips the normal prefilter pass: the caller reads `__primary_key` once and applies all
-    /// encoded-primary-key filters to the returned batches.
-    pub(crate) async fn build_primary_key(
-        &self,
-        build_ctx: RowGroupBuildContext<'_>,
-    ) -> Result<ProjectedRecordBatchStream> {
-        let parquet_schema = self.parquet_meta.file_metadata().schema_descr();
-        let primary_key_index =
-            primary_key_leaf_index(parquet_schema).context(UnexpectedSnafu {
-                reason: "SST does not contain __primary_key",
-            })?;
-        let projection = ProjectionMask::leaves(parquet_schema, [primary_key_index]);
-
-        self.build_with_projection(
-            build_ctx.row_group_idx,
-            build_ctx.row_selection,
-            projection,
-            build_ctx.fetch_metrics,
-        )
-        .await
     }
 
     fn make_projected_stream(

@@ -31,19 +31,21 @@ use futures::TryStreamExt;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 
-use crate::series_index::artifact::SamplesFileHandle;
-use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
+use crate::series_index::format::{SamplesBatch, SamplesReadRequest};
 use crate::series_index::identity::ExactSeriesKey;
-use crate::series_index::purger::series_index_channel;
+use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, KeyRef, MAGIC, Page, PayloadReference, TRAILER_SIZE, Trailer,
 };
-use crate::series_index::samples::{ColumnarSamplesFormat, Manifest};
 use crate::series_index::{TABLE_ID_COLUMN, TSID_COLUMN};
+use crate::sst::file::FileHandle;
 use crate::test_util::sst_util::new_sparse_primary_key;
 
-use super::{RecordingRead, build, exact, keyed_batch, request, root_page, sample_batch, store};
+use super::{
+    REGION_DIR, RecordingRead, build, exact, keyed_batch, request, rewrite_part, root_page,
+    sample_batch, store,
+};
 
 /// `(table_id, tsid, timestamp)` of every returned row, in output order.
 fn collect_times(batches: &[SamplesBatch]) -> Vec<(u32, u64, i64)> {
@@ -109,36 +111,6 @@ fn wide_batch(meta: &RegionMetadataRef, key: &[u8], times: &[i64]) -> RecordBatc
         arrays.insert(index, base.column(0).clone());
     }
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
-}
-
-/// Replaces the part and manifest of `handle` with `bytes` and their recorded sizes.
-///
-/// Everything else stays valid, so a test can isolate one rewritten descriptor.
-async fn rewrite_part(
-    store: &ObjectStore,
-    handle: SamplesFileHandle,
-    mut manifest: Manifest,
-    bytes: Vec<u8>,
-) -> SamplesFileHandle {
-    let part_path = manifest.part_path(0);
-    store.write(&part_path, bytes.clone()).await.unwrap();
-    manifest.files[0].file_size = bytes.len() as u64;
-    let manifest_path = manifest.path();
-    let json = serde_json::to_vec(&manifest).unwrap();
-    store.write(&manifest_path, json.clone()).await.unwrap();
-    let mut entry = handle.entry().clone();
-    for object in &mut entry.artifact.objects {
-        if object.path == part_path {
-            object.file_size = bytes.len() as u64;
-        } else if object.path == manifest_path {
-            object.file_size = json.len() as u64;
-        } else {
-            panic!("unexpected samples object {}", object.path);
-        }
-    }
-    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let (purger, _receiver) = series_index_channel(store.clone());
-    SamplesFileHandle::new(handle.file_id(), entry, purger)
 }
 
 /// A single label this long encodes to a key well past the 65,536-byte page limit. The old
@@ -470,7 +442,7 @@ async fn legacy_112_byte_trailer_is_rejected() {
 async fn key_area_traffic(
     store: &ObjectStore,
     format: &ColumnarSamplesFormat,
-    handle: &SamplesFileHandle,
+    handle: &FileHandle,
     query: SamplesReadRequest,
 ) -> (usize, u64, usize) {
     use object_store::layers::mock::{MockLayerBuilder, oio};
@@ -619,7 +591,7 @@ async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
 /// `root_page` insists on a single-part artifact; the part-boundary tests need one part at a time.
 async fn part_root(
     store: &ObjectStore,
-    handle: &SamplesFileHandle,
+    handle: &FileHandle,
     part: u32,
 ) -> (Trailer, Page, Vec<u8>) {
     let manifest = super::manifest(store, handle).await;
@@ -651,7 +623,7 @@ async fn part_root(
 /// must be the exact keys themselves, not the framing or the reference order.
 async fn rewrite_entries(
     store: &ObjectStore,
-    handle: SamplesFileHandle,
+    handle: FileHandle,
     edit: impl FnOnce(&mut [u8], [std::ops::Range<usize>; 2]),
 ) {
     let (manifest, _, page, mut bytes) = root_page(store, &handle).await;
@@ -672,7 +644,7 @@ async fn rewrite_entries(
 async fn recorded_key_area_reads(
     store: &ObjectStore,
     format: &ColumnarSamplesFormat,
-    handle: &SamplesFileHandle,
+    handle: &FileHandle,
     query: SamplesReadRequest,
 ) -> (usize, u64, crate::error::Result<usize>) {
     use object_store::layers::mock::{MockLayerBuilder, oio};
@@ -1306,9 +1278,10 @@ async fn per_key_fallback_reserves_fetch_and_retained_key() {
         }))
         .build()
         .unwrap();
-    let reader = reader::SamplesReader::open(store.clone().layer(layer), handle.clone())
-        .await
-        .unwrap();
+    let reader =
+        reader::SamplesReader::open(store.clone().layer(layer), handle.clone(), REGION_DIR)
+            .await
+            .unwrap();
     let mut query = super::full_request();
     query.memory_pool = Some(pool.clone());
     reads.lock().unwrap().clear();
@@ -1414,7 +1387,9 @@ async fn boundary_key_is_charged_while_it_is_alive() {
     .await;
     assert_eq!(2, super::manifest(&store, &handle).await.files.len());
     let pool = Arc::new(WatchingPool::new(8 * 1024 * 1024));
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let reader = reader::SamplesReader::open(store, handle, REGION_DIR)
+        .await
+        .unwrap();
     let mut query = request(&[TABLE_ID_COLUMN, TSID_COLUMN, "ts"]);
     query.memory_pool = Some(pool.clone());
     let mut stream = reader.read(query).unwrap();

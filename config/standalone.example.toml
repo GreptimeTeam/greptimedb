@@ -806,29 +806,14 @@ manifest_checkpoint_distance = 10
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
 
-## Under development; do not enable. Whether to enable series indexes.
-## Indexes are stored on the local filesystem under `{data_home}/series_index`.
+## Build certified series indexes for Narthex regions.
 #+ experimental_enable_series_index = false
-
-## Under development. Select legacy Parquet indexes or paired columnar series and samples.
-#+ experimental_series_index_format = "legacy"
-
-## Approximate size limit for local series and range index sidecars in open regions, shared across workers.
-## Workers periodically refresh usage and defer sidecar builds when full. In-flight reconciliation
-## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
-## retained by readers are not counted.
-## Minimum: 1KiB. Takes effect on restart.
-#+ experimental_series_index_max_size = "5GiB"
-
-## Whether to build and query range indexes when series indexes are enabled.
-## Obsolete range-index metadata and files are still cleaned up when disabled.
-#+ experimental_enable_range_index = false
 
 ## Interval between series-index maintenance runs. Zero uses the default of 5 min.
 #+ experimental_series_index_maintenance_interval = "5m"
 
 ## Series-index window width (default: 5 days). Native series indexes persist the
-## width on first build. Local series indexes round up to a compaction window multiple.
+## width on first build.
 #+ experimental_series_index_bucket_width = "5days"
 
 ## Minimum uncovered live sample SSTs per native series index window. Zero uses the default of 4.
@@ -989,9 +974,6 @@ schedule_compaction_after_edit = true
 
 ## Whether to enable flat format as the default SST format.
 default_flat_format = true
-
-## Whether to enable the experimental two-phase mode for eligible metric series scans.
-experimental_series_scan_v2 = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]
