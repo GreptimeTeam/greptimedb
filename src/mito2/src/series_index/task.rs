@@ -311,7 +311,7 @@ impl SeriesIndexTask {
         {
             return Ok(());
         }
-        self.build_and_expire_native(&region, manual).await?;
+        self.build_and_expire_narthex(&region, manual).await?;
         let version = region.version();
         if !version.pending_tails.is_empty() || !self.state.is_running() {
             return Ok(());
@@ -339,7 +339,7 @@ impl SeriesIndexTask {
                 series_indexes_to_remove: inputs.iter().map(FileHandle::file_id).collect(),
                 ..Default::default()
             };
-            self.publish_native(
+            self.publish_narthex(
                 &region,
                 edit,
                 &[handle],
@@ -351,7 +351,7 @@ impl SeriesIndexTask {
         Ok(())
     }
 
-    async fn build_and_expire_native(&self, region: &MitoRegionRef, manual: bool) -> Result<()> {
+    async fn build_and_expire_narthex(&self, region: &MitoRegionRef, manual: bool) -> Result<()> {
         let (ssts, metadata, frontier, truncated_entry_id, options, series_window_seconds) = {
             let current = region.version_control.current();
             let version = current.version;
@@ -492,13 +492,13 @@ impl SeriesIndexTask {
             }
         }
         if !handles.is_empty() || !edit.series_indexes_to_remove.is_empty() {
-            self.publish_native(region, edit, &handles, truncated_entry_id, &watermarks)
+            self.publish_narthex(region, edit, &handles, truncated_entry_id, &watermarks)
                 .await?;
         }
         Ok(())
     }
 
-    async fn publish_native(
+    async fn publish_narthex(
         &self,
         region: &MitoRegionRef,
         edit: crate::manifest::action::RegionEdit,
@@ -611,7 +611,7 @@ mod tests {
     #[case(false)]
     #[case(true)]
     #[tokio::test]
-    async fn test_native_index_build_releases_flushed_memtables(#[case] truncate: bool) {
+    async fn test_narthex_index_build_releases_flushed_memtables(#[case] truncate: bool) {
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let writer_entered = entered.clone();
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_native_import_frontier_and_index_ttl() {
+    async fn test_narthex_import_frontier_and_index_ttl() {
         let mut env = TestEnv::new().await;
         let clock = Arc::new(crate::time_provider::mock::MockTimeProvider::new(2000));
         let engine = env

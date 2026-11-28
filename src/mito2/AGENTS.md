@@ -99,7 +99,7 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
   `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file
   that carries extension indexes (`worker/handle_rebuild_index.rs::needs_background_indexes`).
-- **Native series maintenance** (`series_index/task.rs`) streams exact keys from pinned
+- **Narthex series maintenance** (`series_index/task.rs`) streams exact keys from pinned
   Narthex files and publishes index replacements through a region manifest edit. Expiry respects the certified window. Reader handles pin retired files until the last reader releases them.
 - **Series discovery** (`read/series_scan/prepared/narthex.rs`) checks the sequence domain,
   schema and required artifacts before skipping sample keys. Samples and live memtables

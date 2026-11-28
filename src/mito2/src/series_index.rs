@@ -14,7 +14,7 @@
 
 //! Series index construction, search, and maintenance.
 //!
-//! Native index artifacts are owned and published by the region manifest.
+//! Narthex index artifacts are owned and published by the region manifest.
 
 pub(crate) mod artifact;
 mod artifact_writer;
