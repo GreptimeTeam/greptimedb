@@ -261,6 +261,7 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
+                test_elasticsearch_logs_with_new_field,
                 test_elasticsearch_pipeline_version,
                 test_splunk_logs,
                 test_splunk_raw,
@@ -16352,6 +16353,59 @@ pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
         "test_elasticsearch_logs_with_index_2",
         &client,
         "select foo, bar from test_index2;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_elasticsearch_logs_with_new_field(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs_with_new_field")
+            .await;
+
+    let client = TestClient::new(app).await;
+
+    // Every document is its own insert request. The first one creates the table,
+    // the third one needs a column that table lacks.
+    let body = r#"
+        {"create":{"_index":"es_new_field"}}
+        {"a":"1"}
+        {"create":{"_index":"es_new_field"}}
+        {"a":"2"}
+        {"create":{"_index":"es_new_field"}}
+        {"b":"3"}
+        {"create":{"_index":"es_new_field"}}
+        {"a":"4"}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+    let response: Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(response["errors"], json!(false));
+    assert_eq!(
+        response["items"],
+        json!(vec![json!({"create": {"status": 201}}); 4])
+    );
+
+    let expected = r#"[["1",null],["2",null],[null,"3"],["4",null]]"#;
+    validate_data(
+        "test_elasticsearch_logs_with_new_field",
+        &client,
+        "select a, b from es_new_field order by coalesce(a, b);",
         expected,
     )
     .await;

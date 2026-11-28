@@ -1392,8 +1392,12 @@ impl Inserter {
     }
 
     /// Creates or alter tables on demand:
-    /// - if table does not exist, create table by inferred CreateExpr
+    /// - if table does not exist, create table by inferred CreateExpr from the first request for it,
+    ///   then check every request for it against the table that exists after the CREATE, which a
+    ///   concurrent writer may have created with other columns
     /// - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
+    ///
+    /// Each altered table gets one `AlterExpr` with the new columns of all its requests.
     ///
     /// Returns a mapping from table name to table id, where table name is the table name involved in the requests.
     /// This mapping is used in the conversion of RowToRegion.
@@ -1407,7 +1411,9 @@ impl Inserter {
     /// `align_time_index_unit` supplies the selected physical table's time-index
     /// unit for new logical tables. Existing logical targets always use their
     /// own unit, even when this argument is `None` because no new target needs
-    /// the selected backing table.
+    /// the selected backing table. Rows for a new table keep their unit until
+    /// the CREATE returns, and are then converted once to the unit of the table
+    /// that exists.
     #[allow(clippy::too_many_arguments)]
     async fn create_or_alter_tables_on_demand(
         &self,
@@ -1492,8 +1498,11 @@ impl Inserter {
         let mut need_refresh_table_infos = HashSet::new();
         let mut instant_table_ids = HashSet::new();
         let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
+        // Requests whose tables are created below, by index. They are checked
+        // against the table that exists after the CREATE.
+        let mut created_table_requests = vec![];
 
-        for req in &mut requests.inserts {
+        for (index, req) in requests.inserts.iter_mut().enumerate() {
             // Mixed batches need a per-table decision so an exempt table cannot authorize others.
             let auto_create_allowed = auto_create_disabled_reason.is_none()
                 || Self::is_auto_create_exempt_private_table(&schema, &req.table_name);
@@ -1528,7 +1537,7 @@ impl Inserter {
                             auto_create_table_type.alter_existing(),
                         )?
                     {
-                        alter_tables.push(alter_expr);
+                        merge_alter_table_expr(&mut alter_tables, alter_expr);
                         need_refresh_table_infos.insert((
                             catalog.to_string(),
                             schema.clone(),
@@ -1563,49 +1572,46 @@ impl Inserter {
                     .fail();
                 }
                 None => {
-                    // Metric path: a new table uses the selected physical
-                    // table's unit; convert before the create expression is
-                    // derived from the request schema.
-                    if let Some(physical_unit) = align_time_index_unit
-                        && let Some(rows) = req.rows.as_mut()
+                    // The first request for a missing table defines its CREATE.
+                    if !create_tables
+                        .iter()
+                        .any(|expr: &CreateTableExpr| expr.table_name == req.table_name)
                     {
-                        convert_rows_time_unit(rows, physical_unit)?;
+                        let semantic_index = per_table_semantics
+                            .get_or_insert_with(|| parse_per_table_semantic_index(ctx))
+                            .as_ref();
+                        let mut create_expr = self.get_create_table_expr_on_demand(
+                            req,
+                            &auto_create_table_type,
+                            ctx,
+                            semantic_index,
+                        )?;
+                        // Metric path: a new table uses the selected physical
+                        // table's unit. The rows keep their own unit until the
+                        // table that exists after the CREATE is known.
+                        if let Some(physical_unit) = align_time_index_unit {
+                            set_time_index_unit(&mut create_expr, physical_unit);
+                        }
+                        create_tables.push(create_expr);
                     }
-                    let semantic_index = per_table_semantics
-                        .get_or_insert_with(|| parse_per_table_semantic_index(ctx))
-                        .as_ref();
-                    let create_expr = self.get_create_table_expr_on_demand(
-                        req,
-                        &auto_create_table_type,
-                        ctx,
-                        semantic_index,
-                    )?;
-                    create_tables.push(create_expr);
+                    created_table_requests.push(index);
                 }
             }
         }
 
+        let mut created_tables = HashMap::with_capacity(create_tables.len());
         match auto_create_table_type {
             AutoCreateTableType::Logical(_) => {
                 if !create_tables.is_empty() {
-                    // Creates logical tables in batch.
+                    // Creates logical tables in batch. They are read back from the
+                    // catalog, so a table that a concurrent writer created comes
+                    // with its actual schema.
                     let tables = self
                         .create_logical_tables(create_tables, ctx, statement_executor)
                         .await?;
-
                     for table in tables {
-                        let table_info = table.table_info();
-                        if table_info.is_ttl_instant_table() {
-                            instant_table_ids.insert(table_info.table_id());
-                        }
-                        table_infos.insert(table_info.table_id(), table.table_info());
+                        created_tables.insert(table.table_info().name.clone(), table);
                     }
-                }
-                if !alter_tables.is_empty() {
-                    // Alter logical tables in batch.
-                    statement_executor
-                        .alter_logical_tables(alter_tables, ctx.clone(), TriggerReason::AutoAlter)
-                        .await?;
                 }
             }
             AutoCreateTableType::Physical
@@ -1618,43 +1624,10 @@ impl Inserter {
                     let table = self
                         .create_physical_table(create_table, None, ctx, statement_executor)
                         .await?;
-                    // A concurrent CREATE can return our proposed schema with the winner's ID.
-                    let table = if is_exemplar {
-                        let name = table.table_info().name.clone();
-                        self.get_table(catalog, &schema, &name)
-                            .await?
-                            .context(TableNotFoundSnafu { table_name: name })?
-                    } else {
-                        table
-                    };
-                    if matches!(auto_create_table_type, AutoCreateTableType::Exemplar) {
+                    if is_exemplar {
                         validate_exemplar_table(&table.table_info())?;
-                        if let Some(req) = requests
-                            .inserts
-                            .iter_mut()
-                            .find(|r| r.table_name == table.table_info().name)
-                            && let Some(alter) = self.get_alter_table_expr_on_demand(
-                                req, &table, ctx, false, false, true,
-                            )?
-                        {
-                            alter_tables.push(alter);
-                            need_refresh_table_infos.insert((
-                                catalog.to_string(),
-                                schema.clone(),
-                                req.table_name.clone(),
-                            ));
-                        }
                     }
-                    let table_info = table.table_info();
-                    if table_info.is_ttl_instant_table() {
-                        instant_table_ids.insert(table_info.table_id());
-                    }
-                    table_infos.insert(table_info.table_id(), table.table_info());
-                }
-                for alter_expr in alter_tables.into_iter() {
-                    statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
-                        .await?;
+                    created_tables.insert(table.table_info().name.clone(), table);
                 }
             }
 
@@ -1696,11 +1669,7 @@ impl Inserter {
                         let table = self
                             .create_physical_table(create_table, None, ctx, statement_executor)
                             .await?;
-                        let table_info = table.table_info();
-                        if table_info.is_ttl_instant_table() {
-                            instant_table_ids.insert(table_info.table_id());
-                        }
-                        table_infos.insert(table_info.table_id(), table.table_info());
+                        created_tables.insert(table.table_info().name.clone(), table);
                     } else {
                         // prebuilt partition rules for uuid data: see the function
                         // for more information
@@ -1787,14 +1756,59 @@ impl Inserter {
                                 statement_executor,
                             )
                             .await?;
-                        let table_info = table.table_info();
-                        if table_info.is_ttl_instant_table() {
-                            instant_table_ids.insert(table_info.table_id());
-                        }
-                        table_infos.insert(table_info.table_id(), table.table_info());
+                        created_tables.insert(table.table_info().name.clone(), table);
                     }
                 }
-                for alter_expr in alter_tables.into_iter() {
+            }
+        }
+
+        for index in created_table_requests {
+            let req = &mut requests.inserts[index];
+            let table = created_tables
+                .get(&req.table_name)
+                .context(TableNotFoundSnafu {
+                    table_name: &req.table_name,
+                })?;
+            // Metric path: convert the rows once, to the unit of the table that
+            // exists after the CREATE.
+            if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
+                && let Some(rows) = req.rows.as_mut()
+                && let Some(target_unit) = table_time_index_unit(table)
+            {
+                convert_rows_time_unit(rows, target_unit)?;
+            }
+            if let Some(alter_expr) = self.get_alter_table_expr_on_demand(
+                req,
+                table,
+                ctx,
+                accommodate_existing_schema,
+                is_single_value,
+                auto_create_table_type.alter_existing(),
+            )? {
+                merge_alter_table_expr(&mut alter_tables, alter_expr);
+                need_refresh_table_infos.insert((
+                    catalog.to_string(),
+                    schema.clone(),
+                    req.table_name.clone(),
+                ));
+            }
+        }
+        for table in created_tables.into_values() {
+            let table_info = table.table_info();
+            if table_info.is_ttl_instant_table() {
+                instant_table_ids.insert(table_info.table_id());
+            }
+            table_infos.insert(table_info.table_id(), table_info);
+        }
+
+        if !alter_tables.is_empty() {
+            if matches!(auto_create_table_type, AutoCreateTableType::Logical(_)) {
+                // Alter logical tables in batch.
+                statement_executor
+                    .alter_logical_tables(alter_tables, ctx.clone(), TriggerReason::AutoAlter)
+                    .await?;
+            } else {
+                for alter_expr in alter_tables {
                     statement_executor
                         .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
                         .await?;
@@ -2118,6 +2132,9 @@ impl Inserter {
     }
 
     /// Creates a table with options.
+    ///
+    /// Returns the table read back from the catalog: a CREATE that loses to a
+    /// concurrent writer returns its own schema with the winner's table ID.
     async fn create_physical_table(
         &self,
         mut create_table_expr: CreateTableExpr,
@@ -2141,7 +2158,13 @@ impl Inserter {
         );
 
         match res {
-            Ok(table) => {
+            Ok(_) => {
+                let table = self
+                    .get_table(table_ref.catalog, table_ref.schema, table_ref.table)
+                    .await?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: table_ref.to_string(),
+                    })?;
                 validate_trace_table_model(&table.table_info(), ctx)?;
                 Ok(table)
             }
@@ -2202,6 +2225,32 @@ impl Inserter {
     }
 }
 
+/// Merges `alter_expr` into the pending ALTER of the same table, so each table
+/// gets one `AddColumns`. An ALTER LOGICAL TABLES procedure reads the metadata
+/// of each table once and fails on a second ALTER of the same table.
+fn merge_alter_table_expr(alter_tables: &mut Vec<AlterTableExpr>, alter_expr: AlterTableExpr) {
+    let pending = alter_tables
+        .iter_mut()
+        .find(|pending| pending.table_name == alter_expr.table_name)
+        .and_then(|pending| pending.kind.as_mut());
+    if let Some(Kind::AddColumns(pending)) = pending
+        && let Some(Kind::AddColumns(add_columns)) = alter_expr.kind
+    {
+        for add_column in add_columns.add_columns {
+            let name = add_column.column_def.as_ref().map(|def| &def.name);
+            if !pending
+                .add_columns
+                .iter()
+                .any(|column| column.column_def.as_ref().map(|def| &def.name) == name)
+            {
+                pending.add_columns.push(add_column);
+            }
+        }
+    } else {
+        alter_tables.push(alter_expr);
+    }
+}
+
 fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
     let mut fields = request_schema
         .iter()
@@ -2228,6 +2277,18 @@ fn table_time_index_unit(table: &TableRef) -> Option<TimeUnit> {
         .schema
         .timestamp_column()
         .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
+}
+
+fn set_time_index_unit(create_table_expr: &mut CreateTableExpr, unit: TimeUnit) {
+    if let Some(column) = create_table_expr
+        .column_defs
+        .iter_mut()
+        .find(|column| column.name == create_table_expr.time_index)
+    {
+        column.data_type = api::helper::timestamp_datatype(unit) as i32;
+        // Timestamp columns never carry a datatype extension.
+        column.datatype_extension = None;
+    }
 }
 
 fn convert_rows_time_unit(rows: &mut Rows, target_unit: TimeUnit) -> Result<()> {
