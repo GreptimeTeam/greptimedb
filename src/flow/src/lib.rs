@@ -27,6 +27,7 @@ mod df_optimizer;
 pub(crate) mod engine;
 pub mod error;
 mod expr;
+pub mod flow_admin;
 pub mod heartbeat;
 mod metrics;
 mod repr;
@@ -54,6 +55,7 @@ pub use batching_mode::utils::{
 };
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
+pub use flow_admin::{FlowAdminHandler, FlowAdminRegistry, FlowAdminRegistryRef, FlowAdminRequest};
 pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder};
 
 pub use crate::adapter::FlownodeOptions;

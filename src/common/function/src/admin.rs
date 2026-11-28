@@ -40,6 +40,8 @@ use crate::admin::build_index_table::{BuildIndexFunction, BuildSeriesIndexFuncti
 use crate::admin::cancel_region_compaction::CancelRegionCompactionFunction;
 use crate::admin::discard_pending_tails::DiscardPendingTailsFunction;
 use crate::admin::discard_unflushed_data::DiscardUnflushedDataFunction;
+#[cfg(feature = "enterprise")]
+use crate::backfill::{FlowBackfillFunction, FlowBackfillStatusFunction};
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
@@ -70,6 +72,10 @@ impl AdminFunction {
         registry.register(DiscardUnflushedDataFunction::factory());
         registry.register(DiscardPendingTailsFunction::factory());
         #[cfg(feature = "enterprise")]
-        registry.register(PurgeTableFunction::factory());
+        {
+            registry.register(PurgeTableFunction::factory());
+            registry.register(FlowBackfillFunction::factory());
+            registry.register(FlowBackfillStatusFunction::factory());
+        }
     }
 }

@@ -154,13 +154,29 @@ pub trait ProcedureServiceHandler: Send + Sync {
     ) -> Result<MetaGcResponse>;
 }
 
-/// This flow service handler is only use for flush flow for now.
+/// This flow service handler is only use for flush and flow-admin calls for now.
 #[async_trait]
 pub trait FlowServiceHandler: Send + Sync {
     async fn flush(
         &self,
         catalog: &str,
         flow: &str,
+        ctx: QueryContextRef,
+    ) -> Result<api::v1::flow::FlowResponse>;
+
+    /// Runs the flow-admin function `function` on the flownode that owns
+    /// `catalog.flow`, with the function's own `args` (already normalized to
+    /// strings, in the order the function documents).
+    ///
+    /// The route carries no per-function request: the flownode resolves
+    /// `function` itself and answers with its result in the
+    /// `flow_admin_result` extension of the response.
+    async fn admin(
+        &self,
+        catalog: &str,
+        flow: &str,
+        function: &str,
+        args: Vec<String>,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse>;
 }

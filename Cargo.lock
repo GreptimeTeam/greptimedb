@@ -2515,6 +2515,7 @@ dependencies = [
  "axum 0.8.4",
  "bincode",
  "catalog",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-error",
@@ -6187,7 +6188,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=8aa45418597636516410c0c892dbd0269754a02c#8aa45418597636516410c0c892dbd0269754a02c"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d6059627a1a460831311b757b8498c8eb51d07e8#d6059627a1a460831311b757b8498c8eb51d07e8"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",

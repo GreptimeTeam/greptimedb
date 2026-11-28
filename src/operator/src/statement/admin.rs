@@ -40,6 +40,7 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
 use sql::statements::admin::Admin;
+use sqlparser::ast::UnaryOperator;
 
 use crate::error::{self, CastSnafu, ExecuteAdminFunctionSnafu, Result};
 use crate::statement::StatementExecutor;
@@ -79,6 +80,7 @@ struct CoreAdminFunctionService {
 }
 
 /// Parts of an `ADMIN` call needed both for execution and schema derivation.
+#[derive(Debug)]
 struct ResolvedAdminFunction {
     admin_udf: datafusion_expr::ScalarUDF,
     fn_name: String,
@@ -123,19 +125,48 @@ fn resolve_admin_function(
         }
         .fail();
     };
-    let arg_values = args
-        .args
-        .iter()
-        .map(|arg| {
-            let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg else {
+    // ADMIN arguments are literals. Accept one leading `+`/`-` on a numeric
+    // literal as well: sqlparser represents `-1000` as a unary expression, and
+    // epoch-millisecond arguments are documented as signed. Signed strings,
+    // nested signs, arithmetic and casts remain rejected.
+    let mut owned_args = Vec::with_capacity(args.args.len());
+    for arg in &args.args {
+        let value = match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) => value.value.clone(),
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::UnaryOp { op, expr })) => {
+                let Expr::Value(value) = expr.as_ref() else {
+                    return error::BuildAdminFunctionArgsSnafu {
+                        msg: format!("unsupported function arg {arg} for {}", fn_name),
+                    }
+                    .fail();
+                };
+                let SqlValue::Number(raw, _) = &value.value else {
+                    return error::BuildAdminFunctionArgsSnafu {
+                        msg: format!("unsupported function arg {arg} for {}", fn_name),
+                    }
+                    .fail();
+                };
+                match op {
+                    UnaryOperator::Plus => SqlValue::Number(raw.clone(), false),
+                    UnaryOperator::Minus => SqlValue::Number(format!("-{raw}"), false),
+                    _ => {
+                        return error::BuildAdminFunctionArgsSnafu {
+                            msg: format!("unsupported function arg {arg} for {}", fn_name),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            _ => {
                 return error::BuildAdminFunctionArgsSnafu {
                     msg: format!("unsupported function arg {arg} for {}", fn_name),
                 }
                 .fail();
-            };
-            Ok(&value.value)
-        })
-        .collect::<Result<Vec<_>>>()?;
+            }
+        };
+        owned_args.push(value);
+    }
+    let arg_values = owned_args.iter().collect::<Vec<_>>();
 
     let args = args_to_vector(&signature.type_signature, &arg_values, query_ctx)?;
     let arg_types = args
@@ -468,6 +499,8 @@ fn try_get_data_type_for_sql_value(value: &SqlValue) -> Result<ArrowDataType> {
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(feature = "enterprise")]
+    use common_function::state::FunctionState;
     use datafusion_expr::TypeSignature;
     use datatypes::arrow::datatypes::DataType as ArrowDataType;
     use datatypes::value::Value;
@@ -479,7 +512,36 @@ mod tests {
     use sql::statements::statement::Statement;
 
     use crate::error::Error;
+    #[cfg(feature = "enterprise")]
+    use crate::statement::admin::resolve_admin_function;
     use crate::statement::admin::{admin_output_schema, args_to_vector, immediate_result};
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_admin_signed_numeric_args_resolve() {
+        for sql in [
+            "ADMIN flow_backfill('bf', -1000, 1000)",
+            "ADMIN flow_backfill('bf', +1000, 2000)",
+            "ADMIN flow_backfill('bf', -9223372036854775808, 0)",
+        ] {
+            let statement = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_or_else(|e| panic!("{sql} must parse: {e}"))
+            .remove(0);
+            let Statement::Admin(statement) = statement else {
+                panic!("{sql} must be an ADMIN statement");
+            };
+            let resolved = resolve_admin_function(
+                &statement,
+                &QueryContext::arc(),
+                Arc::new(FunctionState::default()),
+            );
+            assert!(resolved.is_ok(), "{sql} must resolve: {resolved:?}");
+        }
+    }
 
     #[test]
     fn test_args_to_vector_arity() {
