@@ -2139,24 +2139,31 @@ fn empty_discovered_series_schema(fields: Vec<String>) -> Arc<SeriesSchema> {
 /// `=` names one field. The selector that carries no such matcher gets the one default field, which is
 /// the name this route gives the single value column it reads a scan's field into.
 ///
-/// `None` is a matcher whose answer is a set over the fields a table carries - `!=`, `=~` and `!~` keep
-/// or drop columns by a rule over every one of them - because an input that reads no table has none to
-/// apply that rule to. Such a selection keeps the plan the existing planner would have built for it
-/// rather than claiming a layout nothing decided.
+/// An operator whose answer is a set over the fields a table carries - `!=`, `=~` and `!~` keep or drop
+/// columns by a rule over every one of them - states no name of its own. A layout an `=` states beside it
+/// is still the layout this selector declares, and with no such matcher the one name an input that reads
+/// no table can be given is that same default field, which these operators keep or drop like any other
+/// name. `None` is that rule dropping every name the input can be given: nothing is left to declare, and
+/// a selection whose layout nothing decides keeps the plan the existing planner would have built for it.
 fn empty_discovered_fields(matchers: Option<&[Matcher]>) -> Option<Vec<String>> {
     let Some(matchers) = matchers else {
         return Some(vec![DEFAULT_FIELD_COLUMN.to_string()]);
     };
     let mut fields = Vec::with_capacity(matchers.len());
-    for matcher in matchers {
-        if matcher.op != MatchOp::Equal {
-            return None;
-        }
+    for matcher in matchers.iter().filter(|matcher| matcher.op == MatchOp::Equal) {
         if !fields.iter().any(|field| field == &matcher.value) {
             fields.push(matcher.value.clone());
         }
     }
-    Some(fields)
+    if !fields.is_empty() {
+        return Some(fields);
+    }
+    // No matcher states a name, so the input carries the default field and these operators decide
+    // whether that name is one the selection keeps.
+    let keeps_default = matchers
+        .iter()
+        .all(|matcher| matcher.is_match(DEFAULT_FIELD_COLUMN));
+    keeps_default.then(|| vec![DEFAULT_FIELD_COLUMN.to_string()])
 }
 
 /// Whether `expr` asks for `absent_over_time`, whose window is read through a fold that keeps the
