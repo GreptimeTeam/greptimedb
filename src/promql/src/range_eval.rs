@@ -16,8 +16,6 @@
 
 use std::ops::Range;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use common_query::prometheus::is_prometheus_stale_nan;
 use common_query::promql_annotations::PromqlAnnotationCollector;
@@ -290,12 +288,27 @@ impl PendingBatch {
 }
 
 #[cfg(test)]
-static POSITION_COMPARISONS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// Comparisons [`timestamp_le`] made on this thread, so tests can bound the positioning work
+    /// that the result does not show. Per thread to isolate concurrently running tests.
+    static POSITION_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_position_comparisons() {
+    POSITION_COMPARISONS.with(|comparisons| comparisons.set(0));
+}
+
+/// Comparisons [`timestamp_le`] made on this thread since [`reset_position_comparisons`].
+#[cfg(test)]
+pub(crate) fn position_comparisons() -> u64 {
+    POSITION_COMPARISONS.with(std::cell::Cell::get)
+}
 
 #[inline]
 fn timestamp_le(timestamp: i64, eval_ts: i64) -> bool {
     #[cfg(test)]
-    POSITION_COMPARISONS.fetch_add(1, Ordering::Relaxed);
+    POSITION_COMPARISONS.with(|comparisons| comparisons.set(comparisons.get() + 1));
     timestamp <= eval_ts
 }
 

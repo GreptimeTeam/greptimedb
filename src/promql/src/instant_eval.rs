@@ -27,14 +27,27 @@ use crate::map::drop_metric_name;
 #[cfg(test)]
 mod tests;
 
-/// Source rows [`select_instants`] examined, so tests can assert it makes one pass over the axis.
 #[cfg(test)]
-pub(crate) static AXIS_ROWS_READ: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// Source rows [`select_instants`] examined on this thread, so tests can assert it makes one
+    /// pass over the axis. Per thread to isolate concurrently running tests.
+    static AXIS_ROWS_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_axis_rows_read() {
+    AXIS_ROWS_READ.with(|rows| rows.set(0));
+}
+
+/// Source rows [`select_instants`] examined on this thread since [`reset_axis_rows_read`].
+#[cfg(test)]
+pub(crate) fn axis_rows_read() -> u64 {
+    AXIS_ROWS_READ.with(std::cell::Cell::get)
+}
 
 fn row_read() {
     #[cfg(test)]
-    AXIS_ROWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    AXIS_ROWS_READ.with(|rows| rows.set(rows.get() + 1));
 }
 
 /// Selects the one source row an anchored instant reads, with the lookback, offset and staleness

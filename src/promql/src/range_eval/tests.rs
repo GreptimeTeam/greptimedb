@@ -38,8 +38,9 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::{
-    CounterReset, FieldSamples, FloatWindow, POSITION_COMPARISONS, PendingBatch, RangeEvaluator,
-    RangeFunction, RangeModifier, RangeWindow, WindowKernel, accumulate, subquery_grid,
+    CounterReset, FieldSamples, FloatWindow, PendingBatch, RangeEvaluator, RangeFunction,
+    RangeModifier, RangeWindow, WindowKernel, accumulate, position_comparisons,
+    reset_position_comparisons, subquery_grid,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::functions::{
@@ -66,7 +67,7 @@ fn accumulate_positioning_comparison_counts() {
             ..Default::default()
         };
         let mut pending = PendingBatch::with_fields(1);
-        POSITION_COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        reset_position_comparisons();
         for point in 0..points {
             let eval_ts = point as i64 + window_samples as i64 - 1;
             accumulate(&mut pending, point, eval_ts, std::slice::from_ref(&field));
@@ -74,7 +75,7 @@ fn accumulate_positioning_comparison_counts() {
                 pending.clear_points();
             }
         }
-        POSITION_COMPARISONS.load(std::sync::atomic::Ordering::Relaxed)
+        position_comparisons()
     }
 
     assert_eq!(count(100_000, 100_000, 6, 1), 200_005);
