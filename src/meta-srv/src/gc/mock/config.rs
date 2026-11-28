@@ -186,13 +186,39 @@ async fn test_regions_per_table_threshold() {
         candidates.len()
     );
     if let Some(table_candidates) = candidates.get(&table_id) {
-        // Should be limited to 3 regions
+        // `regions_per_table_threshold` is the *maximum* number of candidates a table
+        // may contribute, so 10 equally scored regions yield exactly 3: the 2 score
+        // seats (lowest region ids, since every score is equal) plus the single
+        // staleness seat, all inside the budget.
         assert_eq!(
             table_candidates.len(),
             3,
-            "Expected 3 candidates for table {}, got {}",
+            "Expected at most regions_per_table_threshold candidates for table {}, got {}",
             table_id,
             table_candidates.len()
+        );
+
+        let mut region_ids: Vec<RegionId> = table_candidates
+            .iter()
+            .map(|candidate| candidate.region_id)
+            .collect();
+        region_ids.sort_unstable();
+        let deduped = region_ids.len();
+        region_ids.dedup();
+        assert_eq!(
+            region_ids.len(),
+            deduped,
+            "a region must not be selected by both the score seats and the staleness seat"
+        );
+        assert_eq!(
+            region_ids,
+            vec![
+                RegionId::new(table_id, 1),
+                RegionId::new(table_id, 2),
+                RegionId::new(table_id, 3)
+            ],
+            "equal scores fall back to the region id for the score seats, and the staleness \
+             seat takes the next id because no region was ever GC'd"
         );
     } else {
         panic!("Expected table {} to have candidates", table_id);

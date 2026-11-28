@@ -57,6 +57,15 @@ impl GcScheduler {
             table_to_region_stats.len()
         );
 
+        // Only regions the table routes can dispatch to may enter the candidate pool,
+        // so a region that cannot be dispatched cannot hold a candidate slot either.
+        let table_to_region_stats = self
+            .restrict_to_dispatchable_regions(table_to_region_stats)
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_filter_dispatchable_regions"
+            ))
+            .await?;
+
         let per_table_candidates = self
             .select_gc_candidates(&table_to_region_stats)
             .instrument(common_telemetry::tracing::info_span!(
@@ -143,6 +152,68 @@ impl GcScheduler {
         debug!("Detailed GC Job Report: {report:#?}");
 
         Ok(report)
+    }
+
+    /// Narrows `table_to_region_stats` down to the regions the current table routes can
+    /// dispatch to, i.e. the regions whose route entry carries a leader peer.
+    ///
+    /// Selection ranks regions by score and by [`RegionGcInfo::last_gc_time`], and that
+    /// rotation key only moves forward once a region is actually dispatched: it is
+    /// [`Self::process_datanode_gc`] that calls [`Self::update_full_listing_time`]. A
+    /// region the route cannot reach is dropped later, in
+    /// [`Self::aggregate_candidates_by_datanode`], so it would hold its slot at
+    /// selection time without ever advancing its key. With a single staleness seat per
+    /// table that is a permanent monopoly: every tick hands the seat to the same
+    /// unroutable region and every region ranked below it is starved, no matter how
+    /// stale its listing state gets.
+    ///
+    /// Filtering before selection makes "candidate" and "dispatchable" the same set, so
+    /// an unroutable region cannot take a slot in the first place. The aggregation-time
+    /// `warn!` stays as the guard for a route that changes between the two reads.
+    async fn restrict_to_dispatchable_regions(
+        &self,
+        table_to_region_stats: HashMap<TableId, Vec<RegionStat>>,
+    ) -> Result<HashMap<TableId, Vec<RegionStat>>> {
+        if table_to_region_stats.is_empty() {
+            return Ok(table_to_region_stats);
+        }
+
+        let table_ids = table_to_region_stats.keys().copied().collect::<Vec<_>>();
+        let mut table_routes = self.ctx.batch_get_table_route(&table_ids).await?;
+
+        let mut dispatchable = HashMap::with_capacity(table_to_region_stats.len());
+        for (table_id, region_stats) in table_to_region_stats {
+            let Some(table_route) = table_routes.remove(&table_id) else {
+                // A table without a route has no dispatchable region; a dropped table
+                // is covered by the dropped-region collector, not by this live
+                // statistics path.
+                debug!("Skipping table {table_id} for GC: no table route found");
+                continue;
+            };
+            let reachable: HashSet<RegionId> = table_route
+                .region_routes
+                .iter()
+                .filter(|region_route| region_route.leader_peer.is_some())
+                .map(|region_route| region_route.region.id)
+                .collect();
+
+            let mut kept = Vec::with_capacity(region_stats.len());
+            for region_stat in region_stats {
+                if reachable.contains(&region_stat.id) {
+                    kept.push(region_stat);
+                } else {
+                    debug!(
+                        "Skipping region {} of table {}: no leader peer in the table route",
+                        region_stat.id, table_id
+                    );
+                }
+            }
+            if !kept.is_empty() {
+                dispatchable.insert(table_id, kept);
+            }
+        }
+
+        Ok(dispatchable)
     }
 
     fn merge_dropped_regions(

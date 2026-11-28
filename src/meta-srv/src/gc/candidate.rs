@@ -65,15 +65,74 @@ impl GcScheduler {
     }
 
     /// Filter and score regions that are candidates for GC, grouped by table.
+    ///
+    /// `regions_per_table_threshold` is documented as the *maximum* number of
+    /// regions selected per table, so a table gets at most `N = threshold` seats and
+    /// every candidate is allocated inside that budget:
+    ///
+    /// 1. **The first `N - 1` seats go by score** — the best scoring eligible
+    ///    regions, highest score first and region id only to make equal scores
+    ///    deterministic, i.e. the original behaviour. A higher score is never
+    ///    displaced, so "the tables with the most garbage are collected first" still
+    ///    holds.
+    /// 2. **The last seat goes by staleness** — the eligible region whose last GC
+    ///    (`RegionGcInfo::last_gc_time`) is the oldest, with `None` — never GC'd —
+    ///    treated as the oldest of all; equal ages fall back to the higher score and
+    ///    then to the region id. The score-seated regions are excluded from that
+    ///    pool, so the two groups are disjoint by construction.
+    ///
+    /// `N == 1` therefore degenerates to "always the least recently dispatched
+    /// region": there is no score seat left and the single seat is the staleness
+    /// one. When a table has fewer than `N` eligible regions, all of them are
+    /// selected.
+    ///
+    /// The staleness seat is what keeps selection bounded: with
+    /// `gc_cooldown_period` equal to the ticker interval the score seats alone
+    /// re-select the same best-scoring regions whenever their cooldown clears, so a
+    /// region ranked below them could be starved forever even though its own listing
+    /// state is unboundedly stale.
+    ///
+    /// `last_gc_time` is the clock that makes that seat a rotation rather than a
+    /// fixed second slate: `Self::update_full_listing_time` moves it forward after
+    /// every dispatch attempt, fast listing included. The seated region is therefore
+    /// the least recently dispatched one, and dispatching it sends it to the back of
+    /// the queue, so the seat walks the regions ranked below the score seats in
+    /// least-recently-used order. With `R` equally eligible regions ranked by score
+    /// and `N` seats, each tick seats at most one new region of the tail while the
+    /// score seats keep their `N - 1` places, so the region at rank `R` is dispatched
+    /// within `1 + max(0, R - N)` ticks of first becoming eligible.
+    /// (`last_full_listing_time` would not rotate — it only advances on a full
+    /// listing, i.e. once per `full_file_listing_interval`, so a fast-listing steady
+    /// state would seat the same regions every tick.)
+    ///
+    /// Both groups share the same eligibility filter below (leader, size, cooldown,
+    /// positive score), so a staleness-seated candidate is subject to exactly the
+    /// same cooldown and the same fast/full listing decision as a score-seated one.
+    ///
+    /// Eligibility is not the same thing as dispatchability: a region can report
+    /// itself as a leader in its statistics while its table route carries no
+    /// `leader_peer`, and such a region is dropped at aggregation time. Because the
+    /// staleness key above only advances on an actual dispatch, a region that is
+    /// selected but never dispatched would keep the staleness seat forever, so the
+    /// caller (`GcScheduler::restrict_to_dispatchable_regions`) removes the regions
+    /// the route cannot reach *before* they enter this pool.
+    ///
+    /// The `region_gc_tracker` is read here rather than passed in: the selector
+    /// already locks it to apply the cooldown, so a region's ordering key is
+    /// available without widening the signature or adding a second pass over the
+    /// tracker.
     pub(crate) async fn select_gc_candidates(
         &self,
         table_to_region_stats: &HashMap<TableId, Vec<RegionStat>>,
     ) -> Result<HashMap<TableId, Vec<GcCandidate>>> {
         let mut table_candidates: HashMap<TableId, Vec<GcCandidate>> = HashMap::new();
         let now = Instant::now();
+        let threshold = self.config.regions_per_table_threshold;
 
         for (table_id, region_stats) in table_to_region_stats {
-            let mut candidates = Vec::new();
+            // Eligible regions paired with the staleness ordering key: the last GC
+            // of the region, with `None` meaning "never GC'd".
+            let mut candidates: Vec<(Option<Instant>, GcCandidate)> = Vec::new();
             let tracker = self.region_gc_tracker.lock().await;
 
             for region_stat in region_stats {
@@ -104,25 +163,62 @@ impl GcScheduler {
 
                 // Only consider regions with a meaningful score
                 if score > 0.0 {
-                    candidates.push(GcCandidate::new(region_stat.id, score, region_stat.clone()));
+                    let last_gc_time = tracker
+                        .get(&region_stat.id)
+                        .map(|gc_info| gc_info.last_gc_time);
+                    candidates.push((
+                        last_gc_time,
+                        GcCandidate::new(region_stat.id, score, region_stat.clone()),
+                    ));
                 }
             }
+            drop(tracker);
 
-            // Sort candidates by score in descending order and take top N
-            candidates.sort_by_key(|a| std::cmp::Reverse(a.score));
-            let top_candidates: Vec<GcCandidate> = candidates
-                .into_iter()
-                .take(self.config.regions_per_table_threshold)
-                .collect();
+            // Score order: highest score first, region id only to make equal scores
+            // deterministic.
+            candidates.sort_by(|a, b| {
+                b.1.score
+                    .cmp(&a.1.score)
+                    .then_with(|| a.1.region_id.cmp(&b.1.region_id))
+            });
+            // The score seats are the best `threshold - 1` regions; everything past
+            // them competes for the single staleness seat, so the total never exceeds
+            // `regions_per_table_threshold`.
+            let score_seats = threshold.saturating_sub(1).min(candidates.len());
+            let mut stale_pool = candidates.split_off(score_seats);
 
-            if !top_candidates.is_empty() {
+            // Staleness order: oldest GC first, `None` (never GC'd) beating every
+            // dispatched region; score and id only break ties so the sweep is
+            // deterministic.
+            stale_pool.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| b.1.score.cmp(&a.1.score))
+                    .then_with(|| a.1.region_id.cmp(&b.1.region_id))
+            });
+
+            let score_selected = candidates.len();
+            let mut selected: Vec<GcCandidate> = candidates.into_iter().map(|(_, c)| c).collect();
+            // The staleness seat only exists when a seat is actually left over, i.e.
+            // `threshold >= 1`, and when the pool below the score seats is not empty.
+            let stale_seat = if score_seats < threshold {
+                stale_pool.into_iter().next()
+            } else {
+                None
+            };
+            let stale_selected = usize::from(stale_seat.is_some());
+            selected.extend(stale_seat.map(|(_, candidate)| candidate));
+
+            if !selected.is_empty() {
                 info!(
-                    "Selected {} GC candidates for table {} (top {} out of all qualified)",
-                    top_candidates.len(),
+                    "Selected {} of at most {} GC candidate seats for table {} ({} by score, \
+                     {} least recently GC'd)",
+                    selected.len(),
+                    threshold,
                     table_id,
-                    self.config.regions_per_table_threshold
+                    score_selected,
+                    stale_selected,
                 );
-                table_candidates.insert(*table_id, top_candidates);
+                table_candidates.insert(*table_id, selected);
             }
         }
 

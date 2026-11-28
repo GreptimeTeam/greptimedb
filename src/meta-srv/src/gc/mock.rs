@@ -65,6 +65,20 @@ pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> 
     }
 }
 
+/// One `gc_regions` dispatch as observed by [`MockSchedulerCtx`].
+///
+/// Recorded before the mock builds (or fails) its report, so tests can observe
+/// exactly which regions the scheduler handed to a datanode in a given tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRecord {
+    /// Round tag the test stamped with [`MockSchedulerCtx::begin_dispatch_round`].
+    pub round: usize,
+    /// Region ids carried by this dispatch, sorted.
+    pub region_ids: Vec<RegionId>,
+    /// Whether the dispatch asked the datanode for a full file listing.
+    pub full: bool,
+}
+
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Default)]
 pub struct MockSchedulerCtx {
@@ -77,6 +91,10 @@ pub struct MockSchedulerCtx {
     pub get_table_to_region_stats_calls: Arc<Mutex<usize>>,
     pub gc_regions_calls: Arc<Mutex<usize>>,
     pub gc_event_contexts: Arc<Mutex<Vec<PersistentEventContext>>>,
+    /// Log of every `gc_regions` dispatch, in call order.
+    pub dispatch_log: Arc<Mutex<Vec<DispatchRecord>>>,
+    /// Round tag stamped on new [`DispatchRecord`]s.
+    pub dispatch_round: Arc<Mutex<usize>>,
     // Error injection fields for testing
     pub get_table_to_region_stats_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub get_table_route_error: Arc<Mutex<Option<crate::error::Error>>>,
@@ -89,26 +107,56 @@ pub struct MockSchedulerCtx {
     pub gc_regions_per_region_errors: Arc<Mutex<HashMap<RegionId, crate::error::Error>>>,
 }
 
+/// One table's route as the mock builders take it: the physical table id plus every
+/// region's leader peer, where `None` is a route entry that carries no leader.
+pub type MockRouteLeaders = HashMap<TableId, (TableId, Vec<(RegionId, Option<Peer>)>)>;
+
 impl MockSchedulerCtx {
     pub fn with_table_routes(
         self,
         table_routes: HashMap<TableId, (TableId, Vec<(RegionId, Peer)>)>,
     ) -> Self {
+        self.with_region_leaders(
+            table_routes
+                .into_iter()
+                .map(|(table_id, (physical_table_id, region_peers))| {
+                    (
+                        table_id,
+                        (
+                            physical_table_id,
+                            region_peers
+                                .into_iter()
+                                .map(|(region_id, peer)| (region_id, Some(peer)))
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Same as [`Self::with_table_routes`], but names every region's leader
+    /// explicitly.
+    ///
+    /// `None` models the state the routes can be in: the region is still reported by
+    /// the datanodes as a leader (its [`RegionStat`] says so) while its route entry
+    /// carries no leader peer, so the region cannot be dispatched to at all.
+    pub fn with_region_leaders(self, table_routes: MockRouteLeaders) -> Self {
         *self.table_routes.lock().unwrap() = table_routes
             .into_iter()
-            .map(|(k, (phy_id, region2peer))| {
-                let phy = PhysicalTableRouteValue::new(
-                    region2peer
+            .map(|(table_id, (physical_table_id, region_leaders))| {
+                let route = PhysicalTableRouteValue::new(
+                    region_leaders
                         .into_iter()
-                        .map(|(region_id, peer)| RegionRoute {
+                        .map(|(region_id, leader_peer)| RegionRoute {
                             region: Region::new_test(region_id),
-                            leader_peer: Some(peer),
+                            leader_peer,
                             ..Default::default()
                         })
                         .collect(),
                 );
 
-                (k, (phy_id, phy))
+                (table_id, (physical_table_id, route))
             })
             .collect();
         self
@@ -142,6 +190,33 @@ impl MockSchedulerCtx {
     #[allow(unused)]
     pub fn clear_gc_regions_per_region_errors(&self) {
         self.gc_regions_per_region_errors.lock().unwrap().clear();
+    }
+
+    /// Tag subsequent dispatches with `round` so a test can group `gc_regions`
+    /// calls per logical tick.
+    pub fn begin_dispatch_round(&self, round: usize) {
+        *self.dispatch_round.lock().unwrap() = round;
+    }
+
+    /// Dispatches recorded while `round` was the current round tag.
+    pub fn dispatches_in_round(&self, round: usize) -> Vec<DispatchRecord> {
+        self.dispatch_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| record.round == round)
+            .cloned()
+            .collect()
+    }
+
+    /// Every region id that was ever handed to `gc_regions`, across all rounds.
+    pub fn dispatched_region_ids(&self) -> HashSet<RegionId> {
+        self.dispatch_log
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|record| record.region_ids.iter().copied())
+            .collect()
     }
 }
 
@@ -195,6 +270,12 @@ impl SchedulerCtx for MockSchedulerCtx {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        // The injected error models a failing route read in general, so the batch
+        // accessor reports it as well: the scheduler may read routes through either.
+        if let Some(error) = self.get_table_route_error.lock().unwrap().take() {
+            return Err(error);
+        }
+
         let mut result = HashMap::new();
         for &table_id in table_ids {
             let route = self
@@ -212,7 +293,7 @@ impl SchedulerCtx for MockSchedulerCtx {
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],
-        _full_file_listing: bool,
+        full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
         procedure_context: ProcedureContext,
@@ -222,6 +303,19 @@ impl SchedulerCtx for MockSchedulerCtx {
             .lock()
             .unwrap()
             .push(procedure_context.event_context.unwrap_or_default());
+
+        // Record the dispatch before any report building or error injection, so the
+        // log reflects what the scheduler actually asked for even when the mock fails.
+        {
+            let mut dispatched = region_ids.to_vec();
+            dispatched.sort_unstable();
+            let round = *self.dispatch_round.lock().unwrap();
+            self.dispatch_log.lock().unwrap().push(DispatchRecord {
+                round,
+                region_ids: dispatched,
+                full: full_file_listing,
+            });
+        }
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {
