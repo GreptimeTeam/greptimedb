@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use ::auth::{UserInfoRef, UserProviderRef};
+pub use copy_in::COPY_IN_MAX_PAYLOAD_BYTES;
 use derive_builder::Builder;
 use pgwire::api::auth::{AuthDriver, ServerParameterProvider, StartupHandler};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
@@ -96,6 +97,9 @@ pub struct PostgresServerHandlerInner {
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     otlp_with_metric_engine: bool,
     memory_limiter: ServerMemoryLimiter,
+    /// Upper bound of a table-less COPY FROM STDIN payload, in bytes; 0 is
+    /// unbounded. Checked before the chunk is charged against the limiter.
+    max_copy_in_payload: u64,
     /// Completes `COPY FROM STDIN WITH (FORMAT promwrite)` payloads
     /// through the shared remote-write ingestion core — the same state
     /// the `/v1/prometheus/write` endpoint runs.
@@ -126,6 +130,8 @@ pub(crate) struct MakePostgresServerHandler {
     otlp_with_metric_engine: bool,
     #[builder(default)]
     memory_limiter: ServerMemoryLimiter,
+    #[builder(default = "COPY_IN_MAX_PAYLOAD_BYTES")]
+    max_copy_in_payload: u64,
     #[builder(default)]
     prom_write_state: Option<crate::http::prom_store::PromStoreState>,
     user_provider: Option<UserProviderRef>,
@@ -182,6 +188,7 @@ impl MakePostgresServerHandler {
             otlp_handler: self.otlp_handler.clone(),
             otlp_with_metric_engine: self.otlp_with_metric_engine,
             memory_limiter: self.memory_limiter.clone(),
+            max_copy_in_payload: self.max_copy_in_payload,
             prom_write_state: self.prom_write_state.clone(),
             force_tls: self.force_tls,
             auth_driver: AuthDriver::new(self.param_provider.clone())

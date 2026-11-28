@@ -777,6 +777,7 @@ mod tests {
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
         assert_eq!(opts.mysql.addr, "127.0.0.1:5678");
         assert_eq!(opts.postgres.addr, "127.0.0.1:5432");
+        assert_eq!(ReadableSize::mb(64), opts.postgres.max_copy_in_payload);
 
         let internal_grpc = opts.internal_grpc.as_ref().unwrap();
         assert_eq!(internal_grpc.bind_addr, "127.0.0.1:4010");
@@ -806,6 +807,9 @@ mod tests {
             timeout = "0s"
             body_limit = "2GB"
 
+            [postgres]
+            max_copy_in_payload = "128MB"
+
             [opentsdb]
             enable = false
 
@@ -827,6 +831,7 @@ mod tests {
         assert_eq!(Duration::from_secs(0), fe_opts.http.timeout);
 
         assert_eq!(ReadableSize::gb(2), fe_opts.http.body_limit);
+        assert_eq!(ReadableSize::mb(128), fe_opts.postgres.max_copy_in_payload);
 
         assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
         assert_eq!(

@@ -68,6 +68,7 @@
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `postgres.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
+| `postgres.max_copy_in_payload` | String | `64MB` | Maximum size of a table-less `COPY ... FROM STDIN` payload: the influxdb line protocol, OTLP and Prometheus Remote Write formats, which buffer the whole payload until the copy completes, like an HTTP request body.<br/>Table-bound formats (csv, jsonl, arrow) stream and are not bound by it.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | Unset | Certificate file path. |
@@ -355,6 +356,7 @@
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `postgres.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
+| `postgres.max_copy_in_payload` | String | `64MB` | Maximum size of a table-less `COPY ... FROM STDIN` payload: the influxdb line protocol, OTLP and Prometheus Remote Write formats, which buffer the whole payload until the copy completes, like an HTTP request body.<br/>Table-bound formats (csv, jsonl, arrow) stream and are not bound by it.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | Unset | Certificate file path. |

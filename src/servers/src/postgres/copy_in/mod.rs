@@ -53,6 +53,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use codec::{CopyFormat, RecordParser, TableBoundCodec};
+use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
 use common_grpc::precision::Precision;
 use common_query::OutputData;
@@ -94,11 +95,12 @@ use crate::request_memory_limiter::ServerMemoryLimiter;
 /// the per-batch fixed costs negligible.
 pub(crate) const COPY_IN_FLUSH_ROWS: usize = 32768;
 
-/// Upper bound of a table-less COPY FROM STDIN payload (influxdb line
-/// protocol, OTLP). One COPY statement is one bounded ingestion request
-/// (the whole payload is buffered like one HTTP request body); a larger
-/// import is multiple COPY statements.
-pub(crate) const COPY_IN_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Default upper bound of a table-less COPY FROM STDIN payload (influxdb
+/// line protocol, OTLP, Prometheus Remote Write). One COPY statement is one
+/// bounded ingestion request (the whole payload is buffered like one HTTP
+/// request body); a larger import is multiple COPY statements. Deployments
+/// override it with `postgres.max_copy_in_payload` (0 disables the bound).
+pub const COPY_IN_MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Builds a format from the format-neutral option set.
 type FormatBuilder = fn(options::CopyOptionSet) -> PgWireResult<CopyFormat>;
@@ -568,8 +570,25 @@ impl CopyInState {
         }
     }
 
-    /// Feeds a `CopyData` chunk into the parser and buffers parsed rows
-    /// (csv) or payload bytes (influxdb).
+    /// Rejects a chunk that would grow the buffered payload past
+    /// `max_bytes` (0: unbounded). The caller checks it BEFORE charging the
+    /// chunk against the shared limiter: a chunk the bound rejects must
+    /// neither wait for permits nor take memory that other requests need.
+    fn check_payload_bound(&self, chunk_bytes: u64, max_bytes: u64) -> PgWireResult<()> {
+        if max_bytes == 0 {
+            return Ok(());
+        }
+        match self.buffered_bytes().checked_add(chunk_bytes) {
+            Some(total) if total <= max_bytes => Ok(()),
+            _ => Err(bad_copy_data(format!(
+                "COPY FROM STDIN payload exceeds the {} limit; split the import into multiple COPY statements",
+                ReadableSize(max_bytes)
+            ))),
+        }
+    }
+
+    /// Buffers a `CopyData` chunk of a table-less payload. The payload bound
+    /// is the caller's job ([`Self::check_payload_bound`]).
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
         match &mut self.payload {
             Payload::Table { .. } => return Err(bad_copy_data("Table requires accounted decode")),
@@ -578,12 +597,6 @@ impl CopyInState {
             Payload::Influxdb { data: buffered, .. }
             | Payload::Otlp { data: buffered, .. }
             | Payload::PromWrite { data: buffered, .. } => {
-                if buffered.len() + data.len() > COPY_IN_MAX_PAYLOAD_BYTES {
-                    return Err(bad_copy_data(format!(
-                        "COPY FROM STDIN payload exceeds the {} limit; split the import into multiple COPY statements",
-                        COPY_IN_MAX_PAYLOAD_BYTES
-                    )));
-                }
                 buffered.extend_from_slice(data);
             }
         }
@@ -1356,6 +1369,12 @@ impl CopyHandler for PostgresServerHandlerInner {
         } else if state.buffers_payload() {
             let chunk_bytes = u64::try_from(copy_data.data.len())
                 .map_err(|_| bad_copy_data("chunk too large"))?;
+            let buffered_after = state.buffered_bytes() + chunk_bytes;
+            // The payload bound comes first: a chunk it rejects must not
+            // wait on the limiter's Wait policy (up to its timeout) nor
+            // take permits that other requests could use, and the client
+            // should see the bound's error, not a memory-quota one.
+            state.check_payload_bound(chunk_bytes, self.max_copy_in_payload)?;
             // Charge only this chunk's uncovered delta against the
             // shared budget: the limiter rounds each acquisition up to a
             // KiB, so per-chunk full charges would accumulate rounding
@@ -1364,7 +1383,6 @@ impl CopyHandler for PostgresServerHandlerInner {
             // THIS request's own holdings — cross-request contention is
             // left to `acquire`, which applies the configured
             // Wait/Reject policy instead of failing fast.
-            let buffered_after = state.buffered_bytes() + chunk_bytes;
             // Granted coverage is KiB-aligned, so it can exceed the
             // buffered bytes: chunks inside the rounding headroom are
             // already covered.
@@ -1806,6 +1824,69 @@ mod tests {
             copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER ';')")
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    /// A table-less (influxdb) copy state already holding `buffered` bytes.
+    fn influxdb_state_with(buffered: usize) -> CopyInState {
+        let mut state = CopyInState::new_influxdb(
+            &InfluxdbOptions { precision: None },
+            session::context::QueryContext::arc(),
+        );
+        if buffered > 0 {
+            state.feed(&vec![b'x'; buffered]).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn test_payload_bound_boundary() {
+        let state = influxdb_state_with(1023);
+        // Filling the bound exactly is accepted ...
+        state.check_payload_bound(1, 1024).unwrap();
+        // ... one byte more is not, as bad copy data (22P04) naming a
+        // human-readable size rather than a raw byte count.
+        let err = state.check_payload_bound(2, 1024).unwrap_err();
+        assert_eq!(err.code(), PgErrorCode::Ec22P04.code());
+        assert_eq!(
+            err.to_string(),
+            "User provided error: ErrorInfo: ERROR, 22P04, COPY FROM STDIN payload exceeds the \
+             1.0KiB limit; split the import into multiple COPY statements"
+        );
+    }
+
+    #[test]
+    fn test_payload_bound_default() {
+        // The shipped default renders as 64 MiB, not 67108864.
+        let state = influxdb_state_with(0);
+        state
+            .check_payload_bound(COPY_IN_MAX_PAYLOAD_BYTES, COPY_IN_MAX_PAYLOAD_BYTES)
+            .unwrap();
+        let err = state
+            .check_payload_bound(COPY_IN_MAX_PAYLOAD_BYTES + 1, COPY_IN_MAX_PAYLOAD_BYTES)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("exceeds the 64.0MiB limit; split the import"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_payload_bound_zero_is_unbounded() {
+        influxdb_state_with(8)
+            .check_payload_bound(u64::MAX - 8, 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_payload_bound_size_overflow_rejected() {
+        // Defensive: a size that cannot even be represented is rejected
+        // rather than wrapping around into the bound.
+        assert!(
+            influxdb_state_with(8)
+                .check_payload_bound(u64::MAX, u64::MAX)
+                .is_err()
         );
     }
 }

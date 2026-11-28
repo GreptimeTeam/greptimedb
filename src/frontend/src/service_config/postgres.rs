@@ -12,8 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
+use servers::postgres::COPY_IN_MAX_PAYLOAD_BYTES;
 use servers::tls::TlsOption;
+
+fn default_max_copy_in_payload() -> ReadableSize {
+    ReadableSize(COPY_IN_MAX_PAYLOAD_BYTES)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PostgresOptions {
@@ -28,6 +34,15 @@ pub struct PostgresOptions {
     #[serde(default = "Default::default")]
     #[serde(with = "humantime_serde")]
     pub keep_alive: std::time::Duration,
+    /// Maximum size of a table-less `COPY ... FROM STDIN` payload: the
+    /// influxdb line protocol, OTLP and Prometheus Remote Write formats,
+    /// which buffer the whole payload until the copy completes, like an
+    /// HTTP request body. Table-bound formats (csv, jsonl, arrow) stream
+    /// and are not bound by it.
+    /// The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+    /// Set to 0 to disable limit.
+    #[serde(default = "default_max_copy_in_payload")]
+    pub max_copy_in_payload: ReadableSize,
 }
 
 impl Default for PostgresOptions {
@@ -38,6 +53,7 @@ impl Default for PostgresOptions {
             runtime_size: 2,
             tls: Default::default(),
             keep_alive: std::time::Duration::from_secs(0),
+            max_copy_in_payload: default_max_copy_in_payload(),
         }
     }
 }
