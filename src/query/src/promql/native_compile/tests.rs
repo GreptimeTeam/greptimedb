@@ -4506,30 +4506,22 @@ fn an_invalid_label_replace_expression_fails_the_statement() {
     assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
 }
 
+/// A multi-field row is one sample to `timestamp`, as in the existing planner.
 #[test]
-fn timestamp_multi_field_input_is_not_supported_natively() {
+fn timestamp_multi_field_input_answers_one_field() {
     for query in ["timestamp(x)", "timestamp(abs(x))"] {
-        let error = compile(
+        let tree = compile(
             &eval_stmt(query),
             raw_schema_with_fields(2),
             SeriesOrdering::KeyThenTime,
         )
-        .unwrap_err();
-        assert!(
-            matches!(&error, DataFusionError::NotImplemented(_)),
-            "`{query}` is a shape this compiler declines: {error}"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("timestamp() over a multi-value input"),
-            "`{query}` did not name the field count as the reason: {error}"
-        );
-    }
-    // One field is the shape the node does answer, so the refusal is about the field count.
-    for query in ["timestamp(x)", "timestamp(abs(x))"] {
-        compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .unwrap_or_else(|error| panic!("`{query}` over one field was refused: {error}"));
+        .unwrap_or_else(|error| panic!("`{query}` over two fields was refused: {error}"));
+        let fields = tree
+            .root()
+            .output
+            .samples()
+            .map(|schema| schema.fields.len());
+        assert_eq!(Some(1), fields, "`{query}`");
     }
 }
 

@@ -914,18 +914,30 @@ fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNod
     let NativeType::Samples(schema) = &input.output else {
         return Err(not_implemented("timestamp argument is not a vector"));
     };
-    if schema.fields.len() != 1 {
-        return Err(not_implemented(
-            "timestamp() over a multi-value input is not supported natively",
-        ));
-    }
-    let output = input.output.clone();
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: timestamp_fields(context, &schema.fields),
+        eval_grid: schema.eval_grid.clone(),
+    }));
     Ok(NativeNode {
         expr: NativeExpr::Timestamp {
             input: Box::new(input),
         },
         output,
     })
+}
+
+/// The fields `timestamp` answers over `fields`.
+///
+/// A row of a multi-field table is one sample, so `timestamp` over one answers a single value, the
+/// row's time, as the existing planner does.
+fn timestamp_fields(context: &Context, fields: &Arc<[FieldSpec]>) -> Arc<[FieldSpec]> {
+    if fields.len() > 1 {
+        Arc::from([FieldSpec {
+            name: Arc::clone(&context.value_field),
+        }])
+    } else {
+        Arc::clone(fields)
+    }
 }
 
 /// Compiles `info(v[, {selector}])` as its base `v` and the instant selection of the info series it
@@ -1913,13 +1925,13 @@ fn instant_selection_of(
             timing: SelectorTiming::Instant { lookback_ms },
         },
     )?;
-    if value == InstantValue::Timestamp && schema.fields.len() != 1 {
-        return Err(not_implemented(
-            "timestamp() over a multi-value input is not supported natively",
-        ));
-    }
+    let fields = if value == InstantValue::Timestamp {
+        timestamp_fields(context, &schema.fields)
+    } else {
+        Arc::clone(&schema.fields)
+    };
     let output = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: Arc::clone(&schema.fields),
+        fields,
         eval_grid: Some(Arc::clone(&output_grid)),
     }));
     let raw = NativeType::Samples(Arc::clone(&schema));

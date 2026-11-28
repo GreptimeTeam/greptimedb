@@ -3591,8 +3591,9 @@ async fn native_fused_timestamp_admits_raw_and_evaluated_vectors() {
     }
 }
 
+/// A multi-field row is one sample, so `timestamp` over it answers one value column natively.
 #[tokio::test]
-async fn native_fused_timestamp_with_multiple_fields_keeps_legacy_plan() {
+async fn native_fused_timestamp_over_multiple_fields_answers_one_value() {
     for query in ["timestamp(some_metric)", "timestamp(abs(some_metric))"] {
         let provider = build_test_table_provider_with_options(
             &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
@@ -3606,13 +3607,9 @@ async fn native_fused_timestamp_with_multiple_fields_keeps_legacy_plan() {
         )
         .await;
         let plan = build_native_fused_plan_with_provider(query, true, provider).await;
-        assert!(find_fused_series(&plan).is_none(), "{query}");
-        assert!(
-            plan.display_indent()
-                .to_string()
-                .contains("PromInstantManipulate"),
-            "{query}"
-        );
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query}: {}", plan.display_indent_schema()));
+        native_value_field(fused, query);
     }
 }
 

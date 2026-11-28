@@ -1863,7 +1863,11 @@ impl NativeNode {
                 }
                 ensure_not_interleaved(input)?;
                 ensure_samples(&self.output, "an instant selection")?;
-                ensure_same_fields(&input.output, &self.output, "an instant selection")?;
+                if op.value == InstantValue::Timestamp {
+                    ensure_timestamp_fields(&input.output, &self.output)?;
+                } else {
+                    ensure_same_fields(&input.output, &self.output, "an instant selection")?;
+                }
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
             }
             NativeExpr::Merge { input } => {
@@ -2057,7 +2061,7 @@ impl NativeNode {
                     return Err(invalid("timestamp consumes an evaluated vector"));
                 };
                 ensure_samples(&self.output, "timestamp")?;
-                ensure_same_fields(&input.output, &self.output, "timestamp")?;
+                ensure_timestamp_fields(&input.output, &self.output)?;
                 ensure_grid(&self.output, input_grid, "timestamp")?;
             }
             NativeExpr::Aggregate { input, op } => {
@@ -2492,6 +2496,18 @@ fn ensure_same_fields(input: &NativeType, output: &NativeType, what: &str) -> Re
         return Ok(());
     };
     ensure_field_count(output.fields.len(), input.fields.len(), what)
+}
+
+/// Checks the fields `timestamp` declares: its input's, or one where a multi-field input's row is one
+/// sample.
+fn ensure_timestamp_fields(input: &NativeType, output: &NativeType) -> Result<()> {
+    let (NativeType::Samples(input), NativeType::Samples(output)) = (input, output) else {
+        return Ok(());
+    };
+    if input.fields.len() > 1 && output.fields.len() == 1 {
+        return Ok(());
+    }
+    ensure_field_count(output.fields.len(), input.fields.len(), "timestamp")
 }
 
 fn ensure_field_count(declared: usize, expected: usize, what: &str) -> Result<()> {
