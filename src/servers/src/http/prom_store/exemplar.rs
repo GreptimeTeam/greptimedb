@@ -19,13 +19,13 @@ use api::v1::RowInsertRequests;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use futures::future::ready;
-use operator::insert::PreparedMetricInserts;
+use operator::insert::{ExemplarBatch, PreparedMetricInserts};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::{self, Result};
-use crate::exemplar::{ExemplarRequests, into_rows};
+use crate::exemplar::ExemplarRequests;
 use crate::http::prom_store::PromWriteBatch;
 use crate::query_handler::PromStoreProtocolHandlerRef;
 
@@ -56,9 +56,15 @@ impl Outcome {
     }
 }
 
+enum PreparedBatch {
+    Rows(RowInsertRequests),
+    Exemplars(ExemplarBatch),
+}
+
 enum PreparedWrite {
     Metric(PreparedMetricInserts),
     Rows(RowInsertRequests),
+    Exemplars(ExemplarBatch),
 }
 
 /// Preflights all destinations together, retaining per-kind write progress.
@@ -76,39 +82,45 @@ pub(super) async fn write(
             let mut sources = Vec::new();
             let mut prepared = Vec::new();
             let mut source_failed = false;
-            for (kind, ctx, request) in writes {
-                if kind != 2 && metric_engine {
-                    let (pinned, other): (Vec<_>, Vec<_>) =
-                        request.inserts.into_iter().partition(|request| {
-                            targets.contains(&(
-                                ctx.current_catalog().to_string(),
-                                ctx.current_schema(),
-                                request.table_name.clone(),
-                            ))
-                        });
-                    if !other.is_empty() {
-                        prepared.push((
-                            kind,
-                            ctx.clone(),
-                            Ok(PreparedWrite::Rows(RowInsertRequests { inserts: other })),
-                        ));
-                    }
-                    if !pinned.is_empty() {
-                        let result = handler
-                            .prepare_metric_write(
-                                RowInsertRequests { inserts: pinned },
+            for (kind, ctx, batch) in writes {
+                match (kind != 2 && metric_engine, batch) {
+                    (true, PreparedBatch::Rows(request)) => {
+                        let (pinned, other): (Vec<_>, Vec<_>) =
+                            request.inserts.into_iter().partition(|request| {
+                                targets.contains(&(
+                                    ctx.current_catalog().to_string(),
+                                    ctx.current_schema(),
+                                    request.table_name.clone(),
+                                ))
+                            });
+                        if !other.is_empty() {
+                            prepared.push((
+                                kind,
                                 ctx.clone(),
-                            )
-                            .await;
-                        if let Ok(request) = &result {
-                            sources.extend(request.source_tables().cloned());
-                        } else {
-                            source_failed = true;
+                                Ok(PreparedWrite::Rows(RowInsertRequests { inserts: other })),
+                            ));
                         }
-                        prepared.push((kind, ctx, result.map(PreparedWrite::Metric)));
+                        if !pinned.is_empty() {
+                            let result = handler
+                                .prepare_metric_write(
+                                    RowInsertRequests { inserts: pinned },
+                                    ctx.clone(),
+                                )
+                                .await;
+                            if let Ok(request) = &result {
+                                sources.extend(request.source_tables().cloned());
+                            } else {
+                                source_failed = true;
+                            }
+                            prepared.push((kind, ctx, result.map(PreparedWrite::Metric)));
+                        }
                     }
-                } else {
-                    prepared.push((kind, ctx, Ok(PreparedWrite::Rows(request))));
+                    (_, PreparedBatch::Rows(request)) => {
+                        prepared.push((kind, ctx, Ok(PreparedWrite::Rows(request))));
+                    }
+                    (_, PreparedBatch::Exemplars(batch)) => {
+                        prepared.push((kind, ctx, Ok(PreparedWrite::Exemplars(batch))));
+                    }
                 }
             }
             // A failed source preparation must not fall back to a newer table with the same name.
@@ -143,17 +155,20 @@ pub(super) async fn write(
                     Ok(PreparedWrite::Metric(request)) => {
                         handler.write_prepared_metric(request, ctx).await
                     }
-                    Ok(PreparedWrite::Rows(request)) => {
-                        if kind == 2 && !metric_engine {
+                    Ok(PreparedWrite::Exemplars(batch)) => {
+                        if !metric_engine {
                             error::NotSupportedSnafu {
                                 feat: "exemplars require metric-engine ingestion",
                             }
                             .fail()
-                        } else if kind == 2 {
+                        } else {
                             handler
-                                .write_exemplars_with_sources(request, ctx, &sources)
+                                .write_exemplars_with_sources(batch, ctx, &sources)
                                 .await
-                        } else if kind == 0
+                        }
+                    }
+                    Ok(PreparedWrite::Rows(request)) => {
+                        if kind == 0
                             && let Some(batcher) = batcher
                         {
                             deferred = !batcher.is_synchronous();
@@ -231,7 +246,7 @@ async fn prepare(
     exemplars: ExemplarRequests,
     ctx: QueryContextRef,
 ) -> Result<(
-    Vec<(usize, QueryContextRef, RowInsertRequests)>,
+    Vec<(usize, QueryContextRef, PreparedBatch)>,
     HashSet<(String, String, String)>,
 )> {
     let mut kinds = Vec::new();
@@ -242,7 +257,10 @@ async fn prepare(
             handler.pre_write(&request, ctx.clone()).await?;
             kinds.push(kind);
             // Keep per-batch routing options when admitting database-wide totals.
-            prepared.push((Arc::new(ctx.with_confirmed_writes()), request));
+            prepared.push((
+                Arc::new(ctx.with_confirmed_writes()),
+                PreparedBatch::Rows(request),
+            ));
         }
     }
     for (schema, exemplars) in exemplars {
@@ -250,33 +268,57 @@ async fn prepare(
         if let Some(schema) = schema {
             target.set_current_schema(&schema);
         }
-        let (request, sources) = into_rows(exemplars)?;
+        let batch = crate::exemplar::prepare(exemplars)?;
         let target = Arc::new(target);
-        handler.pre_write(&request, target.clone()).await?;
+        handler.pre_write_exemplars(&batch, target.clone()).await?;
         let target = Arc::new(target.with_confirmed_writes());
-        if !sources.is_empty() {
+        if !batch.sources().is_empty() {
             handler
-                .check_exemplar_sources(&sources, target.clone())
+                .check_exemplar_sources(batch.sources(), target.clone())
                 .await?;
         }
-        targets.extend(sources.into_iter().map(|name| {
+        targets.extend(batch.sources().iter().map(|name| {
             (
                 target.current_catalog().to_string(),
                 target.current_schema(),
-                name,
+                name.clone(),
             )
         }));
         kinds.push(2);
-        prepared.push((target, request));
+        prepared.push((target, PreparedBatch::Exemplars(batch)));
     }
-    operator::insert::admit_row_insert_batches(&mut prepared)
-        .await
-        .map_err(BoxedError::new)
-        .context(error::ExecuteGrpcQuerySnafu)?;
+    let mut counts = Vec::with_capacity(prepared.len());
+    for (_, batch) in &prepared {
+        let count = match batch {
+            PreparedBatch::Rows(requests) => requests
+                .inserts
+                .iter()
+                .filter_map(|r| r.rows.as_ref())
+                .try_fold(0u64, |total, rows| {
+                    total.checked_add(rows.rows.len() as u64).ok_or_else(|| {
+                        error::InvalidPromRemoteRequestSnafu {
+                            msg: "Insert row count exceeds u64::MAX",
+                        }
+                        .build()
+                    })
+                })?,
+            PreparedBatch::Exemplars(batch) => batch.len() as u64,
+        };
+        counts.push(count);
+    }
+    operator::insert::admit_insert_row_counts(
+        prepared
+            .iter_mut()
+            .zip(counts)
+            .map(|((ctx, _), count)| (ctx, count)),
+    )
+    .await
+    .map_err(BoxedError::new)
+    .context(error::ExecuteGrpcQuerySnafu)?;
     let writes = kinds
         .into_iter()
         .zip(prepared)
-        .map(|(kind, (ctx, request))| (kind, ctx, request))
+        .map(|(kind, (ctx, batch))| (kind, ctx, batch))
         .collect();
     Ok((writes, targets))
 }
@@ -419,6 +461,28 @@ mod tests {
             Ok(())
         }
 
+        async fn pre_write_exemplars(
+            &self,
+            exemplars: &ExemplarBatch,
+            ctx: QueryContextRef,
+        ) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("pre:{}", ctx.current_schema()));
+            assert!(!exemplars.is_empty());
+            if self.deny_schema && ctx.current_schema() == "other" {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: "denied destination",
+                }
+                .fail();
+            }
+            if let Some(schema) = ctx.extension("resolved_schema") {
+                ctx.set_current_schema(schema);
+            }
+            Ok(())
+        }
+
         async fn check_exemplar_sources(
             &self,
             sources: &BTreeSet<String>,
@@ -446,7 +510,7 @@ mod tests {
 
         async fn write_exemplars_prepared(
             &self,
-            _: RowInsertRequests,
+            _: ExemplarBatch,
             ctx: QueryContextRef,
         ) -> Result<Output> {
             assert!(ctx.confirmed_writes());
@@ -589,7 +653,10 @@ mod tests {
             assert_eq!(ctx.current_schema(), "tenant");
             assert!(ctx.confirmed_writes());
             assert_eq!(ctx.write_rows_to_admit("greptime", "tenant", 1), 0);
-            assert_eq!(request.inserts.len(), 1);
+            match request {
+                PreparedBatch::Rows(request) => assert_eq!(request.inserts.len(), 1),
+                PreparedBatch::Exemplars(batch) => assert_eq!(batch.len(), 1),
+            }
         }
     }
 

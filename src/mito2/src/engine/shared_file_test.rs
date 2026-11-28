@@ -20,7 +20,7 @@ use store_api::region_request::RegionRequest;
 use store_api::storage::{FileId, RegionId};
 
 use crate::config::MitoConfig;
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::RegionEdit;
 use crate::sst::file::{FileMeta, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
@@ -113,12 +113,13 @@ async fn test_shared_import_preserves_visible_sequence_and_rejects_overwrite() {
     assert!(
         region
             .manifest_ctx
-            .update_manifest_for_compaction(RegionMetaActionList::with_action(
-                RegionMetaAction::Edit(RegionEdit {
+            .update_manifest_for_compaction(
+                &region.metadata(),
+                RegionEdit {
                     files_to_remove: vec![stale],
                     ..Default::default()
-                })
-            ))
+                }
+            )
             .await
             .is_err()
     );
@@ -200,9 +201,7 @@ async fn test_shared_reclassification_requires_add_only() {
     // The final manifest guard must also reject callers that bypass admission.
     let error = region
         .manifest_ctx
-        .update_manifest_for_compaction(RegionMetaActionList::with_action(RegionMetaAction::Edit(
-            invalid,
-        )))
+        .update_manifest_for_compaction(&region.metadata(), invalid)
         .await
         .unwrap_err();
     assert!(matches!(error, crate::error::Error::InvalidRequest { .. }));

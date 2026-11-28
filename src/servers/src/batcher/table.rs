@@ -31,13 +31,12 @@ use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
 use common_error::ext::BoxedError;
-use common_memory_manager::OnExhaustedPolicy;
 use common_query::{Output, WriteCompletion, WriteProgress};
 use operator::batcher::{PendingRowsBatcher, PendingRowsPermit};
 use operator::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
 use session::context::QueryContextRef;
-use snafu::{IntoError, ResultExt};
+use snafu::ResultExt;
 use table::metadata::TableInfoRef;
 use tokio::sync::{Semaphore, broadcast, oneshot};
 
@@ -173,29 +172,11 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
             }
             .build()
         })?;
-        if self.memory_limit_bytes() == 0 {
-            return Ok(permit);
-        }
-        let bytes = u64::try_from(estimated_bytes).unwrap_or(u64::MAX);
-        let reserve = || {
-            self.memory_limiter.check_request_fits(bytes, held_bytes)?;
-            self.memory_limiter.try_acquire(bytes).ok_or_else(|| {
-                let source = common_memory_manager::Error::MemoryLimitExceeded {
-                    requested_bytes: bytes,
-                    limit_bytes: self.memory_limit_bytes(),
-                };
-                // Remote Write senders must retry contention under the wait policy.
-                match self.memory_limiter.policy() {
-                    OnExhaustedPolicy::Wait { .. } => {
-                        crate::error::OtherSnafu.into_error(BoxedError::new(source))
-                    }
-                    OnExhaustedPolicy::Fail => {
-                        crate::error::MemoryLimitExceededSnafu.into_error(source)
-                    }
-                }
-            })
-        };
-        let memory = reserve().map_err(BoxedError::new).context(ExternalSnafu)?;
+        let memory = self
+            .memory_limiter
+            .reserve_conversion_memory(estimated_bytes, held_bytes)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
         Ok(Arc::new((permit, memory)))
     }
 
@@ -297,6 +278,7 @@ mod tests {
     use common_catalog::consts::default_engine;
     use common_grpc::flight::FlightDecoder;
     use common_memory_manager::OnExhaustedPolicy;
+    use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::error::Result as MetaResult;
     use common_meta::peer::Peer;
     use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
@@ -393,6 +375,7 @@ mod tests {
                 }));
                 let inserter = Arc::new(Inserter::new(
                     MemoryCatalogManager::new(),
+                    Arc::new(DummyCacheInvalidator),
                     create_partition_rule_manager(backend).await,
                     nodes,
                     mock_table_flownode_cache(1, vec![]).await,
@@ -586,6 +569,7 @@ mod tests {
         }));
         let inserter = Arc::new(Inserter::new(
             MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
             partitions.clone(),
             nodes.clone(),
             mock_table_flownode_cache(1, vec![]).await,
@@ -632,10 +616,10 @@ mod tests {
         let ingest_count =
             DIST_INGEST_ROW_COUNT.with_label_values(&[influx_ctx.get_db_string().as_str()]);
         assert_eq!(0, ingest_count.get());
-        influx_ctx.set_skip_wal(skip_wal);
-        opentsdb_ctx.set_skip_wal(skip_wal);
         let (first_result, second_result) = timeout(Duration::from_secs(5), async {
             if shared_request {
+                influx_ctx.set_skip_wal(skip_wal);
+                opentsdb_ctx.set_skip_wal(skip_wal);
                 let permit = batcher.acquire(0, 0).await.unwrap();
                 let (first, second) = tokio::join!(
                     batcher.submit(table.clone(), first, influx_ctx, permit.clone()),
@@ -646,8 +630,12 @@ mod tests {
                     second.map(|output| output.extract_rows_and_cost().0),
                 )
             } else {
+                // TableInsertRequest owns the WAL policy even when its context disagrees.
+                influx_ctx.set_skip_wal(!skip_wal);
+                opentsdb_ctx.set_skip_wal(!skip_wal);
                 let inserter = Inserter::new(
                     MemoryCatalogManager::new_with_table(DistTable::table(table.clone())),
+                    Arc::new(DummyCacheInvalidator),
                     partitions,
                     nodes,
                     mock_table_flownode_cache(1, vec![]).await,
@@ -809,6 +797,7 @@ mod tests {
             let partitions = create_partition_rule_manager(prepare_mocked_backend().await).await;
             let inserter = Arc::new(Inserter::new(
                 MemoryCatalogManager::new(),
+                Arc::new(DummyCacheInvalidator),
                 partitions,
                 Arc::new(MockDatanodeManager::new(PartialHandler)),
                 mock_table_flownode_cache(1, vec![]).await,
@@ -940,6 +929,7 @@ mod tests {
                     .unwrap();
             let inserter = Arc::new(Inserter::new(
                 MemoryCatalogManager::new(),
+                Arc::new(DummyCacheInvalidator),
                 partitions,
                 nodes,
                 cache,

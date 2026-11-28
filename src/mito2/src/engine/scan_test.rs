@@ -80,6 +80,146 @@ use crate::test_util::{
     sparse_metric_create_request,
 };
 
+#[rstest::rstest]
+#[case::inherited_files(false)]
+#[case::inherited_and_local_files(true)]
+#[tokio::test]
+async fn test_repair_sparse_key_order_after_split(
+    #[case] has_local_sst: bool,
+) -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(1, 1);
+    let target = RegionId::new(1, 2);
+    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, target).await;
+    let sync = |column_metadatas| {
+        RegionRequest::Alter(RegionAlterRequest {
+            kind: AlterKind::SyncColumns { column_metadatas },
+        })
+    };
+    let mut reordered = metadata.column_metadatas.clone();
+    reordered.swap(2, 3); // tag_0 and tag_1
+    engine.handle_request(target, sync(reordered)).await?;
+    let region = engine.get_region(target).unwrap();
+    let split_schema = region.metadata();
+    assert_ne!(metadata.primary_key, split_schema.primary_key);
+
+    let mut source_create = CreateRequestBuilder::new()
+        .insert_option(PRIMARY_KEY_ENCODING, "sparse")
+        .insert_option("sst_format", "flat")
+        .build();
+    source_create.column_metadatas = metadata.column_metadatas.clone();
+    source_create
+        .column_metadatas
+        .retain(|column| column.column_schema.name != "tag_1");
+    source_create.primary_key = metadata.primary_key[..3].to_vec();
+    engine
+        .handle_request(source, RegionRequest::Create(source_create))
+        .await?;
+    let key = new_sparse_primary_key(&["early"], &metadata, 42, 6);
+    put_sparse_rows(&engine, source, &row_schema, vec![(key, 1000, 6)]).await;
+    test_util::flush_region(&engine, source, None).await;
+    engine
+        .handle_request(source, sync(metadata.column_metadatas.clone()))
+        .await?;
+    let key = new_sparse_primary_key(&["api", "east"], &metadata, 42, 7);
+    put_sparse_rows(&engine, source, &row_schema, vec![(key, 1000, 7)]).await;
+    test_util::flush_region(&engine, source, None).await;
+    if has_local_sst {
+        let key = new_sparse_primary_key(&["worker"], &split_schema, 42, 8);
+        put_sparse_rows(&engine, target, &row_schema, vec![(key, 2000, 8)]).await;
+        test_util::flush_region(&engine, target, None).await;
+    }
+    // A pre-upgrade split attached the source's files to a target created with the catalog key.
+    let owner = engine.get_region(source).unwrap();
+    let files: Vec<_> = owner
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .map(|file| file.as_ref().clone())
+        .collect();
+    assert_eq!(files.len(), 2);
+    engine
+        .edit_region(
+            target,
+            RegionEdit {
+                files_to_add: files.clone(),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let rows = async |id| -> WhateverResult<String> {
+        let stream = engine.scan_to_stream(id, ScanRequest::default()).await?;
+        let batches = RecordBatches::try_collect(stream).await?;
+        Ok(sort_batches_and_print(&batches, &["tag_0"]))
+    };
+    let error = rows(target).await.unwrap_err().to_string();
+    assert!(error.contains("different prefix"), "{error}");
+    let before = region.manifest_ctx.manifest_version().await;
+    let error = engine
+        .handle_request(
+            target,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 3600,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err()
+        .output_msg();
+    assert!(error.contains("different prefix"), "{error}");
+    assert_eq!(before, region.manifest_ctx.manifest_version().await);
+    let result = engine
+        .handle_request(target, sync(metadata.column_metadatas.clone()))
+        .await;
+    if has_local_sst {
+        let error = result.unwrap_err().output_msg();
+        assert!(
+            error.contains("Cannot reorder sparse primary key"),
+            "{error}"
+        );
+        assert_eq!(before, region.manifest_ctx.manifest_version().await);
+        assert_eq!(split_schema, region.metadata());
+    } else {
+        result?;
+        let restored = rows(target).await?;
+        assert!(
+            restored.contains("early") && restored.contains("east"),
+            "{restored}"
+        );
+        assert_eq!(rows(source).await?, restored);
+        // An in-flight compaction must not reintroduce the key that reconciliation just repaired.
+        let repaired = region.manifest_ctx.manifest_version().await;
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta {
+                region_id: target,
+                file_id: FileId::random(),
+                ..Default::default()
+            }],
+            files_to_remove: files,
+            ..Default::default()
+        };
+        let error = region
+            .manifest_ctx
+            .update_manifest_for_compaction(&split_schema, edit)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidRequest { .. }));
+        assert_eq!(repaired, region.manifest_ctx.manifest_version().await);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
     check_sparse_upsert_after_adding_nullable_tag("flat").await

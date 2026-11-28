@@ -14,7 +14,8 @@
 
 mod memory;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use api::helper::{
     ColumnDataTypeWrapper, pb_value_to_value_ref, proto_value_type, proto_value_type_match,
@@ -22,28 +23,59 @@ use api::helper::{
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, Rows, SemanticType, Value};
+use arrow::array::{ArrayRef, BinaryBuilder, UInt32Builder, UInt64Builder};
+use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common_error::ext::BoxedError;
+use common_query::prelude::{EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_value};
+use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::extension::json::align_schema_with_json_array;
+use datatypes::value::ValueRef;
+use datatypes::vectors::{MutableVector, VectorRef};
+use itertools::{Either, Itertools};
+use memory::SPARSE_PK_MIN_ROW_BYTES;
+use mito_codec::row_converter::sparse::SparsePrimaryKeyCodec;
+use mito_codec::row_converter::{SortField, TsidGenerator};
+use partition::partition::RegionMask;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
+use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId, SPARSE_KEY_ORDER};
+use store_api::storage::{ColumnId, TableId};
 use table::metadata::TableInfo;
 
 use crate::error::{self, Result};
+use crate::insert::ExemplarBatch;
+use crate::insert::exemplar::encode_json2_data_value;
 
-pub(crate) use memory::estimated_record_batch_bytes;
+pub(crate) use memory::{
+    estimated_exemplar_record_batch_bytes, estimated_record_batch_bytes,
+    estimated_sparse_record_batch_bytes,
+};
 
-/// Converts prepared rows in target-schema order without Prom-specific renaming.
-///
-/// Missing columns evaluate their defaults once per conversion. Explicit nulls
-/// remain nulls. Semantic types are checked against the table time index and
-/// primary-key indices.
-///
-/// # Panics
-///
-/// Panics if `rows.rows` is empty. Callers must skip empty writes before conversion.
-pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<RecordBatch> {
-    assert!(!rows.rows.is_empty(), "prepared rows must not be empty");
+/// Iterates the original observations in order without copying their values.
+fn selected_rows<'a, T>(
+    rows: &'a [T],
+    mask: Option<&'a RegionMask>,
+) -> impl Iterator<Item = &'a T> {
+    match mask {
+        Some(mask) => Either::Right(
+            mask.array()
+                .values()
+                .set_indices()
+                .map(|index| &rows[index]),
+        ),
+        None => Either::Left(rows.iter()),
+    }
+}
+
+fn validate_row_input_columns<'a>(
+    rows: &'a Rows,
+    table_info: &TableInfo,
+    mask: Option<&RegionMask>,
+) -> Result<HashMap<&'a str, usize>> {
     let schema = &table_info.meta.schema;
     let mut source_columns = HashMap::with_capacity(rows.schema.len());
     for (index, source) in rows.schema.iter().enumerate() {
@@ -95,7 +127,7 @@ pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<Recor
             }
         );
     }
-    for row in &rows.rows {
+    for row in selected_rows(&rows.rows, mask) {
         ensure!(
             row.values.len() == rows.schema.len(),
             error::InvalidInsertRequestSnafu {
@@ -107,51 +139,680 @@ pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<Recor
             }
         );
     }
+    Ok(source_columns)
+}
 
-    let mut arrays = Vec::with_capacity(schema.num_columns());
-    for column in schema.column_schemas() {
-        let vector = if let Some(&index) = source_columns.get(column.name.as_str()) {
-            let mut builder = column.create_mutable_vector(rows.rows.len());
-            for row in &rows.rows {
-                let value = &row.values[index];
-                ensure!(
-                    value.value_data.is_some() || column.is_nullable(),
-                    error::InvalidInsertRequestSnafu {
-                        reason: format!("Null supplied for non-nullable column {}", column.name),
-                    }
-                );
-                ensure!(
-                    value_matches_type(
-                        value,
-                        rows.schema[index].datatype,
-                        rows.schema[index].datatype_extension.as_ref(),
-                    ),
-                    error::InvalidInsertRequestSnafu {
-                        reason: format!("Value datatype differs for column {}", column.name),
-                    }
-                );
-                builder
-                    .try_push_value_ref(&pb_value_to_value_ref(
-                        value,
-                        rows.schema[index].datatype_extension.as_ref(),
-                    ))
-                    .map_err(BoxedError::new)
-                    .context(error::ExternalSnafu)?;
-            }
-            builder.to_vector()
+fn build_column_vector(
+    rows: &Rows,
+    column: &datatypes::schema::ColumnSchema,
+    source_index: Option<usize>,
+    mask: Option<&RegionMask>,
+) -> Result<VectorRef> {
+    let len = mask.map_or(rows.rows.len(), RegionMask::selected_rows);
+    if let Some(index) = source_index {
+        let mut builder = column.create_mutable_vector(len);
+        for row in selected_rows(&rows.rows, mask) {
+            let value = &row.values[index];
+            ensure!(
+                value.value_data.is_some() || column.is_nullable(),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!("Null supplied for non-nullable column {}", column.name),
+                }
+            );
+            ensure!(
+                value_matches_type(
+                    value,
+                    rows.schema[index].datatype,
+                    rows.schema[index].datatype_extension.as_ref(),
+                ),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!("Value datatype differs for column {}", column.name),
+                }
+            );
+            builder
+                .try_push_value_ref(&pb_value_to_value_ref(
+                    value,
+                    rows.schema[index].datatype_extension.as_ref(),
+                ))
+                .map_err(BoxedError::new)
+                .context(error::ExternalSnafu)?;
+        }
+        Ok(builder.to_vector())
+    } else {
+        column
+            .create_default_vector(len)
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?
+            .with_context(|| error::InvalidInsertRequestSnafu {
+                reason: format!("Missing required column {}", column.name),
+            })
+    }
+}
+
+/// Converts prepared rows in target-schema order without Prom-specific renaming.
+///
+/// Missing columns evaluate their defaults once per conversion. Explicit nulls
+/// remain nulls. Semantic types are checked against the table time index and
+/// primary-key indices.
+///
+/// # Panics
+///
+/// Panics if `rows.rows` is empty. Callers must skip empty writes before conversion.
+pub fn rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<RecordBatch> {
+    let schema = &table_info.meta.schema;
+    row_columns_to_batch(
+        rows,
+        table_info,
+        schema.column_schemas().iter(),
+        schema.arrow_schema().clone(),
+    )
+}
+
+/// Uses the same values and defaults as the sparse encoder to locate the destination regions.
+pub(crate) fn rows_partition_batch(rows: &Rows, table: &TableInfo) -> Result<RecordBatch> {
+    let indices = &table.meta.partition_key_indices;
+    let schema = &table.meta.schema;
+    let projection = schema
+        .arrow_schema()
+        .project(indices)
+        .context(error::ComputeArrowSnafu)?;
+    row_columns_to_batch(
+        rows,
+        table,
+        indices.iter().map(|&i| &schema.column_schemas()[i]),
+        Arc::new(projection),
+    )
+}
+
+fn row_columns_to_batch<'a>(
+    rows: &Rows,
+    table: &TableInfo,
+    columns: impl Iterator<Item = &'a datatypes::schema::ColumnSchema>,
+    schema: Arc<ArrowSchema>,
+) -> Result<RecordBatch> {
+    assert!(!rows.rows.is_empty(), "prepared rows must not be empty");
+    let source = validate_row_input_columns(rows, table, None)?;
+    let mut arrays = Vec::with_capacity(schema.fields().len());
+    for column in columns {
+        let values = build_column_vector(
+            rows,
+            column,
+            source.get(column.name.as_str()).copied(),
+            None,
+        )?;
+        arrays.push(values.to_arrow_array());
+    }
+    let schema = align_schema_with_json_array(schema, &arrays);
+    let options =
+        arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(rows.rows.len()));
+    RecordBatch::try_new_with_options(schema, arrays, &options).context(error::ComputeArrowSnafu)
+}
+
+fn check_sparse_key_buffer_size(current_bytes: usize, key_bytes: usize) -> Result<()> {
+    ensure!(
+        current_bytes.saturating_add(key_bytes) <= i32::MAX as usize,
+        error::InvalidInsertRequestSnafu {
+            reason: "Encoded sparse primary keys exceed Arrow's binary offset limit. Split the insert into smaller batches",
+        }
+    );
+    Ok(())
+}
+
+fn sparse_key_field(mut ids: impl Iterator<Item = ColumnId>) -> Arc<ArrowField> {
+    Arc::new(
+        ArrowField::new(PRIMARY_KEY_COLUMN_NAME, ArrowDataType::Binary, false).with_metadata(
+            std::collections::HashMap::from([(SPARSE_KEY_ORDER.to_string(), ids.join(","))]),
+        ),
+    )
+}
+
+/// Encodes the sparse key in the supplied region primary-key order and emits retained columns in schema order.
+/// Applies pure defaults and nullability checks.
+///
+/// Retains non-tag columns and any primary-key columns listed in
+/// `table_info.meta.partition_key_indices` so initial partitioning needs no key decoding.
+///
+/// # Panics
+///
+/// Panics if `rows.rows` is empty. Callers must skip empty writes before conversion.
+pub fn sparse_rows_to_record_batch(rows: &Rows, table_info: &TableInfo) -> Result<RecordBatch> {
+    sparse_rows_to_batch(rows, table_info, None)
+}
+
+pub(crate) fn sparse_rows_to_batch(
+    rows: &Rows,
+    table_info: &TableInfo,
+    mask: Option<&RegionMask>,
+) -> Result<RecordBatch> {
+    let len = mask.map_or(rows.rows.len(), RegionMask::selected_rows);
+    assert!(!rows.rows.is_empty(), "prepared rows must not be empty");
+    let schema = &table_info.meta.schema;
+    ensure!(
+        table_info.meta.column_ids.len() == schema.num_columns(),
+        error::InvalidInsertRequestSnafu {
+            reason: format!("Table {} is missing sparse column IDs", table_info.name),
+        }
+    );
+    let source_columns = validate_row_input_columns(rows, table_info, mask)?;
+    let pk_set: HashSet<usize> = table_info
+        .meta
+        .primary_key_indices
+        .iter()
+        .copied()
+        .collect();
+    let partition_set: HashSet<usize> = table_info
+        .meta
+        .partition_key_indices
+        .iter()
+        .copied()
+        .collect();
+
+    enum PkColumnInput<'a> {
+        Supplied {
+            column_id: store_api::storage::ColumnId,
+            index: usize,
+            column: &'a datatypes::schema::ColumnSchema,
+            source: &'a api::v1::ColumnSchema,
+        },
+        Default {
+            column_id: store_api::storage::ColumnId,
+            value: datatypes::value::Value,
+        },
+    }
+
+    let mut codec_fields = Vec::with_capacity(table_info.meta.primary_key_indices.len());
+    let mut pk_inputs = Vec::with_capacity(table_info.meta.primary_key_indices.len());
+    for &index in &table_info.meta.primary_key_indices {
+        let column = &schema.column_schemas()[index];
+        let raw_column_id = table_info.meta.column_ids[index];
+        let column_id = if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            || raw_column_id == ReservedColumnId::table_id()
+        {
+            ensure!(
+                column.data_type == ConcreteDataType::uint32_datatype(),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!("Sparse column {} must be UINT32", column.name),
+                }
+            );
+            ReservedColumnId::table_id()
+        } else if column.name == DATA_SCHEMA_TSID_COLUMN_NAME
+            || raw_column_id == ReservedColumnId::tsid()
+        {
+            ensure!(
+                column.data_type == ConcreteDataType::uint64_datatype(),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!("Sparse column {} must be UINT64", column.name),
+                }
+            );
+            ReservedColumnId::tsid()
         } else {
-            column
-                .create_default_vector(rows.rows.len())
+            ensure!(
+                column.data_type.is_string(),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!("Sparse primary key tag {} must be STRING", column.name),
+                }
+            );
+            raw_column_id
+        };
+        codec_fields.push((column_id, SortField::new(column.data_type.clone())));
+        if let Some(&src_idx) = source_columns.get(column.name.as_str()) {
+            pk_inputs.push(PkColumnInput::Supplied {
+                column_id,
+                index: src_idx,
+                column,
+                source: &rows.schema[src_idx],
+            });
+        } else {
+            let value = column
+                .create_default()
                 .map_err(BoxedError::new)
                 .context(error::ExternalSnafu)?
                 .with_context(|| error::InvalidInsertRequestSnafu {
                     reason: format!("Missing required column {}", column.name),
-                })?
-        };
+                })?;
+            // Omitted NULL tags are absent from sparse keys, so skip per-row null propagation.
+            if !value.is_null() {
+                pk_inputs.push(PkColumnInput::Default { column_id, value });
+            }
+        }
+    }
+
+    // Sparse readers address the two reserved fields at fixed offsets.
+    ensure!(
+        codec_fields
+            .iter()
+            .map(|(id, _)| *id)
+            .take(2)
+            .eq([ReservedColumnId::table_id(), ReservedColumnId::tsid()]),
+        error::InvalidInsertRequestSnafu {
+            reason: format!(
+                "Sparse primary key for {} must start with (__table_id, __tsid). Reconcile the table metadata with its regions (ADMIN RECONCILE_TABLE in distributed mode), or use a new table with the correct key order",
+                table_info.table_ref()
+            ),
+        }
+    );
+    let key_field = sparse_key_field(codec_fields.iter().map(|(id, _)| *id));
+    let codec = SparsePrimaryKeyCodec::with_fields(codec_fields);
+    let mut pk_builder = BinaryBuilder::with_capacity(len, len * SPARSE_PK_MIN_ROW_BYTES);
+    let mut pk_buf = Vec::with_capacity(128);
+    let mut row_refs = Vec::with_capacity(pk_inputs.len());
+    for row in selected_rows(&rows.rows, mask) {
+        row_refs.clear();
+        for input in &pk_inputs {
+            match input {
+                PkColumnInput::Supplied {
+                    column_id,
+                    index,
+                    column,
+                    source,
+                } => {
+                    let value = &row.values[*index];
+                    ensure!(
+                        value.value_data.is_some() || column.is_nullable(),
+                        error::InvalidInsertRequestSnafu {
+                            reason: format!(
+                                "Null supplied for non-nullable column {}",
+                                column.name
+                            ),
+                        }
+                    );
+                    ensure!(
+                        value_matches_type(
+                            value,
+                            source.datatype,
+                            source.datatype_extension.as_ref()
+                        ),
+                        error::InvalidInsertRequestSnafu {
+                            reason: format!("Value datatype differs for column {}", column.name),
+                        }
+                    );
+                    if value.value_data.is_some() {
+                        row_refs.push((
+                            *column_id,
+                            pb_value_to_value_ref(value, source.datatype_extension.as_ref()),
+                        ));
+                    }
+                }
+                PkColumnInput::Default { column_id, value } => {
+                    row_refs.push((*column_id, value.as_value_ref()));
+                }
+            }
+        }
+        pk_buf.clear();
+        codec
+            .encode_to_vec(row_refs.iter().cloned(), &mut pk_buf)
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+        check_sparse_key_buffer_size(pk_builder.values_slice().len(), pk_buf.len())?;
+        pk_builder.append_value(&pk_buf);
+    }
+
+    let arrow_schema = schema.arrow_schema();
+    let retained_len =
+        schema.num_columns() - pk_set.len() + partition_set.intersection(&pk_set).count();
+    let mut fields = Vec::with_capacity(retained_len + 1);
+    let mut arrays = Vec::with_capacity(retained_len + 1);
+    fields.push(key_field);
+    arrays.push(Arc::new(pk_builder.finish()) as arrow::array::ArrayRef);
+
+    for (idx, column) in schema.column_schemas().iter().enumerate() {
+        if pk_set.contains(&idx) && !partition_set.contains(&idx) {
+            continue;
+        }
+        let vector = build_column_vector(
+            rows,
+            column,
+            source_columns.get(column.name.as_str()).copied(),
+            mask,
+        )?;
+        fields.push(arrow_schema.fields()[idx].clone());
         arrays.push(vector.to_arrow_array());
     }
-    let arrow_schema = align_schema_with_json_array(schema.arrow_schema().clone(), &arrays);
-    RecordBatch::try_new(arrow_schema, arrays).context(error::ComputeArrowSnafu)
+
+    let target_schema = align_schema_with_json_array(
+        Arc::new(ArrowSchema::new_with_metadata(
+            fields,
+            arrow_schema.metadata().clone(),
+        )),
+        &arrays,
+    );
+    RecordBatch::try_new(target_schema, arrays).context(error::ComputeArrowSnafu)
+}
+
+/// Encodes a validated [`ExemplarBatch`] with `__primary_key` first and retained columns in schema order.
+///
+/// Uses destination `ColumnId`s in region primary-key order so inherited tag encoding
+/// matches Mito compaction and region splits even after `ALTER ... FIRST/AFTER`. Retains any
+/// primary-key columns listed in `table_info.meta.partition_key_indices` so initial partitioning
+/// needs no key decoding.
+///
+/// # Panics
+///
+/// Panics if `exemplars` is empty. Callers must skip empty writes before conversion.
+pub fn exemplars_to_sparse_record_batch(
+    exemplars: &ExemplarBatch,
+    resolved_table_ids: &ahash::HashMap<String, TableId>,
+    table_info: &TableInfo,
+) -> Result<RecordBatch> {
+    sparse_exemplars_to_batch(exemplars, resolved_table_ids, table_info, None)
+}
+
+pub(crate) fn sparse_exemplars_to_batch(
+    exemplars: &ExemplarBatch,
+    resolved_table_ids: &ahash::HashMap<String, TableId>,
+    table_info: &TableInfo,
+    mask: Option<&RegionMask>,
+) -> Result<RecordBatch> {
+    assert!(
+        !exemplars.is_empty(),
+        "prepared exemplars must not be empty"
+    );
+    let meta = &table_info.meta;
+    let schema = &meta.schema;
+    ensure!(
+        meta.column_ids.len() == schema.num_columns(),
+        error::InvalidInsertRequestSnafu {
+            reason: format!("Table {} is missing sparse column IDs", table_info.name),
+        }
+    );
+
+    let ts_idx = schema
+        .timestamp_index()
+        .context(error::InvalidInsertRequestSnafu {
+            reason: "missing exemplar time index",
+        })?;
+    let ts_col = &schema.column_schemas()[ts_idx];
+    let ts_unit = ts_col
+        .data_type
+        .as_timestamp()
+        .map(|ts| ts.unit())
+        .context(error::InvalidInsertRequestSnafu {
+            reason: "invalid exemplar time index",
+        })?;
+    let val_idx = schema.column_index_by_name(greptime_value()).context(
+        error::InvalidInsertRequestSnafu {
+            reason: "missing exemplar value column",
+        },
+    )?;
+    let val_col = &schema.column_schemas()[val_idx];
+    let labels_idx = schema
+        .column_index_by_name(greptime_exemplar_labels())
+        .context(error::InvalidInsertRequestSnafu {
+            reason: format!("missing {} column", greptime_exemplar_labels()),
+        })?;
+    let labels_col = &schema.column_schemas()[labels_idx];
+
+    let mut metric_col = None;
+    let mut key_order = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
+    let mut active_tags = ahash::AHashMap::with_capacity(exemplars.distinct_tags().len());
+    for (pk_rank, &idx) in meta.primary_key_indices.iter().enumerate() {
+        let col = &schema.column_schemas()[idx];
+        let col_id = meta.column_ids[idx];
+        if col.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            || col.name == DATA_SCHEMA_TSID_COLUMN_NAME
+            || col_id == ReservedColumnId::table_id()
+            || col_id == ReservedColumnId::tsid()
+        {
+            continue;
+        }
+        ensure!(
+            col.data_type.is_string(),
+            error::InvalidInsertRequestSnafu {
+                reason: format!("exemplar tag {} must be STRING", col.name),
+            }
+        );
+        key_order.push(col_id);
+        if col.name == EXEMPLAR_METRIC_COLUMN {
+            metric_col = Some((pk_rank, col_id));
+        } else if exemplars.distinct_tags().contains(col.name.as_str()) {
+            active_tags.insert(col.name.as_str(), (pk_rank, col_id));
+        }
+    }
+    let Some((metric_rank, metric_col_id)) = metric_col else {
+        return error::InvalidInsertRequestSnafu {
+            reason: "missing exemplar metric column",
+        }
+        .fail();
+    };
+    if active_tags.len() != exemplars.distinct_tags().len() {
+        exemplars
+            .validate_destination_tags(&table_info.name, |tag| active_tags.contains_key(tag))?;
+    }
+
+    enum ExemplarColumn<'a> {
+        TableId(UInt32Builder),
+        Tsid(UInt64Builder),
+        Metric(Box<dyn MutableVector>),
+        ActiveTag {
+            name: &'a str,
+            nullable: bool,
+            builder: Box<dyn MutableVector>,
+        },
+        Array(ArrayRef),
+    }
+
+    let len = mask.map_or(exemplars.len(), RegionMask::selected_rows);
+    let arrow_schema = schema.arrow_schema();
+    let mut seen_partition = HashSet::new();
+    let mut columns = Vec::with_capacity(3 + meta.partition_key_indices.len());
+    for &idx in &meta.partition_key_indices {
+        if idx == ts_idx
+            || idx == val_idx
+            || idx == labels_idx
+            || !meta.primary_key_indices.contains(&idx)
+            || !seen_partition.insert(idx)
+        {
+            continue;
+        }
+        let col =
+            schema
+                .column_schemas()
+                .get(idx)
+                .with_context(|| error::InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "Invalid partition column index {idx} in table {}",
+                        table_info.name
+                    ),
+                })?;
+        let col_id = meta.column_ids[idx];
+        let output = if col.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            || col_id == ReservedColumnId::table_id()
+        {
+            ensure!(
+                col.data_type == ConcreteDataType::uint32_datatype(),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!("Sparse column {} must be UINT32", col.name),
+                }
+            );
+            ExemplarColumn::TableId(UInt32Builder::with_capacity(len))
+        } else if col.name == DATA_SCHEMA_TSID_COLUMN_NAME || col_id == ReservedColumnId::tsid() {
+            ensure!(
+                col.data_type == ConcreteDataType::uint64_datatype(),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!("Sparse column {} must be UINT64", col.name),
+                }
+            );
+            ExemplarColumn::Tsid(UInt64Builder::with_capacity(len))
+        } else if col.name == EXEMPLAR_METRIC_COLUMN {
+            ExemplarColumn::Metric(col.create_mutable_vector(len))
+        } else if exemplars.distinct_tags().contains(col.name.as_str()) {
+            ExemplarColumn::ActiveTag {
+                name: col.name.as_str(),
+                nullable: col.is_nullable(),
+                builder: col.create_mutable_vector(len),
+            }
+        } else {
+            let vector = col
+                .create_default_vector(len)
+                .map_err(BoxedError::new)
+                .context(error::ExternalSnafu)?
+                .with_context(|| error::InvalidInsertRequestSnafu {
+                    reason: format!("Missing required column {}", col.name),
+                })?;
+            ExemplarColumn::Array(vector.to_arrow_array())
+        };
+        columns.push((idx, output));
+    }
+
+    let codec = SparsePrimaryKeyCodec::schemaless();
+    let mut pk_builder = BinaryBuilder::with_capacity(len, len * SPARSE_PK_MIN_ROW_BYTES);
+    let mut ts_builder = ts_col.create_mutable_vector(len);
+    let mut val_builder = val_col.create_mutable_vector(len);
+    let mut labels_builder = labels_col.create_mutable_vector(len);
+    let mut pk_buf = Vec::with_capacity(128);
+    let mut ordered_tags = Vec::with_capacity(exemplars.distinct_tags().len() + 1);
+    let mut prev_series: Option<(&str, &BTreeMap<String, String>, TableId, u64)> = None;
+
+    for exemplar in selected_rows(exemplars.exemplars(), mask) {
+        let (table_id, tsid) = if let Some((prev_metric, prev_labels, table_id, tsid)) = prev_series
+            && prev_metric == exemplar.metric.as_ref()
+            && std::ptr::eq(prev_labels, &*exemplar.series_labels)
+        {
+            (table_id, tsid)
+        } else {
+            let table_id = resolved_table_ids
+                .get(exemplar.metric.as_ref())
+                .copied()
+                .with_context(|| error::InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "exemplar source {} table ID was not resolved",
+                        exemplar.metric
+                    ),
+                })?;
+            let tsid = TsidGenerator::from_sorted_tags(
+                exemplar
+                    .series_labels
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str())),
+            );
+            ordered_tags.clear();
+            ordered_tags.push((metric_rank, metric_col_id, exemplar.metric.as_bytes()));
+            for (name, value) in exemplar.series_labels.iter() {
+                let &(rank, col_id) = &active_tags[name.as_str()];
+                ordered_tags.push((rank, col_id, value.as_bytes()));
+            }
+            ordered_tags.sort_unstable_by_key(|&(rank, _, _)| rank);
+            pk_buf.clear();
+            codec
+                .encode_raw(
+                    table_id,
+                    tsid,
+                    ordered_tags
+                        .iter()
+                        .map(|&(_, col_id, bytes)| (col_id, bytes)),
+                    &mut pk_buf,
+                )
+                .map_err(BoxedError::new)
+                .context(error::ExternalSnafu)?;
+            prev_series = Some((
+                exemplar.metric.as_ref(),
+                &*exemplar.series_labels,
+                table_id,
+                tsid,
+            ));
+            (table_id, tsid)
+        };
+        check_sparse_key_buffer_size(pk_builder.values_slice().len(), pk_buf.len())?;
+        pk_builder.append_value(&pk_buf);
+
+        let converted_ts = Timestamp::new_nanosecond(exemplar.timestamp)
+            .convert_to(ts_unit)
+            .with_context(|| error::InvalidInsertRequestSnafu {
+                reason: format!(
+                    "exemplar timestamp {} overflows when converting to unit {ts_unit:?}",
+                    exemplar.timestamp
+                ),
+            })?;
+        ts_builder
+            .try_push_value_ref(&ValueRef::Timestamp(converted_ts))
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+        val_builder
+            .try_push_value_ref(&ValueRef::Float64(datatypes::value::OrderedFloat(
+                exemplar.value,
+            )))
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+        let labels_val = encode_json2_data_value(&exemplar.labels)?;
+        labels_builder
+            .try_push_value_ref(&labels_val.as_value_ref())
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+
+        for (_, output) in &mut columns {
+            match output {
+                ExemplarColumn::TableId(builder) => builder.append_value(table_id),
+                ExemplarColumn::Tsid(builder) => builder.append_value(tsid),
+                ExemplarColumn::Metric(builder) => {
+                    builder
+                        .try_push_value_ref(&ValueRef::String(exemplar.metric.as_ref()))
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                }
+                ExemplarColumn::ActiveTag {
+                    name,
+                    nullable,
+                    builder,
+                } => {
+                    if let Some(value) = exemplar.series_labels.get(*name) {
+                        builder
+                            .try_push_value_ref(&ValueRef::String(value.as_str()))
+                            .map_err(BoxedError::new)
+                            .context(error::ExternalSnafu)?;
+                    } else {
+                        ensure!(
+                            *nullable,
+                            error::InvalidInsertRequestSnafu {
+                                reason: format!("Null supplied for non-nullable column {name}"),
+                            }
+                        );
+                        builder.push_null();
+                    }
+                }
+                ExemplarColumn::Array(_) => {}
+            }
+        }
+    }
+
+    columns.extend([
+        (
+            ts_idx,
+            ExemplarColumn::Array(ts_builder.to_vector().to_arrow_array()),
+        ),
+        (
+            val_idx,
+            ExemplarColumn::Array(val_builder.to_vector().to_arrow_array()),
+        ),
+        (
+            labels_idx,
+            ExemplarColumn::Array(labels_builder.to_vector().to_arrow_array()),
+        ),
+    ]);
+    // The table batcher can coalesce exemplars with ordinary sparse rows when their schemas match.
+    columns.sort_unstable_by_key(|(idx, _)| *idx);
+    let mut fields = Vec::with_capacity(1 + columns.len());
+    let mut arrays = Vec::with_capacity(1 + columns.len());
+    fields.push(sparse_key_field(key_order.into_iter()));
+    arrays.push(Arc::new(pk_builder.finish()) as ArrayRef);
+    for (idx, output) in columns {
+        fields.push(arrow_schema.fields()[idx].clone());
+        arrays.push(match output {
+            ExemplarColumn::TableId(mut builder) => Arc::new(builder.finish()),
+            ExemplarColumn::Tsid(mut builder) => Arc::new(builder.finish()),
+            ExemplarColumn::Metric(mut builder) | ExemplarColumn::ActiveTag { mut builder, .. } => {
+                builder.to_vector().to_arrow_array()
+            }
+            ExemplarColumn::Array(array) => array,
+        });
+    }
+    let target_schema = align_schema_with_json_array(
+        Arc::new(ArrowSchema::new_with_metadata(
+            fields,
+            arrow_schema.metadata().clone(),
+        )),
+        &arrays,
+    );
+    RecordBatch::try_new(target_schema, arrays).context(error::ComputeArrowSnafu)
 }
 
 // Validate nested values before the infallible protobuf conversion reads type extensions.
@@ -815,5 +1476,1194 @@ mod tests {
         };
         assert!(value_matches_type(&value, kind as i32, extension.as_ref()));
         assert!(!value_matches_type(&value, kind as i32, None));
+    }
+
+    #[test]
+    fn test_sparse_key_buffer_size_at_arrow_offset_limit() {
+        let limit = i32::MAX as usize;
+        assert!(check_sparse_key_buffer_size(limit - 1, 1).is_ok());
+        assert!(check_sparse_key_buffer_size(limit, 1).is_err());
+        assert!(check_sparse_key_buffer_size(1, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn test_sparse_rows_reject_legacy_first_tag_key_order() {
+        use api::v1::helper::{tag_column_schema, time_index_column_schema};
+
+        let mut table = table_info(Schema::new(vec![
+            ColumnSchema::new("env", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        table.meta.column_ids = vec![3, ReservedColumnId::table_id(), ReservedColumnId::tsid(), 2];
+        table.meta.options.extra_options.insert(
+            store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.into(),
+            "sparse".into(),
+        );
+        // Before #10591, ADD COLUMN env ... FIRST saved the catalog key in schema order.
+        table.meta.primary_key_indices = vec![0, 1, 2];
+        let rows = Rows {
+            schema: vec![
+                tag_column_schema("env", ColumnDataType::String),
+                tag_column_schema(DATA_SCHEMA_TABLE_ID_COLUMN_NAME, ColumnDataType::Uint32),
+                tag_column_schema(DATA_SCHEMA_TSID_COLUMN_NAME, ColumnDataType::Uint64),
+                time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+            ],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::StringValue("prod".into()).into(),
+                    ValueData::U32Value(1).into(),
+                    ValueData::U64Value(2).into(),
+                    ValueData::TimestampMillisecondValue(3).into(),
+                ],
+            }],
+        };
+        let error = sparse_rows_to_record_batch(&rows, &table).unwrap_err();
+        assert!(
+            error.to_string().contains("Reconcile the table metadata"),
+            "{error}"
+        );
+
+        table.meta.primary_key_indices = vec![1, 2, 0];
+        assert!(sparse_rows_to_record_batch(&rows, &table).is_ok());
+    }
+
+    #[test]
+    fn test_sparse_rows_to_record_batch_defaults_nulls_and_pk_order() {
+        use arrow::array::{Array, BinaryArray, Float64Array};
+        use mito_codec::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
+
+        let schema = Schema::new(vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("tag_b", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("tag_a", ConcreteDataType::string_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::String(
+                    "east".into(),
+                ))))
+                .unwrap(),
+            ColumnSchema::new("tag_req", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::Float64(
+                    42.0.into(),
+                ))))
+                .unwrap(),
+        ]);
+        let mut info = TableInfoBuilder::default()
+            .table_id(7)
+            .table_version(0)
+            .name("sparse_defaults")
+            .meta(
+                TableMetaBuilder::empty()
+                    .schema(Arc::new(schema))
+                    // Non-column-ordered PK (tag_a before tag_b before tag_req).
+                    .primary_key_indices(vec![0, 1, 3, 2, 4])
+                    .column_ids(vec![
+                        ReservedColumnId::table_id(),
+                        ReservedColumnId::tsid(),
+                        10,
+                        11,
+                        12,
+                        13,
+                        14,
+                    ])
+                    .next_column_id(15)
+                    .engine("mito")
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        info.meta.options.extra_options.insert(
+            store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+            "SpArSe".to_string(),
+        );
+
+        let tag_col = |name: &str| ProtoColumnSchema {
+            column_name: name.to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let tid_col = ProtoColumnSchema {
+            column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint32 as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let tsid_col = ProtoColumnSchema {
+            column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint64 as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let ts_col = ProtoColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        };
+
+        // Missing required non-nullable tag fails.
+        let missing_req = Rows {
+            schema: vec![tid_col.clone(), tsid_col.clone(), ts_col.clone()],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::U32Value(1).into(),
+                    ValueData::U64Value(2).into(),
+                    ValueData::TimestampMillisecondValue(100).into(),
+                ],
+            }],
+        };
+        let err = sparse_rows_to_record_batch(&missing_req, &info).unwrap_err();
+        assert!(
+            err.to_string().contains("Missing required column tag_req"),
+            "{err}"
+        );
+
+        // Explicit NULL on non-nullable tag fails.
+        let null_req = Rows {
+            schema: vec![
+                tid_col.clone(),
+                tsid_col.clone(),
+                tag_col("tag_req"),
+                ts_col.clone(),
+            ],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::U32Value(1).into(),
+                    ValueData::U64Value(2).into(),
+                    Value::default(),
+                    ValueData::TimestampMillisecondValue(100).into(),
+                ],
+            }],
+        };
+        let err = sparse_rows_to_record_batch(&null_req, &info).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Null supplied for non-nullable column tag_req"),
+            "{err}"
+        );
+
+        // Row 0 omits tag_a (uses DEFAULT 'east') and val (DEFAULT 42.0), supplies tag_b="".
+        let rows_omitted_default = Rows {
+            schema: vec![
+                tid_col.clone(),
+                tsid_col.clone(),
+                tag_col("tag_b"),
+                tag_col("tag_req"),
+                ts_col.clone(),
+            ],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::U32Value(11).into(),
+                    ValueData::U64Value(22).into(),
+                    ValueData::StringValue(String::new()).into(),
+                    ValueData::StringValue("req0".into()).into(),
+                    ValueData::TimestampMillisecondValue(100).into(),
+                ],
+            }],
+        };
+        let batch0 = sparse_rows_to_record_batch(&rows_omitted_default, &info).unwrap();
+        assert_eq!(batch0.num_columns(), 3);
+        let pk0 = batch0
+            .column_by_name(PRIMARY_KEY_COLUMN_NAME)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let val0 = batch0
+            .column_by_name("val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(val0.value(0), 42.0);
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        assert_eq!(codec.decode_ids(pk0.value(0)).unwrap(), (11, 22));
+        let mut cache = SparseOffsetsCache::new();
+        let mut buf = Vec::new();
+        let mut view = SparsePrimaryKeyView::new(pk0.value(0), &mut cache).unwrap();
+        // Verify tag_a (col 11) precedes tag_b (col 10) matching catalog primary_key_indices.
+        let pos_11 = pk0
+            .value(0)
+            .windows(4)
+            .position(|w| w == 11_u32.to_be_bytes())
+            .unwrap();
+        let pos_10 = pk0
+            .value(0)
+            .windows(4)
+            .position(|w| w == 10_u32.to_be_bytes())
+            .unwrap();
+        assert!(pos_11 < pos_10);
+        assert_eq!(view.label(11, &mut buf).unwrap(), Some("east"));
+        assert_eq!(view.label(10, &mut buf).unwrap(), Some(""));
+        assert_eq!(view.label(12, &mut buf).unwrap(), Some("req0"));
+
+        // Explicit NULL on DEFAULT 'east' column tag_a stays NULL (omitted from __primary_key).
+        let rows_explicit_null = Rows {
+            schema: vec![
+                tid_col,
+                tsid_col,
+                tag_col("tag_a"),
+                tag_col("tag_b"),
+                tag_col("tag_req"),
+                ts_col,
+            ],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::U32Value(11).into(),
+                    ValueData::U64Value(22).into(),
+                    Value::default(),
+                    Value::default(),
+                    ValueData::StringValue("req1".into()).into(),
+                    ValueData::TimestampMillisecondValue(200).into(),
+                ],
+            }],
+        };
+        let batch1 = sparse_rows_to_record_batch(&rows_explicit_null, &info).unwrap();
+        let pk1 = batch1
+            .column_by_name(PRIMARY_KEY_COLUMN_NAME)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let mut view1 = SparsePrimaryKeyView::new(pk1.value(0), &mut cache).unwrap();
+        assert_eq!(view1.label(11, &mut buf).unwrap(), None);
+        assert_eq!(view1.label(10, &mut buf).unwrap(), None);
+        assert_eq!(view1.label(12, &mut buf).unwrap(), Some("req1"));
+    }
+
+    #[test]
+    fn test_sparse_conversion_estimate_omitted_and_default_tags() {
+        let make_table = |with_default: bool| {
+            let mut columns = vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+            ];
+            for i in 0..128 {
+                let mut col = ColumnSchema::new(
+                    format!("tag_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                );
+                if with_default {
+                    col = col
+                        .with_default_constraint(Some(ColumnDefaultConstraint::Value(
+                            DtValue::String("prod".into()),
+                        )))
+                        .unwrap();
+                }
+                columns.push(col);
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                "val",
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let pk_indices: Vec<usize> = (0..130).collect();
+            let column_ids: Vec<u32> = std::iter::once(ReservedColumnId::table_id())
+                .chain(std::iter::once(ReservedColumnId::tsid()))
+                .chain(10..140)
+                .collect();
+            let mut info = TableInfoBuilder::default()
+                .table_id(9)
+                .table_version(0)
+                .name("sparse_wide")
+                .meta(
+                    TableMetaBuilder::empty()
+                        .schema(Arc::new(Schema::new(columns)))
+                        .primary_key_indices(pk_indices)
+                        .column_ids(column_ids)
+                        .next_column_id(150)
+                        .engine("mito")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap();
+            info.meta.options.extra_options.insert(
+                store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+                "sparse".to_string(),
+            );
+            info
+        };
+
+        let make_rows = |include_explicit_nulls: bool| {
+            let mut schema = vec![
+                ProtoColumnSchema {
+                    column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                    datatype: ColumnDataType::Uint32 as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ProtoColumnSchema {
+                    column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                    datatype: ColumnDataType::Uint64 as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+            ];
+            if include_explicit_nulls {
+                for i in 0..128 {
+                    schema.push(ProtoColumnSchema {
+                        column_name: format!("tag_{i}"),
+                        datatype: ColumnDataType::String as i32,
+                        semantic_type: SemanticType::Tag as i32,
+                        ..Default::default()
+                    });
+                }
+            }
+            schema.push(ProtoColumnSchema {
+                column_name: "ts".to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            });
+            schema.push(source("val", ColumnDataType::Float64));
+
+            let rows = (0..1000)
+                .map(|i| {
+                    let mut values =
+                        vec![ValueData::U32Value(1).into(), ValueData::U64Value(i).into()];
+                    if include_explicit_nulls {
+                        values.extend(std::iter::repeat_n(Value::default(), 128));
+                    }
+                    values.push(ValueData::TimestampMillisecondValue(i as i64).into());
+                    values.push(ValueData::F64Value(i as f64).into());
+                    Row { values }
+                })
+                .collect();
+            Rows { schema, rows }
+        };
+
+        let nullable_table = make_table(false);
+        let omitted_rows = make_rows(false);
+        let omitted_estimate =
+            estimated_sparse_record_batch_bytes(&omitted_rows, &nullable_table).unwrap();
+        let omitted_batch = sparse_rows_to_record_batch(&omitted_rows, &nullable_table).unwrap();
+        assert!(omitted_estimate < 512 * 1024, "estimate={omitted_estimate}");
+        assert!(omitted_estimate >= omitted_batch.get_array_memory_size());
+
+        let explicit_null_rows = make_rows(true);
+        let null_estimate =
+            estimated_sparse_record_batch_bytes(&explicit_null_rows, &nullable_table).unwrap();
+        let null_batch = sparse_rows_to_record_batch(&explicit_null_rows, &nullable_table).unwrap();
+        assert!(null_estimate < 512 * 1024, "estimate={null_estimate}");
+        assert!(null_estimate >= null_batch.get_array_memory_size());
+
+        let default_table = make_table(true);
+        let default_estimate =
+            estimated_sparse_record_batch_bytes(&omitted_rows, &default_table).unwrap();
+        let default_batch = sparse_rows_to_record_batch(&omitted_rows, &default_table).unwrap();
+        assert!(
+            default_estimate > 4 * 1024 * 1024,
+            "estimate={default_estimate}"
+        );
+        assert!(default_estimate >= default_batch.get_array_memory_size());
+    }
+
+    #[test]
+    fn test_exemplars_to_sparse_record_batch_wide_catalog_and_pk_order() {
+        use std::collections::BTreeMap;
+
+        use arrow::array::BinaryArray;
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use common_query::prelude::greptime_timestamp;
+        use mito_codec::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
+
+        use crate::insert::Exemplar;
+
+        let mut labels_col = ColumnSchema::new(
+            greptime_exemplar_labels(),
+            ConcreteDataType::json2(JsonNativeType::Null),
+            true,
+        );
+        labels_col.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::new_v2(),
+        ))));
+        let mut columns = vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                EXEMPLAR_METRIC_COLUMN,
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new("zone", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
+        ];
+        for i in 0..2048 {
+            columns.push(ColumnSchema::new(
+                format!("unused_{i}"),
+                ConcreteDataType::string_datatype(),
+                true,
+            ));
+        }
+        columns.push(
+            ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            greptime_value(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        columns.push(labels_col);
+
+        // Non-column-ordered primary key: (table_id, tsid, job, metric, zone, unused...)
+        let mut pk_indices = vec![0, 1, 4, 2, 3];
+        pk_indices.extend(5..2053);
+        let column_ids: Vec<u32> = std::iter::once(ReservedColumnId::table_id())
+            .chain(std::iter::once(ReservedColumnId::tsid()))
+            .chain(10..10 + (columns.len() as u32 - 2))
+            .collect();
+        let next_col_id = *column_ids.last().unwrap() + 1;
+        let info = TableInfoBuilder::default()
+            .table_id(1)
+            .table_version(0)
+            .name(METRICS_EXEMPLARS_TABLE)
+            .meta(
+                TableMetaBuilder::empty()
+                    .schema(Arc::new(Schema::new(columns)))
+                    .primary_key_indices(pk_indices)
+                    .column_ids(column_ids)
+                    .next_column_id(next_col_id)
+                    .engine("mito")
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        let shared_series = Arc::new(BTreeMap::from([
+            ("job".to_string(), "api".to_string()),
+            ("zone".to_string(), "z1".to_string()),
+        ]));
+        let other_series = Arc::new(BTreeMap::from([("zone".to_string(), "".to_string())]));
+        let batch_input = ExemplarBatch::try_new(vec![
+            Exemplar {
+                metric: "cpu".into(),
+                series_labels: shared_series.clone(),
+                timestamp: 10,
+                value: 1.0,
+                labels: BTreeMap::from([("trace_id".into(), "t0".into())]),
+            },
+            Exemplar {
+                metric: "cpu".into(),
+                series_labels: shared_series.clone(),
+                timestamp: 20,
+                value: 2.0,
+                labels: BTreeMap::from([("trace_id".into(), "t1".into())]),
+            },
+            Exemplar {
+                metric: "mem".into(),
+                series_labels: shared_series,
+                timestamp: 30,
+                value: 3.0,
+                labels: BTreeMap::new(),
+            },
+            Exemplar {
+                metric: "mem".into(),
+                series_labels: other_series,
+                timestamp: 40,
+                value: 4.0,
+                labels: BTreeMap::new(),
+            },
+        ])
+        .unwrap();
+        let resolved = ahash::HashMap::from_iter([("cpu".into(), 100), ("mem".into(), 200)]);
+        let record_batch =
+            exemplars_to_sparse_record_batch(&batch_input, &resolved, &info).unwrap();
+        let mask = RegionMask::from(arrow::array::BooleanArray::from(vec![
+            true, false, false, true,
+        ]));
+        let selected =
+            sparse_exemplars_to_batch(&batch_input, &resolved, &info, Some(&mask)).unwrap();
+        assert_eq!(
+            selected,
+            arrow::compute::filter_record_batch(&record_batch, mask.array()).unwrap()
+        );
+        let pk_array = record_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(pk_array.value(0), pk_array.value(1));
+
+        let mut cache = SparseOffsetsCache::new();
+        let mut buf = Vec::new();
+        // Row 0 encodes job (col 12), metric (col 10), zone (col 11) in catalog PK rank order.
+        let pk0 = pk_array.value(0);
+        let pos_job = pk0
+            .windows(4)
+            .position(|w| w == 12_u32.to_be_bytes())
+            .unwrap();
+        let pos_metric = pk0
+            .windows(4)
+            .position(|w| w == 10_u32.to_be_bytes())
+            .unwrap();
+        let pos_zone = pk0
+            .windows(4)
+            .position(|w| w == 11_u32.to_be_bytes())
+            .unwrap();
+        assert!(pos_job < pos_metric && pos_metric < pos_zone);
+
+        let mut view2 = SparsePrimaryKeyView::new(pk_array.value(2), &mut cache).unwrap();
+        assert_eq!(view2.table_id(), 200);
+        assert_eq!(view2.label(10, &mut buf).unwrap(), Some("mem"));
+        assert_eq!(view2.label(12, &mut buf).unwrap(), Some("api"));
+        assert_eq!(view2.label(11, &mut buf).unwrap(), Some("z1"));
+
+        let mut view3 = SparsePrimaryKeyView::new(pk_array.value(3), &mut cache).unwrap();
+        assert_eq!(view3.table_id(), 200);
+        assert_eq!(view3.label(10, &mut buf).unwrap(), Some("mem"));
+        assert_eq!(view3.label(12, &mut buf).unwrap(), None);
+        assert_eq!(view3.label(11, &mut buf).unwrap(), Some(""));
+    }
+
+    #[test]
+    fn test_exemplar_label_path_estimation() {
+        use std::collections::BTreeMap;
+
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use common_query::prelude::greptime_timestamp;
+
+        use crate::insert::Exemplar;
+
+        let make_exemplar_table = |settings: JsonSettings| {
+            let mut labels_col = ColumnSchema::new(
+                greptime_exemplar_labels(),
+                ConcreteDataType::json2(JsonNativeType::Null),
+                true,
+            );
+            labels_col.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                settings,
+            ))));
+            let schema = Schema::new(vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    EXEMPLAR_METRIC_COLUMN,
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                ColumnSchema::new(
+                    greptime_timestamp(),
+                    ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+                labels_col,
+            ]);
+            TableInfoBuilder::default()
+                .table_id(1)
+                .table_version(0)
+                .name(METRICS_EXEMPLARS_TABLE)
+                .meta(
+                    TableMetaBuilder::empty()
+                        .schema(Arc::new(schema))
+                        .primary_key_indices(vec![0, 1, 2])
+                        .column_ids(vec![
+                            ReservedColumnId::table_id(),
+                            ReservedColumnId::tsid(),
+                            10,
+                            11,
+                            12,
+                            13,
+                        ])
+                        .next_column_id(14)
+                        .engine("mito")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap()
+        };
+
+        let table = make_exemplar_table(JsonSettings::new_v2());
+        let resolved = ahash::HashMap::from_iter([("cpu".into(), 100), ("a".into(), 101)]);
+        let shared = Arc::new(BTreeMap::new());
+        let repeated = ExemplarBatch::try_new(
+            (0..1000)
+                .map(|i| Exemplar {
+                    metric: "cpu".into(),
+                    series_labels: shared.clone(),
+                    timestamp: i,
+                    value: i as f64,
+                    labels: BTreeMap::from([("trace_id".into(), format!("trace_{i}"))]),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let distinct = ExemplarBatch::try_new(
+            (0..1000)
+                .map(|i| Exemplar {
+                    metric: "cpu".into(),
+                    series_labels: shared.clone(),
+                    timestamp: i,
+                    value: i as f64,
+                    labels: BTreeMap::from([(format!("label_{i}"), "val".into())]),
+                })
+                .collect(),
+        )
+        .unwrap();
+
+        let short_metric = ExemplarBatch::try_new(
+            (0..1000)
+                .map(|i| Exemplar {
+                    metric: "a".into(),
+                    series_labels: shared.clone(),
+                    timestamp: i,
+                    value: i as f64,
+                    labels: BTreeMap::new(),
+                })
+                .collect(),
+        )
+        .unwrap();
+
+        for batch in [&repeated, &distinct, &short_metric] {
+            let estimate = estimated_exemplar_record_batch_bytes(batch, &table).unwrap();
+            let actual = exemplars_to_sparse_record_batch(batch, &resolved, &table).unwrap();
+            assert!(estimate >= actual.get_array_memory_size());
+        }
+    }
+
+    #[test]
+    fn test_sparse_conversion_and_estimation_with_partition_columns() {
+        use arrow::array::{Array, BinaryArray, StringArray, UInt32Array, UInt64Array};
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use common_query::prelude::greptime_timestamp;
+
+        use crate::insert::Exemplar;
+
+        let mut labels_col = ColumnSchema::new(
+            greptime_exemplar_labels(),
+            ConcreteDataType::json2(JsonNativeType::Null),
+            true,
+        );
+        labels_col.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::new_v2(),
+        ))));
+        let schema = Schema::new(vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                EXEMPLAR_METRIC_COLUMN,
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            labels_col,
+            ColumnSchema::new("unused_tag", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+        ]);
+        let mut table = TableInfoBuilder::default()
+            .table_id(21)
+            .table_version(0)
+            .name(METRICS_EXEMPLARS_TABLE)
+            .meta(
+                TableMetaBuilder::empty()
+                    .schema(Arc::new(schema))
+                    .primary_key_indices(vec![0, 1, 2, 4, 6])
+                    .partition_key_indices(vec![6, 1, 4, 7, 2, 0, 3])
+                    .column_ids(vec![
+                        ReservedColumnId::table_id(),
+                        ReservedColumnId::tsid(),
+                        10,
+                        13,
+                        11,
+                        15,
+                        12,
+                        14,
+                    ])
+                    .next_column_id(16)
+                    .engine("mito")
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        table.meta.options.extra_options.insert(
+            store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+            "sparse".to_string(),
+        );
+
+        let tid_col = ProtoColumnSchema {
+            column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint32 as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let tsid_col = ProtoColumnSchema {
+            column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint64 as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let tag_col = |name: &str| ProtoColumnSchema {
+            column_name: name.to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let ts_col = ProtoColumnSchema {
+            column_name: greptime_timestamp().to_string(),
+            datatype: ColumnDataType::TimestampNanosecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        };
+        let mut labels_source = source(greptime_exemplar_labels(), ColumnDataType::Json);
+        labels_source.datatype_extension =
+            ColumnDataTypeWrapper::try_from(ConcreteDataType::json2(JsonNativeType::Null))
+                .unwrap()
+                .into_parts()
+                .1;
+
+        let empty_labels = to_grpc_value(
+            JsonSettings::new_v2()
+                .encode(serde_json::json!({}))
+                .unwrap(),
+        );
+        let rows = Rows {
+            schema: vec![
+                tid_col,
+                tsid_col,
+                tag_col(EXEMPLAR_METRIC_COLUMN),
+                tag_col("host"),
+                ts_col,
+                source(greptime_value(), ColumnDataType::Float64),
+                labels_source,
+            ],
+            rows: (0..200)
+                .map(|i| Row {
+                    values: vec![
+                        ValueData::U32Value(100 + (i % 2) as u32).into(),
+                        ValueData::U64Value(i as u64).into(),
+                        ValueData::StringValue("cpu".into()).into(),
+                        if i % 3 == 0 {
+                            Value::default()
+                        } else {
+                            ValueData::StringValue(format!("node-{i}")).into()
+                        },
+                        ValueData::TimestampNanosecondValue(i).into(),
+                        ValueData::F64Value(i as f64).into(),
+                        empty_labels.clone(),
+                    ],
+                })
+                .collect(),
+        };
+        let rows_estimate = estimated_sparse_record_batch_bytes(&rows, &table).unwrap();
+        let rows_batch = sparse_rows_to_record_batch(&rows, &table).unwrap();
+        assert!(rows_estimate >= rows_batch.get_array_memory_size());
+        assert_eq!(
+            rows_batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                PRIMARY_KEY_COLUMN_NAME,
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                EXEMPLAR_METRIC_COLUMN,
+                greptime_timestamp(),
+                "host",
+                greptime_exemplar_labels(),
+                "unused_tag",
+                greptime_value(),
+            ]
+        );
+        assert_eq!(
+            rows_batch
+                .column_by_name("unused_tag")
+                .unwrap()
+                .null_count(),
+            200
+        );
+
+        let host_series = Arc::new(BTreeMap::from([("host".to_string(), "n1".to_string())]));
+        let empty_series = Arc::new(BTreeMap::new());
+        let exemplars = ExemplarBatch::try_new(vec![
+            Exemplar {
+                metric: "cpu".into(),
+                series_labels: host_series.clone(),
+                timestamp: 10,
+                value: 1.0,
+                labels: BTreeMap::new(),
+            },
+            Exemplar {
+                metric: "cpu".into(),
+                series_labels: host_series,
+                timestamp: 20,
+                value: 2.0,
+                labels: BTreeMap::new(),
+            },
+            Exemplar {
+                metric: "mem".into(),
+                series_labels: empty_series,
+                timestamp: 30,
+                value: 3.0,
+                labels: BTreeMap::new(),
+            },
+        ])
+        .unwrap();
+        let resolved = ahash::HashMap::from_iter([("cpu".into(), 100), ("mem".into(), 200)]);
+        let ex_estimate = estimated_exemplar_record_batch_bytes(&exemplars, &table).unwrap();
+        let ex_batch = exemplars_to_sparse_record_batch(&exemplars, &resolved, &table).unwrap();
+        assert!(ex_estimate >= ex_batch.get_array_memory_size());
+        assert_eq!(ex_batch.schema(), rows_batch.schema());
+        let pk_col = ex_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let table_ids = ex_batch
+            .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let tsids = ex_batch
+            .column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let metrics = ex_batch
+            .column_by_name(EXEMPLAR_METRIC_COLUMN)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let hosts = ex_batch
+            .column_by_name("host")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let unused = ex_batch
+            .column_by_name("unused_tag")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        for row in 0..3 {
+            assert_eq!(
+                codec.decode_ids(pk_col.value(row)).unwrap(),
+                (table_ids.value(row), tsids.value(row))
+            );
+        }
+        assert_eq!(table_ids.values().as_ref(), &[100, 100, 200]);
+        assert_eq!(tsids.value(0), tsids.value(1));
+        assert_eq!(
+            vec![metrics.value(0), metrics.value(1), metrics.value(2)],
+            vec!["cpu", "cpu", "mem"]
+        );
+        assert_eq!(
+            hosts.iter().collect::<Vec<_>>(),
+            vec![Some("n1"), Some("n1"), None]
+        );
+        assert_eq!(unused.iter().collect::<Vec<_>>(), vec![None, None, None]);
+    }
+
+    #[test]
+    fn test_sparse_rows_to_record_batch_skips_omitted_null_tags_and_preserves_defaults() {
+        use arrow::array::BinaryArray;
+        use mito_codec::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
+
+        let build_table = |with_required_tag: bool| {
+            let mut columns = vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+                ColumnSchema::new("site", ConcreteDataType::string_datatype(), true)
+                    .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::String(
+                        "east".into(),
+                    ))))
+                    .unwrap(),
+                ColumnSchema::new("empty_def", ConcreteDataType::string_datatype(), true)
+                    .with_default_constraint(Some(ColumnDefaultConstraint::Value(DtValue::String(
+                        String::new().into(),
+                    ))))
+                    .unwrap(),
+            ];
+            for i in 0..128 {
+                columns.push(ColumnSchema::new(
+                    format!("opt_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ));
+            }
+            if with_required_tag {
+                columns.push(ColumnSchema::new(
+                    "req_tag",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                "val",
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+
+            let opt_end = 5 + 128;
+            // Non-column-ordered primary key: (__table_id, __tsid, site, host, empty_def, opt_0..opt_127[, req_tag])
+            let mut pk_indices = vec![0, 1, 3, 2, 4];
+            pk_indices.extend(5..opt_end);
+            if with_required_tag {
+                pk_indices.push(opt_end);
+            }
+            let column_ids: Vec<u32> = std::iter::once(ReservedColumnId::table_id())
+                .chain(std::iter::once(ReservedColumnId::tsid()))
+                .chain(10..10 + (columns.len() as u32 - 2))
+                .collect();
+            let next_column_id = *column_ids.last().unwrap() + 1;
+            let mut info = TableInfoBuilder::default()
+                .table_id(15)
+                .table_version(0)
+                .name("sparse_skipped_nulls")
+                .meta(
+                    TableMetaBuilder::empty()
+                        .schema(Arc::new(Schema::new(columns)))
+                        .primary_key_indices(pk_indices)
+                        .column_ids(column_ids)
+                        .next_column_id(next_column_id)
+                        .engine("mito")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap();
+            info.meta.options.extra_options.insert(
+                store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+                "sparse".to_string(),
+            );
+            info
+        };
+
+        let table = build_table(false);
+        let req_table = build_table(true);
+
+        let tid_col = ProtoColumnSchema {
+            column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint32 as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let tsid_col = ProtoColumnSchema {
+            column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint64 as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let tag_col = |name: &str| ProtoColumnSchema {
+            column_name: name.to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        };
+        let ts_col = ProtoColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        };
+
+        let omitted_rows = Rows {
+            schema: vec![
+                tid_col.clone(),
+                tsid_col.clone(),
+                tag_col("host"),
+                ts_col.clone(),
+                source("val", ColumnDataType::Float64),
+            ],
+            rows: vec![
+                Row {
+                    values: vec![
+                        ValueData::U32Value(15).into(),
+                        ValueData::U64Value(101).into(),
+                        ValueData::StringValue(String::new()).into(),
+                        ValueData::TimestampMillisecondValue(1).into(),
+                        ValueData::F64Value(1.0).into(),
+                    ],
+                },
+                Row {
+                    values: vec![
+                        ValueData::U32Value(15).into(),
+                        ValueData::U64Value(102).into(),
+                        Value::default(),
+                        ValueData::TimestampMillisecondValue(2).into(),
+                        ValueData::F64Value(2.0).into(),
+                    ],
+                },
+            ],
+        };
+
+        // Required non-nullable omitted tag still fails even when nullable tags are skipped.
+        let err = sparse_rows_to_record_batch(&omitted_rows, &req_table).unwrap_err();
+        assert!(
+            err.to_string().contains("Missing required column req_tag"),
+            "{err}"
+        );
+
+        let omitted_batch = sparse_rows_to_record_batch(&omitted_rows, &table).unwrap();
+
+        // Explicit NULLs for opt_0..opt_127 must encode byte-for-byte identically to omitting them.
+        let mut explicit_schema = vec![tid_col, tsid_col, tag_col("host")];
+        explicit_schema.extend((0..128).map(|i| tag_col(&format!("opt_{i}"))));
+        explicit_schema.push(ts_col);
+        explicit_schema.push(source("val", ColumnDataType::Float64));
+        let explicit_rows = Rows {
+            schema: explicit_schema,
+            rows: omitted_rows
+                .rows
+                .iter()
+                .map(|row| {
+                    let mut values = row.values[..3].to_vec();
+                    values.extend(std::iter::repeat_n(Value::default(), 128));
+                    values.extend_from_slice(&row.values[3..]);
+                    Row { values }
+                })
+                .collect(),
+        };
+        let explicit_batch = sparse_rows_to_record_batch(&explicit_rows, &table).unwrap();
+        assert_eq!(omitted_batch, explicit_batch);
+
+        let pk_col = omitted_batch
+            .column_by_name(PRIMARY_KEY_COLUMN_NAME)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        // Column IDs: host=10, site=11, empty_def=12, opt_0=13 .. opt_127=140
+        let pk0 = pk_col.value(0);
+        let pos_site = pk0
+            .windows(4)
+            .position(|w| w == 11_u32.to_be_bytes())
+            .unwrap();
+        let pos_host = pk0
+            .windows(4)
+            .position(|w| w == 10_u32.to_be_bytes())
+            .unwrap();
+        let pos_empty_def = pk0
+            .windows(4)
+            .position(|w| w == 12_u32.to_be_bytes())
+            .unwrap();
+        assert!(pos_site < pos_host && pos_host < pos_empty_def);
+
+        let mut cache = SparseOffsetsCache::new();
+        let mut buf = Vec::new();
+        let mut view0 = SparsePrimaryKeyView::new(pk0, &mut cache).unwrap();
+        assert_eq!(view0.label(11, &mut buf).unwrap(), Some("east"));
+        assert_eq!(view0.label(10, &mut buf).unwrap(), Some(""));
+        assert_eq!(view0.label(12, &mut buf).unwrap(), Some(""));
+        assert_eq!(view0.label(13, &mut buf).unwrap(), None);
+        assert_eq!(view0.label(140, &mut buf).unwrap(), None);
+
+        let mut view1 = SparsePrimaryKeyView::new(pk_col.value(1), &mut cache).unwrap();
+        assert_eq!(view1.label(11, &mut buf).unwrap(), Some("east"));
+        assert_eq!(view1.label(10, &mut buf).unwrap(), None);
+        assert_eq!(view1.label(12, &mut buf).unwrap(), Some(""));
+        assert_eq!(view1.label(13, &mut buf).unwrap(), None);
     }
 }

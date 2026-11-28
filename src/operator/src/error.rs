@@ -118,6 +118,19 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to resolve sparse primary key for table {table_name}"))]
+    ResolveSparsePrimaryKey {
+        table_name: String,
+        source: Arc<common_meta::error::Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Table {table_name} changed during sparse write preparation. Retry with the current schema"
+    ))]
+    SparseWriteTableChanged { table_name: String },
+
     #[snafu(display("external error"))]
     External {
         #[snafu(implicit)]
@@ -1145,6 +1158,8 @@ impl ErrorExt for Error {
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
             Error::BatchFlush { source, .. } => source.status_code(),
+            Error::ResolveSparsePrimaryKey { source, .. } => source.status_code(),
+            Error::SparseWriteTableChanged { .. } => StatusCode::TableUnavailable,
             Error::WriteRejected { .. } => StatusCode::RateLimited,
             Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
@@ -1212,7 +1227,9 @@ impl ErrorExt for Error {
     fn retry_hint(&self) -> RetryHint {
         match self {
             Error::ReadObject { error, .. } => retry_hint_from_opendal_error(error),
-            Error::ReadParquetMetadata { .. } | Error::WriteRejected { .. } => RetryHint::Retryable,
+            Error::ReadParquetMetadata { .. }
+            | Error::WriteRejected { .. }
+            | Error::SparseWriteTableChanged { .. } => RetryHint::Retryable,
             Error::InvalidateTableCache { source, .. }
             | Error::ExecuteDdl { source, .. }
             | Error::RequestInserts { source, .. }
@@ -1264,6 +1281,7 @@ impl ErrorExt for Error {
             Error::SubstraitCodec { source, .. } => source.retry_hint(),
             Error::External { source, .. } => source.retry_hint(),
             Error::BatchFlush { source, .. } => source.retry_hint(),
+            Error::ResolveSparsePrimaryKey { source, .. } => source.retry_hint(),
             Error::BuildRecordBatch { source, .. } => source.retry_hint(),
             Error::DecodeFlightData { source, .. } => source.retry_hint(),
             Error::SqlCommon { source, .. } => source.retry_hint(),

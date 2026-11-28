@@ -1143,6 +1143,13 @@ mod exemplar_accounting_tests {
         async fn pre_write(&self, _: &RowInsertRequests, _: QueryContextRef) -> Result<()> {
             Ok(())
         }
+        async fn pre_write_exemplars(
+            &self,
+            _: &operator::insert::ExemplarBatch,
+            _: QueryContextRef,
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn check_exemplar_sources(
             &self,
             _: &std::collections::BTreeSet<String>,
@@ -1152,7 +1159,7 @@ mod exemplar_accounting_tests {
         }
         async fn write_exemplars_prepared(
             &self,
-            request: RowInsertRequests,
+            exemplars: operator::insert::ExemplarBatch,
             _: QueryContextRef,
         ) -> Result<Output> {
             if self.fail_exemplars {
@@ -1161,9 +1168,7 @@ mod exemplar_accounting_tests {
                 }
                 .build());
             }
-            Ok(Output::new_with_affected_rows(
-                prom_write_row_count(&request) as usize,
-            ))
+            Ok(Output::new_with_affected_rows(exemplars.len()))
         }
         async fn write_prepared(
             &self,
@@ -1484,6 +1489,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mixed_write_requires_exemplar_destination_preflight() {
+        let handler = Arc::new(RecordingPromStoreHandler {
+            events: Default::default(),
+        });
+        let exemplar = crate::exemplar::Exemplar {
+            metric: "exemplar_source".into(),
+            series_labels: Default::default(),
+            labels: Default::default(),
+            timestamp: 1,
+            value: 1.0,
+        };
+        let outcome = exemplar::write(
+            handler.clone(),
+            None,
+            true,
+            vec![test_prom_write_batch("sample")],
+            vec![],
+            [(None, vec![exemplar])].into(),
+            QueryContext::arc(),
+        )
+        .await;
+
+        assert_eq!(outcome.written, [0, 0, 0]);
+        assert!(
+            matches!(outcome.error, Some(error::Error::NotSupported { feat }) if feat == "exemplar destination preflight")
+        );
+        let events = handler.events.lock().unwrap();
+        assert!(
+            events.iter().all(|event| event.starts_with("pre:")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_async_v2_counts_acceptance_without_confirming_storage() {
         let handler: PromStoreProtocolHandlerRef = Arc::new(RecordingPromStoreHandler {
             events: Default::default(),
@@ -1603,6 +1642,24 @@ mod tests {
             Ok(())
         }
 
+        // Intentionally inherit destination preflight even though source checks succeed.
+        async fn check_exemplar_sources(
+            &self,
+            _: &std::collections::BTreeSet<String>,
+            _: QueryContextRef,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write_exemplars_prepared(
+            &self,
+            exemplars: operator::insert::ExemplarBatch,
+            _: QueryContextRef,
+        ) -> Result<Output> {
+            self.events.lock().unwrap().push("exemplar".into());
+            Ok(Output::new_with_affected_rows(exemplars.len()))
+        }
+
         async fn write_prepared(
             &self,
             request: RowInsertRequests,
@@ -1704,14 +1761,19 @@ mod tests {
 
     #[async_trait]
     impl PromStoreProtocolHandler for ExemplarMemoryHandler {
-        async fn pre_write(&self, request: &RowInsertRequests, _: QueryContextRef) -> Result<()> {
-            let capacity: usize = request
-                .inserts
-                .iter()
-                .flat_map(|request| &request.rows.as_ref().unwrap().rows)
-                .map(|row| row.values.capacity() * std::mem::size_of::<api::v1::Value>())
-                .sum();
-            assert!(self.limiter.used_bytes() >= capacity as u64);
+        async fn pre_write(&self, _: &RowInsertRequests, _: QueryContextRef) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn pre_write_exemplars(
+            &self,
+            exemplars: &operator::insert::ExemplarBatch,
+            _: QueryContextRef,
+        ) -> Result<()> {
+            let estimated =
+                crate::exemplar::estimated_row_bytes(std::iter::once(exemplars.exemplars()))
+                    .unwrap();
+            assert!(self.limiter.used_bytes() >= estimated as u64);
             Ok(())
         }
 
@@ -1725,13 +1787,11 @@ mod tests {
 
         async fn write_exemplars_prepared(
             &self,
-            request: RowInsertRequests,
+            exemplars: operator::insert::ExemplarBatch,
             ctx: QueryContextRef,
         ) -> Result<Output> {
             *self.progress.lock().unwrap() = Some(ctx.write_progress().unwrap().clone());
-            Ok(Output::new_with_affected_rows(
-                prom_write_row_count(&request) as usize,
-            ))
+            Ok(Output::new_with_affected_rows(exemplars.len()))
         }
 
         async fn write_prepared(
@@ -2046,8 +2106,7 @@ mod tests {
                     let response = response.await.unwrap();
                     let timed_out =
                         expire && matches!(policy, OnExhaustedPolicy::Wait { .. }) && !fail_fast;
-                    let rejected = distinct_tags
-                        || timed_out
+                    let rejected = timed_out
                         || fail_fast
                         || (contended && matches!(policy, OnExhaustedPolicy::Fail));
                     assert_eq!(
@@ -2091,6 +2150,57 @@ mod tests {
                 }
             }
         }
+
+        // Verify linear row/tag charging still rejects requests exceeding a small quota.
+        let mut small_req = remote::WriteRequest::default();
+        for index in 0..1024 {
+            small_req.timeseries.push(remote::TimeSeries {
+                labels: vec![
+                    remote::Label {
+                        name: "__name__".into(),
+                        value: format!("metric_{index}"),
+                    },
+                    remote::Label {
+                        name: format!("tag_{index}"),
+                        value: "value".into(),
+                    },
+                ],
+                exemplars: vec![remote::Exemplar::default()],
+                ..Default::default()
+            });
+        }
+        let limiter = ServerMemoryLimiter::new(512 * 1024, OnExhaustedPolicy::Fail);
+        let handler = Arc::new(ExemplarMemoryHandler {
+            limiter: limiter.clone(),
+            progress: Mutex::new(None),
+        });
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_memory_limiter(limiter.clone())
+            .with_prom_handler(
+                handler.clone(),
+                None,
+                true,
+                PromValidationMode::Strict,
+                None,
+            )
+            .build();
+        let response = server
+            .build(server.make_app())
+            .unwrap()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header(header::CONTENT_TYPE, "application/x-protobuf")
+                    .header(header::CONTENT_ENCODING, DEFAULT_ENCODING)
+                    .body(Body::from(
+                        crate::prom_store::snappy_compress(&small_req.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(handler.progress.lock().unwrap().is_none());
+        assert_eq!(limiter.used_bytes(), 0);
     }
 
     fn memory_limited_prom_write_app(limiter: ServerMemoryLimiter) -> Router {

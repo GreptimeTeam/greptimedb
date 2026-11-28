@@ -251,9 +251,7 @@ async fn test_duplicate_publication_and_later_replacement_do_not_readmit_inputs(
     };
     region
         .manifest_ctx
-        .update_manifest_for_compaction(RegionMetaActionList::with_action(RegionMetaAction::Edit(
-            edit.clone(),
-        )))
+        .update_manifest_for_compaction(&region.metadata(), edit.clone())
         .await
         .unwrap();
     region
@@ -738,9 +736,7 @@ async fn seed_sequence_inputs(engine: &MitoEngine, region_id: RegionId, mixed: b
     };
     region
         .manifest_ctx
-        .update_manifest_for_compaction(RegionMetaActionList::with_action(RegionMetaAction::Edit(
-            edit.clone(),
-        )))
+        .update_manifest_for_compaction(&region.metadata(), edit.clone())
         .await
         .unwrap();
     region

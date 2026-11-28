@@ -20,7 +20,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
-use api::v1::value::ValueData;
 use async_trait::async_trait;
 use auth::{
     OTLP_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
@@ -31,7 +30,7 @@ use common_catalog::consts::{
     METRICS_EXEMPLARS_TABLE, trace_operations_table_name, trace_services_table_name,
 };
 use common_error::ext::BoxedError;
-use common_query::prelude::{EXEMPLAR_METRIC_COLUMN, GREPTIME_PHYSICAL_TABLE};
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -235,7 +234,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             ctx
         };
         let exemplar_rows = exemplars.len();
-        let (exemplars, _) = servers::exemplar::into_rows(exemplars)?;
+        let exemplars = servers::exemplar::prepare(exemplars)?;
         let total_rows = rows.checked_add(exemplar_rows).ok_or_else(|| {
             error::InvalidOtlpMetricInputSnafu {
                 reason: "combined metric and exemplar row count overflow",
@@ -264,23 +263,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         if exemplar_rows > 0 {
             let confirmed = Arc::new(ctx.with_confirmed_writes());
-            let source_names = exemplars
-                .inserts
-                .iter()
-                .filter_map(|request| request.rows.as_ref())
-                .flat_map(|rows| {
-                    let index = rows
-                        .schema
-                        .iter()
-                        .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN);
-                    rows.rows.iter().filter_map(move |row| {
-                        match &row.values.get(index?)?.value_data {
-                            Some(ValueData::StringValue(name)) => Some(name.as_str()),
-                            _ => None,
-                        }
-                    })
-                })
-                .collect::<HashSet<_>>();
+            let source_names = exemplars.sources();
             let (source_requests, other): (Vec<_>, Vec<_>) = requests
                 .inserts
                 .into_iter()

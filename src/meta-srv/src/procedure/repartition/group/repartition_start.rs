@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ensure};
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::allocate_region::sparse_source_schema;
 use crate::procedure::repartition::group::sync_region::SyncRegion;
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::utils::validate_merge_sources;
@@ -165,6 +166,17 @@ impl State for RepartitionStart {
             &ctx.persistent_ctx.sources,
             &ctx.persistent_ctx.targets,
         )?;
+        // Old checkpoints could reach Dispatch without comparing source keys. Fail this group
+        // before staging, so the parent's normal rollback preserves other groups' progress.
+        if let Some((nodes, table)) = &ctx.volatile_ctx.sparse_source_check {
+            sparse_source_schema(
+                nodes,
+                table,
+                &group_prepare_result.source_routes,
+                &ctx.persistent_ctx.sources,
+            )
+            .await?;
+        }
         ctx.persistent_ctx.group_prepare_result = Some(group_prepare_result);
         debug!(
             "Repartition group {}: captured {} sources, {} targets",

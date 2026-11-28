@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use common_meta::affinity::{
@@ -23,6 +24,7 @@ use common_meta::ddl::create_table::template::{
     CreateRequestBuilder, build_template_from_raw_table_info_for_physical_table,
 };
 use common_meta::ddl::utils::get_region_wal_options;
+use common_meta::ddl::utils::region_metadata_lister::RegionMetadataLister;
 use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::PeerAllocContext;
@@ -34,7 +36,7 @@ use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{debug, info};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Deserializer, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::RegionRequirements;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::TableInfo;
@@ -44,7 +46,7 @@ use tokio::time::Instant;
 use crate::error::{self, Result};
 use crate::procedure::repartition::dispatch::Dispatch;
 use crate::procedure::repartition::plan::{
-    AllocationPlanEntry, RepartitionPlanEntry, TargetRegionDescriptor,
+    AllocationPlanEntry, RepartitionPlanEntry, SourceRegionDescriptor, TargetRegionDescriptor,
     convert_allocation_plan_to_repartition_plan,
 };
 use crate::procedure::repartition::{Context, State};
@@ -279,6 +281,10 @@ impl ExecutePlan {
         AllocateRegion::allocate_regions(
             &ctx.node_manager,
             &table_info_value.table_info,
+            &ctx.persistent_ctx.plans,
+            table_route_value
+                .region_routes()
+                .context(error::TableMetadataManagerSnafu)?,
             &new_allocated_region_routes,
             &wal_options,
         )
@@ -442,18 +448,51 @@ impl AllocateRegion {
     async fn allocate_regions(
         node_manager: &NodeManagerRef,
         raw_table_info: &TableInfo,
+        plans: &[RepartitionPlanEntry],
+        current_routes: &[RegionRoute],
         region_routes: &[RegionRoute],
         wal_options: &RegionWalOptions,
     ) -> Result<()> {
-        let table_ref = TableReference::full(
-            &raw_table_info.catalog_name,
-            &raw_table_info.schema_name,
-            &raw_table_info.name,
-        );
-        let table_id = raw_table_info.ident.table_id;
-        // Repartition allocation targets physical regions, so exclude metric internal columns
-        // and derive primary keys from tag semantics.
-        let request = build_template_from_raw_table_info_for_physical_table(raw_table_info)
+        if !raw_table_info.needs_sparse_key_order_lookup() {
+            return Self::create_regions(node_manager, raw_table_info, region_routes, wal_options)
+                .await;
+        }
+
+        // Each target inherits SSTs only from the sources in its repartition group.
+        let by_id: HashMap<_, _> = region_routes.iter().map(|r| (r.region.id, r)).collect();
+        for plan in plans.iter().filter(|p| !p.allocated_region_ids.is_empty()) {
+            let schema = sparse_source_schema(
+                node_manager,
+                raw_table_info,
+                current_routes,
+                &plan.source_regions,
+            )
+            .await?;
+            let targets = plan
+                .allocated_region_ids
+                .iter()
+                .map(|&region_id| {
+                    by_id
+                        .get(&region_id)
+                        .copied()
+                        .cloned()
+                        .context(error::RegionRouteNotFoundSnafu { region_id })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Self::create_regions(node_manager, &schema, &targets, wal_options).await?;
+        }
+        Ok(())
+    }
+
+    async fn create_regions(
+        node_manager: &NodeManagerRef,
+        table: &TableInfo,
+        region_routes: &[RegionRoute],
+        wal_options: &RegionWalOptions,
+    ) -> Result<()> {
+        let table_id = table.table_id();
+        let table_ref = TableReference::full(&table.catalog_name, &table.schema_name, &table.name);
+        let request = build_template_from_raw_table_info_for_physical_table(table)
             .context(error::BuildCreateRequestSnafu { table_id })?;
         common_telemetry::debug!(
             "Allocating regions request, table_id: {}, request: {:?}",
@@ -476,6 +515,48 @@ impl AllocateRegion {
 
         Ok(())
     }
+}
+
+/// Repartition shares existing SSTs, so every source in a connected group must agree on the key.
+pub(super) async fn sparse_source_schema<'a>(
+    node_manager: &NodeManagerRef,
+    table: &'a TableInfo,
+    current_routes: &[RegionRoute],
+    sources: &[SourceRegionDescriptor],
+) -> Result<Cow<'a, TableInfo>> {
+    let table_id = table.table_id();
+    let by_id: HashMap<_, _> = current_routes.iter().map(|r| (r.region.id, r)).collect();
+    let routes = sources
+        .iter()
+        .map(|source| {
+            let region_id = source.region_id();
+            by_id
+                .get(&region_id)
+                .copied()
+                .cloned()
+                .context(error::RegionRouteNotFoundSnafu { region_id })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let keys = RegionMetadataLister::new(node_manager.clone())
+        .sparse_primary_keys(table_id, &routes, None)
+        .await
+        .context(error::BuildCreateRequestSnafu { table_id })?;
+    let mut keys = keys.iter();
+    let (first, key) = keys.next().context(error::UnexpectedSnafu {
+        violated: "Repartition group has no source regions",
+    })?;
+    for (region, other_key) in keys {
+        ensure!(
+            key == other_key,
+            error::InvalidArgumentsSnafu {
+                err_msg: format!(
+                    "Cannot repartition table {table_id}: regions {first} and {region} have different sparse primary key orders"
+                ),
+            }
+        );
+    }
+    key.align_table(table)
+        .context(error::BuildCreateRequestSnafu { table_id })
 }
 
 /// Selects the lowest-ID contributing source for a target spanning multiple sources.

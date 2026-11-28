@@ -184,6 +184,10 @@ def exact_anchor(constraint: str, case_path: Path) -> str | None:
     if normalized == "*":
         return None
 
+    _, build_marker, sha = normalized.partition("+git.")
+    if build_marker and (not normalized.startswith(">=") or not re.fullmatch(r"[0-9a-fA-F]{40}", sha)):
+        raise CompatVersionError(f"Invalid Git build minimum in {case_path}: {constraint!r}")
+
     for operator in (">=", "<=", "==", "=", ">", "<"):
         if normalized.startswith(operator):
             version = _runner_version(normalized[len(operator) :], case_path, constraint)

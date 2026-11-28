@@ -186,7 +186,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
     async fn test_exemplar_wide_schema_conversion_memory_limit() {
         use std::time::Duration;
 
@@ -313,16 +312,11 @@ mod tests {
                 .body(body)
                 .send()
                 .await;
-            let success = remote_write || limit > 4 * 1024 * 1024;
-            assert_eq!(
+            assert!(
                 response.status().is_success(),
-                success,
                 "{path}, quota={limit}: {}",
                 response.text().await
             );
-            if !success {
-                assert_eq!(response.status(), 429);
-            }
             tokio::time::timeout(Duration::from_secs(5), async {
                 while memory.used_bytes() != 0 {
                     tokio::task::yield_now().await;
@@ -350,7 +344,95 @@ mod tests {
                     .column(0)
                     .as_primitive::<datatypes::arrow::datatypes::Int64Type>()
                     .value(0),
-                if success { 1000 } else { 0 }
+                1000
+            );
+        }
+
+        // Wide destination JSON2 type hints still expand per hinted field at conversion time
+        // and must be rejected non-blockingly under the 4 MiB quota.
+        for remote_write in [false, true] {
+            let limit = 4 * 1024 * 1024;
+            let standalone =
+                GreptimeDbStandaloneBuilder::new(&format!("exemplar_wide_hints_{remote_write}"))
+                    .with_write_memory_limit(limit)
+                    .with_table_batcher(BatcherOptions {
+                        protocols: vec![BatchingProtocol::Prom, BatchingProtocol::Otlp],
+                        pending_rows_flush_interval: Duration::from_millis(10),
+                        ..Default::default()
+                    })
+                    .build()
+                    .await;
+            let instance = standalone.fe_instance();
+            let hints = (0..512)
+                .map(|i| format!("h_{i} STRING"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            for sql in [
+                "CREATE TABLE probe_physical (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')".to_string(),
+                "CREATE TABLE probe_metric (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, job STRING, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='probe_physical')".to_string(),
+                format!("CREATE TABLE greptime_metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE, greptime_exemplar_labels JSON2(max_auto_expanded_paths=0, trace_id STRING, {hints}), job STRING, PRIMARY KEY (__table_id, __tsid, greptime_metric, job)) ENGINE=mito WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"),
+            ] {
+                instance.do_query(&sql, QueryContext::arc()).await.remove(0).unwrap();
+            }
+            let memory = instance.server_memory_limiter();
+            let server = HttpServerBuilder::new(HttpOptions::default())
+                .with_memory_limiter(memory.clone())
+                .with_batching_protocols(vec![BatchingProtocol::Prom, BatchingProtocol::Otlp])
+                .with_otlp_handler(instance.clone(), true)
+                .with_prom_handler(
+                    instance.clone(),
+                    None,
+                    true,
+                    PromValidationMode::Strict,
+                    None,
+                )
+                .build();
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            let (path, encoding, body) = if remote_write {
+                (
+                    "/v1/prometheus/write",
+                    "snappy",
+                    prom_store::snappy_compress(&v1.encode_to_vec()).unwrap(),
+                )
+            } else {
+                ("/v1/otlp/v1/metrics", "identity", otlp.encode_to_vec())
+            };
+            let response = client
+                .post(path)
+                .header("content-type", "application/x-protobuf")
+                .header("content-encoding", encoding)
+                .body(body)
+                .send()
+                .await;
+            assert_eq!(response.status(), 429, "{path}: {}", response.text().await);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while memory.used_bytes() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let output = instance
+                .do_query(
+                    "SELECT COUNT(*) FROM greptime_metrics_exemplars",
+                    QueryContext::arc(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                unreachable!()
+            };
+            let batches = common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .take();
+            assert_eq!(
+                batches[0]
+                    .column(0)
+                    .as_primitive::<datatypes::arrow::datatypes::Int64Type>()
+                    .value(0),
+                0
             );
         }
     }

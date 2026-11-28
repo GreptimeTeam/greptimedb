@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use common_procedure::{Context as ProcedureContext, ProcedureWithId, Status};
@@ -60,9 +61,11 @@ impl State for Dispatch {
     ) -> Result<(Box<dyn State>, Status)> {
         ctx.volatile_ctx.dispatch_start_time = Some(Instant::now());
         let table_id = ctx.persistent_ctx.table_id;
-        let table_info_value = ctx.get_table_info_value().await?;
-        let table_engine = table_info_value.table_info.meta.engine;
-        let sync_region = table_engine == METRIC_ENGINE_NAME;
+        let table = ctx.get_table_info_value().await?.table_info;
+        let sync_region = table.meta.engine == METRIC_ENGINE_NAME;
+        let unchecked_sparse_table = (!ctx.volatile_ctx.sparse_sources_checked
+            && table.needs_sparse_key_order_lookup())
+        .then(|| Arc::new(table));
         let plan_count = ctx.persistent_ctx.plans.len();
         let mut procedures = Vec::with_capacity(plan_count);
         let mut procedure_metas = Vec::with_capacity(plan_count);
@@ -88,7 +91,12 @@ impl State for Dispatch {
                 ctx.persistent_ctx.timeout,
             );
 
-            let group_procedure = RepartitionGroupProcedure::new(persistent_ctx, ctx);
+            let check_sources = unchecked_sparse_table
+                .as_ref()
+                .filter(|_| plan.source_regions.len() > 1)
+                .cloned();
+            let group_procedure =
+                RepartitionGroupProcedure::new(persistent_ctx, ctx, check_sources);
             let procedure = ProcedureWithId::with_random_id(Box::new(group_procedure));
             procedure_metas.push(ProcedureMeta {
                 plan_index,

@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use api::region::RegionResponse;
 use api::v1::column_def::try_as_column_def;
 use api::v1::region::region_request::Body;
 use api::v1::region::{
@@ -34,6 +35,7 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::ddl::utils::{add_peer_context_if_needed, extract_column_metadatas};
 use crate::error::{ConvertColumnDefSnafu, Result, UnexpectedSnafu};
 use crate::reconciliation::reconcile_table::reconciliation_end::ReconciliationEnd;
+use crate::reconciliation::reconcile_table::reconciliation_start::ReconciliationStart;
 use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
 use crate::reconciliation::reconcile_table::{ReconcileTableContext, State};
 use crate::rpc::router::{find_leaders, region_distribution};
@@ -61,6 +63,19 @@ impl State for ReconcileRegions {
         ctx: &mut ReconcileTableContext,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let previous = ctx.persistent_ctx.table_info_value.as_ref().unwrap();
+        let refresh_sparse_keys = previous.table_info.needs_sparse_key_order_lookup();
+        if refresh_sparse_keys {
+            // A partial attempt may already have published a version. Re-resolve concurrent DDL.
+            let current = ctx.read_table_info().await?;
+            let mut expected = previous.table_info.clone();
+            expected.ident.version = current.table_info.ident.version;
+            if expected != current.table_info {
+                ctx.volatile_ctx.table_meta = None;
+                return Ok((Box::new(ReconciliationStart), Status::executing(false)));
+            }
+            ctx.persistent_ctx.table_info_value = Some(current);
+        }
         let table_meta = ctx.build_table_meta(&self.column_metadatas)?;
         ctx.volatile_ctx.table_meta = Some(table_meta);
         let table_id = ctx.table_id();
@@ -129,41 +144,57 @@ impl State for ReconcileRegions {
         ctx.volatile_ctx
             .result_summary
             .record_updated_regions(updated_region_count);
-        let mut results = results.into_iter().collect::<Result<Vec<_>>>()?;
-
-        // Ensures all the column metadatas are the same.
-        let column_metadatas =
-            extract_column_metadatas(&mut results, TABLE_COLUMN_METADATA_EXTENSION_KEY)?.context(
-                UnexpectedSnafu {
-                    err_msg: format!(
-                        "The table column metadata schemas from datanodes are not the same, table: {}, table_id: {}",
-                        ctx.table_name(),
-                        table_id
-                    ),
-                },
-            )?;
+        let table_info_value = ctx.persistent_ctx.table_info_value.as_ref().unwrap();
+        let column_metadatas = match reconciled_columns(results, ctx) {
+            Err(error) if refresh_sparse_keys => {
+                // A SyncColumns error can follow an applied change, even if its reply was lost.
+                // Retire the old layouts without publishing a partially reconciled schema.
+                ctx.publish_table_info(table_info_value.table_info.clone(), None)
+                    .await?;
+                return Err(error);
+            }
+            result => result?,
+        };
 
         ctx.volatile_ctx
             .result_summary
             .mark_region_phase_completed();
 
-        // Checks all column metadatas are consistent, and updates the table info if needed.
-        if column_metadatas != self.column_metadatas {
+        // SyncColumns can change a region's sparse key order even when the catalog already agrees.
+        if column_metadatas != self.column_metadatas || refresh_sparse_keys {
             info!(
-                "Datanode column metadatas are not consistent with metasrv, updating metasrv's column metadatas, table: {}, table_id: {}",
+                "Publishing reconciled region metadata for table: {}, table_id: {}",
                 ctx.table_name(),
                 table_id
             );
-            // Safety: fetched in the above.
-            let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
             return Ok((
-                Box::new(UpdateTableInfo::new(table_info_value, column_metadatas)),
+                Box::new(UpdateTableInfo::new(
+                    table_info_value.clone(),
+                    column_metadatas,
+                    refresh_sparse_keys,
+                )),
                 Status::executing(true),
             ));
         }
 
         Ok((Box::new(ReconciliationEnd), Status::executing(false)))
     }
+}
+
+fn reconciled_columns(
+    results: Vec<Result<RegionResponse>>,
+    ctx: &ReconcileTableContext,
+) -> Result<Vec<ColumnMetadata>> {
+    let mut responses = results.into_iter().collect::<Result<Vec<_>>>()?;
+    extract_column_metadatas(&mut responses, TABLE_COLUMN_METADATA_EXTENSION_KEY)?.with_context(
+        || UnexpectedSnafu {
+            err_msg: format!(
+                "The table column metadata schemas from datanodes are not the same, table: {}, table_id: {}",
+                ctx.table_name(),
+                ctx.table_id()
+            ),
+        },
+    )
 }
 
 /// Makes an alter region request to sync columns.

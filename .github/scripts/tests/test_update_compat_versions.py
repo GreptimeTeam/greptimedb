@@ -101,6 +101,14 @@ class UpdateCompatVersionsTest(unittest.TestCase):
             {"v1.0.2", "v1.1.0", "v1.1.1", "v1.1.2", "v1.1.3"}, anchors
         )
 
+    def test_git_build_minimum_is_validated_without_pinning_a_stable_tag(self) -> None:
+        sha = "8787551393019eb6377d3a457c8faff4cde30106"
+        case = Path("case.toml")
+        self.assertIsNone(UPDATER.exact_anchor(f">=v1.4.0+git.{sha}", case))
+        for constraint in (f"=v1.4.0+git.{sha}", ">=v1.4.0+git.truncated"):
+            with self.assertRaises(UPDATER.CompatVersionError):
+                UPDATER.exact_anchor(constraint, case)
+
     def test_ordered_ranges_and_wildcard_are_not_anchors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

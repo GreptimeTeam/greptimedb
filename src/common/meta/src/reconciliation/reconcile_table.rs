@@ -27,18 +27,19 @@ use common_procedure::{
     Procedure, Result as ProcedureResult, Status,
 };
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::TableId;
-use table::metadata::TableMeta;
+use table::metadata::{TableInfo, TableMeta};
 use table::table_name::TableName;
 use tonic::async_trait;
 
-use crate::cache_invalidator::CacheInvalidatorRef;
-use crate::error::Result;
+use crate::cache_invalidator::{CacheInvalidatorRef, Context as CacheContext};
+use crate::error::{Result, TableNotFoundSnafu};
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
-use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use crate::key::{DeserializedValueWithBytes, RegionDistribution, TableMetadataManagerRef};
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
@@ -178,6 +179,49 @@ impl ReconcileTableContext {
     /// Returns the physical table id.
     pub(crate) fn table_id(&self) -> TableId {
         self.persistent_ctx.table_id
+    }
+
+    async fn read_table_info(&self) -> Result<DeserializedValueWithBytes<TableInfoValue>> {
+        self.table_metadata_manager
+            .table_info_manager()
+            .get(self.table_id())
+            .await?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: self.table_name().to_string(),
+            })
+    }
+
+    async fn publish_table_info(
+        &mut self,
+        mut table_info: TableInfo,
+        region_distribution: Option<RegionDistribution>,
+    ) -> Result<()> {
+        let current = self.persistent_ctx.table_info_value.as_ref().unwrap();
+        if table_info.is_sparse_mito_table() {
+            table_info.ident.version += 1;
+        }
+        self.table_metadata_manager
+            .update_table_info(current, region_distribution, table_info)
+            .await?;
+        self.volatile_ctx.result_summary.mark_table_info_updated();
+
+        let table_ref = self.table_name().table_ref();
+        let table_id = self.table_id();
+        self.cache_invalidator
+            .invalidate(
+                &CacheContext {
+                    subject: Some(format!(
+                        "Invalidate table cache by reconciling table {table_ref}, table_id: {table_id}"
+                    )),
+                },
+                &[
+                    CacheIdent::TableName(table_ref.into()),
+                    CacheIdent::TableId(table_id),
+                ],
+            )
+            .await?;
+        self.mut_metrics().update_table_info = true;
+        Ok(())
     }
 
     /// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s.
@@ -442,9 +486,7 @@ mod tests {
 
     use super::*;
     use crate::ddl::test_util::datanode_handler::PartialSuccessDatanodeHandler;
-    use crate::key::DeserializedValueWithBytes;
-    use crate::key::table_info::TableInfoValue;
-    use crate::key::table_route::PhysicalTableRouteValue;
+    use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
     use crate::key::test_utils::new_test_table_info_with_name;
     use crate::peer::Peer;
     use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
@@ -699,10 +741,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn table_mixed_region_outcome_preserves_partial_result() {
+    async fn mixed_region_repair(
+        table_info: TableInfo,
+        retryable: bool,
+    ) -> (ReconcileTableProcedure, ProcedureContext, Context) {
         let ddl_context = new_ddl_context(Arc::new(MockDatanodeManager::new(
-            PartialSuccessDatanodeHandler { retryable: false },
+            PartialSuccessDatanodeHandler { retryable },
         )));
         let context = Context {
             node_manager: ddl_context.node_manager,
@@ -710,15 +754,13 @@ mod tests {
             cache_invalidator: ddl_context.cache_invalidator,
         };
         let mut procedure = ReconcileTableProcedure::new(
-            context,
-            42,
+            context.clone(),
+            table_info.table_id(),
             TableName::new("greptime", "public", "metrics"),
             ResolveStrategy::UseLatest,
             false,
         );
 
-        let mut table_info = new_test_table_info_with_name(42, "metrics");
-        table_info.meta.column_ids = vec![0, 1, 2];
         let name_to_ids = table_info.name_to_ids().unwrap();
         let column_metadatas = build_column_metadata_from_table_info(
             table_info.meta.schema.column_schemas(),
@@ -727,22 +769,26 @@ mod tests {
         )
         .unwrap();
         let region_ids = [RegionId::new(42, 1), RegionId::new(42, 2)];
-        procedure.context.persistent_ctx.table_info_value = Some(
-            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
-        );
+        let routes = region_ids
+            .map(|id| RegionRoute {
+                region: Region::new_test(id),
+                leader_peer: Some(Peer::empty(id.region_number().into())),
+                ..Default::default()
+            })
+            .to_vec();
+        context
+            .table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(routes.clone()),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        procedure.context.persistent_ctx.table_info_value =
+            Some(procedure.context.read_table_info().await.unwrap());
         procedure.context.persistent_ctx.physical_table_route =
-            Some(PhysicalTableRouteValue::new(vec![
-                RegionRoute {
-                    region: Region::new_test(region_ids[0]),
-                    leader_peer: Some(Peer::empty(1)),
-                    ..Default::default()
-                },
-                RegionRoute {
-                    region: Region::new_test(region_ids[1]),
-                    leader_peer: Some(Peer::empty(2)),
-                    ..Default::default()
-                },
-            ]));
+            Some(PhysicalTableRouteValue::new(routes));
 
         let summary = &mut procedure.context.volatile_ctx.result_summary;
         summary.record_scanned_regions(region_ids.len());
@@ -759,6 +805,14 @@ mod tests {
             provider: Arc::new(MockContextProvider::default()),
             event_context: None,
         };
+        (procedure, procedure_ctx, context)
+    }
+
+    #[tokio::test]
+    async fn table_mixed_region_outcome_preserves_partial_result() {
+        let mut table_info = new_test_table_info_with_name(42, "metrics");
+        table_info.meta.column_ids = vec![0, 1, 2];
+        let (mut procedure, procedure_ctx, _) = mixed_region_repair(table_info, false).await;
         assert!(procedure.execute(&procedure_ctx).await.is_err());
 
         assert_eq!(
@@ -778,6 +832,82 @@ mod tests {
                 "table_info_updated": false,
                 "last_completed_phase": "resolve_column_metadata",
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn sparse_repair_replay_uses_current_version_and_respects_concurrent_ddl() {
+        use api::v1::SemanticType;
+        use common_catalog::consts::MITO_ENGINE;
+        use datatypes::prelude::ConcreteDataType;
+        use datatypes::schema::Schema;
+        use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
+        use table::metadata::TableMetaBuilder;
+
+        use crate::ddl::test_util::test_column_metadatas;
+
+        let mut columns = test_column_metadatas(&["host", "site"]);
+        columns[2].column_schema.data_type = ConcreteDataType::uint32_datatype();
+        columns[3].column_schema.data_type = ConcreteDataType::uint64_datatype();
+        let column_ids = columns.iter().map(|column| column.column_id).collect();
+        let schema = Schema::new(
+            columns
+                .into_iter()
+                .map(|column| {
+                    column
+                        .column_schema
+                        .with_time_index(column.semantic_type == SemanticType::Timestamp)
+                })
+                .collect(),
+        );
+        let mut table = new_test_table_info_with_name(42, "metrics");
+        table.meta = TableMetaBuilder::empty()
+            .schema(Arc::new(schema))
+            .column_ids(column_ids)
+            .primary_key_indices(vec![2, 3, 4, 5])
+            .next_column_id(4)
+            .engine(MITO_ENGINE)
+            .build()
+            .unwrap();
+        table
+            .meta
+            .options
+            .extra_options
+            .insert(PRIMARY_KEY_ENCODING.into(), "sparse".into());
+        let (mut procedure, step, context) = mixed_region_repair(table.clone(), true).await;
+        let saved = procedure.dump().unwrap();
+
+        for delta in [1, 2] {
+            procedure = ReconcileTableProcedure::from_json(context.clone(), &saved).unwrap();
+            let error = procedure.execute(&step).await.unwrap_err();
+            assert!(error.is_retry_later(), "{error}");
+            let current = procedure.context.read_table_info().await.unwrap();
+            assert_eq!(
+                current.table_info.ident.version,
+                table.ident.version + delta
+            );
+            assert_eq!(current.table_info.meta, table.meta);
+        }
+
+        let current = procedure.context.read_table_info().await.unwrap();
+        let mut changed = current.table_info.clone();
+        changed.desc = Some("concurrent table comment".into());
+        context
+            .table_metadata_manager
+            .update_table_info(&current, None, changed.clone())
+            .await
+            .unwrap();
+        procedure.execute(&step).await.unwrap();
+        assert_eq!(procedure.state.name(), "ReconciliationStart");
+        assert!(procedure.context.volatile_ctx.table_meta.is_none());
+        assert_eq!(
+            procedure
+                .context
+                .read_table_info()
+                .await
+                .unwrap()
+                .table_info,
+            changed
         );
     }
 

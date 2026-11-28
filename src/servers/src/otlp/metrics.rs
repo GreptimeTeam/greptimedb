@@ -1654,17 +1654,8 @@ mod tests {
             conversion.exemplars[0].series_labels["defaulted_host"],
             "unknown"
         );
-        let (exemplars, _) = crate::exemplar::into_rows(conversion.exemplars).unwrap();
-        let exemplar_rows = exemplars.inserts[0].rows.as_ref().unwrap();
-        let metric = exemplar_rows
-            .schema
-            .iter()
-            .position(|c| c.column_name == common_query::prelude::EXEMPLAR_METRIC_COLUMN)
-            .unwrap();
-        assert_eq!(
-            exemplar_rows.rows[0].values[metric].value_data,
-            Some(ValueData::StringValue("accepted".into()))
-        );
+        let exemplars = crate::exemplar::prepare(conversion.exemplars).unwrap();
+        assert_eq!(exemplars.exemplars()[0].metric.as_ref(), "accepted");
         let descriptors = conversion.resource_info.unwrap();
         let rows = descriptors.inserts[0].rows.as_ref().unwrap();
         assert_eq!(rows.rows.len(), 1);
@@ -2911,7 +2902,6 @@ mod tests {
 
     #[test]
     fn test_histogram_exemplars_follow_emitted_buckets() {
-        use common_query::prelude::EXEMPLAR_METRIC_COLUMN;
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
         use prost::Message;
 
@@ -3022,35 +3012,17 @@ mod tests {
                 ],
             };
             assert_eq!(conversion.exemplars.len(), expected.len(), "{mode}");
-            let (exemplars, _) = crate::exemplar::into_rows(conversion.exemplars).unwrap();
-            let rows = exemplars.inserts[0].rows.as_ref().unwrap();
-            let index = |name| {
-                rows.schema
-                    .iter()
-                    .position(|c| c.column_name == name)
-                    .unwrap()
-            };
+            let exemplars = crate::exemplar::prepare(conversion.exemplars).unwrap();
             let mut actual = Vec::new();
-            for row in &rows.rows {
-                assert_eq!(
-                    row.values[index(EXEMPLAR_METRIC_COLUMN)].value_data,
-                    Some(ValueData::StringValue("histogram_bucket".into()))
-                );
-                let Some(ValueData::TimestampNanosecondValue(timestamp)) =
-                    row.values[index(greptime_timestamp())].value_data
-                else {
-                    panic!("missing exemplar timestamp")
-                };
-                let Some(ValueData::StringValue(ref bound)) = row.values[index("le")].value_data
-                else {
-                    panic!("missing bucket label")
-                };
-                actual.push((timestamp, bound.as_str()));
-                if timestamp == 3 {
-                    assert_eq!(
-                        row.values[index(greptime_value())].value_data,
-                        Some(ValueData::F64Value(0.5))
-                    );
+            for exemplar in exemplars.exemplars() {
+                assert_eq!(exemplar.metric.as_ref(), "histogram_bucket");
+                let bound = exemplar
+                    .series_labels
+                    .get("le")
+                    .expect("missing bucket label");
+                actual.push((exemplar.timestamp, bound.as_str()));
+                if exemplar.timestamp == 3 {
+                    assert_eq!(exemplar.value, 0.5);
                 }
             }
             actual.sort_unstable();

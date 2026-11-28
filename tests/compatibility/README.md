@@ -186,9 +186,12 @@ values.
 | `"*"` | Matches any version (including unknown). |
 | `"vX.Y.Z"` or `"=vX.Y.Z"` | Matches exactly version X.Y.Z. |
 | `">=vX.Y.Z"` | Matches X.Y.Z or later. |
+| `">=vX.Y.Z+git.<full SHA>"` | Prereleases of X.Y.Z must contain the specified build commit. Also matches stable X.Y.Z and later versions. |
 | `">vX.Y.Z"` | Matches versions strictly later than X.Y.Z. |
 | `"<=vX.Y.Z"` | Matches X.Y.Z or earlier. |
 | `"<vX.Y.Z"` | Matches versions strictly earlier than X.Y.Z. |
+
+For a build-specific minimum, use the commit printed by the published binary’s `--version`. Its release tag can point to a later commit. The runner uses the embedded commit when the binary is available. A dry run with only a named prerelease uses its local Git tag. Checking descendants requires the relevant Git history. An unverified prerelease skips the range entry.
 
 The range list is **OR**: a case matches if **any** entry matches.
 

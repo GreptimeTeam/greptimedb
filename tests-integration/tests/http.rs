@@ -8581,6 +8581,15 @@ impl servers::interceptor::PromStoreProtocolInterceptor for PromSchemaRedirectIn
         ctx.set_current_schema("tenant_redirect");
         Ok(())
     }
+
+    fn pre_write_exemplars(
+        &self,
+        _exemplars: &operator::insert::ExemplarBatch,
+        ctx: QueryContextRef,
+    ) -> servers::error::Result<()> {
+        ctx.set_current_schema("tenant_redirect");
+        Ok(())
+    }
 }
 
 async fn setup_redirecting_batched_prom_app(
@@ -13249,7 +13258,6 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
 }
 
 #[tokio::test]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_otlp_cumulative_histogram_with_exemplars() {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(StorageType::File, "cumulative_histogram_exemplars")

@@ -165,10 +165,6 @@ pub fn modify_batch_sparse(
     let mut buffer = Vec::new();
     for row in 0..num_rows {
         buffer.clear();
-        codec
-            .encode_internal(table_id, tsid_array.value(row), &mut buffer)
-            .context(EncodePrimaryKeySnafu)?;
-
         let tags = sorted_tag_columns
             .iter()
             .zip(tag_arrays.iter())
@@ -176,7 +172,7 @@ pub fn modify_batch_sparse(
                 string_array_value_at_index(arr, row).map(|value| (tc.column_id, value.as_bytes()))
             });
         codec
-            .encode_raw_tag_value(tags, &mut buffer)
+            .encode_raw(table_id, tsid_array.value(row), tags, &mut buffer)
             .context(EncodePrimaryKeySnafu)?;
 
         pk_builder.append_value(&buffer);

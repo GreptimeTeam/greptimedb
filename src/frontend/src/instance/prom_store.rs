@@ -28,6 +28,7 @@ use auth::{
     PermissionTableTarget, PermissionTableTargets,
 };
 use client::OutputData;
+use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
 use common_error::ext::BoxedError;
 use common_meta::rpc::ddl::TriggerReason;
@@ -38,9 +39,9 @@ use common_telemetry::{debug, tracing};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::Schema;
 use operator::insert::{
-    AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
-    apply_retention_ttl_hint, build_create_table_expr, fill_table_options_for_create,
-    parse_per_table_semantic_index,
+    AutoCreateTableType, ExemplarBatch, InserterRef, PerTableSemanticIndex,
+    apply_per_table_semantic_options, apply_retention_ttl_hint, build_create_table_expr,
+    fill_table_options_for_create, parse_per_table_semantic_index,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -565,23 +566,54 @@ impl PromStoreProtocolHandler for Instance {
 
     async fn write_exemplars_prepared(
         &self,
-        request: RowInsertRequests,
+        exemplars: ExemplarBatch,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
-        self.write_exemplars_with_sources(request, ctx, &[]).await
+        self.write_exemplars_with_sources(exemplars, ctx, &[]).await
     }
 
     async fn write_exemplars_with_sources(
         &self,
-        request: RowInsertRequests,
+        exemplars: ExemplarBatch,
         ctx: QueryContextRef,
         sources: &[table::metadata::TableInfoRef],
     ) -> ServerResult<Output> {
         self.inserter
-            .handle_exemplar_inserts(request, ctx, &self.statement_executor, sources)
+            .handle_exemplar_inserts(exemplars, ctx, &self.statement_executor, sources)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
+    }
+
+    async fn pre_write_exemplars(
+        &self,
+        exemplars: &ExemplarBatch,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_WRITE))
+            .context(AuthSnafu)?;
+        let interceptor_ref = self
+            .plugins
+            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_write_exemplars(exemplars, ctx.clone())?;
+        if exemplars.is_empty() {
+            return Ok(());
+        }
+        let target = PermissionTableTarget::new(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            METRICS_EXEMPLARS_TABLE,
+        );
+        self.check_table_permission(
+            &ctx,
+            PermissionReq::Action(PROM_STORE_WRITE),
+            PermissionTableTargets::resolved(vec![target]),
+        )
+        .context(AuthSnafu)?;
+        Ok(())
     }
 
     async fn pre_write(

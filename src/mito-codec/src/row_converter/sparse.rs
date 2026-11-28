@@ -15,12 +15,14 @@
 mod checked;
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hasher;
 use std::sync::Arc;
 
 use bytes::BufMut;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
+use fxhash::FxHasher;
 use memcomparable::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -414,6 +416,23 @@ impl SparsePrimaryKeyCodec {
         Ok(())
     }
 
+    /// Appends the reserved `(table_id, tsid)` prefix followed by ordered non-null raw tag values.
+    ///
+    /// Callers must pass non-null tags in the destination primary-key layout order.
+    pub fn encode_raw<'a, I>(
+        &self,
+        table_id: u32,
+        tsid: u64,
+        ordered_tags: I,
+        buffer: &mut Vec<u8>,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = (ColumnId, &'a [u8])>,
+    {
+        self.encode_internal(table_id, tsid, buffer)?;
+        self.encode_raw_tag_value(ordered_tags.into_iter(), buffer)
+    }
+
     /// Decodes the reserved `(table_id, tsid)` prefix from a sparse primary key.
     pub fn decode_ids(&self, bytes: &[u8]) -> Result<(u32, u64)> {
         // Two column IDs, two non-null markers, a u32 table ID, and a u64 TSID.
@@ -683,6 +702,45 @@ fn validate_prefix(pk: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Deterministic 64-bit hash generator for `__tsid` from sorted tag pairs.
+#[derive(Default)]
+pub struct TsidGenerator {
+    hasher: FxHasher,
+}
+
+impl TsidGenerator {
+    /// Computes the metric TSID from non-null tags sorted by name, retaining empty values.
+    pub fn from_sorted_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> u64 {
+        let mut names = Self::default();
+        for (name, _) in tags.clone() {
+            names.write_str(name);
+        }
+        let mut values = Self::new(names.finish());
+        for (_, value) in tags {
+            values.write_str(value);
+        }
+        values.finish()
+    }
+
+    /// Creates a [`TsidGenerator`] seeded with a precomputed label-name hash.
+    pub fn new(label_name_hash: u64) -> Self {
+        let mut hasher = FxHasher::default();
+        hasher.write_u64(label_name_hash);
+        Self { hasher }
+    }
+
+    /// Writes a label name or value into the TSID hash stream.
+    pub fn write_str(&mut self, value: &str) {
+        self.hasher.write(value.as_bytes());
+        self.hasher.write_u8(0xff);
+    }
+
+    /// Returns the finished 64-bit TSID hash.
+    pub fn finish(&mut self) -> u64 {
+        self.hasher.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -894,12 +952,36 @@ mod tests {
                 .encode_to_vec([(1, ValueRef::String(&label))].into_iter(), &mut expected)
                 .unwrap();
             actual.clear();
-            codec.encode_internal(42, 7, &mut actual).unwrap();
             codec
-                .encode_raw_tag_value([(1, label.as_bytes())].into_iter(), &mut actual)
+                .encode_raw(42, 7, [(1, label.as_bytes())], &mut actual)
                 .unwrap();
             assert_eq!(actual, expected, "label length {len}");
         }
+
+        let mut appended = b"prefix".to_vec();
+        let mut expected = b"prefix".to_vec();
+        let utf8_label = "1234567🦀_multi_chunk";
+        codec
+            .encode_to_vec(
+                [
+                    (RESERVED_COLUMN_ID_TABLE_ID, ValueRef::UInt32(99)),
+                    (RESERVED_COLUMN_ID_TSID, ValueRef::UInt64(1234)),
+                    (2, ValueRef::String("")),
+                    (5, ValueRef::String(utf8_label)),
+                ]
+                .into_iter(),
+                &mut expected,
+            )
+            .unwrap();
+        codec
+            .encode_raw(
+                99,
+                1234,
+                [(2, b"".as_slice()), (5, utf8_label.as_bytes())],
+                &mut appended,
+            )
+            .unwrap();
+        assert_eq!(appended, expected);
     }
 
     #[test]

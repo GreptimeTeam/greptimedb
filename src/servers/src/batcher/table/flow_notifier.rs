@@ -106,6 +106,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use catalog::memory::MemoryCatalogManager;
     use common_grpc::flight::FlightDecoder;
+    use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::error::Result as MetaResult;
     use common_meta::peer::Peer;
     use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
@@ -174,6 +175,7 @@ mod tests {
         let partitions = create_partition_rule_manager(prepare_mocked_backend().await).await;
         let inserter = Arc::new(Inserter::new(
             MemoryCatalogManager::new(),
+            Arc::new(DummyCacheInvalidator),
             partitions,
             Arc::new(MockDatanodeManager::new(PartialHandler)),
             mock_table_flownode_cache(1, vec![]).await,

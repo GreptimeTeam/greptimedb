@@ -169,6 +169,8 @@ pub struct Context {
 pub struct VolatileContext {
     pub metrics: Metrics,
     pub dispatch_start_time: Option<Instant>,
+    /// A recovered Dispatch cannot assume the version that planned the merge checked its keys.
+    sparse_sources_checked: bool,
 }
 
 /// Metrics of repartition.

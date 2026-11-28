@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
-use std::hash::Hasher;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use datatypes::value::ValueRef;
-use fxhash::FxHasher;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -212,42 +210,7 @@ impl RowModifier {
 }
 
 /// Tsid generator.
-#[derive(Default)]
-pub struct TsidGenerator {
-    hasher: FxHasher,
-}
-
-impl TsidGenerator {
-    /// Computes the metric TSID from non-null tags sorted by name, retaining empty values.
-    pub fn from_sorted_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> u64 {
-        let mut names = Self::default();
-        for (name, _) in tags.clone() {
-            names.write_str(name);
-        }
-        let mut values = Self::new(names.finish());
-        for (_, value) in tags {
-            values.write_str(value);
-        }
-        values.finish()
-    }
-
-    pub fn new(label_name_hash: u64) -> Self {
-        let mut hasher = FxHasher::default();
-        hasher.write_u64(label_name_hash);
-        Self { hasher }
-    }
-
-    /// Writes a label pair to the generator.
-    pub fn write_str(&mut self, value: &str) {
-        self.hasher.write(value.as_bytes());
-        self.hasher.write_u8(0xff);
-    }
-
-    /// Generates a new TSID.
-    pub fn finish(&mut self) -> u64 {
-        self.hasher.finish()
-    }
-}
+pub use mito_codec::row_converter::TsidGenerator;
 
 /// Index of a value.
 #[derive(Debug, Clone, Copy)]

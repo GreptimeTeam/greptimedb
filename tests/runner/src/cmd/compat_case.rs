@@ -297,23 +297,30 @@ fn validate_version_constraints(
 // Version-range filtering
 // ---------------------------------------------------------------------------
 
-/// A simple 3-component version: `major.minor.patch`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Product version and optional build identity reported by the binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Version {
     pub major: u64,
     pub minor: u64,
     pub patch: u64,
+    prerelease: Option<String>,
+    commit: Option<String>,
 }
 
 impl Version {
     /// Parse a version string like `v1.1.0` or `1.1.0`.
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
         let stripped = raw.strip_prefix('v').unwrap_or(raw);
-        let core = stripped
+        let (product, build) = stripped.split_once('+').unwrap_or((stripped, ""));
+        let commit = build.strip_prefix("git.");
+        if commit.is_some_and(|sha| !is_full_commit(sha)) {
+            return Err(format!(
+                "Invalid Git commit in '{raw}': expected a full SHA"
+            ));
+        }
+        let (core, prerelease) = product
             .split_once('-')
-            .map(|(core, _)| core)
-            .unwrap_or(stripped);
-        let core = core.split_once('+').map(|(core, _)| core).unwrap_or(core);
+            .map_or((product, None), |(core, suffix)| (core, Some(suffix)));
         let parts: Vec<&str> = core.split('.').collect();
         if parts.len() != 3 {
             return Err(format!(
@@ -334,13 +341,71 @@ impl Version {
             major,
             minor,
             patch,
+            prerelease: prerelease.map(str::to_owned),
+            commit: commit.map(str::to_owned),
         })
     }
+
+    pub(crate) fn core(&self) -> (u64, u64, u64) {
+        (self.major, self.minor, self.patch)
+    }
+
+    fn at_least(&self, minimum: &Self) -> bool {
+        let Some(minimum_commit) = &minimum.commit else {
+            return self.core() >= minimum.core();
+        };
+        if self.core() != minimum.core() || self.prerelease.is_none() {
+            return self.core() >= minimum.core();
+        }
+        let Some(commit) = &self.commit else {
+            return false;
+        };
+        if commit == minimum_commit {
+            return true;
+        }
+        let result = Command::new("git")
+            .current_dir(crate::util::get_workspace_root())
+            .args(["merge-base", "--is-ancestor", minimum_commit, commit])
+            .output();
+        match result {
+            Ok(result) if result.status.success() => true,
+            Ok(result) if result.status.code() == Some(1) => false,
+            _ => {
+                println!(
+                    "Cannot verify build {commit} against {minimum_commit} with the local Git history"
+                );
+                false
+            }
+        }
+    }
+
+    pub(crate) fn resolve(label: Option<&str>, dir: &Path) -> Option<Self> {
+        let Some(label) = label.filter(|v| *v != "current") else {
+            return try_infer_version(dir);
+        };
+        let mut version = Self::parse(label).ok()?;
+        if version.prerelease.is_some() && version.commit.is_none() {
+            // Release archives may have been built before the corresponding tag was created.
+            version.commit = match try_infer_version(dir) {
+                Some(binary) => binary.commit,
+                None => Some(format!("refs/tags/{version}")),
+            };
+        }
+        Some(version)
+    }
+}
+
+fn is_full_commit(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 impl std::fmt::Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "v{}.{}.{}", self.major, self.minor, self.patch)
+        write!(f, "v{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(suffix) = &self.prerelease {
+            write!(f, "-{suffix}")?;
+        }
+        Ok(())
     }
 }
 
@@ -360,11 +425,11 @@ impl VersionConstraint {
     fn matches(&self, version: &Version) -> bool {
         match self {
             Self::Wildcard => true,
-            Self::Exact(target) => version == target,
-            Self::Gt(target) => version > target,
-            Self::Gte(target) => version >= target,
-            Self::Lt(target) => version < target,
-            Self::Lte(target) => version <= target,
+            Self::Exact(target) => version.core() == target.core(),
+            Self::Gt(target) => version.core() > target.core(),
+            Self::Gte(target) => version.at_least(target),
+            Self::Lt(target) => version.core() < target.core(),
+            Self::Lte(target) => version.core() <= target.core(),
         }
     }
 }
@@ -379,6 +444,9 @@ fn parse_version_constraint(raw: &str) -> Result<VersionConstraint, String> {
         return Ok(VersionConstraint::Wildcard);
     }
 
+    if trimmed.contains("+git.") && !trimmed.starts_with(">=") {
+        return Err("Build-specific constraints require a >= minimum".into());
+    }
     // Ordered from most-specific prefix to least
     if let Some(ver_str) = trimmed.strip_prefix(">=") {
         let ver = Version::parse(ver_str.trim())?;
@@ -457,21 +525,29 @@ pub(crate) fn try_infer_version(bins_dir: &Path) -> Option<Version> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Typical output: "greptime 0.9.5-xxxxx" or just "greptime 0.9.5"
-    // Grab the first token that looks like a version.
-    for token in stdout.split_whitespace() {
-        // Strip leading 'v' if present and try to parse
-        let candidate = token.trim();
-        let looks_like_version = candidate.starts_with('v')
-            || candidate.chars().next().is_some_and(|c| c.is_ascii_digit());
-        let parsed_version = looks_like_version
-            .then(|| Version::parse(candidate).ok())
-            .flatten();
-        if let Some(ver) = parsed_version {
-            return Some(ver);
-        }
-    }
-    None
+    parse_binary_version(&stdout)
+}
+
+fn parse_binary_version(stdout: &str) -> Option<Version> {
+    let mut version = if let Some(version) = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("version:"))
+    {
+        Version::parse(version.trim()).ok()?
+    } else {
+        // Older binaries print a single product/version line.
+        stdout
+            .split_whitespace()
+            .find_map(|token| Version::parse(token).ok())?
+    };
+    version.commit = stdout
+        .lines()
+        .find_map(|line| {
+            let sha = line.strip_prefix("commit:")?.trim();
+            is_full_commit(sha).then(|| sha.to_owned())
+        })
+        .or(version.commit);
+    Some(version)
 }
 
 #[cfg(test)]
@@ -905,6 +981,35 @@ isolation = "shared"
         assert_eq!(ver.major, 1);
         assert_eq!(ver.minor, 2);
         assert_eq!(ver.patch, 3);
+    }
+
+    #[test]
+    fn test_prerelease_build_minimum() {
+        let sha = "8787551393019eb6377d3a457c8faff4cde30106";
+        let range = [format!(">=v1.4.0+git.{sha}")];
+        for (label, matches) in [
+            ("v1.3.1", false),
+            ("v1.4.0-alpha.0", false),
+            ("v1.4.0", true),
+            ("v1.5.0-alpha.0", true),
+        ] {
+            assert_eq!(
+                version_matches_range(Some(&mkver(label)), &range),
+                matches,
+                "{label}"
+            );
+        }
+        let binary = parse_binary_version(&format!(
+            "GreptimeDB\nbranch: main\ncommit: {sha}\nversion: 1.4.0-alpha.0"
+        ))
+        .unwrap();
+        assert_eq!(binary.commit.as_deref(), Some(sha));
+        assert!(version_matches_range(Some(&binary), &range));
+        let mut october = binary;
+        october.commit = Some("436d07bf2dcf69cc3e5c5736f1bfe24a0ce4dff1".into());
+        assert!(!version_matches_range(Some(&october), &range));
+
+        assert!(parse_version_constraint(">=v1.4.0+git.truncated").is_err());
     }
 
     #[test]

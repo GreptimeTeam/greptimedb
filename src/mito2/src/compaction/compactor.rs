@@ -48,7 +48,7 @@ use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
 };
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::RegionEdit;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionRef;
@@ -557,10 +557,9 @@ impl CompactionContext {
             ..Default::default()
         };
 
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         let manifest_version = self
             .manifest_ctx
-            .update_manifest_for_compaction(action_list)
+            .update_manifest_for_compaction(&self.region_metadata, edit.clone())
             .await?;
 
         Ok((edit, manifest_version))
@@ -1259,6 +1258,7 @@ mod tests {
     use crate::compaction::memory_manager::new_compaction_memory_manager;
     use crate::compaction::picker::PickerOutput;
     use crate::error::Result;
+    use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
     use crate::sst::file::FileHandle;
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::handler::{

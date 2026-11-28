@@ -90,6 +90,9 @@ pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 /// Name for reserved column: primary_key
 pub const PRIMARY_KEY_COLUMN_NAME: &str = "__primary_key";
 
+/// Comma-separated column IDs in the order used to encode a frontend sparse key.
+pub const SPARSE_KEY_ORDER: &str = "greptime:sparse_key_order";
+
 /// Internal Column Name
 static INTERNAL_COLUMN_VEC: [&str; 3] = [
     SEQUENCE_COLUMN_NAME,
