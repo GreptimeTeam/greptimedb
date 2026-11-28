@@ -461,6 +461,26 @@ pub(crate) fn ensure_region_owns_its_files(
     Ok(())
 }
 
+/// The single comparison the ownership rule is made of: whether a file whose creator recorded
+/// `file_expr` may belong to a region serving `region_expr`.
+///
+/// Both the manifest-time check ([`ensure_region_owns_its_files`], which the remap runs and the
+/// repartition procedure runs before it stages anything) and the admission fence that rejects a
+/// foreign-stamped file at the manifest commit read the rule from here, so the two stages agree on
+/// every file.
+///
+/// A reader drops the region predicate exactly when the two expressions agree
+/// (`ScanRegion::should_skip_region_partition`), so only an exact match makes the file's rows this
+/// region's. That includes the case where the region serves an expression and the file records
+/// none: such a file may hold rows either child of an earlier split wrote, so it is not evidence
+/// that this region produced it.
+pub(crate) fn file_has_region_expr(
+    region_expr: Option<&PartitionExpr>,
+    file_expr: Option<&PartitionExpr>,
+) -> bool {
+    file_expr == region_expr
+}
+
 /// Collects the `(region, file)` pairs of `manifest` whose recorded creator is not `region_id`'s
 /// expression.
 fn collect_foreign_files(
@@ -471,10 +491,7 @@ fn collect_foreign_files(
     let region_expr =
         crate::region::parse_partition_expr(manifest.metadata.partition_expr.as_deref())?;
     for (file_id, file_meta) in &manifest.files {
-        // Exact match, including the case where the region serves an expression and the file
-        // records none: such a file may hold rows either child of an earlier split wrote, so it
-        // is not evidence that this region produced it.
-        if file_meta.partition_expr.as_deref() != region_expr.as_ref() {
+        if !file_has_region_expr(region_expr.as_ref(), file_meta.partition_expr.as_deref()) {
             offenders.push((region_id, *file_id));
         }
     }

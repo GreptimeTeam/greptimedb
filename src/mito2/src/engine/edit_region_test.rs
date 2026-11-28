@@ -2054,3 +2054,157 @@ async fn test_narthex_cleanup_failure_drains_tracking() {
     tracker.cleanup_for_test().await.unwrap();
     assert_eq!(2, attempts.load(std::sync::atomic::Ordering::Relaxed));
 }
+
+/// Builds an import of one file stamped with the partition expression its creator region served.
+fn import_stamped_file(
+    region_id: RegionId,
+    file_id: FileId,
+    partition_expr: Option<partition::expr::PartitionExpr>,
+) -> RegionEdit {
+    RegionEdit {
+        files_to_add: vec![FileMeta {
+            region_id,
+            file_id,
+            level: 0,
+            partition_expr: partition_expr.map(Into::into),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn test_import_rejects_file_with_foreign_partition_expr() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let region_expr = partition::expr::col("field_0").lt(datatypes::value::Value::from(10.00));
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .partition_expr_json(Some(region_expr.as_json_str().unwrap()))
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let before = region.manifest_ctx.manifest().await;
+
+    // The file was created by a region serving another expression.
+    let foreign_expr = partition::expr::col("field_0").lt(datatypes::value::Value::from(5.00));
+    let file_id = FileId::random();
+    let error = engine
+        .edit_region(
+            region_id,
+            import_stamped_file(region_id, file_id, Some(foreign_expr.clone())),
+        )
+        .await
+        .unwrap_err();
+    let crate::error::Error::EditRegion { source, .. } = &error else {
+        panic!("unexpected error: {error}");
+    };
+    let crate::error::Error::ForeignStampedFile {
+        region_id: reported_region,
+        file_id: reported_file,
+        creator_expr,
+        ..
+    } = source.as_ref()
+    else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(region_id, *reported_region);
+    assert_eq!(file_id, *reported_file);
+    assert_eq!(foreign_expr.to_string(), *creator_expr);
+    assert!(error.output_msg().contains(&file_id.to_string()));
+
+    // The rejected import must leave the manifest untouched.
+    let after = region.manifest_ctx.manifest().await;
+    assert_eq!(before.manifest_version, after.manifest_version);
+    assert!(after.files.is_empty());
+    // The region stays writable, so the retry with a matching stamp can succeed.
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Writable),
+        region.state()
+    );
+
+    let matching_expr =
+        crate::region::parse_partition_expr(region.metadata().partition_expr.as_deref())
+            .unwrap()
+            .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            import_stamped_file(region_id, file_id, Some(matching_expr)),
+        )
+        .await
+        .unwrap();
+    let after = region.manifest_ctx.manifest().await;
+    assert!(after.files.contains_key(&file_id));
+}
+
+#[tokio::test]
+async fn test_import_accepts_file_with_matching_partition_expr() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let region_expr = partition::expr::col("field_0").lt(datatypes::value::Value::from(10.00));
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .partition_expr_json(Some(region_expr.as_json_str().unwrap()))
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let stamp = crate::region::parse_partition_expr(region.metadata().partition_expr.as_deref())
+        .unwrap()
+        .unwrap();
+    let file_id = FileId::random();
+    engine
+        .edit_region(
+            region_id,
+            import_stamped_file(region_id, file_id, Some(stamp)),
+        )
+        .await
+        .unwrap();
+
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(1, manifest.files.len());
+    assert!(manifest.files.contains_key(&file_id));
+}
+
+#[tokio::test]
+async fn test_import_accepts_unstamped_file_in_unpartitioned_region() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.metadata().partition_expr.is_none());
+
+    // A legacy file records no creator expression, and neither does the region.
+    let file_id = FileId::random();
+    engine
+        .edit_region(region_id, import_stamped_file(region_id, file_id, None))
+        .await
+        .unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(1, manifest.files.len());
+    assert!(manifest.files.contains_key(&file_id));
+}
