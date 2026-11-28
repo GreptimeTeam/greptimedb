@@ -246,20 +246,7 @@ impl SeriesScan {
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         // Create the shared pruner with number of workers equal to CPU cores.
-        let num_workers = common_stat::get_total_cpu_cores().max(1);
-        let pruner = match mode {
-            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
-                Arc::new(Pruner::new(stream_ctx.clone(), num_workers))
-            }
-            SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
-                stream_ctx.clone(),
-                num_workers,
-                PrunerOptions {
-                    retain_builders: true,
-                    enable_predicate_prefilter: false,
-                },
-            )),
-        };
+        let pruner = Self::new_pruner(&mode, &stream_ctx);
 
         Self {
             mode,
@@ -273,6 +260,28 @@ impl SeriesScan {
             preflight: Mutex::new(None),
             #[cfg(test)]
             preflight_runs: AtomicUsize::new(0),
+        }
+    }
+
+    /// Creates the shared pruner of a [`SeriesScanMode`] with workers equal to CPU cores.
+    ///
+    /// The pruner is shared by all partitions of the scan. Two-phase scans retain their file
+    /// range builders and skip the predicate prefilter because candidate discovery already
+    /// narrowed the assignment.
+    fn new_pruner(mode: &SeriesScanMode, stream_ctx: &Arc<StreamContext>) -> Arc<Pruner> {
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        match mode {
+            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
+                Arc::new(Pruner::new(stream_ctx.clone(), num_workers))
+            }
+            SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
+                stream_ctx.clone(),
+                num_workers,
+                PrunerOptions {
+                    retain_builders: true,
+                    enable_predicate_prefilter: false,
+                },
+            )),
         }
     }
 
@@ -1213,20 +1222,7 @@ impl RegionScanner for SeriesScan {
         self.prepared = Arc::new(prepared::Preparation::default());
         self.clear_preflight_cache();
         self.stream_ctx.input.predicate.clear_dyn_filters();
-        let num_workers = common_stat::get_total_cpu_cores().max(1);
-        self.pruner = match self.mode {
-            SeriesScanMode::Legacy | SeriesScanMode::Prepared => {
-                Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers))
-            }
-            SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
-                self.stream_ctx.clone(),
-                num_workers,
-                PrunerOptions {
-                    retain_builders: true,
-                    enable_predicate_prefilter: false,
-                },
-            )),
-        };
+        self.pruner = Self::new_pruner(&self.mode, &self.stream_ctx);
         self.legacy_receivers.lock().unwrap().clear();
         self.candidate_receivers.lock().unwrap().clear();
         self.metrics_list = Arc::new(PartitionMetricsList::default());
