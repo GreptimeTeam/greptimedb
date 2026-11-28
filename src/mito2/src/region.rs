@@ -149,6 +149,16 @@ impl RegionRoleState {
         }
     }
 
+    /// Returns whether a region in this state is admitted to flush.
+    pub(crate) fn is_flushable(self) -> bool {
+        matches!(
+            self,
+            Self::Leader(RegionLeaderState::Writable)
+                | Self::Leader(RegionLeaderState::Staging)
+                | Self::Leader(RegionLeaderState::Downgrading)
+        )
+    }
+
     /// Returns whether the region is staging or ending staging. A staged edit belongs to the
     /// session too, which only [MitoRegion::in_staging_session] can tell.
     pub(crate) fn in_staging_session(self) -> bool {
@@ -405,12 +415,7 @@ impl MitoRegion {
 
     /// Returns whether the region is flushable.
     pub(crate) fn is_flushable(&self) -> bool {
-        matches!(
-            self.manifest_ctx.state.load(),
-            RegionRoleState::Leader(RegionLeaderState::Writable)
-                | RegionRoleState::Leader(RegionLeaderState::Staging)
-                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-        )
+        self.manifest_ctx.state.load().is_flushable()
     }
 
     /// Returns whether the region should abort index building.

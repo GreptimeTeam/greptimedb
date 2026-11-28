@@ -67,6 +67,169 @@ drop table prune_field;
 
 Affected Rows: 0
 
+-- A single flat SST can contain both the put and its delete marker.
+CREATE TABLE prune_deleted_flat (
+  host STRING, ts TIMESTAMP TIME INDEX,
+  mem BIGINT NULL, note STRING NULL,
+  PRIMARY KEY (host)
+) WITH ('merge_mode' = 'last_non_null', 'sst_format' = 'flat');
+
+Affected Rows: 0
+
+INSERT INTO prune_deleted_flat VALUES ('h1', '2024-01-01 00:00:00', 2, 'b');
+
+Affected Rows: 1
+
+DELETE FROM prune_deleted_flat WHERE host = 'h1' AND ts = '2024-01-01 00:00:00';
+
+Affected Rows: 1
+
+ADMIN flush_table('prune_deleted_flat');
+
++-----------------------------------------+
+| ADMIN flush_table('prune_deleted_flat') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+SELECT * FROM prune_deleted_flat;
+
++------+----+-----+------+
+| host | ts | mem | note |
++------+----+-----+------+
++------+----+-----+------+
+
+SELECT * FROM prune_deleted_flat WHERE mem = 2;
+
++------+----+-----+------+
+| host | ts | mem | note |
++------+----+-----+------+
++------+----+-----+------+
+
+SELECT * FROM prune_deleted_flat WHERE note = 'b';
+
++------+----+-----+------+
+| host | ts | mem | note |
++------+----+-----+------+
++------+----+-----+------+
+
+DROP TABLE prune_deleted_flat;
+
+Affected Rows: 0
+
+-- Strict-window compaction can put separately flushed versions into one SST.
+CREATE TABLE prune_deleted_pk (
+  host STRING, ts TIMESTAMP TIME INDEX,
+  mem BIGINT NULL, note STRING NULL,
+  PRIMARY KEY (host)
+) WITH ('merge_mode' = 'last_non_null', 'sst_format' = 'primary_key', 'memtable.type' = 'time_series');
+
+Affected Rows: 0
+
+INSERT INTO prune_deleted_pk VALUES ('h1', '2024-01-01 00:00:00', 2, 'b');
+
+Affected Rows: 1
+
+ADMIN flush_table('prune_deleted_pk');
+
++---------------------------------------+
+| ADMIN flush_table('prune_deleted_pk') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+DELETE FROM prune_deleted_pk WHERE host = 'h1' AND ts = '2024-01-01 00:00:00';
+
+Affected Rows: 1
+
+ADMIN flush_table('prune_deleted_pk');
+
++---------------------------------------+
+| ADMIN flush_table('prune_deleted_pk') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+INSERT INTO prune_deleted_pk VALUES ('h2', '2024-01-01 00:00:00', 3, 'c');
+
+Affected Rows: 1
+
+ADMIN flush_table('prune_deleted_pk');
+
++---------------------------------------+
+| ADMIN flush_table('prune_deleted_pk') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+SELECT COUNT(DISTINCT file_id) AS ssts FROM information_schema.ssts_manifest
+WHERE visible AND table_id = (SELECT table_id FROM information_schema.tables
+                             WHERE table_schema = 'public' AND table_name = 'prune_deleted_pk');
+
++------+
+| ssts |
++------+
+| 3    |
++------+
+
+SELECT * FROM prune_deleted_pk WHERE mem = 2;
+
++------+----+-----+------+
+| host | ts | mem | note |
++------+----+-----+------+
++------+----+-----+------+
+
+SELECT * FROM prune_deleted_pk WHERE note = 'b';
+
++------+----+-----+------+
+| host | ts | mem | note |
++------+----+-----+------+
++------+----+-----+------+
+
+ADMIN compact_table('prune_deleted_pk', 'swcs', '86400');
+
++----------------------------------------------------------+
+| ADMIN compact_table('prune_deleted_pk', 'swcs', '86400') |
++----------------------------------------------------------+
+| 0                                                        |
++----------------------------------------------------------+
+
+SELECT COUNT(DISTINCT file_id) AS ssts FROM information_schema.ssts_manifest
+WHERE visible AND table_id = (SELECT table_id FROM information_schema.tables
+                             WHERE table_schema = 'public' AND table_name = 'prune_deleted_pk');
+
++------+
+| ssts |
++------+
+| 1    |
++------+
+
+SELECT * FROM prune_deleted_pk;
+
++------+---------------------+-----+------+
+| host | ts                  | mem | note |
++------+---------------------+-----+------+
+| h2   | 2024-01-01T00:00:00 | 3   | c    |
++------+---------------------+-----+------+
+
+SELECT * FROM prune_deleted_pk WHERE mem = 2;
+
++------+----+-----+------+
+| host | ts | mem | note |
++------+----+-----+------+
++------+----+-----+------+
+
+SELECT * FROM prune_deleted_pk WHERE note = 'b';
+
++------+----+-----+------+
+| host | ts | mem | note |
++------+----+-----+------+
++------+----+-----+------+
+
+DROP TABLE prune_deleted_pk;
+
+Affected Rows: 0
+
 -- -0.0 equals 0.0, so flushed rows holding either zero must keep matching.
 CREATE TABLE prune_float_zero (ts TIMESTAMP TIME INDEX, v DOUBLE);
 

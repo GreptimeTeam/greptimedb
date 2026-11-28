@@ -12,20 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The legacy native-histogram estimators, delegated to the native kernel.
-//!
-//! `prom_native_histogram_quantile` and `prom_native_histogram_fraction` used to estimate with the
-//! bucket walk inside `NativeHistogram` itself: exponential bucket bounds computed as `2^x`, and a
-//! forward walk from the lowest bucket only. The native kernel (`histogram_eval`) walks the same
-//! histogram the way Prometheus does -- the bound table in `bounds` and, for a quantile above the
-//! median of a histogram whose sum is not NaN, a walk from the highest bucket down -- so keeping
-//! both estimators leaves two answers for one histogram that differ in their last places.
-//!
-//! These functions read a [`NativeHistogram`] through the borrowed [`HistogramView`] that both
-//! representations share, hand it to the kernel as the [`FloatHistogram`] the kernel owns, and
-//! return the answer in the shape the legacy UDFs report it. The scalar arithmetic -- `add`, `sub`,
-//! `scale`, `divide_by` -- takes the same route below the estimators, so Prometheus's rules for
-//! reconciling a zero bucket, reducing a schema and intersecting custom bounds live in one place.
+//! Legacy [`NativeHistogram`] quantile, fraction and arithmetic, evaluated by the native kernel
+//! so both paths share one implementation of Prometheus's histogram rules. Each function reads
+//! the histogram through a [`HistogramView`] and returns results in the legacy UDFs' shape.
 
 use common_query::native_histogram::{
     CounterResetHint, NativeHistogram, NativeHistogramQuantileInfo, Span,
@@ -36,11 +25,8 @@ use datatypes::series::histogram::{BucketSideView, HistogramView};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::histogram_eval::native;
 
-/// A [`NativeHistogram`] borrowed as a [`HistogramView`], the form the native kernel reads.
-///
-/// A view holds its spans as two parallel slices while a `NativeHistogram` holds them as
-/// [`Span`]s, so the offsets and lengths are copied here and the counts, bounds and metadata stay
-/// borrowed for as long as the view lives.
+/// A [`NativeHistogram`] borrowed as a [`HistogramView`]. Span offsets and lengths are copied
+/// into parallel columns; everything else stays borrowed.
 pub(crate) struct LegacyView<'a> {
     histogram: &'a NativeHistogram,
     positive_offsets: Vec<i32>,
@@ -62,7 +48,6 @@ impl<'a> LegacyView<'a> {
         }
     }
 
-    /// The view of the histogram these span columns were taken from.
     pub(crate) fn view(&self) -> HistogramView<'_> {
         HistogramView {
             schema: self.histogram.schema,
@@ -99,9 +84,8 @@ pub(crate) fn quantile_with_info(
     let view = LegacyView::new(histogram);
     match native::quantile(q, &view.view(), &mut Vec::new()) {
         Ok(value) => (value, nan_observation_info(histogram, q)),
-        // The kernel refuses a layout it cannot walk, a custom histogram carrying a zero count
-        // among them. The legacy estimator reported a histogram it could not read as no estimate,
-        // which is the same NaN without a note about NaN observations.
+        // A layout the kernel refuses (e.g. custom buckets with a zero count) is NaN with no
+        // note, as the legacy estimator answered.
         Err(_) => (f64::NAN, None),
     }
 }
@@ -115,8 +99,8 @@ pub(crate) fn fraction_with_info(
     let view = LegacyView::new(histogram);
     match native::fraction(lower, upper, &view.view(), &mut Vec::new()) {
         Ok(value) => {
-            // The same answer the legacy estimator gave: a fraction is degenerate, and reports
-            // nothing, unless it runs for a non-empty histogram over an increasing pair of bounds.
+            // A degenerate fraction (empty histogram, NaN or non-increasing bounds) reports
+            // nothing, as the legacy estimator did.
             let excluded_nans = histogram.count != 0.0
                 && !lower.is_nan()
                 && !upper.is_nan()
@@ -129,13 +113,9 @@ pub(crate) fn fraction_with_info(
     }
 }
 
-/// The note for a NaN observation, which the kernel accounts for but does not report.
-///
-/// A NaN observation leaves the sum NaN and puts fewer observations in the buckets than the count
-/// holds them (Prometheus marks it the same way). The kernel then walks the buckets forward from
-/// the lowest, so the note distinguishes the two outcomes: the estimate is skewed higher when the
-/// requested rank falls inside the buckets' total, and NaN when it falls past it because the
-/// observations the buckets cannot carry were the highest ones.
+/// The NaN-observation note the kernel does not report. A NaN observation leaves the sum NaN and
+/// the bucket total below the count: the estimate is NaN when the requested rank falls past the
+/// bucket total, and skewed otherwise.
 fn nan_observation_info(
     histogram: &NativeHistogram,
     q: f64,
@@ -154,8 +134,7 @@ fn nan_observation_info(
     })
 }
 
-/// What the populated buckets hold, summed in the order the kernel walks them: the negative side
-/// from its highest index down, the zero bucket, then the positive side upwards.
+/// The sum of all bucket counts, in the kernel's forward walk order so rounding matches.
 fn bucket_total(histogram: &NativeHistogram) -> f64 {
     let mut total = 0.0;
     for count in histogram.negative_buckets.iter().rev() {
@@ -168,10 +147,7 @@ fn bucket_total(histogram: &NativeHistogram) -> f64 {
     total
 }
 
-/// The native kernel's owned form of `histogram`.
-///
-/// A view borrows the offsets and lengths it needs from two temporary slices, so the copy happens
-/// here and the `FloatHistogram` owns the counts that result.
+/// The native kernel's owned form of `histogram`; errors on a span list that steps backwards.
 fn float_histogram(histogram: &NativeHistogram) -> Result<FloatHistogram> {
     if steps_backwards(&histogram.positive_spans) || steps_backwards(&histogram.negative_spans) {
         return Err(datafusion::error::DataFusionError::Execution(
@@ -182,12 +158,9 @@ fn float_histogram(histogram: &NativeHistogram) -> Result<FloatHistogram> {
     FloatHistogram::try_from_view(&view.view())
 }
 
-/// Whether a span list steps backwards, which the legacy `bucket_indices` refused.
-///
-/// The kernel's `side_from_view` adds each offset to a running index and accepts a later span that
-/// steps backwards, so the expanded indices repeat or go negative. Legacy refused such a list
-/// outright, so the bridge refuses it too: `add`/`sub` answer `None` as they did, and
-/// `scale`/`divide_by` keep their field-by-field fallback.
+/// Whether a later span has a negative offset. `side_from_view` would accept it and produce
+/// repeated indices; legacy refused it, so `add`/`sub` answer `None` and `scale`/`divide_by` fall
+/// back to field-by-field arithmetic.
 fn steps_backwards(spans: &[Span]) -> bool {
     spans.iter().skip(1).any(|span| span.offset < 0)
 }
@@ -245,12 +218,8 @@ fn combine(
         combined.add(&other)
     }
     .ok()?;
-    // The outcome reports what the kernel already folded into the result, and the legacy callers
-    // report both from the operands before the call: `custom_bounds_reconciled` is the intersection
-    // the kernel keeps in `custom_values`, which `needs_custom_reconciliation` announces, and a
-    // `counter_reset_collision` is the contradiction the kernel answers with an unknown hint, which
-    // is what the legacy arithmetic derived from two hints that disagree. Holding the kernel to
-    // both keeps a change there from dropping either.
+    // Legacy callers derive both annotations from the operands before the call; these asserts
+    // keep the kernel's outcome consistent with that.
     debug_assert_eq!(
         outcome.custom_bounds_reconciled,
         left.needs_custom_reconciliation(right)
@@ -261,8 +230,7 @@ fn combine(
     if subtract {
         combined.reset_hint = CounterResetHint::Gauge;
     }
-    // The legacy arithmetic compacted a sum, so a bucket the two sides cancel out of leaves no
-    // span behind; the kernel keeps the bucket until a caller drops it.
+    // Legacy arithmetic compacted the result, dropping buckets that cancel out.
     combined.compact();
     Some(legacy_histogram(&combined))
 }
@@ -270,10 +238,8 @@ fn combine(
 /// `histogram * factor`, a gauge histogram for a negative factor.
 pub(crate) fn scale(histogram: &NativeHistogram, factor: f64) -> NativeHistogram {
     let Ok(mut scaled) = float_histogram(histogram) else {
-        // A layout the kernel cannot read -- spans that disagree with the counts, or a bucket index
-        // that leaves `i32` once expanded -- keeps the field-by-field scaling the legacy caller
-        // had, so such a histogram is still multiplied instead of dropped, and reports its layout
-        // when it is serialized. Scaling has no bounds to reconcile, so nothing is lost here.
+        // A layout the kernel cannot read is still scaled field by field instead of dropped;
+        // scaling needs no bucket reconciliation.
         return field_scaled(histogram, factor);
     };
     scaled.mul(factor);
@@ -346,9 +312,6 @@ mod tests {
     use crate::histogram_eval::float_histogram::FloatHistogram;
     use crate::histogram_eval::native;
 
-    /// Every kind of histogram the legacy representation can hold: exponential and custom, one
-    /// side and two, a zero bucket, gaps between the spans, a NaN sum standing for NaN
-    /// observations, and a histogram with no buckets at all.
     fn fixtures() -> Vec<(&'static str, NativeHistogram)> {
         let mut custom = empty(CUSTOM_BUCKETS_SCHEMA, 0.0, 7.0, 21.0, 0.0);
         custom.custom_values = vec![1.0, 2.0, 4.0];
@@ -452,8 +415,6 @@ mod tests {
         }
     }
 
-    /// The legacy UDFs read their quantile out of the kernel now, so the two must agree to the
-    /// last bit for every kind of histogram the legacy representation can hold.
     #[test]
     fn quantile_with_info_is_the_native_quantile() {
         for (name, histogram) in fixtures() {
@@ -485,18 +446,15 @@ mod tests {
         }
     }
 
-    /// Prometheus's NaN branch walks the remaining buckets and leaves the last one for the
-    /// interpolation, so a multi-bucket `sum = NaN` histogram answers with the top bucket rather
-    /// than the bucket the rank fell into. Pinning the number here, rather than only comparing
-    /// against the kernel, keeps a future kernel change from silently re-deciding it.
+    /// Prometheus's NaN branch walks the remaining buckets and interpolates in the last one, not
+    /// the bucket the rank fell into.
     #[test]
     fn quantile_with_nan_sum_uses_the_last_bucket() {
         let mut histogram = empty(0, 0.0, 10.0, f64::NAN, 0.0);
         histogram.positive_spans = vec![span(0, 2)];
         histogram.positive_buckets = vec![8.0, 1.0];
 
-        // The nine observations the buckets hold are fewer than the count of ten and the sum is
-        // NaN, so the note reports the skew: the rank still falls inside what the buckets carry.
+        // Buckets hold 9 of 10 observations; rank 5 is inside them, so the note is a skew.
         let (value, info) = quantile_with_info(&histogram, 0.5);
         assert_eq!(
             value.to_bits(),
@@ -511,16 +469,13 @@ mod tests {
         );
     }
 
-    /// The other half of the same note: a rank past the total the buckets carry is no estimate at
-    /// all, because the observations the buckets cannot hold were the highest ones.
     #[test]
     fn quantile_with_nan_sum_below_the_rank_is_nan() {
         let mut histogram = empty(0, 0.0, 10.0, f64::NAN, 0.0);
         histogram.positive_spans = vec![span(0, 2)];
         histogram.positive_buckets = vec![8.0, 1.0];
 
-        // The rank 0.95 * 10 = 9.5 lies past the 9 observations the buckets hold, so the forward
-        // walk never reaches it and the estimate is NaN rather than the last bucket's bound.
+        // Rank 9.5 lies past the 9 observations the buckets hold.
         let (value, info) = quantile_with_info(&histogram, 0.95);
         assert!(
             value.is_nan(),
@@ -532,8 +487,7 @@ mod tests {
             "the note says the NaN observations were the highest ones"
         );
 
-        // The single-bucket fixture the earlier note test uses reaches the same branch: the rank
-        // 0.9 * 10 = 9 lies past the 8 observations the one bucket holds.
+        // Single bucket: rank 9 lies past its 8 observations.
         let mut single = empty(0, 0.0, 10.0, f64::NAN, 0.0);
         single.positive_spans = vec![span(0, 1)];
         single.positive_buckets = vec![8.0];
@@ -544,31 +498,23 @@ mod tests {
         );
     }
 
-    /// A tie between two buckets that do not touch resolves differently in the two walks, and that
-    /// difference is why the kernel replaced the estimator: the legacy walk goes up from the lowest
-    /// bucket and stops at the first one the rank fits in, while the kernel walks a finite-sum
-    /// histogram at or above the median down from the highest. Both numbers are pinned as literals,
-    /// the legacy one computed through the estimator still in `common/query`, so that a later
-    /// change to either walk shows up as an arithmetic difference instead of a quiet one.
+    /// The `common/query` estimator walks up from the lowest bucket; Prometheus (the kernel) walks
+    /// a finite-sum histogram down from the highest for q >= 0.5, so an exact tie between two
+    /// non-adjacent buckets resolves differently.
     #[test]
     fn exact_tie_answers_one_from_the_legacy_walk_and_two_from_the_kernel() {
         let mut tie = empty(0, 0.0, 2.0, 3.75, 0.0);
-        // Index 0 and index 2 hold one observation each, and index 1 is empty, so the two buckets
-        // do not touch and nothing interpolates across the gap.
+        // One observation at index 0 and one at index 2.
         tie.positive_spans = vec![span(0, 1), span(1, 1)];
         tie.positive_buckets = vec![1.0, 1.0];
 
-        // `NativeHistogram::quantile_with_info` is the estimator the legacy UDF used before the
-        // kernel replaced it and is still in the workspace: rank 0.5 * 2 = 1 fills the bucket at
-        // index 0 exactly, whose fraction is 1, so the answer is that bucket's upper bound.
+        // Rank 1 fills the bucket at index 0 exactly: its upper bound.
         assert_eq!(
             tie.quantile_with_info(0.5),
             (1.0, None),
             "the legacy walk answers with the upper bound of (0.5, 1]"
         );
 
-        // The kernel's backwards walk meets the bucket at index 2 first, and the rank inside it is
-        // 0, so the answer is the lower bound of (2, 4].
         let (value, info) = quantile_with_info(&tie, 0.5);
         assert_eq!(
             value.to_bits(),
@@ -581,7 +527,6 @@ mod tests {
         );
     }
 
-    /// The same agreement for `histogram_fraction`, whose legacy wrapper also returns a note.
     #[test]
     fn fraction_with_info_is_the_native_fraction() {
         for (name, histogram) in fixtures() {
@@ -659,8 +604,7 @@ mod tests {
         nan_right.positive_spans = vec![span(0, 1)];
         nan_right.positive_buckets = vec![2.0];
 
-        // Every operand carries a start timestamp of its own, because the arithmetic is expected to
-        // clear it: a sum differs from both samples it was derived from, so it names no start.
+        // Start timestamps the arithmetic must clear.
         same_left.start_timestamp = Some(1_000);
         same_right.start_timestamp = Some(2_000);
         fine.start_timestamp = Some(3_001);
@@ -681,7 +625,6 @@ mod tests {
         ]
     }
 
-    /// The buckets a side holds that carry observations, by index and bit pattern.
     fn populated_buckets(spans: &[Span], buckets: &[f64]) -> Vec<(i32, u64)> {
         let (offsets, lengths) = columns(spans);
         let mut index = 0;
@@ -721,7 +664,6 @@ mod tests {
         side.iter().map(|&(_, count)| count.to_bits()).collect()
     }
 
-    /// A span list as the `(offset, length)` pairs [`FloatHistogram::spans`] reports.
     fn segments(spans: &[Span]) -> Vec<(i32, i32)> {
         spans
             .iter()
@@ -729,19 +671,8 @@ mod tests {
             .collect()
     }
 
-    /// Every field of the legacy payload against the kernel's, span segmentation included: a
-    /// comparison of the populated buckets alone cannot tell one span of two buckets from two
-    /// spans of one bucket each, and says nothing about the metadata beside the counts.
-    ///
-    /// `expected_start_timestamp` states the policy of the operation that produced the payload. One
-    /// that derives a histogram from its input -- `add`, `sub`, `scale`, `divide_by` -- clears the
-    /// start timestamp, because the field names the start of the sample the payload was read from
-    /// and a derived value is not that sample; the kernel clears it in the same step, so both sides
-    /// must carry the value passed here. `scale` and `divide_by` keep a field-by-field fallback for
-    /// a layout the kernel cannot read, which derives nothing and copies the field, and the test
-    /// that exercises it asserts `Some(..)` where it belongs. `quantile_with_info` and
-    /// `fraction_with_info` return no payload and leave their input untouched, so they have no
-    /// start timestamp to compare here.
+    /// Compares every field, span segmentation included: populated buckets alone cannot tell one
+    /// span of two buckets from two spans of one.
     fn assert_same_payload(
         name: &str,
         legacy: &NativeHistogram,
@@ -812,22 +743,18 @@ mod tests {
         );
     }
 
-    /// The added histogram is the kernel's addition, bucket for bucket and bit for bit.
     #[test]
     fn add_is_the_native_add() {
         for (name, left, right) in pairs() {
             let combined = add(&left, &right).unwrap();
             let mut native = float_histogram(&left).unwrap();
             native.add(&float_histogram(&right).unwrap()).unwrap();
-            // The bridge compacts a sum, dropping the buckets the two sides left empty, so the
-            // kernel's own addition needs the same step before the two payloads can be compared
-            // bucket for bucket.
+            // The bridge compacts its result.
             native.compact();
             assert_same_payload(name, &combined, &native, None);
         }
     }
 
-    /// The same for subtraction, which the kernel reports as an addition of the negation.
     #[test]
     fn sub_is_the_native_sub() {
         for (name, left, right) in pairs() {
@@ -841,8 +768,6 @@ mod tests {
         }
     }
 
-    /// Scaling and dividing move every count and leave the layout alone, as the kernel's own
-    /// multiplication and division do.
     #[test]
     fn scale_and_divide_by_are_the_native_mul_and_div() {
         for (name, histogram, _) in pairs() {
@@ -860,8 +785,6 @@ mod tests {
         }
     }
 
-    /// The note the legacy UDFs turn into an annotation follows the kernel's outcome instead of a
-    /// second reading of the histogram.
     #[test]
     fn nan_notes_follow_the_kernel_outcome() {
         use NativeHistogramQuantileInfo::{NaNResult, NaNSkew};
@@ -891,17 +814,12 @@ mod tests {
         assert!(!fraction_with_info(&nan_sum, 2.0, 1.0).1);
     }
 
-    /// The two conversions are inverse: the payload survives `NativeHistogram` to
-    /// [`FloatHistogram`] and back field for field, including the parts a comparison of the counts
-    /// alone would not see.
     #[test]
     fn round_trip_preserves_the_payload_and_its_span_layout() {
         let mut exponential = empty(2, 0.5, 12.0, -7.5, 1.0);
         exponential.reset_hint = CounterResetHint::NotCounterReset;
         exponential.start_timestamp = Some(1_234_567);
-        // A zero-length span carries nothing but its offset, and the two gaps between the three
-        // populated segments are part of the layout the legacy representation reports: the counts
-        // live at indices 2 and 3 and then 5, with nothing at 4.
+        // A zero-length span and gaps: counts at indices 2, 3 and 5.
         exponential.positive_spans = vec![span(0, 0), span(2, 2), span(1, 1)];
         exponential.positive_buckets = vec![1.0, 3.0, 2.0];
         exponential.negative_spans = vec![span(-2, 2)];
@@ -947,8 +865,6 @@ mod tests {
                 count_bits(&original.negative_buckets),
                 "{name} negative buckets"
             );
-            // Everything else the payload holds -- schema, zero threshold, count, sum and the zero
-            // count -- is compared in one place above.
             assert_eq!(
                 round_tripped, original,
                 "{name}: the round trip changed the histogram"
@@ -956,9 +872,6 @@ mod tests {
         }
     }
 
-    /// A histogram an operation derived carries no start timestamp: the field names the start of
-    /// the sample the payload was read from, and a sum, a difference, a product or a quotient is
-    /// not that sample.
     #[test]
     fn the_arithmetic_clears_the_start_timestamp() {
         let mut left = empty(0, 0.0, 2.0, 3.0, 0.0);
@@ -981,13 +894,10 @@ mod tests {
                 "{name}: a derived histogram names no start"
             );
         }
-        // Reading the operands is not deriving from them.
         assert_eq!(left.start_timestamp, Some(1_000));
         assert_eq!(right.start_timestamp, Some(2_000));
     }
 
-    /// The estimators read the buckets rather than the sample's start timestamp, and neither of
-    /// them hands back a payload, so the field neither changes the answer nor changes itself.
     #[test]
     fn the_estimators_leave_the_start_timestamp_alone() {
         let mut timed = empty(2, 0.5, 20.0, -3.0, 3.0);
@@ -1143,10 +1053,8 @@ mod tests {
         );
     }
 
-    /// Payloads the legacy caller could still produce and the kernel refuses to read: a span whose
-    /// length disagrees with the counts, a span list that steps backwards, an index that leaves
-    /// `i32` once expanded, and a negative span length. All four carry the same numbers, so the
-    /// field-by-field answers below are the same for each of them.
+    /// Layouts the kernel refuses to read, all with the same counts so the field-by-field
+    /// answers match.
     fn unreadable_layouts() -> Vec<(&'static str, NativeHistogram, Option<i64>)> {
         // The span claims one bucket and the counts hold two.
         let mut short_counts = empty(0, 0.0, 3.0, 5.0, 1.0);
@@ -1174,9 +1082,6 @@ mod tests {
         .collect()
     }
 
-    /// A layout the kernel cannot walk keeps the field-by-field scaling and division the legacy
-    /// caller had, so such a histogram is still multiplied instead of dropped, and keeps the start
-    /// timestamp it was stored with.
     #[test]
     fn scale_and_divide_fall_back_to_the_fields_for_an_unreadable_layout() {
         for (name, histogram, start_timestamp) in unreadable_layouts() {
@@ -1251,9 +1156,6 @@ mod tests {
         }
     }
 
-    /// The factors that are not a plain finite number, on a layout the kernel can walk: a zero
-    /// divisor leaves no bucket, a NaN factor reaches every count, and a negative one turns the
-    /// histogram into a gauge.
     #[test]
     fn scale_and_divide_by_the_edge_factors() {
         let mut histogram = empty(0, 0.0, 4.0, 6.0, 0.0);

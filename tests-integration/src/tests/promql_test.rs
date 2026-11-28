@@ -2664,6 +2664,326 @@ fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, q
     );
 }
 
+/// A TQL flow runs on the native route and writes the same sink table and rows as the existing
+/// route.
+///
+/// The flow creates its sink table from the columns its plan publishes, so a plan that published
+/// the native root's columns would create a different table (with a metric-name column) than the
+/// same flow planned by the existing route. The aggregates are shapes the native planner places
+/// differently: one selector, and two occurrences of a selector. The rest keep one row per series
+/// with two labels each, so the published labels are paired with the native ones by name. In
+/// `m / scalar(sum(m))` the existing plan's only aggregate groups by time alone, yet both labels of
+/// `m` stay sink keys.
+#[test]
+fn native_promql_tql_flow_matches_the_sink_table() {
+    // Flushing a flow overflows the default test stack in a debug build.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(native_promql_tql_flow_matches_the_sink_table_impl())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn native_promql_tql_flow_matches_the_sink_table_impl() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_tql_flow")).await;
+    // `ADMIN FLUSH_FLOW` syncs with this task.
+    standalone
+        .flow_engine
+        .start_flow_consistent_check_task()
+        .await
+        .unwrap();
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_flow_src (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO native_flow_src VALUES \
+             (20, now() - '30s'::interval, 's1', 'A'), \
+             (30, now() - '30s'::interval, 's1', 'B'), \
+             (10, now() - '30s'::interval, 's2', 'A'); \
+         CREATE TABLE native_flow_part (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)) \
+             PARTITION ON COLUMNS (loc) (loc < 'B', loc >= 'B'); \
+         INSERT INTO native_flow_part SELECT * FROM native_flow_src; \
+         CREATE TABLE native_flow_series (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO native_flow_series VALUES \
+             (20, now() - '90s'::interval, 's1', 'A'), (25, now() - '30s'::interval, 's1', 'A'), \
+             (30, now() - '90s'::interval, 's1', 'B'), (40, now() - '30s'::interval, 's1', 'B'), \
+             (10, now() - '90s'::interval, 's2', 'A'), (10, now() - '30s'::interval, 's2', 'A')",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sql_output = |sql: String| {
+        let instance = instance.clone();
+        async move {
+            let output = instance
+                .do_query(&sql, QueryContext::arc())
+                .await
+                .remove(0)
+                .unwrap();
+            native_output_text(output).await
+        }
+    };
+    // Each flush evaluates at its own `now()`, so the rows are compared without the time index.
+    let rows_without_ts = |table: String| {
+        let instance = instance.clone();
+        async move {
+            let output = instance
+                .do_query(&format!("SELECT * FROM {table}"), QueryContext::arc())
+                .await
+                .remove(0)
+                .unwrap();
+            let batches = match output.data {
+                OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+                OutputData::RecordBatches(batches) => batches,
+                _ => unreachable!("a query returns record batches"),
+            };
+            let batches = batches
+                .iter()
+                .map(|batch| {
+                    let batch = batch.df_record_batch();
+                    let ts = batch.schema().index_of("ts").unwrap();
+                    let keep = (0..batch.num_columns())
+                        .filter(|index| *index != ts)
+                        .collect::<Vec<_>>();
+                    batch.project(&keep).unwrap()
+                })
+                .collect::<Vec<_>>();
+            // Rows are compared as a set: a sink table returns them in no fixed order.
+            let mut lines = datatypes::arrow::util::pretty::pretty_format_batches(&batches)
+                .unwrap()
+                .to_string()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            lines.sort();
+            lines.join("\n")
+        }
+    };
+    for (name, query) in [
+        ("avg", "avg by (sensor) (native_flow_src)"),
+        (
+            "ratio",
+            "sum by (sensor) (native_flow_src) / count by (sensor) (native_flow_src)",
+        ),
+        ("partitioned", "avg by (sensor) (native_flow_part)"),
+        ("rate", "rate(native_flow_series[2m])"),
+        ("topk", "topk(1, native_flow_series)"),
+        (
+            "offset",
+            "native_flow_series + native_flow_series offset 1m",
+        ),
+        (
+            "label_replace",
+            "label_replace(native_flow_series, \"dst\", \"$1\", \"sensor\", \"(.*)\")",
+        ),
+        (
+            "scalar_ratio",
+            "native_flow_src / scalar(sum(native_flow_src))",
+        ),
+    ] {
+        let mut sinks = Vec::new();
+        for native in [false, true] {
+            let flow = format!("native_flow_{name}_{native}");
+            execute_all(
+                &instance,
+                &format!(
+                    "CREATE FLOW {flow} SINK TO {flow}_sink EVAL INTERVAL '1m' AS \
+                     TQL EVAL (now() - '1m'::interval, now(), '1m') {query}"
+                ),
+                native_query_context(native, 4),
+            )
+            .await;
+            observer.clear();
+            execute_all(
+                &instance,
+                &format!("ADMIN FLUSH_FLOW('{flow}')"),
+                QueryContext::arc(),
+            )
+            .await;
+            assert_eq!(
+                native,
+                !cte_native_observed_fused(&observer).is_empty(),
+                "{flow} runs the fused plan exactly when the route is requested:\n{}",
+                cte_native_observed_plan_trees(&observer)
+            );
+            sinks.push((
+                sql_output(format!("DESC TABLE {flow}_sink")).await,
+                rows_without_ts(format!("{flow}_sink")).await,
+            ));
+        }
+        let rows = &sinks[0].1;
+        assert!(rows.contains("| s1 "), "{name}: {rows}");
+        if ["avg", "ratio", "partitioned"].contains(&name) {
+            assert!(rows.contains("| 10.0 "), "{name}: {rows}");
+        }
+        assert_eq!(sinks[0], sinks[1], "{name}");
+    }
+    standalone
+        .flow_engine
+        .stop_flow_consistent_check_task()
+        .await
+        .unwrap();
+}
+
+/// A native TQL flow keeps writing a sink an earlier build auto-created from the native plan's own
+/// columns: the time index, the value named by the native route, the labels and `__name__`.
+///
+/// `__name__` is part of the primary key there, so the flow has to write what it wrote before: the
+/// metric name for a selector, and null where PromQL drops the name, as `rate` and an aggregate do.
+#[test]
+fn native_promql_tql_flow_keeps_writing_a_sink_with_the_name_column() {
+    // Flushing a flow overflows the default test stack in a debug build.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(native_promql_tql_flow_keeps_writing_a_sink_with_the_name_column_impl())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn native_promql_tql_flow_keeps_writing_a_sink_with_the_name_column_impl() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_tql_flow_name",
+    ))
+    .await;
+    // `ADMIN FLUSH_FLOW` syncs with this task.
+    standalone
+        .flow_engine
+        .start_flow_consistent_check_task()
+        .await
+        .unwrap();
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE old_flow_src (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO old_flow_src VALUES \
+             (20, now() - '90s'::interval, 's1', 'A'), (25, now() - '30s'::interval, 's1', 'A'), \
+             (10, now() - '90s'::interval, 's2', 'A'), (10, now() - '30s'::interval, 's2', 'A')",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The sink tables are the ones the native route auto-created before TQL flows were planned
+    // with the existing planner's columns.
+    for (name, query, labels, expected) in [
+        (
+            "selector",
+            "old_flow_src",
+            ["sensor", "loc"].as_slice(),
+            "+--------------+--------+-----+--------------+\n\
+             | old_flow_src | sensor | loc | __name__     |\n\
+             +--------------+--------+-----+--------------+\n\
+             | 20.0         | s1     | A   | old_flow_src |\n\
+             | 25.0         | s1     | A   | old_flow_src |\n\
+             | 10.0         | s2     | A   | old_flow_src |\n\
+             | 10.0         | s2     | A   | old_flow_src |\n\
+             +--------------+--------+-----+--------------+",
+        ),
+        (
+            "rate",
+            "rate(old_flow_src[2m])",
+            ["sensor", "loc"].as_slice(),
+            "+------------------------+--------+-----+----------+\n\
+             | rate(old_flow_src[2m]) | sensor | loc | __name__ |\n\
+             +------------------------+--------+-----+----------+\n\
+             | 0.08333333333333333    | s1     | A   | NULL     |\n\
+             | 0.0                    | s2     | A   | NULL     |\n\
+             +------------------------+--------+-----+----------+",
+        ),
+        (
+            "sum",
+            "sum by (sensor) (old_flow_src)",
+            ["sensor"].as_slice(),
+            "+--------------------------------+--------+----------+\n\
+             | sum by (sensor) (old_flow_src) | sensor | __name__ |\n\
+             +--------------------------------+--------+----------+\n\
+             | 20.0                           | s1     | NULL     |\n\
+             | 25.0                           | s1     | NULL     |\n\
+             | 10.0                           | s2     | NULL     |\n\
+             | 10.0                           | s2     | NULL     |\n\
+             +--------------------------------+--------+----------+",
+        ),
+    ] {
+        let flow = format!("old_native_flow_{name}");
+        let label_columns = labels
+            .iter()
+            .map(|label| format!("\"{label}\" STRING NULL, "))
+            .collect::<String>();
+        let keys = labels
+            .iter()
+            .chain(&["__name__"])
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {flow}_sink (\"ts\" TIMESTAMP(3) NOT NULL, \"{query}\" DOUBLE NULL, \
+                     {label_columns}\"__name__\" STRING NULL, TIME INDEX (\"ts\"), \
+                     PRIMARY KEY ({keys}))"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE FLOW {flow} SINK TO {flow}_sink EVAL INTERVAL '1m' AS \
+                 TQL EVAL (now() - '1m'::interval, now(), '1m') {query}"
+            ),
+            native_query_context(true, 4),
+        )
+        .await;
+        execute_all(
+            &instance,
+            &format!("ADMIN FLUSH_FLOW('{flow}')"),
+            QueryContext::arc(),
+        )
+        .await;
+        let columns = labels.join(", ");
+        let output = instance
+            .do_query(
+                &format!(
+                    "SELECT \"{query}\", {columns}, coalesce(__name__, 'NULL') AS __name__ \
+                     FROM {flow}_sink \
+                     ORDER BY {columns}, ts"
+                ),
+                QueryContext::arc(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        assert_eq!(expected, native_output_text(output).await, "{name}");
+    }
+    standalone
+        .flow_engine
+        .stop_flow_consistent_check_task()
+        .await
+        .unwrap();
+}
+
 /// A `__field__` selection that matches no metric table answers the empty vector.
 ///
 /// The matcher decides which of a scan's field columns a selection keeps, and no table matched this
@@ -4396,6 +4716,126 @@ async fn native_promql_kind_rules_match_legacy() {
         native_rows,
         "{comparison} must answer the existing plan's rows"
     );
+}
+
+/// A float function above a split `sum` over native histograms runs natively and answers what the
+/// existing plan and Prometheus answer.
+///
+/// Both series put half of each sample in the schema-0 bucket `(0.5, 1]` and half in `(1, 2]`, and
+/// `a` grows twice as fast as `b`. `histogram_count(sum(h))` is the summed count, `6 * (i + 1)` at
+/// the `i`-th minute. The summed rate keeps the even split, so the 0.9 quantile is 80% into
+/// `(1, 2]` on Prometheus' logarithmic interpolation: `2^0.8`.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_float_function_over_split_histogram_sum_matches_legacy() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_float_function_over_split_histogram_sum",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    for (job, per_bucket) in [("a", 2_u64), ("b", 1_u64)] {
+        let request = remote_write_v2::request_with_labels_and_histograms(
+            vec![("__name__", "split_hist"), ("job", job)],
+            (0..=5_u64)
+                .map(|step| {
+                    let bucket = per_bucket * (step + 1);
+                    Histogram {
+                        timestamp: (step * 60_000) as i64,
+                        count: Some(Count::CountInt(2 * bucket)),
+                        sum: 3.0 * bucket as f64,
+                        schema: 0,
+                        positive_spans: vec![BucketSpan {
+                            offset: 0,
+                            length: 2,
+                        }],
+                        positive_deltas: vec![bucket as i64, 0],
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header(
+                        "Content-Type",
+                        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    )
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+
+    let quantile = 0.8_f64.exp2();
+    for (query, expected) in [
+        (
+            "histogram_count(sum(split_hist))",
+            vec![
+                (120_000, 18.0),
+                (180_000, 24.0),
+                (240_000, 30.0),
+                (300_000, 36.0),
+            ],
+        ),
+        (
+            "histogram_quantile(0.9, sum(rate(split_hist[2m])))",
+            vec![
+                (120_000, quantile),
+                (180_000, quantile),
+                (240_000, quantile),
+                (300_000, quantile),
+            ],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (120, 300, '60s') {query}");
+        observer.clear();
+        let native = native_timestamp_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = observer.root_plan();
+        assert!(
+            holds_split_merge(&root),
+            "{query} did not run as a native split: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        observer.clear();
+        let legacy = native_timestamp_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query} must keep the existing plan when the native route is off"
+        );
+        for rows in [&native, &legacy] {
+            assert_eq!(rows.len(), expected.len(), "{query}: {rows:?}");
+            for ((ts, value), (expected_ts, expected_value)) in rows.iter().zip(&expected) {
+                assert_eq!(ts, expected_ts, "{query}: {rows:?}");
+                assert!(
+                    (value - expected_value).abs() < 1e-9,
+                    "{query}: {rows:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
 }
 
 /// How many rows `output` answers, whatever its columns hold.
@@ -11516,13 +11956,7 @@ const CTE_NATIVE_ORDERED_STATEMENT: &str =
 const CTE_NATIVE_ALIASED_STATEMENT: &str = "WITH tql (site, t, v) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
      SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
 
-/// The same statement for the native route, which publishes the name column as a fourth column and
-/// therefore needs a fourth name in the list. The outer projection still reads the same three.
-const CTE_NATIVE_ALIASED_NAME_STATEMENT: &str = "WITH tql (site, t, v, metric) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
-     SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
-
-/// A CTE over a plain selection: the answer keeps the metric name, so the native route publishes it
-/// and the existing route does not.
+/// A CTE over a plain selection, whose native answer carries the metric name of every row.
 const CTE_NATIVE_NAME_STATEMENT: &str =
     "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT * FROM tql";
 
@@ -11604,29 +12038,6 @@ fn cte_native_published_schema_expected() -> ArrowSchema {
         ],
         cte_native_schema_metadata(),
     )
-}
-
-/// The metadata the declared name column carries.
-fn cte_native_name_metadata() -> std::collections::HashMap<String, String> {
-    std::collections::HashMap::from([("greptime:metric_name".to_string(), "true".to_string())])
-}
-
-/// The schema [`CTE_NATIVE_STATEMENT`] publishes on the native route: the existing planner's
-/// columns, then the per-row name the answer declares.
-///
-/// The name is part of what the statement answers, so a CTE over a native answer publishes it. The
-/// existing planner never publishes it, so the same statement answered by that route has one column
-/// fewer: a CTE's columns follow the answer it was planned from.
-fn cte_native_published_schema_expected_native() -> ArrowSchema {
-    let mut fields = cte_native_published_schema_expected()
-        .fields()
-        .iter()
-        .map(|field| field.as_ref().clone())
-        .collect::<Vec<_>>();
-    fields.push(
-        Field::new("__name__", DataType::Utf8, true).with_metadata(cte_native_name_metadata()),
-    );
-    ArrowSchema::new_with_metadata(fields, cte_native_schema_metadata())
 }
 
 /// The schema [`CTE_NATIVE_ALIASED_STATEMENT`] publishes: the names its CTE declares, in the order it
@@ -11856,23 +12267,8 @@ async fn cte_native_statement_runs_the_fused_plan() {
         "the region reads one raw source per occurrence of the repeated selector:\n{trees}"
     );
     assert_eq!(
-        native_schema,
-        cte_native_published_schema_expected_native(),
-        "the CTE publishes the existing planner's columns, then the name the answer declares"
-    );
-    let legacy_fields = legacy_schema
-        .fields()
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    let native_prefix = native_schema.fields()[..legacy_fields.len()]
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        native_prefix, legacy_fields,
-        "and every column the existing route publishes keeps its name, type, nullability and \
-         metadata: only the name column is added"
+        native_schema, legacy_schema,
+        "the CTE publishes the existing planner's columns, and no name column"
     );
     let native_types = cte_native_arrow_types(
         native_tql_output(&instance, CTE_NATIVE_ARROW_TYPE_STATEMENT, true).await,
@@ -11909,10 +12305,9 @@ async fn cte_native_statement_runs_the_fused_plan() {
 /// node still answers the statement, and the columns and rows are the ones the existing plan
 /// answers with.
 ///
-/// The declared list is positional and exact, so the native answer needs one more name than the
-/// existing one: it publishes the per-row name column, and the existing route does not. What the
-/// list declares, what the outer projection reads and what the outer filter keeps are all above the
-/// node, and none of them moves it.
+/// The declared list is positional and exact, so the same three names apply on both routes. What
+/// the list declares, what the outer projection reads and what the outer filter keeps are all above
+/// the node, and none of them moves it.
 #[tokio::test(flavor = "multi_thread")]
 async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     common_telemetry::init_default_ut_logging();
@@ -11938,29 +12333,7 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     assert_eq!(legacy_rows, cte_native_filtered_rows(), "legacy");
 
     observer.clear();
-    // The native answer publishes one more column, so the declared list names four. Three names for
-    // four columns is a hard error, and four names for the existing route's three is one too: the
-    // list is positional and exact.
-    let short = instance
-        .do_query(CTE_NATIVE_ALIASED_STATEMENT, native_query_context(true, 4))
-        .await
-        .remove(0);
-    assert!(
-        short.is_err(),
-        "three names for the native answer's four columns"
-    );
-    let long = instance
-        .do_query(
-            CTE_NATIVE_ALIASED_NAME_STATEMENT,
-            native_query_context(false, 4),
-        )
-        .await
-        .remove(0);
-    assert!(
-        long.is_err(),
-        "four names for the existing answer's three columns"
-    );
-    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_NAME_STATEMENT, true).await;
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, true).await;
     let native_schema = cte_native_published_schema(&native_output);
     let native_rows = cte_native_rows(native_output).await;
     assert_eq!(
@@ -11987,60 +12360,54 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     assert_eq!(native_rows, legacy_rows);
 }
 
-/// The CTE publishes the name column exactly when the answer declares one.
+/// The CTE publishes no metric-name column on either route.
 ///
-/// A plain selection keeps its series name, and the native answer declares the column for it, so the
-/// CTE publishes it and SQL can read it. The existing answer declares none, so the same statement
-/// answered by that route publishes one column fewer and asking for the name is an error - the CTE's
-/// columns follow the answer it was planned from. A scalar-typed answer declares no such column on
-/// either route, so neither publishes one: the CTE does not invent a column the statement does not
-/// answer.
+/// A plain selection keeps its series name, and the native answer declares a per-row name column
+/// for it, but the existing answer declares none, so the CTE publishes the existing columns only:
+/// a column list or outer query written against one route applies to the other. A scalar-typed
+/// answer declares no name column on either route.
 #[tokio::test(flavor = "multi_thread")]
-async fn cte_native_publishes_the_name_column_only_when_the_answer_declares_one() {
+async fn cte_native_publishes_no_name_column() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) =
         native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_name")).await;
     let instance = standalone.fe_instance().clone();
     execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
 
+    let legacy = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, false).await;
+    let legacy_schema = cte_native_published_schema(&legacy);
+    let legacy_rows = cte_native_rows(legacy).await;
+
     observer.clear();
     let native = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, true).await;
     let native_schema = cte_native_published_schema(&native);
-    let name = native_schema
-        .field_with_name("__name__")
-        .expect("the native answer declares the name column");
-    assert!(
-        datatypes::schema::is_metric_name_field(name),
-        "and marks it as one: {native_schema:?}"
+    let native_rows = cte_native_rows(native).await;
+    assert_eq!(
+        1,
+        cte_native_observed_fused(&observer).len(),
+        "the selection runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
     );
-    let rows = cte_native_rows(native).await;
-    assert!(!rows.is_empty(), "the statement answers rows");
     assert!(
-        rows.iter()
-            .all(|(_, labels, _)| labels.get("__name__").map(String::as_str) == Some("cte_native")),
-        "every row names the metric it was read from: {rows:?}"
+        native_schema.field_with_name("__name__").is_err(),
+        "the CTE publishes no name column: {native_schema:?}"
     );
-
-    let legacy = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, false).await;
-    let legacy_schema = cte_native_published_schema(&legacy);
-    assert!(
-        legacy_schema.field_with_name("__name__").is_err(),
-        "the existing answer declares no name column: {legacy_schema:?}"
-    );
-    cte_native_rows(legacy).await;
-    let missing = instance
-        .do_query(
-            "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT __name__ FROM tql",
-            native_query_context(false, 4),
-        )
-        .await
-        .remove(0);
-    assert!(
-        missing.is_err(),
-        "a CTE answered by the existing route has no name column to read"
-    );
+    assert_eq!(native_schema, legacy_schema);
+    assert!(!native_rows.is_empty(), "the statement answers rows");
+    assert_eq!(native_rows, legacy_rows);
 
     for enabled in [true, false] {
+        let missing = instance
+            .do_query(
+                "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT __name__ FROM tql",
+                native_query_context(enabled, 4),
+            )
+            .await
+            .remove(0);
+        assert!(
+            missing.is_err(),
+            "the CTE has no name column to read (native={enabled})"
+        );
         let scalar = native_tql_output(&instance, CTE_NATIVE_SCALAR_STATEMENT, enabled).await;
         let schema = cte_native_published_schema(&scalar);
         assert!(
@@ -12048,6 +12415,93 @@ async fn cte_native_publishes_the_name_column_only_when_the_answer_declares_one(
             "a scalar answer declares no name column (native={enabled}): {schema:?}"
         );
     }
+}
+
+/// A CTE over a per-series answer runs the fused plan and publishes the existing planner's columns
+/// and rows.
+///
+/// Each statement keeps one row per input series, and every series carries two labels of the same
+/// type, so the published labels have to be paired with the native ones by name. The statements
+/// cover a range function, a selection that keeps input rows, a binary operation with an offset
+/// operand and a label rewrite.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_per_series_statements_run_the_fused_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_per_series")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE cte_series (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO cte_series VALUES \
+             (1, 0, 's1', 'A'), (3, 1000, 's1', 'A'), (6, 2000, 's1', 'A'), (10, 3000, 's1', 'A'), \
+             (2, 0, 's1', 'B'), (4, 1000, 's1', 'B'), (8, 2000, 's1', 'B'), (16, 3000, 's1', 'B'), \
+             (5, 0, 's2', 'A'), (5, 1000, 's2', 'A'), (7, 2000, 's2', 'A'), (7, 3000, 's2', 'A')",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sorted_rows = |output| async move {
+        let mut rows = cte_native_rows(output).await;
+        rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        rows
+    };
+    for query in [
+        "rate(cte_series[2s])",
+        "topk(1, cte_series)",
+        "cte_series + cte_series offset 1s",
+        "label_replace(cte_series, \"dst\", \"$1\", \"sensor\", \"(.*)\")",
+    ] {
+        let statement = format!("WITH tql AS (TQL EVAL (0, 3, '1s') {query}) SELECT * FROM tql");
+        let legacy = native_tql_output(&instance, &statement, false).await;
+        let legacy_schema = cte_native_published_schema(&legacy);
+        let legacy_rows = sorted_rows(legacy).await;
+
+        observer.clear();
+        let native = native_tql_output(&instance, &statement, true).await;
+        let native_schema = cte_native_published_schema(&native);
+        let native_rows = sorted_rows(native).await;
+        assert!(
+            !cte_native_observed_fused(&observer).is_empty(),
+            "{query} runs the fused plan:\n{}",
+            cte_native_observed_plan_trees(&observer)
+        );
+        assert_eq!(native_schema, legacy_schema, "{query}");
+        assert!(!legacy_rows.is_empty(), "{query} answers rows");
+        assert_eq!(native_rows, legacy_rows, "{query}");
+    }
+}
+
+/// A CTE over a two-field table publishes each native value column under the existing column it
+/// answers. The value columns are paired by position, and the two fields hold different values, so a
+/// swapped pair changes the rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_two_fields_keep_their_columns() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_two_fields")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE cte_two_fields (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, \
+             a DOUBLE, b DOUBLE); \
+         INSERT INTO cte_two_fields VALUES \
+             ('h0', 0, 1, 100), ('h0', 1000, 2, 300), ('h0', 2000, 4, 700), ('h0', 3000, 8, 1500)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let statement = "WITH tql AS (TQL EVAL (0, 3, '1s') rate(cte_two_fields[2s])) SELECT * FROM tql ORDER BY ts";
+    let legacy = native_output_text(native_tql_output(&instance, statement, false).await).await;
+    observer.clear();
+    let native = native_output_text(native_tql_output(&instance, statement, true).await).await;
+    assert!(
+        !cte_native_observed_fused(&observer).is_empty(),
+        "the statement runs the fused plan:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(native, legacy);
 }
 
 /// The control: without the per-request hint the CTE statement keeps the existing plan, so the rows
@@ -12158,24 +12612,9 @@ async fn distributed_cte_native_runs_the_fused_plan_over_raw_sources() {
     }
     let rows = cte_native_rows(output).await;
     assert_eq!(
-        native_schema,
-        cte_native_published_schema_expected_native(),
-        "the CTE publishes the existing planner's columns over the distributed fused plan, then \
-         the name the answer declares"
-    );
-    let legacy_fields = legacy_schema
-        .fields()
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    let native_prefix = native_schema.fields()[..legacy_fields.len()]
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        native_prefix, legacy_fields,
-        "every column the existing route publishes keeps its name, type, nullability and metadata \
-         on the distributed route too; only the name column is added"
+        native_schema, legacy_schema,
+        "the CTE publishes the existing planner's columns over the distributed fused plan, and no \
+         name column"
     );
     assert_eq!(rows, cte_native_expected_rows(), "native");
     assert_eq!(rows, legacy_rows);
@@ -18245,6 +18684,272 @@ async fn native_promql_matrix_root_matches_legacy() {
     );
     let legacy = run(&instance, &observer, sql, false).await;
     assert_eq!(native, legacy);
+}
+
+/// Creates `split_a` and `split_b` in `db` on one physical metric table. With `narthex`, the
+/// physical table uses narthex storage and is partitioned on the time index at 300s, so every
+/// series is split across two regions; otherwise it is a default-storage, unpartitioned
+/// reference. The rows are flushed twice and the last sample stays in the memtable.
+async fn setup_time_split_database(instance: &Arc<Instance>, db: &str, narthex: bool) {
+    execute_all(
+        instance,
+        &format!("CREATE DATABASE {db}"),
+        QueryContext::arc(),
+    )
+    .await;
+    let ctx = Arc::new(QueryContext::with_db_name(Some(db)));
+    let (partition, storage) = if narthex {
+        (
+            "PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:05:00', ts >= '1970-01-01 00:05:00') ",
+            ", 'sst_format'='narthex'",
+        )
+    } else {
+        ("", "")
+    };
+    execute_all(
+        instance,
+        &format!(
+            "CREATE TABLE phy (job STRING, instance STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+             PRIMARY KEY(job, instance)) {partition}ENGINE=metric \
+             WITH ('physical_metric_table'='true'{storage})"
+        ),
+        ctx.clone(),
+    )
+    .await;
+    for metric in ["split_a", "split_b"] {
+        execute_all(
+            instance,
+            &format!(
+                "CREATE TABLE {metric} (job STRING, instance STRING, ts TIMESTAMP TIME INDEX, \
+                 val DOUBLE, PRIMARY KEY(job, instance)) ENGINE=metric \
+                 WITH ('on_physical_table'='phy')"
+            ),
+            ctx.clone(),
+        )
+        .await;
+    }
+    // Counters growing by `k` per 30s step (`2k` for `split_b`); `db/1` resets at 330s.
+    for (times, flush) in [(0..=300, true), (330..=570, true), (600..=600, false)] {
+        for (metric, scale) in [("split_a", 1), ("split_b", 2)] {
+            let rows = [("api", "0"), ("api", "1"), ("db", "0"), ("db", "1")]
+                .into_iter()
+                .zip(1u32..)
+                .flat_map(|((job, instance), k)| {
+                    times.clone().step_by(30).map(move |t: u32| {
+                        let steps = if (job, instance) == ("db", "1") && t >= 330 {
+                            (t - 330) / 30
+                        } else {
+                            t / 30
+                        };
+                        format!(
+                            "('{job}', '{instance}', {}, {})",
+                            u64::from(t) * 1000,
+                            scale * k * steps + 1
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            execute_all(
+                instance,
+                &format!("INSERT INTO {metric} (job, instance, ts, val) VALUES {rows}"),
+                ctx.clone(),
+            )
+            .await;
+        }
+        if flush {
+            execute_all(instance, "ADMIN FLUSH_TABLE('phy')", ctx.clone()).await;
+        }
+    }
+}
+
+/// `(time, labels without __name__, value)` of `query` over `[60s, 600s]` in `db`, and whether
+/// the plan ran on the native route.
+async fn time_split_rows(
+    instance: &Arc<Instance>,
+    db: &str,
+    native: bool,
+    query: &str,
+) -> (
+    Vec<(i64, std::collections::BTreeMap<String, String>, f64)>,
+    bool,
+) {
+    let mut ctx = QueryContext::with_db_name(Some(db));
+    ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
+    let query = PromQuery {
+        query: query.to_string(),
+        start: "60".to_string(),
+        end: "600".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let output = instance
+        .do_promql_query(&query, Arc::new(ctx))
+        .await
+        .remove(0)
+        .unwrap_or_else(|error| panic!("{}: {error:?}", query.query));
+    let ran_natively = output.meta.plan.as_ref().is_some_and(|plan| {
+        native_plan_nodes(plan)
+            .iter()
+            .any(|node| node.name() == "FusedSeriesExec")
+    });
+    let (_, mut rows) = native_labelled_rows(output).await;
+    for (_, labels, _) in &mut rows {
+        labels.remove("__name__");
+    }
+    rows.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+    (rows, ran_natively)
+}
+
+/// Native PromQL and SQL over a narthex table partitioned on the time index answer like the same
+/// rows held whole in one default-storage region.
+///
+/// Such a partition splits every series across regions. Reading it needs the region's partition
+/// rule applied to sample rows, since series rows have no time index, and the fragments of a
+/// series from both regions must carry one identity so the frontend merges them.
+async fn assert_time_split_narthex_matches_reference(instance: &Arc<Instance>) {
+    setup_time_split_database(instance, "narthex_split", true).await;
+    setup_time_split_database(instance, "narthex_ref", false).await;
+
+    let sql = "SELECT job, instance, ts, val FROM split_a ORDER BY job, instance, ts";
+    let mut answers = Vec::new();
+    for db in ["narthex_split", "narthex_ref"] {
+        let ctx = Arc::new(QueryContext::with_db_name(Some(db)));
+        let output = instance.do_query(sql, ctx).await.remove(0).unwrap();
+        answers.push(native_output_text(output).await);
+    }
+    assert_eq!(answers[0], answers[1], "{sql}");
+
+    for query in [
+        "split_a",
+        "rate(split_a[2m])",
+        "increase(split_a[3m])",
+        "resets(split_a[5m])",
+        "sum_over_time(split_a[2m])",
+        "max_over_time(split_a[2m])",
+        "count_over_time(split_a[2m])",
+        "quantile_over_time(0.5, split_a[3m])",
+        "sum by (job) (rate(split_a[2m]))",
+        "topk(2, split_a)",
+        "split_a + on(job, instance) split_b",
+        "split_a / ignoring(instance) group_left sum by (job) (split_b)",
+        "split_a{job=\"api\"} or split_b",
+        "split_a unless on(job) split_b{job=\"api\"}",
+        "max_over_time(rate(split_a[2m])[5m:1m])",
+        "rate(split_a[2m] offset 2m)",
+        "split_a @ 300",
+        "label_replace(split_a, \"svc\", \"$1\", \"job\", \"(.*)\")",
+    ] {
+        let (expected, _) = time_split_rows(instance, "narthex_ref", false, query).await;
+        assert!(
+            !expected.is_empty(),
+            "{query}: the reference answered nothing"
+        );
+        let (rows, ran_natively) = time_split_rows(instance, "narthex_split", true, query).await;
+        assert!(ran_natively, "{query}: the native route must run");
+        assert_eq!(rows.len(), expected.len(), "{query}: {rows:?}");
+        for (actual, expected) in rows.iter().zip(&expected) {
+            assert_eq!((actual.0, &actual.1), (expected.0, &expected.1), "{query}");
+            assert!(
+                (actual.2 - expected.2).abs() <= 1e-9 * actual.2.abs().max(expected.2.abs()),
+                "{query}: {actual:?} != {expected:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_over_a_time_partitioned_narthex_table_matches_reference() {
+    common_telemetry::init_default_ut_logging();
+    let standalone = GreptimeDbStandaloneBuilder::new("native_promql_narthex_time_split")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    assert_time_split_narthex_matches_reference(standalone.fe_instance()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_over_a_time_partitioned_narthex_table_matches_reference() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_narthex_time_split")
+        .await
+        .with_datanodes(2)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    assert_time_split_narthex_matches_reference(cluster.fe_instance()).await;
+}
+
+/// A narthex table partitioned on its sample value keeps both versions of a sample overwritten
+/// across the partition bound, one per region. Regions do not order writes against each other, so
+/// the native route refuses the series, and the error has to say which sample and why.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_reports_an_overwrite_across_a_value_partition() {
+    common_telemetry::init_default_ut_logging();
+    let standalone = GreptimeDbStandaloneBuilder::new("native_promql_value_partition_overwrite")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let ctx = QueryContext::arc();
+    for sql in [
+        "CREATE TABLE phy (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(job)) \
+         PARTITION ON COLUMNS (val) (val < 0, val >= 0) ENGINE=metric \
+         WITH ('physical_metric_table'='true', 'sst_format'='narthex')",
+        "CREATE TABLE value_split (job STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='phy')",
+        "INSERT INTO value_split (job, ts, val) VALUES ('api', 0, 5), ('api', 60000, -1)",
+        "INSERT INTO value_split (job, ts, val) VALUES ('api', 60000, 1)",
+    ] {
+        execute_all(instance, sql, ctx.clone()).await;
+    }
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    let query = PromQuery {
+        query: "value_split".to_string(),
+        start: "60".to_string(),
+        end: "60".to_string(),
+        step: "1".to_string(),
+        ..PromQuery::default()
+    };
+    let output = instance
+        .do_promql_query(&query, Arc::new(ctx))
+        .await
+        .remove(0)
+        .unwrap();
+    assert!(
+        output
+            .meta
+            .plan
+            .as_ref()
+            .is_some_and(|plan| native_plan_nodes(plan)
+                .iter()
+                .any(|node| node.name() == "FusedSeriesExec")),
+        "the native route must run"
+    );
+    let OutputData::Stream(stream) = output.data else {
+        unreachable!("a native PromQL query streams its answer")
+    };
+    let error = collect_batches(stream).await.unwrap_err().to_string();
+    assert!(
+        error.contains(
+            "series {__name__=\"value_split\", job=\"api\"} has two different samples at \
+             timestamp 60000 ms, read from different regions or scan partitions. Likely cause: the \
+             table is partitioned on a non-tag column and this sample was written with values on \
+             both sides of a partition bound, so each region kept one version"
+        ),
+        "{error}"
+    );
 }
 
 /// Native histograms in a Narthex physical table, and in a Parquet one served by a columnar

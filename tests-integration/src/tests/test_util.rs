@@ -125,6 +125,7 @@ impl MockInstanceBuilder {
                     frontend,
                     datanode,
                     mito_engine,
+                    flow_engine,
                 } = instance;
                 // Procedure loaders retain the old datanode, including its WAL lock.
                 drop((
@@ -133,6 +134,7 @@ impl MockInstanceBuilder {
                     mito_engine,
                     procedure_manager,
                     event_recorder_handle,
+                    flow_engine,
                 ));
                 let (procedure_manager, event_recorder_handle) =
                     standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);

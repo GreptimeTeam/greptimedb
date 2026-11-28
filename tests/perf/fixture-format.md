@@ -72,6 +72,17 @@ response body is read and parsed as JSON. It therefore includes request send,
 server-side Prometheus JSON response building, and response-body read and JSON
 parsing; it is not server-side-only latency.
 
+### Native PromQL route
+
+`require_native = true` (default `false`) states that a query must be planned on
+the native fused-series PromQL route, and is legal only on a
+`TQL ANALYZE [VERBOSE] FORMAT JSON (...)` statement. The runner sends
+`x-greptime-hints: query.experimental_native_promql=true` on every request it
+makes for that query and proves the statement's plan tree before it times the
+query. See the "Native PromQL route enforcement" section of
+[`README.md`](README.md) for the requirement, the assertion, and the failure
+semantics.
+
 `series_layout = "round_robin"` advances the timestamp once per generated row and
 cycles series labels across rows. `series_layout = "timestamp_major"` writes all
 series for one timestamp before advancing to the next timestamp; use it for

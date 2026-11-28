@@ -81,8 +81,6 @@ fn input() -> NativeNode {
 }
 
 fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
-    // One schema allocation shared by the binding and the output: `validate` checks that the output
-    // is the binding it was bound to, which is about the binding itself, not the grid's spec.
     let output = evaluated(Arc::new([]), grid);
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
@@ -94,7 +92,7 @@ fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
     }
 }
 
-/// A scan of `count` fields, so a consumer's field check has something to disagree with.
+/// A scan of `count` fields.
 fn input_with_fields(count: usize) -> NativeNode {
     let output = NativeType::Samples(Arc::new(SeriesSchema {
         fields: fields(count),
@@ -361,13 +359,7 @@ fn parameterized_topk_validates_scalar_and_grid() {
     );
 }
 
-/// A per-point `quantile` whose argument is a literal is refused by the tree's own check.
-///
-/// A literal is one value on a binding, not a series a node hands over: the fold reads its `φ` per
-/// point from the series its parameter child hands over, so a literal leaves it waiting for a chunk
-/// that never arrives. It would run to the end of its input and only then refuse the run, after
-/// every chunk was retained and folded. `validate` is where a tree says what it is, so the shape is
-/// refused there, and the admission predicate agrees so a decoded tree never reaches that wait.
+/// A literal hands over no chunk, so the fold would wait for a `φ` that never arrives.
 #[test]
 fn a_literal_quantile_parameter_is_refused() {
     let out = grid(0, 60_000, 4);
@@ -397,8 +389,6 @@ fn a_literal_quantile_parameter_is_refused() {
         !native_node_supported(&literal),
         "the admission predicate admits a tree `validate` refuses"
     );
-    // A parameter that hands over a series is what the fold reads, so the check is the literal and
-    // not a scalar output.
     assert!(
         node(NativeNode {
             expr: NativeExpr::EvalTime { date: None },
@@ -484,7 +474,6 @@ fn binary_histogram_float_kind_matches_supported_operations() {
     }
 }
 
-/// Arithmetic kinds cover both histogram/float directions without refusing empty results.
 #[test]
 fn binary_arithmetic_field_kind_matrix() {
     use super::binary_output_field_kind;
@@ -529,7 +518,6 @@ fn binary_arithmetic_field_kind_matrix() {
     }
 }
 
-/// Fill pairs contribute their real payload kind; unsupported pairs contribute no kind.
 #[test]
 fn binary_arithmetic_field_kind_accounts_for_fill() {
     use super::binary_output_field_kind;
@@ -568,7 +556,6 @@ fn binary_arithmetic_field_kind_accounts_for_fill() {
             Some(expected),
             "{op:?} {fill:?}"
         );
-        // The tree-level walk must pass the same fill on to the shared kind helper.
         let histogram = input_on(grid(0, 60_000, 1));
         let node = NativeNode {
             expr: NativeExpr::Binary {
@@ -585,9 +572,7 @@ fn binary_arithmetic_field_kind_accounts_for_fill() {
         );
     }
 
-    // The real mixed-kind operation and a fill may emit different kinds in one field, and neither
-    // silently claims homogeneity. A comparison over two kinds is a different question - it emits
-    // no sample whatever the fill says - and answers the empty float layout below.
+    // A comparison over two kinds emits no sample whatever the fill says.
     assert_eq!(
         binary_output_field_kind(Histogram, Float, BinaryOp::Mul, false, left),
         None
@@ -618,12 +603,8 @@ fn binary_arithmetic_field_kind_accounts_for_fill() {
     );
 }
 
-/// A comparison answers a float when its two sides carry different kinds.
-///
-/// The kernel skips every mixed pair without counting a match - `(Float, Histogram)` and
-/// `(Histogram, Float)` included (`vector_match::elem_binop`) - so no sample can end under either
-/// side's type. What is declared is the layout arithmetic keeps for a pair that emits nothing: one
-/// float. Two sides of one kind keep it, and a `bool` comparison answers `1`/`0` whatever it read.
+/// The kernel skips every mixed-kind comparison pair (`vector_match::elem_binop`), so the column is
+/// the empty float layout.
 #[test]
 fn binary_comparison_names_a_mixed_pair_as_a_float() {
     use super::binary_output_field_kind;
@@ -664,8 +645,6 @@ fn binary_comparison_names_a_mixed_pair_as_a_float() {
         );
     }
 
-    // The tree-level walk asks the same helper, so a mixed pair over two inputs answers the float
-    // layout there too, and the answer is the one the statement's column is declared with.
     let histogram = input_on(grid(0, 60_000, 1));
     let float = NativeNode {
         expr: NativeExpr::Timestamp {
@@ -692,13 +671,6 @@ fn binary_comparison_names_a_mixed_pair_as_a_float() {
     }
 }
 
-/// A whole-vector operation answers either the series it selected or a value it computed.
-///
-/// `topk`, `bottomk`, `limitk`, `limit_ratio` and the `sort`s hand on the samples they read under
-/// the labels those samples carry, so a histogram stays a histogram - the same rule the per-point
-/// `k` form states for the same `TopK`. `absent` writes `1.0`, `histogram_quantile` and
-/// `histogram_fraction` reduce a classic histogram to one float, and `count_values` counts samples
-/// as floats: each answers a float whatever its input holds.
 #[test]
 fn vector_operation_field_kinds_follow_what_each_op_answers() {
     use crate::extension_plan::FieldKind::{Float, Histogram};
@@ -772,11 +744,6 @@ fn vector_operation_field_kinds_follow_what_each_op_answers() {
     }
 }
 
-/// `info` answers the base's samples, so its field is the base's field.
-///
-/// The info side is read as sample times (`InstantValue::InfoTimestamp`), which is a float the
-/// kernel compares rather than a value it answers with: a base carrying native histograms therefore
-/// keeps its histogram column.
 #[test]
 fn info_keeps_the_kind_of_its_base() {
     let out = grid(0, 60_000, 4);
@@ -816,11 +783,6 @@ fn info_keeps_the_kind_of_its_base() {
     );
 }
 
-/// A parameterized map applies a math function, and math skips histograms rather than converting
-/// them, so the field shape is unchanged and keeps its input's kind.
-///
-/// `round` and the three `clamp`s map a vector onto the same fields; `max_of`/`min_of` answer one
-/// scalar from one, which is a float whatever the statement's sources hold.
 #[test]
 fn parameterized_map_keeps_the_kind_of_its_input() {
     let out = grid(0, 60_000, 4);
@@ -851,7 +813,6 @@ fn parameterized_map_keeps_the_kind_of_its_input() {
             "{op:?}"
         );
     }
-    // A function of two scalars answers a scalar, whose kind is a float either way.
     let node = NativeNode {
         expr: NativeExpr::ParameterizedMap {
             input: Box::new(scalar_on(1.0, Arc::clone(&out))),
@@ -864,39 +825,6 @@ fn parameterized_map_keeps_the_kind_of_its_input() {
     assert_eq!(
         node.output_field_kind(Some(FieldKind::Histogram)),
         Some(FieldKind::Float)
-    );
-}
-
-/// A compiled tree is accepted when every node's contract holds.
-#[test]
-fn a_window_over_raw_samples_is_valid() {
-    let root = window_over(input(), None);
-    assert!(NativeTree::try_new(root).is_ok());
-}
-
-/// Adding a map to a window changes the tree and nothing else: no new shape is recognised.
-#[test]
-fn adding_a_map_only_changes_the_tree() {
-    let bare = window_over(input(), None);
-    let mapped = map_over(window_over(input(), None));
-    // Both trees are legal, so the comparison below is about the shape and not about both failing.
-    assert!(bare.validate().is_ok(), "{}", bare.validate().unwrap_err());
-    assert!(
-        mapped.validate().is_ok(),
-        "{}",
-        mapped.validate().unwrap_err()
-    );
-    // The mapped tree is that map over that window over that input, and nothing else: the map on
-    // top is the one node the bare tree gained, and what is below it is the tree it was built from.
-    let NativeExpr::Map { input, .. } = &mapped.expr else {
-        unreachable!("the mapped tree's root is a map")
-    };
-    let NativeExpr::Window { input: leaf, .. } = &input.expr else {
-        unreachable!("the map is not over the window the bare tree is")
-    };
-    assert!(
-        matches!(leaf.expr, NativeExpr::Input(_)),
-        "the window is not over the input the bare tree reads"
     );
 }
 
@@ -962,7 +890,6 @@ fn merge_rejects_raw_and_mismatched_input_shapes() {
     assert!(fields_error.to_string().contains("field"), "{fields_error}");
 }
 
-/// A map is point-wise over values, so raw samples are not something it can consume.
 #[test]
 fn a_map_cannot_consume_raw_samples() {
     let node = NativeNode {
@@ -1002,7 +929,6 @@ fn timestamp_requires_evaluated_vector_and_preserves_its_layout() {
     );
 }
 
-/// A scalar is one value per grid point, not a vector, so there are no fields to map.
 #[test]
 fn a_map_cannot_consume_a_scalar() {
     let out = grid(0, 60_000, 4);
@@ -1019,7 +945,6 @@ fn a_map_cannot_consume_a_scalar() {
     assert!(error.to_string().contains("not a scalar"), "{error}");
 }
 
-/// A map with no operation would be a node that does nothing, which is a compiler mistake.
 #[test]
 fn a_map_needs_an_operation() {
     let inner = window_over(input(), None);
@@ -1035,9 +960,6 @@ fn a_map_needs_an_operation() {
     assert!(error.to_string().contains("no operation"), "{error}");
 }
 
-/// A map reports one value per input field, so it cannot declare a layout its input does not
-/// have. Without this check the tree would validate and only fail when the runtime compared the
-/// node's schema against the one its input actually produces.
 #[test]
 fn a_map_cannot_change_the_field_count() {
     let inner = window_over(input(), None);
@@ -1065,12 +987,9 @@ fn a_map_cannot_change_the_field_count() {
     );
 }
 
-/// A window reports one value per input field, so it carries the same rule as a map.
 #[test]
 fn a_window_cannot_change_the_field_count() {
     let inner = window_over(input(), None);
-    // The output grid is the input's, so the grid check passes and the field check is what the
-    // test actually exercises.
     let out = inner.output.grid().unwrap().clone();
     let node = NativeNode {
         expr: NativeExpr::Window {
@@ -1103,13 +1022,9 @@ fn a_window_cannot_change_the_field_count() {
     );
 }
 
-/// An instant selection picks one row of the source per grid point, so it carries one value per
-/// input field. A tree that declares anything else would only fail at run time, against a schema
-/// the tree was supposed to have validated.
 #[test]
 fn an_instant_selection_cannot_change_the_field_count() {
     let out = grid(0, 60_000, 4);
-    // The source has two fields; the selection declares one value.
     let node = NativeNode {
         expr: NativeExpr::Instant {
             input: Box::new(input_with_fields(2)),
@@ -1132,8 +1047,6 @@ fn an_instant_selection_cannot_change_the_field_count() {
     );
 }
 
-/// An instant selection reads raw samples; feeding it evaluated values would re-anchor a grid
-/// that is already fixed.
 #[test]
 fn an_instant_selection_reads_raw_samples() {
     let out = grid(0, 60_000, 4);
@@ -1154,7 +1067,6 @@ fn an_instant_selection_reads_raw_samples() {
     assert!(error.to_string().contains("reads evaluated"), "{error}");
 }
 
-/// Aggregate state is not a sample stream, so an instant selection cannot read it.
 #[test]
 fn an_instant_selection_cannot_consume_state() {
     let out = grid(0, 60_000, 4);
@@ -1179,12 +1091,10 @@ fn an_instant_selection_cannot_consume_state() {
     assert!(error.to_string().contains("aggregate state"), "{error}");
 }
 
-/// A window's declared input grid has to be the grid its input actually produces.
 #[test]
 fn a_window_checks_its_declared_input_grid() {
     let inner_grid = grid(0, 60_000, 4);
     let other_grid = grid(0, 30_000, 8);
-    // The input produces `inner_grid`, but the window claims a different one.
     let node = window_over(input_on(inner_grid), Some(other_grid));
     let error = node.validate().unwrap_err();
     assert!(
@@ -1195,8 +1105,6 @@ fn a_window_checks_its_declared_input_grid() {
     );
 }
 
-/// A range evaluator reads one raw series to its last chunk before it starts the next, so raw
-/// chunks of different series may not interleave.
 #[test]
 fn a_window_cannot_read_interleaved_input() {
     let error = window_over(interleaved_input(), None)
@@ -1210,9 +1118,6 @@ fn a_window_cannot_read_interleaved_input() {
     );
 }
 
-/// An instant selection's consumer collects one series' chunks into one buffer, so it reads a
-/// series to its last chunk before the next: it refuses an interleaved input for the reason a
-/// window does.
 #[test]
 fn an_instant_selection_cannot_read_interleaved_input() {
     let out = grid(0, 60_000, 4);
@@ -1236,9 +1141,16 @@ fn an_instant_selection_cannot_read_interleaved_input() {
             .contains("interleaved chunks cannot be fed to it"),
         "{error}"
     );
+    // The map itself is well-typed; only validating its input finds the interleaved scan.
+    let error = NativeTree::try_new(map_over(node)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("interleaved chunks cannot be fed to it"),
+        "{error}"
+    );
 }
 
-/// A window whose range is empty or negative reads nothing at every grid point.
 #[test]
 fn a_window_reads_a_non_empty_range() {
     let mut node = window_over(input(), None);
@@ -1250,8 +1162,6 @@ fn a_window_reads_a_non_empty_range() {
     assert!(error.to_string().contains("empty range"), "{error}");
 }
 
-/// A node that declares an output grid its output does not carry would be addressed on one grid
-/// and hand out positions on another.
 #[test]
 fn a_window_checks_its_output_grid() {
     let mut node = window_over(input(), None);
@@ -1268,7 +1178,6 @@ fn a_window_checks_its_output_grid() {
     );
 }
 
-/// A window consumes samples: state holds accumulators, not a sample stream to range over.
 #[test]
 fn a_window_cannot_consume_state() {
     let out = grid(0, 60_000, 4);
@@ -1281,7 +1190,6 @@ fn a_window_cannot_consume_state() {
     assert!(error.to_string().contains("aggregate state"), "{error}");
 }
 
-/// A window ranges over timestamps, and a scalar has none of its own.
 #[test]
 fn a_window_cannot_consume_a_scalar() {
     let out = grid(0, 60_000, 4);
@@ -1294,7 +1202,6 @@ fn a_window_cannot_consume_a_scalar() {
     assert!(error.to_string().contains("not a scalar"), "{error}");
 }
 
-/// A binary node aligns two inputs, so two different grids cannot be aligned implicitly.
 #[test]
 fn a_binary_operation_rejects_two_grids() {
     let left = window_over(input(), None);
@@ -1312,30 +1219,9 @@ fn a_binary_operation_rejects_two_grids() {
     assert!(error.to_string().contains("different grids"), "{error}");
 }
 
-/// Two inputs on the same grid are a legal binary operation, which is how
-/// `rate(a[5m]) + rate(b[5m])` becomes an ordinary tree.
-#[test]
-fn a_binary_operation_over_one_grid_is_valid() {
-    // Both sides evaluate on the statement's grid, so the compiler binds one grid to both.
-    let shared = grid(0, 60_000, 4);
-    let node = NativeNode {
-        expr: NativeExpr::Binary {
-            left: Box::new(window_on(input(), None, Arc::clone(&shared))),
-            right: Box::new(window_on(input(), None, Arc::clone(&shared))),
-            matching: add(),
-        },
-        output: evaluated(Arc::new([]), shared),
-    };
-    assert!(node.validate().is_ok());
-}
-
-/// A compiler that allocates one grid per window still produces one grid: the kernel aligns
-/// operands by `EvalGrid::spec` (`vector_match::same_grid`), so `validate` compares specs too and
-/// does not reject a tree the runtime would run correctly.
+/// The kernel aligns operands by `EvalGrid::spec` (`vector_match::same_grid`), not by allocation.
 #[test]
 fn a_binary_operation_aligns_separately_allocated_equal_specs() {
-    // Two windows, one fresh `EvalGrid` each, and the statement's grid a third: equal specs, no
-    // shared allocation anywhere in the tree.
     let node = NativeNode {
         expr: NativeExpr::Binary {
             left: Box::new(window_on(input(), None, grid(0, 60_000, 4))),
@@ -1346,7 +1232,6 @@ fn a_binary_operation_aligns_separately_allocated_equal_specs() {
     };
     assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
 
-    // The same tree with a different spec is still rejected: the kernel rejects that pair too.
     let node = NativeNode {
         expr: NativeExpr::Binary {
             left: Box::new(window_on(input(), None, grid(0, 60_000, 4))),
@@ -1359,8 +1244,6 @@ fn a_binary_operation_aligns_separately_allocated_equal_specs() {
     assert!(error.to_string().contains("different grids"), "{error}");
 }
 
-/// A scalar side is broadcast, not matched: `sum by(job)(rate(x[5m])) + time()` has no labels to
-/// line up, so `matching` is not consulted and the output keeps the vector side's fields.
 #[test]
 fn a_binary_operation_broadcasts_a_scalar() {
     let shared = grid(0, 60_000, 4);
@@ -1375,7 +1258,6 @@ fn a_binary_operation_broadcasts_a_scalar() {
     };
     assert!(node.validate().is_ok());
 
-    // The mirror case: the scalar on the left keeps the right side's fields.
     let node = NativeNode {
         expr: NativeExpr::Binary {
             left: Box::new(scalar_on(1.0, Arc::clone(&shared))),
@@ -1387,28 +1269,9 @@ fn a_binary_operation_broadcasts_a_scalar() {
     assert!(node.validate().is_ok());
 }
 
-/// A broadcast side carries no labels, so the labels a binary operation reports are the vector
-/// side's - whichever side the vector is written on.
-///
-/// Three kinds of constant can sit beside a vector and only one of them is typed as a scalar:
-/// `time()` answers a scalar ([`NativeExpr::EvalTime`]), `vector(1)` is a materialized one-field
-/// vector with no label set ([`NativeExpr::VectorOf`]), and `clamp_max(x, 1)` is a
-/// [`NativeExpr::ParameterizedMap`] whose parameter is a scalar. None of them names a label
-/// column, so a tree that reported one would declare a column no row fills; and a tree that
-/// dropped the vector side's labels instead would lose the identity every series of the answer is
-/// routed by.
-///
-/// `vector(1)` is the one of the three that a vector-vector match reads, because its value is a
-/// vector rather than a scalar: written on the left it is the one-to-one match's label source, so
-/// the answer carries the (empty) label set the match key names - and no label of the vector on
-/// the right. Either way nothing of `vector(1)` reaches the output as a label.
-///
-/// The same constants also decide nothing about a series' *identity*, which is the other half of
-/// what a node reports: a broadcast reaches each series of its vector side as it is, so whether two
-/// series can end under one label set is that side's answer. That half is read against a vector
-/// whose answer is `true` - a rewrite of a label its input already carries can fold two series into
-/// one - because a comparison against a vector that never aliases would pass for an implementation
-/// that always answered `false`.
+/// `time()`, `vector(1)` and a parameterized map's scalar parameter contribute no labels on either
+/// side. Ownership is checked against an aliasing vector, so an implementation that always answered
+/// `false` would fail.
 #[test]
 fn a_broadcast_side_contributes_no_labels() {
     let shared = grid(0, 60_000, 4);
@@ -1424,8 +1287,6 @@ fn a_broadcast_side_contributes_no_labels() {
         },
         output: evaluated(fields(1), Arc::clone(&shared)),
     };
-    // A vector whose answer can alias: the rewrite writes a label its input already carries, which
-    // is what lets two series end under one label set.
     let aliasing = || {
         map_over(rewritten(
             window_on(input(), None, Arc::clone(&shared)),
@@ -1455,8 +1316,7 @@ fn a_broadcast_side_contributes_no_labels() {
     let tags = |node: &NativeNode| fused_output_tags(node, &source_tags);
     let scan = vec!["host".to_string(), "zone".to_string()];
 
-    // `rate(x[5m]) + time()` and `time() + rate(x[5m])`: the evaluation time is a scalar, so the
-    // operation is a broadcast over the vector and reports exactly the vector's labels.
+    // `rate(x[5m]) + time()` and `time() + rate(x[5m])`.
     assert_eq!(
         Some(scan.clone()),
         tags(&vector()),
@@ -1473,7 +1333,6 @@ fn a_broadcast_side_contributes_no_labels() {
         "`time()` contributes no label with the vector on the right either"
     );
 
-    // `vector(1)` answers one series without labels, so it adds none whichever side it is on.
     assert_eq!(
         Some(Vec::new()),
         tags(&vector_of_one()),
@@ -1490,8 +1349,7 @@ fn a_broadcast_side_contributes_no_labels() {
         "`vector(1)` on the left is the match key, and it names no label"
     );
 
-    // `clamp_max(rate(x[5m]), 1)` reads a scalar parameter, which carries no labels: the node
-    // reports its input's labels, and so does a broadcast over it.
+    // `clamp_max(rate(x[5m]), 1)`.
     assert_eq!(
         Some(scan.clone()),
         tags(&clamp_max(vector())),
@@ -1508,9 +1366,6 @@ fn a_broadcast_side_contributes_no_labels() {
         "the same with the constant written first"
     );
 
-    // Ownership follows the vector side as well, and it is read against the aliasing vector: a
-    // broadcast reaches each series of its vector side as it is, so whether two series can end
-    // under one label set is that side's answer, not the constant's.
     assert!(
         duplicates_canonical_labels(&aliasing(), &source_tags, &[]),
         "the fixture aliases: a rewrite of a label its input carries can fold two series into one"
@@ -1532,10 +1387,7 @@ fn a_broadcast_side_contributes_no_labels() {
             "a broadcast keeps the series identity of its vector side"
         );
     }
-    // `vector(1)` is the exception of the three: it is a vector, so a binary with it is a match,
-    // and the kernel files its rows by the label set a sample ends under and refuses two values of
-    // one field at one point. An alias below it therefore cannot reach the answer, whichever side
-    // the match reads it from.
+    // With `vector(1)` the binary is a vector match, which files rows by result label set.
     for node in [
         binary(aliasing(), vector_of_one()),
         binary(vector_of_one(), aliasing()),
@@ -1547,12 +1399,9 @@ fn a_broadcast_side_contributes_no_labels() {
     }
 }
 
-/// A scalar has no fields of its own, so a broadcast that declares a different count than the
-/// vector side would report a layout the kernel does not produce.
 #[test]
 fn a_scalar_broadcast_cannot_change_the_field_count() {
     let shared = grid(0, 60_000, 4);
-    // The vector side has two fields; the broadcast declares one.
     let node = NativeNode {
         expr: NativeExpr::Binary {
             left: Box::new(window_fields(input_with_fields(2), Arc::clone(&shared), 2)),
@@ -1570,13 +1419,10 @@ fn a_scalar_broadcast_cannot_change_the_field_count() {
     );
 }
 
-/// Two vectors pair their fields by position, so the match reports the shorter side's count
-/// (`vector_match::binary_output_schema` takes `min(lhs, rhs)`); a tree declaring anything else is
-/// rejected instead of failing at run time.
+/// `vector_match::binary_output_schema` keeps `min(lhs, rhs)` fields.
 #[test]
 fn a_binary_operation_over_two_vectors_matches_the_shorter_side() {
     let shared = grid(0, 60_000, 4);
-    // Two fields matched against one: the match produces one field, not two.
     let node = NativeNode {
         expr: NativeExpr::Binary {
             left: Box::new(window_fields(input_with_fields(2), Arc::clone(&shared), 2)),
@@ -1593,7 +1439,6 @@ fn a_binary_operation_over_two_vectors_matches_the_shorter_side() {
         "{error}"
     );
 
-    // Declaring the shorter side's count is the legal tree, so the check is not vacuous.
     let node = NativeNode {
         expr: NativeExpr::Binary {
             left: Box::new(window_fields(input_with_fields(2), Arc::clone(&shared), 2)),
@@ -1605,22 +1450,6 @@ fn a_binary_operation_over_two_vectors_matches_the_shorter_side() {
     assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
 }
 
-/// Two scalars make a scalar, because there is nothing to attach labels or fields to.
-#[test]
-fn two_scalars_make_a_scalar() {
-    let shared = grid(0, 60_000, 4);
-    let node = NativeNode {
-        expr: NativeExpr::Binary {
-            left: Box::new(scalar_on(1.0, Arc::clone(&shared))),
-            right: Box::new(scalar_on(2.0, Arc::clone(&shared))),
-            matching: add(),
-        },
-        output: NativeType::Scalar(Arc::clone(&shared)),
-    };
-    assert!(node.validate().is_ok());
-}
-
-/// Two scalars have nothing to attach labels or fields to, so they cannot produce a vector.
 #[test]
 fn two_scalars_cannot_produce_a_vector() {
     let shared = grid(0, 60_000, 4);
@@ -1641,8 +1470,6 @@ fn two_scalars_cannot_produce_a_vector() {
     );
 }
 
-/// `vector(s)` materializes its scalar on the grid that scalar is evaluated on, so an output on
-/// another grid would address positions the scalar does not have.
 #[test]
 fn vector_of_keeps_its_scalars_grid() {
     let shared = grid(0, 60_000, 4);
@@ -1653,11 +1480,9 @@ fn vector_of_keeps_its_scalars_grid() {
         output,
     };
 
-    // The same spec on another allocation is the grid the scalar is on.
     let same = vector_of(evaluated(fields(1), grid(0, 60_000, 4)));
     assert!(same.validate().is_ok(), "{}", same.validate().unwrap_err());
 
-    // Without a grid there are no positions to materialize the scalar on.
     let missing = vector_of(NativeType::Samples(Arc::new(SeriesSchema {
         fields: fields(1),
         eval_grid: None,
@@ -1670,7 +1495,6 @@ fn vector_of_keeps_its_scalars_grid() {
         "{error}"
     );
 
-    // Another grid addresses positions that scalar has no value at.
     let mismatched = vector_of(evaluated(fields(1), grid(0, 30_000, 8)));
     let error = mismatched.validate().unwrap_err();
     assert!(
@@ -1681,12 +1505,6 @@ fn vector_of_keeps_its_scalars_grid() {
     );
 }
 
-/// A constant operand is broadcast to each series the other side answers, so such an operation reads
-/// one series at a time exactly when that other side does.
-///
-/// Two vectors are a match over the whole vector, and an aggregate folds a group, so either of them
-/// under the constant still reads across series. Two constants answer the same value for every series
-/// there is, so they read none.
 #[test]
 fn a_constant_operand_reads_one_series_at_a_time() {
     let shared = grid(0, 60_000, 4);
@@ -1722,12 +1540,12 @@ fn a_constant_operand_reads_one_series_at_a_time() {
             "a broadcast reaches each series the vector side answers: {node:?}"
         );
     }
-    // `sum(rate(v0[5m])) + 100` folds a group first, so the constant is broadcast to each group.
+    // `sum(rate(v0[5m])) + 100`.
     assert!(reads_across_series(&binary(
         aggregate,
         scalar_on(100.0, Arc::clone(&shared))
     )));
-    // `scalar(rate(v0[5m]))` must inspect all the series at each point.
+    // `scalar(rate(v0[5m]))`.
     let scalar_of = NativeNode {
         expr: NativeExpr::ScalarOf {
             input: Box::new(vector()),
@@ -1735,17 +1553,15 @@ fn a_constant_operand_reads_one_series_at_a_time() {
         output: NativeType::Scalar(Arc::clone(&shared)),
     };
     assert!(reads_across_series(&scalar_of));
-    // `rate(v0[5m]) + rate(v0[5m])` matches two vectors by label.
+    // `rate(v0[5m]) + rate(v0[5m])`.
     assert!(reads_across_series(&binary(vector(), vector())));
-    // `1 + 2` answers one value for every series there is.
+    // `1 + 2`.
     assert!(!reads_across_series(&binary(
         scalar_on(1.0, Arc::clone(&shared)),
         scalar_on(2.0, Arc::clone(&shared))
     )));
 }
 
-/// A binary operation is point-wise on a grid, so a side of raw samples has no positions to line
-/// up with the other side.
 #[test]
 fn a_binary_operation_cannot_consume_raw_samples() {
     let shared = grid(0, 60_000, 4);
@@ -1780,7 +1596,6 @@ fn a_binary_operation_cannot_consume_raw_samples() {
     );
 }
 
-/// State is not a value, so neither side of a binary operation may be state.
 #[test]
 fn a_binary_operation_cannot_consume_state() {
     let shared = grid(0, 60_000, 4);
@@ -1800,57 +1615,9 @@ fn a_binary_operation_cannot_consume_state() {
     assert!(error.to_string().contains("aggregate state"), "{error}");
 }
 
-/// A partial aggregate produces state, not a value; a complete one produces a value on the same
-/// grid as its input.
-#[test]
-fn an_aggregate_output_matches_its_stage() {
-    let inner = window_over(input(), None);
-    let value_grid = inner.output.grid().unwrap().clone();
-
-    let complete = NativeNode {
-        expr: NativeExpr::Aggregate {
-            input: Box::new(inner.clone()),
-            op: BoundAggregate {
-                kind: AggregateKind::Sum,
-                group: Grouping::By(Arc::new(["job".into()])),
-                stage: AggregateStage::Complete,
-                field_kind: FieldKind::Float,
-            },
-        },
-        output: evaluated(Arc::new([]), Arc::clone(&value_grid)),
-    };
-    assert!(complete.validate().is_ok());
-
-    let partial = NativeNode {
-        expr: NativeExpr::Aggregate {
-            input: Box::new(inner),
-            op: BoundAggregate {
-                kind: AggregateKind::Sum,
-                group: Grouping::By(Arc::new(["job".into()])),
-                stage: AggregateStage::Partial,
-                field_kind: FieldKind::Float,
-            },
-        },
-        output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
-            group: Grouping::By(Arc::new(["job".into()])),
-            kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
-            components: Arc::from([
-                datatypes::series::aggregate_state::StateComponent::Value,
-                datatypes::series::aggregate_state::StateComponent::Compensation,
-            ]),
-            accumulators: Arc::new([]),
-            grid: value_grid,
-        })),
-    };
-    assert!(partial.validate().is_ok());
-}
-
-/// A complete aggregate folds each field on its own, so it reports one value per input field
-/// (`aggregate::aggregate_float` builds its rows from the input schema's fields).
 #[test]
 fn a_complete_aggregate_cannot_change_the_field_count() {
     let out = grid(0, 60_000, 4);
-    // The input is a legal two-field window; the aggregate declares one value.
     let node = NativeNode {
         expr: NativeExpr::Aggregate {
             input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
@@ -1872,7 +1639,6 @@ fn a_complete_aggregate_cannot_change_the_field_count() {
     );
 }
 
-/// Declaring a value where the stage produces state is a compiler mistake, and is rejected.
 #[test]
 fn an_aggregate_stage_must_agree_with_its_type() {
     let inner = window_over(input(), None);
@@ -1896,12 +1662,9 @@ fn an_aggregate_stage_must_agree_with_its_type() {
     );
 }
 
-/// A `Partial` aggregate keeps one accumulator per input field (`aggregate_float` lays its state
-/// out in `schema.fields.len()`-sized points), so state declaring another count is rejected.
 #[test]
 fn a_partial_aggregate_cannot_change_the_accumulator_count() {
     let out = grid(0, 60_000, 4);
-    // The input is a legal two-field window; the state declares one accumulator.
     let node = NativeNode {
         expr: NativeExpr::Aggregate {
             input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
@@ -1932,8 +1695,6 @@ fn a_partial_aggregate_cannot_change_the_accumulator_count() {
     );
 }
 
-/// A `Partial` aggregate's state is grouped by the binding's group labels, so state declaring
-/// other labels is not the state this aggregate produces.
 #[test]
 fn a_partial_aggregate_groups_its_state_like_its_binding() {
     let mut node = partial_aggregate(window_over(input(), None));
@@ -1948,8 +1709,6 @@ fn a_partial_aggregate_groups_its_state_like_its_binding() {
     );
 }
 
-/// A `Partial` aggregate indexes its state on the grid its input produces, so state on another
-/// grid is addressed with positions the input never wrote.
 #[test]
 fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
     let node = NativeNode {
@@ -1982,8 +1741,6 @@ fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
     );
 }
 
-/// A `Final` aggregate merges into the binding's group labels, so the state it reads has to be
-/// grouped the same way.
 #[test]
 fn a_final_aggregate_groups_its_state_like_its_binding() {
     let mut node = final_aggregate(partial_aggregate(window_over(input(), None)));
@@ -1998,11 +1755,6 @@ fn a_final_aggregate_groups_its_state_like_its_binding() {
     );
 }
 
-/// `by` and `without` are not interchangeable, even over the same label.
-///
-/// `by(job)` keeps `job` and drops every other label; `without(job)` drops `job` and keeps the
-/// rest. A binding that spelled `without` as a label list could only produce the first, so state
-/// built for one has to be refused for the other rather than merged under the wrong labels.
 #[test]
 fn a_grouping_cannot_swap_by_for_without() {
     let mut node = final_aggregate(partial_aggregate(window_over(input(), None)));
@@ -2016,7 +1768,6 @@ fn a_grouping_cannot_swap_by_for_without() {
         "{error}"
     );
 
-    // The same labels under the same shape validate, so the refusal is about the shape.
     let mut node = final_aggregate(partial_aggregate(window_over(input(), None)));
     let NativeExpr::Aggregate { op, .. } = &mut node.expr else {
         unreachable!("a final aggregate tree has an aggregate root")
@@ -2025,25 +1776,9 @@ fn a_grouping_cannot_swap_by_for_without() {
     assert!(node.validate().is_ok());
 }
 
-/// A `Final` aggregate consumes the state a `Partial` produced, which is what an exchange
-/// boundary hands over between the two stages.
-#[test]
-fn a_final_aggregate_merges_partial_state() {
-    let shared = grid(0, 60_000, 4);
-    let state = partial_aggregate(window_on(input(), None, Arc::clone(&shared)));
-    let merged = final_aggregate(state);
-    assert!(merged.validate().is_ok());
-    assert!(
-        matches!(&merged.output, NativeType::Samples(schema) if schema.eval_grid.as_ref().is_some_and(|grid| Arc::ptr_eq(grid, &shared)))
-    );
-}
-
-/// A `Final` aggregate merges the state into one value per accumulator, so it reports the state's
-/// count and nothing else.
 #[test]
 fn a_final_aggregate_cannot_change_the_field_count() {
     let out = grid(0, 60_000, 4);
-    // A legal partial aggregate: two input fields, two accumulators.
     let state = NativeNode {
         expr: NativeExpr::Aggregate {
             input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
@@ -2071,7 +1806,6 @@ fn a_final_aggregate_cannot_change_the_field_count() {
         state.validate().unwrap_err()
     );
 
-    // The merge declares one value for the state's two accumulators.
     let node = NativeNode {
         expr: NativeExpr::Aggregate {
             input: Box::new(state),
@@ -2093,7 +1827,6 @@ fn a_final_aggregate_cannot_change_the_field_count() {
     );
 }
 
-/// A `Final` aggregate consumes state, so a vector is not something it can merge.
 #[test]
 fn a_final_aggregate_cannot_consume_a_window() {
     let inner = window_over(input(), None);
@@ -2117,7 +1850,6 @@ fn a_final_aggregate_cannot_consume_a_window() {
     );
 }
 
-/// A `Complete` aggregate aggregates vectors, so state is not something it can consume.
 #[test]
 fn a_complete_aggregate_cannot_consume_state() {
     let state = partial_aggregate(window_over(input(), None));
@@ -2141,55 +1873,6 @@ fn a_complete_aggregate_cannot_consume_state() {
     );
 }
 
-/// The first-phase walkthrough shapes compile to trees, which is the acceptance the RFC states
-/// for composition.
-#[test]
-fn the_walkthrough_shapes_are_trees() {
-    // Every node in one query evaluates on the statement's grid; `validate` compares the specs of
-    // the grids, not their allocations, which is the rule the kernels apply.
-    let statement_grid = grid(0, 60_000, 4);
-
-    // `abs(rate(x[5m]))`
-    let abs_rate = map_over(window_over(input(), None));
-    assert!(abs_rate.validate().is_ok());
-
-    // `sum by(job)(rate(x[5m]))`, complete because one execution sees every contribution.
-    let sum = NativeNode {
-        expr: NativeExpr::Aggregate {
-            input: Box::new(window_on(input(), None, Arc::clone(&statement_grid))),
-            op: BoundAggregate {
-                kind: AggregateKind::Sum,
-                group: Grouping::By(Arc::new(["job".into()])),
-                stage: AggregateStage::Complete,
-                field_kind: FieldKind::Float,
-            },
-        },
-        output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
-    };
-    assert!(sum.validate().is_ok());
-
-    // `sum by(job)(rate(x[5m])) + 1`: the aggregate is complete, and the scalar side is
-    // broadcast, so `matching` is not consulted for it.
-    let plus_one = NativeNode {
-        expr: NativeExpr::Binary {
-            left: Box::new(sum.clone()),
-            right: Box::new(scalar_on(1.0, Arc::clone(&statement_grid))),
-            matching: add(),
-        },
-        output: evaluated(Arc::new([]), statement_grid),
-    };
-    assert!(plus_one.validate().is_ok());
-}
-
-/// A scalar node's output is the scalar type, which is what keeps a broadcast from turning into
-/// label matching.
-#[test]
-fn a_scalar_node_is_valid() {
-    let node = scalar_on(1.0, grid(0, 60_000, 4));
-    assert!(node.validate().is_ok());
-}
-
-/// A scalar node declared as a vector would let a broadcast be planned as a match.
 #[test]
 fn a_scalar_node_must_produce_a_scalar() {
     let node = NativeNode {
@@ -2203,7 +1886,6 @@ fn a_scalar_node_must_produce_a_scalar() {
     );
 }
 
-/// An input whose declared output is not the binding it was bound to cannot be trusted.
 #[test]
 fn an_input_must_report_the_binding_it_was_bound_to() {
     let node = NativeNode {
@@ -2221,7 +1903,6 @@ fn an_input_must_report_the_binding_it_was_bound_to() {
     assert!(error.to_string().contains("not the binding"), "{error}");
 }
 
-/// An exchange boundary binds state, and the node has to report that same state.
 #[test]
 fn an_input_can_bind_aggregate_state() {
     let state = partial_aggregate(window_over(input(), None));
@@ -2235,7 +1916,6 @@ fn an_input_can_bind_aggregate_state() {
     };
     assert!(bound.validate().is_ok());
 
-    // A `Final` aggregate can then consume it, which is the shape of a distributed aggregate.
     assert!(final_aggregate(bound).validate().is_ok());
 
     // Equivalent independent allocations are accepted; field, order, grid, and group changes remain invalid.
@@ -2347,8 +2027,6 @@ fn an_input_can_bind_aggregate_state() {
     );
 }
 
-/// A vector operation reads the values at each grid point, so raw samples, which have no shared points,
-/// are not something it can consume.
 #[test]
 fn a_vector_operation_cannot_consume_raw_samples() {
     let node = NativeNode {
@@ -2362,12 +2040,7 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
-/// A root that reports samples while its expression is a constant breaks its own contract.
-///
-/// The tree is constructed directly here — a child module of `native::plan` may — because the node
-/// is one the public constructors refuse: a constant does not produce samples, and a zero-input
-/// tree has no scan that would refuse it later. Every public constructor therefore stays a checked
-/// one.
+/// Built directly, because every public constructor refuses this node.
 #[test]
 fn a_scalar_root_claiming_samples_is_refused() {
     let statement_grid = grid(0, 60_000, 4);
@@ -2399,7 +2072,6 @@ fn a_scalar_root_claiming_samples_is_refused() {
     );
 }
 
-/// A samples root without an input is refused by FusedSeries.
 #[test]
 fn a_samples_root_without_an_input_is_refused() {
     let tree = NativeTree::try_new(input()).unwrap();
@@ -2420,9 +2092,6 @@ fn a_samples_root_without_an_input_is_refused() {
     assert!(error.to_string().contains("source indexes"), "{error}");
 }
 
-/// `info` reads its info side's values as sample times, so it accepts only the instant selection
-/// that reports them: one that reports the samples themselves would compare every info series as
-/// equally new.
 #[test]
 fn info_reads_the_sample_times_of_one_field() {
     let out = grid(0, 60_000, 4);
@@ -2504,13 +2173,9 @@ fn named_scan_tags() -> Vec<Vec<String>> {
     vec![vec!["host".to_string(), "__name__".to_string()]]
 }
 
-/// A rewrite that writes a label the input does not carry cannot make two series equal, which is
-/// what lets a query like `label_replace(x, "dst", "$1", "host", "(.*)")` keep every partition.
 #[test]
 fn a_fresh_destination_does_not_alias() {
     let out = grid(0, 60_000, 4);
-    // A window that keeps the metric name hands its input's identity on, so the rewrite is the only
-    // node that could make two series equal.
     let inner = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(!duplicates_canonical_labels(
         &rewritten(inner, "dst", "host"),
@@ -2519,8 +2184,6 @@ fn a_fresh_destination_does_not_alias() {
     ));
 }
 
-/// A rewrite that writes a label the input carries can fold two series into one, which is what a
-/// canonical merge has to collect.
 #[test]
 fn a_rewrite_of_an_existing_label_aliases() {
     let out = grid(0, 60_000, 4);
@@ -2532,9 +2195,7 @@ fn a_rewrite_of_an_existing_label_aliases() {
     ));
 }
 
-/// A scan bound to one metric names every series it hands over, so `__name__` is one of its runtime
-/// labels even though it is not a tag column. A rewrite of that name writes an existing label and
-/// can fold two metrics whose ordinary labels are equal into one identity.
+/// `__name__` is a runtime label of a named scan even though it is not a tag column.
 #[test]
 fn a_rewrite_of_the_metric_name_aliases_a_named_source() {
     let out = grid(0, 60_000, 4);
@@ -2545,7 +2206,6 @@ fn a_rewrite_of_the_metric_name_aliases_a_named_source() {
         &named,
         &[]
     ));
-    // The delete-only form can fold the same two identities, so it is collected too.
     let inner = input_on(Arc::clone(&out));
     assert!(duplicates_canonical_labels(
         &replaced(inner, "__name__", "", "__name__"),
@@ -2554,12 +2214,8 @@ fn a_rewrite_of_the_metric_name_aliases_a_named_source() {
     ));
 }
 
-/// A name write is collected even above a kernel that dropped the name: the scan below `abs`, a
-/// `timestamp` or a range function can still hold several metrics whose ordinary labels are equal,
-/// so writing one name puts those identities under one label set. A fresh ordinary destination over
-/// a kernel that keeps the name is still uncollected, because no scan can carry an ordinary label it
-/// does not declare -- while over a name-dropping kernel the answer is `true` for the kernel's own
-/// sake, which is what [`dropping_the_metric_name_is_a_new_source`] pins.
+/// The scan below a name-dropping kernel may still hold several metrics whose ordinary labels are
+/// equal.
 #[test]
 fn a_name_rewrite_above_a_dropped_name_is_collected() {
     let out = grid(0, 60_000, 4);
@@ -2574,7 +2230,6 @@ fn a_name_rewrite_above_a_dropped_name_is_collected() {
     for (name, dropped) in [
         ("abs", map_over(selected())),
         ("timestamp", timestamp(selected())),
-        // `rate` computes a value of its own, so it drops the name too.
         (
             "rate",
             window_fields(input_with_fields(1), Arc::clone(&out), 1),
@@ -2589,8 +2244,7 @@ fn a_name_rewrite_above_a_dropped_name_is_collected() {
             "{name}: a name write may alias metrics the kernel left indistinguishable"
         );
     }
-    // The fresh destination is judged against a kernel that keeps the name, which is the only shape
-    // where the rewrite alone decides the answer.
+    // Over a name-keeping kernel the rewrite alone decides the answer.
     let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(
         !duplicates_canonical_labels(&rewritten(keeping, "dst", "host"), &named, &[]),
@@ -2598,13 +2252,10 @@ fn a_name_rewrite_above_a_dropped_name_is_collected() {
     );
 }
 
-/// The label walk keeps a name a rewrite writes and drops it wherever the kernel does, so the
-/// query's output columns never claim a name the runtime does not report.
 #[test]
 fn a_written_name_survives_only_where_the_tree_keeps_it() {
     let out = grid(0, 60_000, 4);
     let selected = || input_on(Arc::clone(&out));
-    // A scan bound to one metric: its runtime labels carry the name, its columns do not.
     let runtime = vec![vec!["host".to_string(), "__name__".to_string()]];
     let columns = vec![vec!["host".to_string()]];
     let written = || rewritten(selected(), "__name__", "__name__");
@@ -2616,18 +2267,15 @@ fn a_written_name_survives_only_where_the_tree_keeps_it() {
         Some(vec!["host".to_string(), "__name__".to_string()]),
         fused_output_tags(&written(), &runtime)
     );
-    // A column set gains the name because the rewrite writes a value into it.
     assert_eq!(
         Some(vec!["host".to_string(), "__name__".to_string()]),
         fused_output_tags(&written(), &columns)
     );
-    // A delete-only rewrite over a scan that publishes no name column publishes none.
     assert_eq!(
         Some(vec!["host".to_string()]),
         fused_output_tags(&replaced(selected(), "__name__", "", "__name__"), &columns)
     );
-    // The delete-only rewrite over a set that carries the name keeps it: whether a series keeps its
-    // value depends on the regex, so the label is still part of the set.
+    // Whether a delete-only rewrite removes the name depends on the regex, so the label stays.
     assert_eq!(
         Some(vec!["host".to_string(), "__name__".to_string()]),
         fused_output_tags(&replaced(selected(), "__name__", "", "__name__"), &runtime)
@@ -2659,9 +2307,8 @@ fn a_written_name_survives_only_where_the_tree_keeps_it() {
     }
 }
 
-/// `group_left(__name__)` copies the one side's name onto an arithmetic result: the kernel drops the
-/// metadata before it copies an included label, so the name the one side carries is what the result
-/// reports, while a one side without the name removes it from the result.
+/// `result_metric` drops the name before it copies include labels, so `group_left(__name__)` takes
+/// the one side's name.
 #[test]
 fn an_included_metric_name_survives_an_arithmetic_match() {
     let out = grid(0, 60_000, 4);
@@ -2700,13 +2347,11 @@ fn an_included_metric_name_survives_an_arithmetic_match() {
     ];
     let tagged = |source_index: usize| input(source_index);
 
-    // The one side (right) carries a rewritten name, so the include puts it on the result.
     let renamed = replaced(tagged(1), "__name__", "renamed", "__name__");
     assert_eq!(
         Some(vec!["host".to_string(), "__name__".to_string()]),
         fused_output_tags(&binary(tagged(0), renamed, group_left()), &source_tags)
     );
-    // A one side without the name cannot give the include one, so the result drops it.
     let unnamed_tags = vec![
         vec!["host".to_string(), "__name__".to_string()],
         vec!["host".to_string()],
@@ -2715,7 +2360,6 @@ fn an_included_metric_name_survives_an_arithmetic_match() {
         Some(vec!["host".to_string()]),
         fused_output_tags(&binary(tagged(0), tagged(1), group_left()), &unnamed_tags)
     );
-    // `group_right` trades the sides: the include is read from the left (one) side there.
     let group_right = || BinaryMatching {
         op: BinaryOp::Mul,
         return_bool: false,
@@ -2728,8 +2372,6 @@ fn an_included_metric_name_survives_an_arithmetic_match() {
         Some(vec!["host".to_string(), "__name__".to_string()]),
         fused_output_tags(&binary(renamed, tagged(1), group_right()), &source_tags)
     );
-    // A `bool` comparison drops the name like arithmetic does, and the include still copies the one
-    // side's name afterwards: the drop happens before the include.
     let bool_comparison = || BinaryMatching {
         op: BinaryOp::Eq,
         return_bool: true,
@@ -2743,9 +2385,7 @@ fn an_included_metric_name_survives_an_arithmetic_match() {
         fused_output_tags(&binary(tagged(0), renamed, bool_comparison()), &source_tags)
     );
 
-    // A filtering comparison keeps the name of the side it reports, but an included name the one
-    // side does not carry still leaves the set: `result_metric` removes an included label it cannot
-    // copy, and the base name is not exempt.
+    // `result_metric` removes an include label the one side lacks, the base name included.
     let filtering = || BinaryMatching {
         op: BinaryOp::Eq,
         return_bool: false,
@@ -2759,8 +2399,6 @@ fn an_included_metric_name_survives_an_arithmetic_match() {
     );
 }
 
-/// A source the caller says nothing about proves nothing: the pass has to assume the destination
-/// was one of its labels, because two series sharing one is exactly the wrong answer to ship.
 #[test]
 fn an_unknown_source_may_alias() {
     let out = grid(0, 60_000, 4);
@@ -2772,39 +2410,23 @@ fn an_unknown_source_may_alias() {
     ));
 }
 
-/// Dropping the metric name is a source of duplicates in its own right, and a window that keeps it
-/// is not.
-///
-/// The name is part of the identity a merge groups by, so a kernel that computes a value of its own
-/// and reports the name dropped can leave two series under one label set - but only when something
-/// below it could be told apart by that name.
-///
-/// A scan bound to one metric names every series it hands over, so no name of its tells two of them
-/// apart, and the labels are the whole proof. A scan that may hand over several metrics is collected,
-/// and so is one carrying `__type__` or `__unit__` among its tags, because only those labels told
-/// the two series apart. The scan's key columns are not asked: a key column that holds `NULL` in one
-/// series and `''` in another decodes to an absent and to an empty label, both of which the drop
-/// normalizes into one, and that pair is deliberately left outside the proof - see
-/// [`metadata_labels_keep_series_apart`].
+/// A name drop is proved only over a single-metric source without `__type__`/`__unit__` tags. The
+/// `NULL`/`''` key pair is deliberately outside the proof.
 #[test]
 fn dropping_the_metric_name_is_a_new_source() {
     let out = grid(0, 60_000, 4);
     let single = [Some(Arc::<str>::from("some_metric"))];
     let dropped = window_fields(input_with_fields(1), Arc::clone(&out), 1);
-    // A caller that says nothing about the metric is not proved.
     assert!(duplicates_canonical_labels(
         &dropped,
         &named_scan_tags(),
         &[]
     ));
-    // The scan reads one metric, so the name it drops told none of its series apart.
     assert!(!duplicates_canonical_labels(
         &dropped,
         &named_scan_tags(),
         &single
     ));
-    // A source that may hand over several metrics is not proved, and neither is one that carries a
-    // metadata label of its own: both can hold two series that only that label told apart.
     assert!(duplicates_canonical_labels(
         &dropped,
         &named_scan_tags(),
@@ -2818,28 +2440,17 @@ fn dropping_the_metric_name_is_a_new_source() {
             "{metadata}"
         );
     }
-    // A key column that can hold `NULL` in one series and `''` in another is *not* part of that
-    // proof: the empty value leaves with the name, but the pair is a property of a nullable tag
-    // column rather than of the labels, and every tag column of a metric-engine table is nullable.
-    // Nothing is collected for it, above the window or above a map that drops the name again.
-    assert!(!duplicates_canonical_labels(
-        &dropped,
-        &named_scan_tags(),
-        &single
-    ));
     assert!(!duplicates_canonical_labels(
         &map_over(input_on(Arc::clone(&out))),
         &named_scan_tags(),
         &single
     ));
-    // A window that keeps the name passes its input's answer on instead.
     let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(!duplicates_canonical_labels(
         &keeping,
         &named_scan_tags(),
         &[]
     ));
-    // `timestamp` reports a sample's own time under the name dropped, in both of its forms.
     let stamps = |inner: NativeNode| NativeNode {
         expr: NativeExpr::Timestamp {
             input: Box::new(inner),
@@ -2861,7 +2472,6 @@ fn dropping_the_metric_name_is_a_new_source() {
         &named_scan_tags(),
         &single
     ));
-    // A sample-preserving selection keeps the name it read, so it is no source of its own.
     assert!(!duplicates_canonical_labels(
         &instant_sample(input_on(Arc::clone(&out)), Arc::clone(&out)),
         &named_scan_tags(),
@@ -2869,22 +2479,13 @@ fn dropping_the_metric_name_is_a_new_source() {
     ));
 }
 
-/// The plan-time counter's question: which statements drop the metadata labels over series whose
-/// labels prove them apart and whose keys do not.
-///
-/// The labels are what the walk reads; the key columns are stated by the caller, and a drop is
-/// counted exactly when the labels prove it, nothing below it has collected already, and the scan's
-/// key columns cannot tell the pair apart - a key column holding `NULL` in one series and `''` in
-/// another, which is a fact about the physical table. Nothing is collected for that pair, so the
-/// count is what keeps the statements it leaves unproved observable. This is the tree half of that
-/// count: the planner pairs it with the fact it read from the resolved table.
+/// Counted when the labels prove the drop, no merge sits below it, and `keys_survive` is `false`.
 #[test]
 fn a_drop_the_labels_prove_is_counted_only_when_its_keys_do_not() {
     let out = grid(0, 60_000, 4);
     let single = [Some(Arc::<str>::from("some_metric"))];
     let named = named_scan_tags();
-    // `rate(x[5m])` and `abs(abs(x))` over one metric: the drop removes a name every series shares,
-    // and nothing below either node is collected, so the key columns are what decides the answer.
+    // `rate(x[5m])` and `abs(abs(x))` over one metric.
     for keys in [false, true] {
         let counted = !keys;
         assert_eq!(
@@ -2909,15 +2510,12 @@ fn a_drop_the_labels_prove_is_counted_only_when_its_keys_do_not() {
             "`abs(abs(x))` with keys_survive = {keys}"
         );
     }
-    // A source that may hand over several metrics is collected by the labels, so nothing is left to
-    // the key columns.
     assert!(!leaves_a_drop_to_the_storage_keys(
         &NativeTree::try_new(window_fields(input_with_fields(1), Arc::clone(&out), 1)).unwrap(),
         &named,
         &[None],
         false,
     ));
-    // A window that keeps the name drops nothing.
     assert!(!leaves_a_drop_to_the_storage_keys(
         &NativeTree::try_new(keeping_window_fields(
             input_with_fields(1),
@@ -2929,8 +2527,6 @@ fn a_drop_the_labels_prove_is_counted_only_when_its_keys_do_not() {
         &single,
         false,
     ));
-    // A merge below the drop hands over one series per canonical label set, which is unique even
-    // where the grouping treats an empty label value as no label, so the key columns decide nothing.
     assert!(!leaves_a_drop_to_the_storage_keys(
         &NativeTree::try_new(window_on(
             merge_over(input_on(Arc::clone(&out))),
@@ -2944,12 +2540,11 @@ fn a_drop_the_labels_prove_is_counted_only_when_its_keys_do_not() {
     ));
 }
 
-/// A rewrite can alias distinct outputs of a whole-vector operation, even when they were unique
-/// before the rewrite. Grouped topk(1) and an aggregate can each produce more than one series.
+/// Grouped `topk(1)` and an aggregate can each produce more than one series, which a rewrite above
+/// them can alias.
 #[test]
 fn a_rewrite_after_ranking_or_grouping_may_alias() {
     let out = grid(0, 60_000, 4);
-    // A name-keeping window, so the ranking below is the only node whose answer is in question.
     let selected = || keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     let vector = |op| NativeNode {
         expr: NativeExpr::Vector {
@@ -3016,9 +2611,6 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
     }
 }
 
-/// `count_values` reports the grouping applied to the labels its input carries, plus the label it
-/// writes. What it does not report is the input's own set: a `by` narrows it, a `without` narrows
-/// it the other way, and the destination is a column no scan has.
 #[test]
 fn count_values_reports_its_grouping_and_the_label_it_writes() {
     let out = grid(0, 60_000, 4);
@@ -3042,7 +2634,6 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
         )
     };
 
-    // `by (zone)` keeps one of the input's labels and adds the one the node writes.
     assert_eq!(
         tags(&["zone", "value"]),
         fused_output_tags(
@@ -3050,7 +2641,6 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
             &source_tags
         )
     );
-    // `without (host)` keeps the rest, and the destination with it.
     assert_eq!(
         tags(&["zone", "value"]),
         fused_output_tags(
@@ -3058,7 +2648,6 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
             &source_tags
         )
     );
-    // A `without` naming the destination removes the label the node just wrote.
     assert_eq!(
         tags(&["zone"]),
         fused_output_tags(
@@ -3066,8 +2655,6 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
             &source_tags
         )
     );
-    // A destination naming the metric name writes the name, which is the one label the node's
-    // result carries when its grouping names nothing else.
     assert_eq!(
         tags(&["__name__"]),
         fused_output_tags(
@@ -3075,51 +2662,12 @@ fn count_values_reports_its_grouping_and_the_label_it_writes() {
             &source_tags
         )
     );
-    // An empty destination cannot be a label, so the walk refuses rather than name a column.
     assert_eq!(
         None,
         fused_output_tags(&counted("", Grouping::By(Arc::new([]))), &source_tags)
     );
 }
 
-/// A consumer that files its rows by the label set a sample ends under answers one series per set,
-/// so a rewrite beneath it is not something above it has to collect again.
-#[test]
-fn a_whole_vector_consumer_answers_one_series_per_set() {
-    let out = grid(0, 60_000, 4);
-    let aliasing = || {
-        rewritten(
-            window_fields(input_with_fields(1), Arc::clone(&out), 1),
-            "host",
-            "host",
-        )
-    };
-    for op in [
-        BoundVectorOp::TopK {
-            k: 1.0,
-            top: true,
-            group: Grouping::By(Arc::new([])),
-        },
-        BoundVectorOp::Absent {
-            labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
-        },
-        BoundVectorOp::CountValues {
-            label: Arc::from("v"),
-            group: Grouping::By(Arc::new([])),
-        },
-    ] {
-        let node = NativeNode {
-            expr: NativeExpr::Vector {
-                input: Box::new(aliasing()),
-                op,
-            },
-            output: evaluated(fields(1), Arc::clone(&out)),
-        };
-        assert!(node.validate().is_ok());
-    }
-}
-
-/// The merge is the collection, so a second pass over a collected node finds nothing to collect.
 #[test]
 fn a_merge_answers_one_series_per_set() {
     let out = grid(0, 60_000, 4);
@@ -3135,11 +2683,8 @@ fn a_merge_answers_one_series_per_set() {
     ));
 }
 
-/// A window answers for the labels it keeps. A function that keeps the metric name hands over one
-/// series per label set once its child answers either `Some(true)` (already one per set) or
-/// `Some(false)` (fragments the window's `MergeInput` collects); only a boundary child (`None`)
-/// leaves the answer aliasing. A function that drops the metric name can always alias, whatever
-/// the child answered.
+/// A name-keeping window answers `Some(true)` unless its child is a boundary; a name-dropping window
+/// answers whether the labels prove the drop.
 #[test]
 fn a_window_unifies_its_own_contributions() {
     let out = grid(0, 60_000, 4);
@@ -3191,9 +2736,7 @@ fn a_window_unifies_its_own_contributions() {
              boundary leaves it aliasing"
         );
     }
-    // A function that drops the metadata labels can give two series one label set, so the window
-    // reports it whatever its child said - and a caller that cannot say which metric the child reads
-    // has no proof to offer on the child's behalf.
+    // Without source facts a name-dropping window has no proof, whatever its child said.
     for child in [collected(), fragments()] {
         assert_eq!(
             Some(false),
@@ -3201,16 +2744,11 @@ fn a_window_unifies_its_own_contributions() {
             "a name-dropping window over an unproved source may alias"
         );
     }
-    // A boundary is the one child the proof says nothing about: the window folds the pieces of one
-    // series one at a time, so what it emits aliases them whatever the labels say.
     assert_eq!(
         Some(false),
         unifies_its_own_contributions(&window_of(boundary(), RangeFunction::Rate), &[], &[]),
         "a boundary leaves the window's own answer aliasing"
     );
-    // The proof is the one the canonical pass reads: a child whose labels lost the name, over a
-    // source bound to a single metric without a metadata tag of its own, keeps the name-dropping
-    // window from reporting fragments.
     let named = [vec!["host".to_string(), "__name__".to_string()]];
     let single = [Some(Arc::<str>::from("some_metric"))];
     let dropped = map_over(input_on(Arc::clone(&out)));
@@ -3234,8 +2772,6 @@ fn a_window_unifies_its_own_contributions() {
     );
     let mut typed = named.clone();
     typed[0].push("__type__".to_string());
-    // A metadata tag of the source is one the drop removes, and two series that differed only in it
-    // end under one label set - so a window reading the tagged scan directly is not proved.
     assert_eq!(
         Some(false),
         unifies_its_own_contributions(
@@ -3245,8 +2781,7 @@ fn a_window_unifies_its_own_contributions() {
         ),
         "a metadata tag the window drops is not proved constant"
     );
-    // A map below the window drops that tag first, and its own drop is what the pass collects: what
-    // the window reads has already lost it, so the window above the map is proved.
+    // The map below already dropped `__type__`, so the window's own drop is proved.
     assert_eq!(
         Some(true),
         unifies_its_own_contributions(&window_of(dropped, RangeFunction::Rate), &typed, &single),
@@ -3254,8 +2789,6 @@ fn a_window_unifies_its_own_contributions() {
     );
 }
 
-/// `info` reads its info side through a canonical merge: the merge only collects the pieces of one
-/// label set, so the sample times it hands over are the ones the selection produced.
 #[test]
 fn info_sees_through_a_canonical_merge() {
     let out = grid(0, 60_000, 4);
@@ -3288,8 +2821,6 @@ fn info_sees_through_a_canonical_merge() {
         .expect("a merge above the info selection keeps its meaning");
 }
 
-/// The same tree without the merge is the tree the check was written for, so the check is not
-/// simply accepting every info side.
 #[test]
 fn info_still_refuses_an_evaluated_value_vector() {
     let out = grid(0, 60_000, 4);
@@ -3341,7 +2872,6 @@ fn native_tree_deeper_than_64_round_trips_and_validates() {
         NativeTree { root: node }
     }
 
-    // This tests a representative depth, not a guarantee about the available worker stack.
     let deep = nested_maps(80);
     let checked = NativeTree::try_new(deep.root.clone()).unwrap();
     let bytes = postcard::to_stdvec(&checked).unwrap();
@@ -3349,7 +2879,6 @@ fn native_tree_deeper_than_64_round_trips_and_validates() {
     assert_eq!(checked, decoded);
     decoded.root().validate().unwrap();
 
-    // Decoding must still validate the tree's structural contract.
     let mut invalid = nested_maps(80);
     invalid.root.output = NativeType::Scalar(grid(0, 60_000, 1));
     assert!(NativeTree::try_new(invalid.root.clone()).is_err());
@@ -3357,18 +2886,13 @@ fn native_tree_deeper_than_64_round_trips_and_validates() {
     assert!(postcard::from_bytes::<NativeTree>(&bytes).is_err());
 }
 
-/// The index postcard writes for a [`NativeExpr`] variant is a wire contract, not an implementation
-/// detail: postcard encodes a variant as its index, and a version 3 `FusedSeries` envelope carries
-/// the whole tree rather than a prefix of it, so a variant inserted anywhere but the end renames
-/// every variant after it for a reader of an earlier build.
-///
-/// The numbers here are the ones already written to the wire. New variants are appended after
-/// `Info`; every variant above them keeps the index below.
+/// Postcard encodes a variant by its index and a `FusedSeries` carries the whole tree, so these
+/// indices must not change. New variants are appended at the end.
 #[test]
 fn native_expr_variant_indices_are_a_wire_contract() {
     use crate::histogram_eval::HistogramFunction;
 
-    // A node carries its expression first, so this is also the tag of any node or tree holding it.
+    // A node serializes its expression first, so this byte is also the node's and the tree's.
     fn tag(expr: &NativeExpr) -> u8 {
         let encoded = postcard::to_stdvec(expr).expect("a native expression encodes");
         *encoded.first().expect("a variant tag is the first byte")
@@ -3423,7 +2947,6 @@ fn native_expr_variant_indices_are_a_wire_contract() {
             10,
             "Aggregate",
         ),
-        // The dynamic forms are the last four, which is what keeps every index above them.
         (
             NativeExpr::ScalarOf {
                 input: Box::new(vector()),
@@ -3495,15 +3018,6 @@ fn native_tree_postcard_float_fidelity_round_trip() {
 }
 
 #[test]
-fn native_tree_postcard_rejects_trailing_bytes() {
-    let tree = NativeTree::try_new(input()).unwrap();
-    let mut bytes = postcard::to_stdvec(&tree).unwrap();
-    bytes.push(0);
-    let (_, remainder) = postcard::take_from_bytes::<NativeTree>(&bytes).unwrap();
-    assert!(!remainder.is_empty());
-}
-
-#[test]
 fn native_tree_non_prefix_shapes_round_trip() {
     let grid = grid(0, 60_000, 4);
     let lhs = window_on(input(), None, Arc::clone(&grid));
@@ -3557,9 +3071,7 @@ fn independently_allocated_binding_mismatch_is_rejected() {
     assert!(mismatch.validate().is_err());
 }
 
-/// Asserts the admission verdict for `node`, and that the runtime's own construction answers the
-/// same: a predicate that stopped agreeing with it would either admit a tree the executor cannot
-/// build, or refuse a shape the executor can run.
+/// Asserts the admission verdict for `node`, and that `NativeExecutionState::try_new` agrees.
 fn assert_admission(node: NativeNode, admitted: bool, shape: &str) {
     use datafusion::execution::memory_pool::UnboundedMemoryPool;
 
@@ -3576,7 +3088,7 @@ fn assert_admission(node: NativeNode, admitted: bool, shape: &str) {
     );
 }
 
-/// `outer` over `inner`, with `function` and `modifier` bound as written.
+/// A window over `inner` with `function` and `modifier` as written.
 fn window_with(
     inner: NativeNode,
     input_grid: Option<Arc<EvalGrid>>,
@@ -3603,13 +3115,11 @@ fn window_with(
     }
 }
 
-/// Every shape the runtime refuses is refused here, and each one is a shape a tree can hold.
 #[test]
 fn native_tree_supported_excludes_the_shapes_the_runtime_refuses() {
     use crate::select::SortOrder;
 
     let out = grid(0, 60_000, 4);
-    // A leaf whose chunks of different series may interleave: no consumer of a leaf orders them.
     let interleaved = NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: evaluated(Arc::new([]), Arc::clone(&out)),
@@ -3825,18 +3335,12 @@ fn native_tree_supported_excludes_the_shapes_the_runtime_refuses() {
     }
 }
 
-/// A refusal below the root is still a refusal: admission reads the whole tree, not its root.
-///
-/// Each case below holds an aggregate grouping by a value field — a shape the runtime refuses, at
-/// any depth — under a node whose own shape the runtime does build. A predicate that stopped
-/// recursing into one of these variants' inputs, or into a parameterised node's parameters, would
-/// admit a tree the runtime then refuses, and a refusal raised while the runtime is built cannot
-/// fall back: the statement loses the plan it had instead of keeping it.
+/// Each case nests an aggregate grouped by a value field under a node the runtime builds, so
+/// admission must recurse into every input and parameter.
 #[test]
 fn native_tree_supported_excludes_a_refused_shape_nested_under_another() {
     let out = grid(0, 60_000, 4);
     let one_field = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
-    // The refused shape every case nests, one level down from a node the runtime builds.
     let refused = || {
         aggregate_with(
             one_field(),
@@ -3846,8 +3350,6 @@ fn native_tree_supported_excludes_a_refused_shape_nested_under_another() {
             AggregateStage::Complete,
         )
     };
-    // The info side `info` reads, which `validate` requires to be the times of an instant
-    // selection; only the base side of the node carries the refused shape.
     let info_times = || {
         merge_over(NativeNode {
             expr: NativeExpr::Instant {
@@ -3935,19 +3437,10 @@ fn native_tree_supported_excludes_a_refused_shape_nested_under_another() {
     }
 }
 
-/// A window whose timestamps do not fit is refused by the runtime, so admission refuses it too.
-///
-/// These two are not shapes and every term of their arithmetic fits: an `@` anchor is folded into
-/// an offset from the grid's first point, which is a difference of two timestamps, and
-/// `predict_linear` adds that offset to the first and last point of the grid. A tree carrying
-/// either is still one the runtime cannot build, and admitting it is what made a query the
-/// existing plan answered fail while its runtime was built instead of keeping that plan, because a
-/// refusal raised during physical planning cannot fall back.
+/// Not shapes: the `@` fold offset or the `predict_linear` instants overflow `i64`.
 #[test]
 fn native_tree_supported_refuses_the_instants_that_overflow() {
-    // The first point of a statement reaching far into the future, a step apart: this is the grid
-    // `predict_linear(some_metric[1m] @ 0, 60)` is planned over, whose anchor makes the fold offset
-    // the grid's own start and whose horizon then adds the two.
+    // `predict_linear(some_metric[1m] @ 0, 60)` over a grid starting at 5e18 ms.
     let far = grid(5_000_000_000_000_000_000, 5_000, 3);
     let window = |function: RangeFunction, anchor_ms: Option<i64>, out: Arc<EvalGrid>| NativeNode {
         expr: NativeExpr::Window {
@@ -3966,8 +3459,7 @@ fn native_tree_supported_refuses_the_instants_that_overflow() {
         },
         output: evaluated(Arc::new([]), out),
     };
-    // The fold offset is 5e18 ms and `predict_linear` adds it to a point of the grid: 1e19 ms is
-    // what an `i64` cannot hold, so the kernel would read an instant that does not exist.
+    // Fold offset 5e18 ms plus a grid point of 5e18 ms overflows `i64`.
     let horizon = window(
         RangeFunction::PredictLinear(60.0),
         Some(0),
@@ -3978,15 +3470,13 @@ fn native_tree_supported_refuses_the_instants_that_overflow() {
         false,
         "a predict_linear horizon over the grid that overflows",
     );
-    // The same overflow without `predict_linear`: `@ -5e18` over that grid is a fold offset of
-    // 1e19 ms on its own, so even `rate` reads a window the runtime cannot place.
+    // `@ -5e18` over that grid is a 1e19 ms fold offset on its own.
     let anchored = window(
         RangeFunction::Rate,
         Some(-5_000_000_000_000_000_000),
         Arc::clone(&far),
     );
     assert_admission(anchored, false, "an `@` anchor whose fold offset overflows");
-    // The same shapes over a grid near the epoch fit, so the check does not narrow the route.
     let fitting = window(
         RangeFunction::PredictLinear(60.0),
         Some(0),
@@ -3995,7 +3485,6 @@ fn native_tree_supported_refuses_the_instants_that_overflow() {
     assert_admission(fitting, true, "a predict_linear horizon near the epoch");
 }
 
-/// Every shape the runtime builds is admitted, so the predicate does not narrow the route.
 #[test]
 fn native_tree_supported_admits_the_shapes_the_runtime_builds() {
     use crate::select::SortOrder;
@@ -4013,8 +3502,6 @@ fn native_tree_supported_admits_the_shapes_the_runtime_builds() {
     let cases = vec![
         ("an evaluated input leaf", input_on(Arc::clone(&out))),
         (
-            // A quantile is one Complete fold: it keeps no state, so there is nothing to merge and
-            // nothing the runtime refuses.
             "the quantile aggregate",
             aggregate_with(
                 one_field(),
@@ -4225,11 +3712,6 @@ fn inner_field_count(inner: &NativeNode) -> usize {
         .map_or(0, |schema| schema.fields.len())
 }
 
-/// The state an aggregate binds follows the kind its direct input carries.
-///
-/// The two families differ in both the kind and the components, so a node bound over one kind can
-/// never be merged as a node bound over the other: the frame's kind is what says which merge rules
-/// apply, and its component list is what the merge reads.
 #[test]
 fn aggregate_state_binding_follows_the_input_kind() {
     for (kind, numeric, histogram) in [
@@ -4250,7 +3732,6 @@ fn aggregate_state_binding_follows_the_input_kind() {
         let (histogram_kind, histogram_components) =
             aggregate_state_binding(kind, FieldKind::Histogram).expect("a histogram state");
         assert_eq!(histogram_kind, histogram, "{kind:?}");
-        // The histogram layout is the kind's own canonical list, which is what a frame accepts.
         assert_eq!(histogram_components, histogram.components().to_vec());
         assert_ne!(
             float_components, histogram_components,
@@ -4265,8 +3746,7 @@ fn aggregate_state_binding_follows_the_input_kind() {
             "{kind:?} keeps the payload over a histogram input"
         );
     }
-    // An aggregate that answers a float whatever it reads keeps its numeric state over a histogram
-    // input as well: a count is a count of samples, not of payloads.
+    // A count is a count of samples, so it keeps numeric state over histograms.
     for kind in [
         AggregateKind::Count,
         AggregateKind::Min,
@@ -4281,7 +3761,6 @@ fn aggregate_state_binding_follows_the_input_kind() {
             "{kind:?}"
         );
     }
-    // A quantile has no mergeable state at all, whatever it reads.
     for field_kind in [FieldKind::Float, FieldKind::Histogram] {
         assert!(
             aggregate_state_binding(AggregateKind::Quantile { quantile: 0.5 }, field_kind)

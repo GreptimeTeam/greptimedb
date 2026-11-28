@@ -250,22 +250,12 @@ async fn test_staging_state_validation_patterns() {
     assert!(writable_is_writable, "Writable regions should be writable");
 
     // Test flushable state check
-    let staging_is_flushable = matches!(
-        staging_state,
-        RegionRoleState::Leader(RegionLeaderState::Writable)
-            | RegionRoleState::Leader(RegionLeaderState::Staging)
-            | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-    );
-    assert!(staging_is_flushable, "Staging regions should be flushable");
-
-    let writable_is_flushable = matches!(
-        writable_state,
-        RegionRoleState::Leader(RegionLeaderState::Writable)
-            | RegionRoleState::Leader(RegionLeaderState::Staging)
-            | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+    assert!(
+        staging_state.is_flushable(),
+        "Staging regions should be flushable"
     );
     assert!(
-        writable_is_flushable,
+        writable_state.is_flushable(),
         "Writable regions should be flushable"
     );
 }
