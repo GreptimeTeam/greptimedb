@@ -49,10 +49,7 @@ use store_api::metric_engine_consts::{
 
 /// Validates every assignment before opening authoritative objects. Missing support is an
 /// error, never permission to read narthex files through the legacy adapter.
-pub(crate) fn file_indices(
-    context: &StreamContext,
-    ranges: &[PartitionRange],
-) -> Result<BTreeSet<usize>> {
+fn file_indices(context: &StreamContext, ranges: &[PartitionRange]) -> Result<BTreeSet<usize>> {
     let mut files = BTreeSet::new();
     for range in ranges {
         let range = context
@@ -65,7 +62,7 @@ pub(crate) fn file_indices(
             }
             if !context.is_file_range_index(*index) {
                 return Err(invalid(
-                    "narthex preparation requires a prepared memtable source",
+                    "Narthex prepared scans support only SST and memtable ranges",
                 ));
             }
             let i = index.index - context.input.num_memtables();

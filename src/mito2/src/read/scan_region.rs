@@ -462,24 +462,6 @@ impl ScanRegion {
             mapper
         };
 
-        // Only time-pruned sources from this pinned version may accompany an assigned SST
-        // in a grouped sample artifact. Explicit selections and sequence pruning stay strict.
-        let time_pruned_files = if self.exact_selection.is_none()
-            && !self.request.skip_sst_files
-            && self.request.sst_min_sequence.is_none()
-            && !self.request.exact_sequence_range
-        {
-            self.version
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files.values())
-                .filter(|file| !file_in_range(file, &time_range))
-                .map(|file| file.file_id().file_id())
-                .collect()
-        } else {
-            HashSet::new()
-        };
         let (files, sequence_range) =
             if let Some((files, sequence_range)) = self.exact_selection.take() {
                 (files, sequence_range)
@@ -585,7 +567,6 @@ impl ScanRegion {
                     .cloned()
                     .collect(),
             )
-            .with_time_pruned_files(time_pruned_files)
             .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
@@ -946,8 +927,6 @@ pub struct ScanInput {
     pub(crate) narthex_series_indexes: Vec<FileHandle>,
     /// Narthex regions require prepared reads, even before the first flush.
     pub(crate) narthex_format: bool,
-    /// Visible sources excluded solely by the query time range.
-    pub(crate) time_pruned_files: HashSet<store_api::storage::FileId>,
     /// Shares the pinned schema's encoded defaults across parallel range readers.
     primary_key_mapper: OnceLock<Arc<PrimaryKeyRangeMapper>>,
     /// Scan-wide hint for rows in an execution batch.
@@ -1039,7 +1018,6 @@ impl ScanInput {
                 files: Vec::new(),
                 narthex_series_indexes: Vec::new(),
                 narthex_format: false,
-                time_pruned_files: HashSet::new(),
                 primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                 cache_strategy: CacheStrategy::Disabled,
@@ -1240,16 +1218,6 @@ impl ScanInputBuilder {
     #[must_use]
     pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
         self.input.memtables = memtables;
-        self
-    }
-
-    /// Sets visible sources excluded solely by time pruning.
-    #[must_use]
-    pub(crate) fn with_time_pruned_files(
-        mut self,
-        files: HashSet<store_api::storage::FileId>,
-    ) -> Self {
-        self.input.time_pruned_files = files;
         self
     }
 

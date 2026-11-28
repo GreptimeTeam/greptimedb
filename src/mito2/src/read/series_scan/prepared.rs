@@ -185,11 +185,6 @@ pub(super) fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool
     }
 }
 
-/// Checks that the selected ranges refer to authoritative Narthex files.
-pub(super) fn validate_ranges(context: &StreamContext, ranges: &[PartitionRange]) -> Result<()> {
-    narthex::file_indices(context, ranges).map(|_| ())
-}
-
 /// Pushes the supported conjuncts into the request.
 ///
 /// The second element reports, for every input conjunct, whether `ColumnarReader`

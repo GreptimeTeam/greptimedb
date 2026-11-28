@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::fmt;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use api::v1::SemanticType;
@@ -32,6 +32,7 @@ use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::{debug, warn};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datafusion_common::tree_node::TreeNode;
@@ -78,7 +79,26 @@ use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// Legacy data receivers for output partitions.
-type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
+type LegacyReceiverList = Vec<Option<SeriesReceiver>>;
+
+struct SeriesReceiver {
+    batches: Receiver<BufferedSeriesBatch>,
+    terminal_error: Arc<OnceLock<Arc<Error>>>,
+}
+
+impl SeriesReceiver {
+    async fn recv(&mut self) -> Result<Option<BufferedSeriesBatch>> {
+        if let Some(batch) = self.batches.recv().await {
+            return Ok(Some(batch));
+        }
+        // The distributor records any error before dropping the senders. Each partition
+        // can drain its own queue and see the terminal outcome independently.
+        if let Some(error) = self.terminal_error.get() {
+            return Err(error.clone()).context(ScanSeriesSnafu);
+        }
+        Ok(None)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct RawScanPreparation {
@@ -380,16 +400,6 @@ impl SeriesScan {
             );
             return Ok(None);
         }
-        if narthex {
-            let ranges = self
-                .properties
-                .partitions
-                .iter()
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>();
-            prepared::validate_ranges(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
-        }
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
@@ -577,12 +587,9 @@ impl SeriesScan {
                 part_metrics,
                 ctx.memory_pool.clone(),
             )),
-            SeriesScanMode::Legacy => self.scan_legacy_batch_in_partition(
-                partition,
-                part_metrics,
-                metrics_set,
-                ctx.explain_verbose,
-            ),
+            SeriesScanMode::Legacy => {
+                self.scan_legacy_batch_in_partition(partition, part_metrics, metrics_set, ctx)
+            }
         }
     }
 
@@ -591,9 +598,9 @@ impl SeriesScan {
         partition: usize,
         part_metrics: PartitionMetrics,
         metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
+        ctx: &QueryScanContext,
     ) -> Result<ScanBatchStream> {
-        self.maybe_start_legacy_distributor(metrics_set, explain_verbose);
+        self.maybe_start_legacy_distributor(metrics_set, ctx);
         let mut receiver = self.legacy_receivers.lock().unwrap()[partition]
             .take()
             .context(ScanMultiTimesSnafu { partition })?;
@@ -602,14 +609,16 @@ impl SeriesScan {
 
             let mut fetch_start = Instant::now();
             let mut metrics = ScannerMetrics::default();
-            while let Some(series) = receiver.recv().await {
-                let series = series?;
+            while let Some(group) = receiver.recv().await? {
+                let series = SeriesBatch::Flat(FlatSeriesBatch { batches: group.batches });
                 metrics.scan_cost += fetch_start.elapsed();
                 metrics.num_batches += series.num_batches();
                 metrics.num_rows += series.num_rows();
 
                 let yield_start = Instant::now();
                 yield ScanBatch::Series(series);
+                // Keep the input charged while the downstream adapter drains this group.
+                drop(group.reservations);
                 metrics.yield_cost += yield_start.elapsed();
                 fetch_start = Instant::now();
             }
@@ -623,7 +632,7 @@ impl SeriesScan {
     fn maybe_start_legacy_distributor(
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
+        ctx: &QueryScanContext,
     ) {
         let mut rx_list = self.legacy_receivers.lock().unwrap();
         if !rx_list.is_empty() {
@@ -631,7 +640,7 @@ impl SeriesScan {
         }
 
         let (senders, receivers) = new_legacy_channel_list(self.properties.num_partitions());
-        let mut distributor = SeriesDistributor {
+        let distributor = SeriesDistributor {
             stream_ctx: self.stream_ctx.clone(),
             range_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
             final_merge_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
@@ -640,7 +649,8 @@ impl SeriesScan {
             senders,
             metrics_set: metrics_set.clone(),
             metrics_list: self.metrics_list.clone(),
-            explain_verbose,
+            explain_verbose: ctx.explain_verbose,
+            query_pool: ctx.memory_pool.clone(),
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
@@ -729,13 +739,25 @@ impl SeriesScan {
 }
 
 fn new_legacy_channel_list(num_partitions: usize) -> (SenderList, LegacyReceiverList) {
+    let terminal_error = Arc::new(OnceLock::new());
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..num_partitions)
         .map(|_| {
             let (sender, receiver) = mpsc::channel(1);
+            let receiver = SeriesReceiver {
+                batches: receiver,
+                terminal_error: terminal_error.clone(),
+            };
             (Some(sender), Some(receiver))
         })
         .unzip();
-    (SenderList::new(senders), receivers)
+    let senders = SenderList {
+        senders,
+        terminal_error,
+        num_nones: 0,
+        sender_idx: 0,
+        num_full: 0,
+    };
+    (senders, receivers)
 }
 
 impl RegionScanner for SeriesScan {
@@ -1006,6 +1028,7 @@ struct SeriesDistributor {
     metrics_list: Arc<PartitionMetricsList>,
     /// Whether to use verbose logging and collect detailed metrics.
     explain_verbose: bool,
+    query_pool: Arc<dyn MemoryPool>,
 }
 
 impl SeriesDistributor {
@@ -1014,9 +1037,9 @@ impl SeriesDistributor {
         skip_all,
         fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
     )]
-    async fn execute(&mut self) {
+    async fn execute(mut self) {
         if let Err(e) = self.scan_partitions_flat().await {
-            self.senders.send_error(e).await;
+            self.senders.finish_with_error(e);
         }
     }
 
@@ -1111,7 +1134,7 @@ impl SeriesDistributor {
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
 
-        let mut divider = FlatSeriesBatchDivider::default();
+        let mut divider = FlatSeriesBatchDivider::new(&self.query_pool);
         while let Some(record_batch) = reader.try_next().await? {
             metrics.scan_cost += fetch_start.elapsed();
             metrics.num_batches += 1;
@@ -1125,13 +1148,11 @@ impl SeriesDistributor {
 
             // Use divider to split series
             let divider_start = Instant::now();
-            let series_batch = divider.push(record_batch);
+            let series_batch = divider.push(record_batch)?;
             metrics.divider_cost += divider_start.elapsed();
             if let Some(series_batch) = series_batch {
                 let yield_start = Instant::now();
-                self.senders
-                    .send_batch(SeriesBatch::Flat(series_batch))
-                    .await?;
+                self.senders.send_batch(series_batch).await?;
                 metrics.yield_cost += yield_start.elapsed();
             }
             fetch_start = Instant::now();
@@ -1143,9 +1164,7 @@ impl SeriesDistributor {
         metrics.divider_cost += divider_start.elapsed();
         if let Some(series_batch) = series_batch {
             let yield_start = Instant::now();
-            self.senders
-                .send_batch(SeriesBatch::Flat(series_batch))
-                .await?;
+            self.senders.send_batch(series_batch).await?;
             metrics.yield_cost += yield_start.elapsed();
         }
 
@@ -1190,9 +1209,25 @@ pub struct FlatSeriesBatch {
     pub batches: SmallVec<[RecordBatch; 4]>,
 }
 
+/// Batches retained by the distributor or a partition queue, with their query-pool charges.
+#[derive(Default, Debug)]
+struct BufferedSeriesBatch {
+    batches: SmallVec<[RecordBatch; 4]>,
+    // Slices on opposite sides of a series boundary share their backing allocation.
+    reservations: SmallVec<[Arc<MemoryReservation>; 4]>,
+}
+
+impl BufferedSeriesBatch {
+    fn push(&mut self, batch: RecordBatch, reservation: Arc<MemoryReservation>) {
+        self.batches.push(batch);
+        self.reservations.push(reservation);
+    }
+}
+
 /// List of senders.
 struct SenderList {
-    senders: Vec<Option<Sender<Result<SeriesBatch>>>>,
+    senders: Vec<Option<Sender<BufferedSeriesBatch>>>,
+    terminal_error: Arc<OnceLock<Arc<Error>>>,
     /// Number of None senders.
     num_nones: usize,
     /// Index of the current partition to send.
@@ -1202,19 +1237,12 @@ struct SenderList {
 }
 
 impl SenderList {
-    fn new(senders: Vec<Option<Sender<Result<SeriesBatch>>>>) -> Self {
-        let num_nones = senders.iter().filter(|sender| sender.is_none()).count();
-        Self {
-            senders,
-            num_nones,
-            sender_idx: 0,
-            num_full: 0,
-        }
-    }
-
     /// Finds a partition and tries to send the batch to the partition.
     /// Returns None if it sends successfully.
-    fn try_send_batch(&mut self, mut batch: SeriesBatch) -> Result<Option<SeriesBatch>> {
+    fn try_send_batch(
+        &mut self,
+        mut batch: BufferedSeriesBatch,
+    ) -> Result<Option<BufferedSeriesBatch>> {
         for _ in 0..self.senders.len() {
             ensure!(self.num_nones < self.senders.len(), InvalidSenderSnafu);
 
@@ -1223,18 +1251,16 @@ impl SenderList {
                 continue;
             };
 
-            match sender.try_send(Ok(batch)) {
+            match sender.try_send(batch) {
                 Ok(()) => return Ok(None),
                 Err(TrySendError::Full(res)) => {
                     self.num_full += 1;
-                    // Safety: we send Ok.
-                    batch = res.unwrap();
+                    batch = res;
                 }
                 Err(TrySendError::Closed(res)) => {
                     self.senders[sender_idx] = None;
                     self.num_nones += 1;
-                    // Safety: we send Ok.
-                    batch = res.unwrap();
+                    batch = res;
                 }
             }
         }
@@ -1243,7 +1269,7 @@ impl SenderList {
     }
 
     /// Finds a partition and sends the batch to the partition.
-    async fn send_batch(&mut self, batch: SeriesBatch) -> Result<()> {
+    async fn send_batch(&mut self, batch: BufferedSeriesBatch) -> Result<()> {
         let Some(batch) = self.try_send_batch(batch)? else {
             return Ok(());
         };
@@ -1263,7 +1289,7 @@ impl SenderList {
                 let ((idx, reserved), _, _) = futures::future::select_all(reservations).await;
                 match reserved {
                     Ok(permit) => {
-                        permit.send(Ok(batch));
+                        permit.send(batch);
                         return Ok(());
                     }
                     Err(_) => idx,
@@ -1274,12 +1300,8 @@ impl SenderList {
         }
     }
 
-    async fn send_error(&self, error: Error) {
-        let error = Arc::new(error);
-        for sender in self.senders.iter().flatten() {
-            let result = Err(error.clone()).context(ScanSeriesSnafu);
-            let _ = sender.send(result).await;
-        }
+    fn finish_with_error(self, error: Error) {
+        let _ = self.terminal_error.set(Arc::new(error));
     }
 
     fn fetch_add_sender_idx(&mut self) -> usize {
@@ -1313,20 +1335,32 @@ fn new_partition_metrics(
 ///
 /// It only ensures rows of the same series are returned in the same [FlatSeriesBatch].
 /// However, a [FlatSeriesBatch] may contain rows from multiple series.
-#[derive(Default)]
 struct FlatSeriesBatchDivider {
-    buffer: FlatSeriesBatch,
+    reservation: MemoryReservation,
+    buffer: BufferedSeriesBatch,
 }
 
 impl FlatSeriesBatchDivider {
+    fn new(pool: &Arc<dyn MemoryPool>) -> Self {
+        Self {
+            reservation: MemoryConsumer::new("SeriesDistributor").register(pool),
+            buffer: BufferedSeriesBatch::default(),
+        }
+    }
+
     /// Pushes a record batch into the divider.
     ///
-    /// Returns a [FlatSeriesBatch] if we ensure the batch contains all rows of the series in it.
-    fn push(&mut self, batch: RecordBatch) -> Option<FlatSeriesBatch> {
+    /// Emits the buffered group once its last series is complete.
+    fn push(&mut self, batch: RecordBatch) -> Result<Option<BufferedSeriesBatch>> {
+        let reservation = self.reservation.new_empty();
+        reservation
+            .try_grow(batch.get_array_memory_size())
+            .context(crate::error::ScanMemoryExhaustedSnafu)?;
+        let reservation = Arc::new(reservation);
         // If buffer is empty
         if self.buffer.batches.is_empty() {
-            self.buffer.batches.push(batch);
-            return None;
+            self.buffer.push(batch, reservation);
+            return Ok(None);
         }
 
         // Gets the primary key column from the incoming batch.
@@ -1362,8 +1396,8 @@ impl FlatSeriesBatchDivider {
 
         // If last primary key in the batch is the same as last primary key in the buffer.
         if batch_last_pk == buffer_last_pk {
-            self.buffer.batches.push(batch);
-            return None;
+            self.buffer.push(batch, reservation);
+            return Ok(None);
         }
         // Otherwise, the batch must have a different primary key, we find the first offset of the
         // changed primary key.
@@ -1379,31 +1413,19 @@ impl FlatSeriesBatchDivider {
             }
         }
 
-        // Splits the batch at the change offset
-        let (first_part, remaining_part) = if change_offset > 0 {
-            let first_part = batch.slice(0, change_offset);
-            let remaining_part = batch.slice(change_offset, batch.num_rows() - change_offset);
-            (Some(first_part), Some(remaining_part))
-        } else {
-            (None, Some(batch))
-        };
-
-        // Creates the result from current buffer + first part of new batch
         let mut result = std::mem::take(&mut self.buffer);
-        if let Some(first_part) = first_part {
-            result.batches.push(first_part);
-        }
-
-        // Pushes remaining part to the buffer if it exists
-        if let Some(remaining_part) = remaining_part {
-            self.buffer.batches.push(remaining_part);
-        }
-
-        Some(result)
+        let remaining = if change_offset == 0 {
+            batch
+        } else {
+            result.push(batch.slice(0, change_offset), reservation.clone());
+            batch.slice(change_offset, batch.num_rows() - change_offset)
+        };
+        self.buffer.push(remaining, reservation);
+        Ok(Some(result))
     }
 
-    /// Returns the final [FlatSeriesBatch].
-    fn finish(&mut self) -> Option<FlatSeriesBatch> {
+    /// Returns the final buffered group.
+    fn finish(&mut self) -> Option<BufferedSeriesBatch> {
         if self.buffer.batches.is_empty() {
             None
         } else {
@@ -1443,7 +1465,7 @@ mod tests {
         let producer = tokio::spawn(async move {
             for _ in 0..NUM_BATCHES {
                 senders
-                    .send_batch(SeriesBatch::Flat(FlatSeriesBatch::default()))
+                    .send_batch(BufferedSeriesBatch::default())
                     .await
                     .unwrap();
             }
@@ -1453,8 +1475,7 @@ mod tests {
         let consume = async {
             let mut received = 0;
             for mut receiver in receivers.into_iter().flatten() {
-                while let Some(batch) = receiver.recv().await {
-                    batch.unwrap();
+                while receiver.recv().await.unwrap().is_some() {
                     received += 1;
                 }
             }
@@ -1465,6 +1486,39 @@ mod tests {
             .expect("the distributor stalled on partitions the consumer was not reading");
         producer.await.unwrap();
         assert_eq!(NUM_BATCHES, received);
+    }
+
+    #[tokio::test]
+    async fn terminal_error_reaches_each_partition_with_a_full_batch_queue() {
+        let (mut senders, mut receivers) = new_legacy_channel_list(2);
+        let mut first = receivers[0].take().unwrap();
+        let mut second = receivers[1].take().unwrap();
+        let producer = tokio::spawn(async move {
+            senders
+                .send_batch(BufferedSeriesBatch::default())
+                .await
+                .unwrap();
+            senders.finish_with_error(
+                crate::error::UnexpectedSnafu {
+                    reason: "read failed after the first batch",
+                }
+                .build(),
+            );
+        });
+
+        let second_error = tokio::time::timeout(std::time::Duration::from_secs(5), second.recv())
+            .await
+            .expect("partition 1 waited for partition 0")
+            .unwrap_err();
+        assert!(first.recv().await.unwrap().is_some());
+        let first_error = first.recv().await.unwrap_err();
+        let (Error::ScanSeries { source: a, .. }, Error::ScanSeries { source: b, .. }) =
+            (first_error, second_error)
+        else {
+            panic!("expected shared scan errors");
+        };
+        assert!(Arc::ptr_eq(&a, &b));
+        producer.await.unwrap();
     }
 
     fn new_test_record_batch(
@@ -1541,11 +1595,11 @@ mod tests {
 
     #[test]
     fn test_empty_buffer_first_push() {
-        let mut divider = FlatSeriesBatchDivider::default();
+        let mut divider = FlatSeriesBatchDivider::new(&QueryScanContext::default().memory_pool);
         let result = divider.finish();
         assert!(result.is_none());
 
-        let mut divider = FlatSeriesBatchDivider::default();
+        let mut divider = FlatSeriesBatchDivider::new(&QueryScanContext::default().memory_pool);
         let batch = new_test_record_batch(
             &[b"series1", b"series1"],
             &[1000, 2000],
@@ -1553,14 +1607,14 @@ mod tests {
             &[OpType::Put, OpType::Put],
             &[10, 20],
         );
-        let result = divider.push(batch);
+        let result = divider.push(batch).unwrap();
         assert!(result.is_none());
         assert_eq!(divider.buffer.batches.len(), 1);
     }
 
     #[test]
     fn test_same_series_accumulation() {
-        let mut divider = FlatSeriesBatchDivider::default();
+        let mut divider = FlatSeriesBatchDivider::new(&QueryScanContext::default().memory_pool);
 
         let batch1 = new_test_record_batch(
             &[b"series1", b"series1"],
@@ -1578,8 +1632,8 @@ mod tests {
             &[30, 40],
         );
 
-        divider.push(batch1);
-        let result = divider.push(batch2);
+        divider.push(batch1).unwrap();
+        let result = divider.push(batch2).unwrap();
         assert!(result.is_none());
         let series_batch = divider.finish().unwrap();
         assert_eq!(series_batch.batches.len(), 2);
@@ -1587,7 +1641,7 @@ mod tests {
 
     #[test]
     fn test_series_boundary_detection() {
-        let mut divider = FlatSeriesBatchDivider::default();
+        let mut divider = FlatSeriesBatchDivider::new(&QueryScanContext::default().memory_pool);
 
         let batch1 = new_test_record_batch(
             &[b"series1", b"series1"],
@@ -1605,8 +1659,8 @@ mod tests {
             &[30, 40],
         );
 
-        divider.push(batch1);
-        let series_batch = divider.push(batch2).unwrap();
+        divider.push(batch1).unwrap();
+        let series_batch = divider.push(batch2).unwrap().unwrap();
         assert_eq!(series_batch.batches.len(), 1);
 
         assert_eq!(divider.buffer.batches.len(), 1);
@@ -1614,7 +1668,8 @@ mod tests {
 
     #[test]
     fn test_series_boundary_within_batch() {
-        let mut divider = FlatSeriesBatchDivider::default();
+        let pool = QueryScanContext::default().memory_pool;
+        let mut divider = FlatSeriesBatchDivider::new(&pool);
 
         let batch1 = new_test_record_batch(
             &[b"series1", b"series1"],
@@ -1632,19 +1687,26 @@ mod tests {
             &[30, 40],
         );
 
-        divider.push(batch1);
-        let series_batch = divider.push(batch2).unwrap();
+        let first_size = batch1.get_array_memory_size();
+        let split_size = batch2.get_array_memory_size();
+        divider.push(batch1).unwrap();
+        let series_batch = divider.push(batch2).unwrap().unwrap();
+        assert_eq!(pool.reserved(), first_size + split_size);
         assert_eq!(series_batch.batches.len(), 2);
         assert_eq!(series_batch.batches[0].num_rows(), 2);
         assert_eq!(series_batch.batches[1].num_rows(), 1);
 
         assert_eq!(divider.buffer.batches.len(), 1);
         assert_eq!(divider.buffer.batches[0].num_rows(), 1);
+        drop(series_batch);
+        assert_eq!(pool.reserved(), split_size);
+        drop(divider);
+        assert_eq!(pool.reserved(), 0);
     }
 
     #[test]
     fn test_series_splitting() {
-        let mut divider = FlatSeriesBatchDivider::default();
+        let mut divider = FlatSeriesBatchDivider::new(&QueryScanContext::default().memory_pool);
 
         let batch1 = new_test_record_batch(&[b"series1"], &[1000], &[1], &[OpType::Put], &[10]);
 
@@ -1656,8 +1718,8 @@ mod tests {
             &[20, 30, 40, 50],
         );
 
-        divider.push(batch1);
-        let series_batch = divider.push(batch2).unwrap();
+        divider.push(batch1).unwrap();
+        let series_batch = divider.push(batch2).unwrap().unwrap();
         assert_eq!(series_batch.batches.len(), 2);
 
         let total_rows: usize = series_batch.batches.iter().map(|b| b.num_rows()).sum();

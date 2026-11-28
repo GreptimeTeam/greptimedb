@@ -2924,6 +2924,25 @@ async fn test_series_scan_with_format(flat_format: bool) {
         expected_rows,
         collect_partition_rows_round_robin(&scanner, 3).await
     );
+
+    // Another operator has already claimed the query budget when the distributor starts.
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    scanner.reset_state();
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+    let other = MemoryConsumer::new("other-query-operator").register(&pool);
+    other.try_grow(1024 * 1024).unwrap();
+    let ctx = store_api::region_engine::QueryScanContext {
+        memory_pool: pool.clone(),
+        ..Default::default()
+    };
+    let metrics = ExecutionPlanMetricsSet::new();
+    for partition in (0..3).rev() {
+        let mut stream = scanner.scan_partition(&ctx, &metrics, partition).unwrap();
+        let error = stream.try_next().await.unwrap_err();
+        assert_eq!(StatusCode::RuntimeResourcesExhausted, error.status_code());
+    }
+    drop(other);
+    assert_eq!(0, pool.reserved());
 }
 
 /// Cross-range merges split long series but preserve larger batches for short series.
