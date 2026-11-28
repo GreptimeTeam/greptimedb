@@ -364,12 +364,28 @@ impl FrontendClient {
         })
     }
 
-    /// Executes SQL with an optional timezone override.
+    /// Executes SQL with optional Flow budget extensions and an optional
+    /// timezone override.
+    ///
+    /// `timezone`, when set, overrides the session timezone for this statement.
+    ///
+    /// `extensions` are forwarded to the executing frontend exactly like
+    /// `query_with_terminal_metrics` does: as query context extensions in
+    /// standalone mode and as Flow extensions on the Flight request in
+    /// distributed mode.
+    ///
+    /// A flow-owned SQL statement must pass the budget extensions of the flow
+    /// that issues it (`flow.max_memory_bytes` together with `flow.flow_id`, as
+    /// returned by `BatchingTask::memory_budget_extensions`); a statement that
+    /// omits them while the flow declares a `max_memory` budget escapes that
+    /// budget and can run unbounded. Callers that issue a statement not owned by
+    /// a flow pass an empty slice.
     pub async fn sql(
         &self,
         catalog: &str,
         schema: &str,
         sql: &str,
+        extensions: &[(&str, &str)],
         timezone: Option<Timezone>,
     ) -> Result<Output, Error> {
         match self {
@@ -379,6 +395,8 @@ impl FrontendClient {
                     db.database.set_timezone(timezone.to_string());
                 }
                 db.database
+                    .flight_request()
+                    .with_flow_extensions(extensions)
                     .sql(sql)
                     .await
                     .map_err(BoxedError::new)
@@ -390,7 +408,12 @@ impl FrontendClient {
                 // Each request gets fresh query state, including read snapshots.
                 let mut ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
-                    .current_schema(schema.to_string());
+                    .current_schema(schema.to_string())
+                    .extensions(HashMap::from_iter(
+                        extensions
+                            .iter()
+                            .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+                    ));
                 if let Some(timezone) = timezone {
                     ctx = ctx.timezone(timezone);
                 }
@@ -901,6 +924,12 @@ mod tests {
     #[derive(Debug)]
     struct ExtensionAwareHandler;
 
+    /// Records the extensions of every standalone query context it receives.
+    struct CapturingExtensionHandler {
+        extensions: Arc<Mutex<HashMap<String, String>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
     #[derive(Debug)]
     struct SnapshotBindingHandler;
 
@@ -989,6 +1018,30 @@ mod tests {
             assert_eq!(ctx.channel(), Channel::Internal);
             Ok(Output::new_with_affected_rows(1))
         }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for CapturingExtensionHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.extensions.lock().unwrap() = ctx.extensions();
+            Ok(Output::new_with_affected_rows(0))
+        }
+    }
+
+    /// The sorted `flow.*` extension keys of a query context.
+    fn flow_extension_keys(extensions: &HashMap<String, String>) -> Vec<&str> {
+        let mut keys = extensions
+            .keys()
+            .filter(|key| key.starts_with("flow."))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
     }
 
     #[async_trait::async_trait]
@@ -1139,6 +1192,7 @@ mod tests {
                         "test_catalog",
                         "test_schema",
                         "SELECT to_unixtime('2026-01-01 00:00:00')",
+                        &[],
                         timezone.clone(),
                     )
                     .await
@@ -1218,6 +1272,78 @@ mod tests {
         assert_eq!(affected_rows, 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(peer_desc.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sql_forwards_given_extensions_in_standalone_mode() {
+        let extensions = Arc::new(Mutex::new(HashMap::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+            Arc::new(CapturingExtensionHandler {
+                extensions: extensions.clone(),
+                calls: calls.clone(),
+            });
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+
+        client
+            .sql(
+                "greptime",
+                "public",
+                "select 1",
+                &[
+                    (query::options::FLOW_MAX_MEMORY_BYTES, "536870912"),
+                    (query::options::FLOW_ID, "7"),
+                ],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let captured = extensions.lock().unwrap();
+        assert_eq!(
+            captured
+                .get(query::options::FLOW_MAX_MEMORY_BYTES)
+                .map(String::as_str),
+            Some("536870912")
+        );
+        assert_eq!(
+            captured.get(query::options::FLOW_ID).map(String::as_str),
+            Some("7")
+        );
+        // Nothing else is invented for the flow-owned statement. The query
+        // context adds unrelated internal extensions (e.g. `remote_query_id`),
+        // so only the flow-owned keys are inspected here.
+        assert_eq!(
+            flow_extension_keys(&captured),
+            ["flow.flow_id", "flow.max_memory_bytes"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sql_without_extensions_forwards_no_flow_extension_in_standalone_mode() {
+        let extensions = Arc::new(Mutex::new(HashMap::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+            Arc::new(CapturingExtensionHandler {
+                extensions: extensions.clone(),
+                calls: calls.clone(),
+            });
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+
+        client
+            .sql("greptime", "public", "select 1", &[], None)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let captured = extensions.lock().unwrap();
+        assert!(
+            flow_extension_keys(&captured).is_empty(),
+            "a caller without extensions must not forward any flow extension: {captured:?}"
+        );
     }
 
     #[tokio::test]
