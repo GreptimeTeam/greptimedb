@@ -3142,6 +3142,37 @@ async fn test_handover_records_source_tail_and_replays_it() {
     assert!(region.sees_overwrite().await);
 }
 
+/// A handover whose request names no source fails, before the log store hands anything over,
+/// when the source has entries to recover, and leaves the region a Follower.
+#[tokio::test]
+async fn test_handover_from_unknown_source_fails() {
+    let region = TestRegion::new("handover-unknown-source", true, None).await;
+    region.flush_and_demote().await;
+    let last = region.write_handed_over_remote_rows().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+    // A hand-off would fail retryably.
+    region.log_store.fail_creates();
+
+    let error = region.catchup_from(last, None).await.unwrap_err();
+
+    assert_eq!(
+        StatusCode::InvalidArguments,
+        error.status_code(),
+        "{error:?}"
+    );
+    assert!(mito_region.is_follower());
+    assert_eq!(version, next_manifest_version(&mito_region).await);
+    assert!(!region.has_pending_tails());
+    region.log_store.allow_creates();
+    region
+        .catchup_from(last, Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+    region.wait_until_replayed().await;
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+}
+
 /// Where the rows of a region's memtable are when it is caught up.
 #[derive(Clone, Copy, PartialEq)]
 enum MemtableRows {
@@ -3410,6 +3441,33 @@ async fn test_catchup_replays_wal_after_handoff_floor(#[case] again: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
+/// A catchup again of a region that awaits its Leader lease and carries its source's last entry
+/// commits an empty edit: it records no handoff floor and no tail.
+#[tokio::test]
+async fn test_catchup_again_with_reported_entry_writes_no_floor() {
+    let region = TestRegion::new("catchup-again-no-floor", true, None).await;
+    // The flushed entry id stays below the reported one, so a floor would be kept.
+    region.reopen_without_wal_replay().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    mito_region
+        .manifest_ctx
+        .start_leader_lease_wait_for_test(region.region_id);
+    let manifest = region.manifest().await;
+
+    region
+        .catchup_from(region.entries[1], Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+
+    assert!(is_replaced(&region.engine, &mito_region));
+    let caught_up = region.manifest().await;
+    assert_eq!(manifest.manifest_version + 1, caught_up.manifest_version);
+    assert!(caught_up.handoff_floors.is_empty());
+    assert!(caught_up.pending_tails.is_empty());
+    // The replacement replays this node's entries, which no floor covers.
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+}
+
 /// A catchup that replays this node's WAL releases it only up to the tails of this node, which
 /// still need their entries.
 #[tokio::test]
@@ -3611,6 +3669,46 @@ async fn test_handover_refused_while_tail_replay_runs(#[case] in_commit: bool) {
     );
     region.assert_version_files_match_manifest().await;
     region.listener.hold_from(0);
+}
+
+/// A follower opened after a close hands over while the closed instance's tail replay has not
+/// reported its end: that replay's edit cannot reach the new instance.
+#[tokio::test]
+async fn test_reopened_follower_hands_over_during_old_tail_replay() {
+    let region = TestRegion::new("handover-old-replay", true, None).await;
+    let last = region.write_handed_over_remote_rows().await;
+    region
+        .reopen_with_tails(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        .await;
+    // The replay commits its edit and waits before it tells the worker.
+    region.listener.hold_commit_end(true);
+    region.promote_with_lease();
+    wait_until(|| region.listener.commit_ends() == 1).await;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        region.reopen().await;
+        region
+            .catchup_from(last, Some(REMOTE_NODE_ID))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("the reopen or the handover waited for the old tail replay");
+    assert_eq!(
+        0,
+        region.listener.ended(),
+        "the old replay reported its end before the handover"
+    );
+
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    assert!(mito_region.is_writable());
+    assert_eq!(
+        vec![remote_tail(region.entries[1], last, UptoKind::Reported)],
+        region.version().pending_tails
+    );
+    region.listener.hold_commit_end(false);
+    region.wait_until_replayed().await;
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
 }
 
 /// A handover whose commit conflicts with a version another writer published fails retryably

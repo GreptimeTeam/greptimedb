@@ -1384,8 +1384,9 @@ struct RegionWorkerLoop<S> {
     granted_leases: Arc<GrantedLeases>,
     /// Staging regions of this node that have received writes.
     staging_regions: StagingRegionsRef,
-    /// Running tail replays, which stay here until they report their end.
-    tail_replays: HashMap<RegionId, CancellableTaskState>,
+    /// Running tail replays and the instances they replay, which stay here until they report
+    /// their end.
+    tail_replays: HashMap<RegionId, (MitoRegionRef, CancellableTaskState)>,
     /// Work due once a region is a writable leader with its Leader lease, which
     /// `sweep_deferred_lease_work` runs then. Close and drop remove it; a catchup that reopens or
     /// replaces the region keeps it.
@@ -2020,7 +2021,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
     async fn clean(&mut self) {
-        for state in self.tail_replays.values() {
+        for (_, state) in self.tail_replays.values() {
             let _ = state.request_cancel();
         }
         // Closes remaining regions.
