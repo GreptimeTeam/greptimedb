@@ -513,11 +513,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        region.version_control.apply_edit(
-            Some(request.edit.clone()),
-            &request.memtables_to_remove,
-            region.file_purger.clone(),
-        );
+        region
+            .apply_published_edit(request.edit.clone(), &request.memtables_to_remove)
+            .await;
 
         // The flush has committed its manifest. Count only its Parquet output, before
         // WAL cleanup (which can fail after the commit).

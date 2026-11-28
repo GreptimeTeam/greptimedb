@@ -92,6 +92,34 @@ fn test_decoded_row_group_size_is_optional_in_manifests() {
     assert_eq!(file, serde_json::from_value::<FileMeta>(encoded).unwrap());
 }
 
+#[test]
+fn test_file_meta_dedup_marker_trust_is_optional() {
+    let actions = RegionMetaActionList::decode(EDIT.as_bytes()).unwrap();
+    let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
+        panic!("expected edit");
+    };
+    let legacy = &edit.files_to_add[0];
+    assert!(!legacy.dedup_marker_trusted);
+    assert!(
+        serde_json::to_value(legacy)
+            .unwrap()
+            .get("dedup_marker_trusted")
+            .is_none()
+    );
+
+    let trusted = FileMeta {
+        dedup_marker_trusted: true,
+        ..legacy.clone()
+    };
+    assert_ne!(legacy, &trusted);
+    let encoded = serde_json::to_value(&trusted).unwrap();
+    assert_eq!(json!(true), encoded["dedup_marker_trusted"]);
+    assert_eq!(
+        trusted,
+        serde_json::from_value::<FileMeta>(encoded).unwrap()
+    );
+}
+
 #[rstest::rstest]
 #[case("table_compaction")]
 #[case("extensions")]

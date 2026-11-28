@@ -98,8 +98,10 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   Metadata COUNT (`read/scan_region/aggr.rs`) uses the footer for both file-local
   uniqueness and all-Put evidence. Only writers that fold versions may add
   `greptimedb.deduped`. LastNonNull can retain delete barriers, so it requires
-  all-Put output before adding the marker. Unmarked multi-row SSTs stay on the
-  scan path.
+  all-Put output before adding the marker. In non-append regions, a multi-row
+  SST also needs `FileMeta::dedup_marker_trusted`. Old manifests default this
+  field to false. External imports cannot establish trust, and internal file
+  transfers preserve it.
 - **Index extensions**: shared contracts and provider validation live in `sst/index/registry.rs`;
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
   `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file

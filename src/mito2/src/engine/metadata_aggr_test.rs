@@ -356,8 +356,11 @@ async fn test_metadata_aggr_reads_deletes_from_sst_statistics() {
     engine.stop().await.unwrap();
 }
 
+#[rstest::rstest]
+#[case::marked(true)]
+#[case::unmarked(false)]
 #[tokio::test]
-async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
+async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back(#[case] marked: bool) {
     use bytes::Bytes;
     use datatypes::arrow::array::UInt32Array;
     use datatypes::arrow::compute::take_record_batch;
@@ -375,13 +378,19 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
         .create_engine(MitoConfig {
             experimental_metadata_aggr: true,
             schedule_compaction_after_edit: false,
+            min_compaction_interval: Duration::from_secs(3600),
             ..Default::default()
         })
         .await;
     let region_id = RegionId::new(1, 1);
-    let create = CreateRequestBuilder::new().build();
+    let create = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .build();
     let table_dir = create.table_dir.clone();
     let path_type = create.path_type;
+    let options = create.options.clone();
     let schema = test_util::rows_schema(&create);
     engine
         .handle_request(region_id, RegionRequest::Create(create))
@@ -420,18 +429,20 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
         .key_value_metadata()
         .unwrap();
     assert!(entries.iter().any(|entry| entry.key == DEDUPED_SST_KEY));
-    let region_metadata = entries
+    let entries = entries
         .iter()
-        .find(|entry| entry.key == PARQUET_METADATA_KEY)
-        .unwrap()
-        .clone();
+        .filter(|entry| {
+            entry.key == PARQUET_METADATA_KEY || (marked && entry.key == DEDUPED_SST_KEY)
+        })
+        .cloned()
+        .collect();
     let batch = reader.build().unwrap().next().unwrap().unwrap();
     // Preserve physical row count and time bounds, but replace the middle row
     // with a second put for the first row's (primary key, timestamp).
     let duplicate = take_record_batch(&batch, &UInt32Array::from(vec![0, 0, 2])).unwrap();
     let mut replacement_bytes = Vec::new();
     let props = WriterProperties::builder()
-        .set_key_value_metadata(Some(vec![region_metadata]))
+        .set_key_value_metadata(Some(entries))
         .build();
     let mut writer =
         ArrowWriter::try_new(&mut replacement_bytes, duplicate.schema(), Some(props)).unwrap();
@@ -440,8 +451,10 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
     let replacement = crate::sst::file::FileMeta {
         file_id: FileId::random(),
         file_size: replacement_bytes.len() as u64,
+        dedup_marker_trusted: true,
         ..file.meta_ref().clone()
     };
+    let replacement_id = replacement.file_id;
     store
         .write(
             &replacement.file_path(&table_dir, path_type),
@@ -461,6 +474,307 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
         .await
         .unwrap();
 
+    for reopened in [false, true] {
+        if reopened {
+            test_util::reopen_region(&engine, region_id, table_dir.clone(), true, options.clone())
+                .await;
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let manifest = region.manifest_ctx.manifest().await;
+        assert!(!manifest.files[&replacement_id].dedup_marker_trusted);
+        let scan = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(scan.properties().exact_num_rows(), None);
+        for request in [request.clone(), ScanRequest::default()] {
+            let rows = common_recordbatch::RecordBatches::try_collect(
+                engine.scan_to_stream(region_id, request).await.unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 5);
+        }
+    }
+
+    compact(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert!(!manifest.files.contains_key(&replacement_id));
+    assert_eq!(manifest.files.len(), 1);
+    assert!(manifest.files.values().next().unwrap().dedup_marker_trusted);
+    let scan = engine.handle_query(region_id, request).await.unwrap();
+    assert_eq!(scan.properties().exact_num_rows(), Some(5));
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::after_flush(false)]
+#[case::before_flush_notification(true)]
+#[tokio::test]
+async fn test_metadata_aggr_external_reimport_revokes_trust_on_indexed_sst(
+    #[case] delay_flush_notification: bool,
+) {
+    use common_base::Plugins;
+    use store_api::ManifestVersion;
+    use tokio::sync::Notify;
+
+    use crate::engine::region_hook::{RegionHook, RegionHookRef};
+    use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+
+    #[derive(Debug, Default)]
+    struct PauseFlushPublication {
+        committed: Notify,
+        resume: Notify,
+    }
+
+    #[async_trait]
+    impl RegionHook for PauseFlushPublication {
+        async fn on_manifest_updated(
+            &self,
+            _region_id: RegionId,
+            actions: &RegionMetaActionList,
+            _version: ManifestVersion,
+        ) {
+            if actions.actions.iter().any(|action| {
+                matches!(action, RegionMetaAction::Edit(edit) if edit.flushed_entry_id.is_some())
+            }) {
+                self.committed.notify_one();
+                self.resume.notified().await;
+            }
+        }
+    }
+
+    let mut env = TestEnv::new().await;
+    let plugins = Plugins::new();
+    let hook = Arc::new(PauseFlushPublication::default());
+    if delay_flush_notification {
+        plugins.insert(hook.clone() as RegionHookRef);
+    }
+    let engine = env
+        .create_engine_with_plugins(
+            MitoConfig {
+                experimental_metadata_aggr: true,
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            },
+            plugins,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build_with_index();
+    let schema = test_util::rows_schema(&create);
+    let table_dir = create.table_dir.clone();
+    let options = create.options.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        api::v1::Rows {
+            schema,
+            rows: test_util::build_rows_for_key("a", 0, 3, 0),
+        },
+    )
+    .await;
+    let pending_flush = if delay_flush_notification {
+        let engine = engine.clone();
+        let task =
+            tokio::spawn(async move { test_util::flush_region(&engine, region_id, None).await });
+        tokio::time::timeout(Duration::from_secs(10), hook.committed.notified())
+            .await
+            .unwrap();
+        Some(task)
+    } else {
+        test_util::flush_region(&engine, region_id, None).await;
+        None
+    };
+
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    let file = manifest.files.values().next().unwrap().as_ref().clone();
+    assert!(file.dedup_marker_trusted && file.exists_index());
+    let request = ScanRequest {
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    if pending_flush.is_none() {
+        let scan = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(scan.properties().exact_num_rows(), Some(3));
+    }
+
+    let imported = engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![file.clone()],
+                ..Default::default()
+            },
+        )
+        .await;
+    if let Some(task) = pending_flush {
+        hook.resume.notify_one();
+        task.await.unwrap();
+    }
+    imported.unwrap();
+    for reopened in [false, true] {
+        if reopened {
+            test_util::reopen_region(&engine, region_id, table_dir.clone(), true, options.clone())
+                .await;
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let manifest = region.manifest_ctx.manifest().await;
+        let version = region.version();
+        let handle = &version.ssts.levels()[0].files[&file.file_id];
+        assert!(!manifest.files[&file.file_id].dedup_marker_trusted);
+        assert!(!handle.dedup_marker_trusted());
+        assert_eq!(handle.index_id(), file.index_id());
+        let scan = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(scan.properties().exact_num_rows(), None);
+        let rows = common_recordbatch::RecordBatches::try_collect(
+            engine
+                .scan_to_stream(region_id, request.clone())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 3);
+    }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_metadata_aggr_falls_back_after_legacy_checkpoint_rewrite() {
+    use std::collections::HashMap;
+    use std::num::NonZeroU64;
+
+    use serde::{Deserialize, Serialize};
+    use store_api::storage::FileId;
+
+    use crate::manifest::action::RegionCheckpoint;
+    use crate::sst::file::{ColumnIndexMetadata, FileFormat, FileTimeRange, IndexTypes};
+
+    // Freeze the old file schema so re-encoding drops fields an old binary
+    // would ignore, even if the current deserializer understands them.
+    #[derive(Deserialize, Serialize)]
+    struct LegacyFileMeta {
+        region_id: RegionId,
+        file_id: FileId,
+        time_range: FileTimeRange,
+        level: u8,
+        file_size: u64,
+        max_row_group_uncompressed_size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_row_group_decoded_size: Option<u64>,
+        available_indexes: IndexTypes,
+        indexes: Vec<ColumnIndexMetadata>,
+        index_file_size: u64,
+        index_version: u64,
+        num_rows: u64,
+        num_row_groups: u64,
+        sequence: Option<NonZeroU64>,
+        partition_expr: Option<String>,
+        num_series: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        primary_key_min: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        primary_key_max: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preserve_row_sequence: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        format: Option<FileFormat>,
+    }
+
+    #[derive(Deserialize, Serialize)]
+    struct LegacyManifest {
+        files: HashMap<FileId, LegacyFileMeta>,
+        #[serde(flatten)]
+        other_fields: serde_json::Map<String, serde_json::Value>,
+    }
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_metadata_aggr: true,
+            manifest_checkpoint_distance: 0,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&create);
+    let table_dir = create.table_dir.clone();
+    let options = create.options.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &schema, 0..3).await;
+
+    let request = ScanRequest {
+        filters: vec![col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(5000), None)))],
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    {
+        let scan = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(scan.properties().exact_num_rows(), Some(3));
+    }
+
+    let (version, mut file) = {
+        let region = engine.get_region(region_id).unwrap();
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        let manifest = manager.manifest();
+        let version = manifest.manifest_version;
+        assert_eq!(manifest.files.len(), 1);
+        let file = manifest.files.values().next().unwrap().as_ref().clone();
+        assert!(file.dedup_marker_trusted);
+        let legacy: LegacyManifest =
+            serde_json::from_value(serde_json::to_value(manifest.as_ref()).unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "last_version": version,
+            "compacted_actions": version + 1,
+            "checkpoint": legacy,
+        }))
+        .unwrap();
+
+        let mut store = manager.store();
+        store.save_checkpoint(version, &bytes).await.unwrap();
+        let (loaded_version, loaded_bytes) = store.load_last_checkpoint().await.unwrap().unwrap();
+        assert_eq!(loaded_version, version);
+        assert_eq!(
+            RegionCheckpoint::decode(&loaded_bytes)
+                .unwrap()
+                .last_version,
+            version
+        );
+        assert!(
+            !std::str::from_utf8(&loaded_bytes)
+                .unwrap()
+                .contains("\"dedup_marker_trusted\"")
+        );
+        (version, file)
+    };
+
+    test_util::reopen_region(&engine, region_id, table_dir, true, options).await;
+    let region = engine.get_region(region_id).unwrap();
+    let recovered = region.manifest_ctx.manifest().await;
+    assert_eq!(recovered.manifest_version, version);
+    file.dedup_marker_trusted = false;
+    assert_eq!(recovered.files[&file.file_id].as_ref(), &file);
+
     let scan = engine
         .handle_query(region_id, request.clone())
         .await
@@ -472,7 +786,7 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
         )
         .await
         .unwrap();
-        assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 5);
+        assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 3);
     }
     engine.stop().await.unwrap();
 }

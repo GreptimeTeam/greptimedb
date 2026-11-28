@@ -1876,7 +1876,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
-                self.handle_copy_region_from_finished(req)
+                self.handle_copy_region_from_finished(req).await
             }
             BackgroundNotify::RegionFenced => {}
             BackgroundNotify::RegionReloaded { old, result } => {

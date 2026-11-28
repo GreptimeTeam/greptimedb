@@ -30,13 +30,19 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows
 
 #[cfg(feature = "enterprise")]
 #[rstest::rstest]
-#[case::shared_only(false, false)]
-#[case::mixed(true, false)]
-#[case::metadata_rejected_before_copy(true, true)]
+#[case::shared_only(false, false, false)]
+#[case::mixed(true, false, false)]
+#[case::metadata_rejected_before_copy(true, true, false)]
+#[case::trusted_shared(false, false, true)]
 #[tokio::test]
-async fn test_copy_shared_reference_contract(#[case] mixed: bool, #[case] metadata: bool) {
+async fn test_copy_shared_reference_contract(
+    #[case] mixed: bool,
+    #[case] metadata: bool,
+    #[case] trusted_shared: bool,
+) {
     use crate::manifest::action::RegionEdit;
-    use crate::sst::file::{FileMeta, LEVEL_SHARED, RegionFileId};
+    use crate::request::{RegionEditRequest, WorkerRequest};
+    use crate::sst::file::{FileMeta, LEVEL_SHARED, RegionFileId, SHARED_LEVEL_SLOT};
     use crate::test_util::flush_region;
     use std::collections::HashSet;
     use store_api::region_request::PathType;
@@ -90,16 +96,24 @@ async fn test_copy_shared_reference_contract(#[case] mixed: bool, #[case] metada
             .clone()
     };
     for id in [owner_id, source_id] {
-        engine
-            .edit_region(
-                id,
-                RegionEdit {
-                    files_to_add: vec![shared.clone()],
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+        let edit = RegionEdit {
+            files_to_add: vec![shared.clone()],
+            ..Default::default()
+        };
+        if trusted_shared {
+            assert!(shared.dedup_marker_trusted);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let request = RegionEditRequest::new(id, edit, false, tx).for_copy_region();
+            engine
+                .inner
+                .workers
+                .submit_to_worker(id, WorkerRequest::EditRegion(request))
+                .await
+                .unwrap();
+            rx.await.unwrap().unwrap();
+        } else {
+            engine.edit_region(id, edit).await.unwrap();
+        }
     }
     let source = engine
         .get_region(source_id)
@@ -107,6 +121,10 @@ async fn test_copy_shared_reference_contract(#[case] mixed: bool, #[case] metada
         .manifest_ctx
         .manifest()
         .await;
+    assert_eq!(
+        source.files[&shared.file_id].dedup_marker_trusted,
+        trusted_shared
+    );
     let target = engine.get_region(target_id).unwrap();
     let before = target.manifest_ctx.manifest().await;
     let target_path = |file_id| {
@@ -176,6 +194,10 @@ async fn test_copy_shared_reference_contract(#[case] mixed: bool, #[case] metada
                 .unwrap()
         );
         assert_eq!(Some(1), file.sequence.map(|sequence| sequence.get()));
+        assert_eq!(
+            file.dedup_marker_trusted,
+            file.level != LEVEL_SHARED || trusted_shared
+        );
     }
     let sequence = target.version_control.current().last_sequence;
     let retry = engine
@@ -194,6 +216,28 @@ async fn test_copy_shared_reference_contract(#[case] mixed: bool, #[case] metada
     );
     assert_eq!(installed.files, target.manifest_ctx.manifest().await.files);
     assert_eq!(sequence, target.version_control.current().last_sequence);
+    if trusted_shared {
+        engine
+            .edit_region(
+                target_id,
+                RegionEdit {
+                    files_to_add: vec![FileMeta {
+                        dedup_marker_trusted: false,
+                        ..installed.files[&shared.file_id].as_ref().clone()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let manifest = target.manifest_ctx.manifest().await;
+        let version = target.version();
+        let handle = &version.ssts.levels()[SHARED_LEVEL_SLOT].files[&shared.file_id];
+        assert!(manifest.files[&shared.file_id].dedup_marker_trusted);
+        assert!(handle.dedup_marker_trusted());
+        assert_eq!(installed.files, manifest.files);
+        assert_eq!(sequence, target.version_control.current().last_sequence);
+    }
     let rows = RecordBatches::try_collect(
         engine
             .scan_to_stream(target_id, Default::default())

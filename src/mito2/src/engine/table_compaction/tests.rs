@@ -32,6 +32,7 @@ use crate::engine::region_hook::{RegionHook, RegionHookRef, VerifiedSstFileInfo}
 use crate::error::Error;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
+use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::sst::location;
 use crate::test_util::{
@@ -50,6 +51,7 @@ async fn copy_sst(region: &MitoRegionRef, source: &FileMeta, level: u8) -> FileM
     let mut output = source.clone();
     output.file_id = FileId::random();
     output.level = level;
+    output.dedup_marker_trusted = false;
     let access = &region.access_layer;
     let path = |file: &FileMeta| {
         location::sst_file_path(access.table_dir(), file.file_id(), access.path_type())
@@ -74,7 +76,7 @@ async fn copy_sst(region: &MitoRegionRef, source: &FileMeta, level: u8) -> FileM
 
 /// Input admission is deliberately separate from the compaction API.
 async fn seed(engine: &MitoEngine, region_id: RegionId) -> (TableCompactionSnapshot, FileMeta) {
-    let (snapshot, outputs) = seed_shared_inputs(engine, region_id, &[(0, 3)]).await;
+    let (snapshot, outputs) = seed_shared_inputs(engine, region_id, &[(0, 3)], false).await;
     let output = outputs.into_iter().next().unwrap();
     (snapshot, output)
 }
@@ -85,6 +87,7 @@ async fn seed_shared_inputs(
     engine: &MitoEngine,
     region_id: RegionId,
     row_ranges: &[(usize, usize)],
+    trusted_inputs: bool,
 ) -> (TableCompactionSnapshot, Vec<FileMeta>) {
     let create = CreateRequestBuilder::new().build();
     engine
@@ -111,19 +114,28 @@ async fn seed_shared_inputs(
     assert_eq!(row_ranges.len(), originals.len());
     let mut shared = Vec::with_capacity(originals.len());
     for original in &originals {
-        shared.push(copy_sst(&region, original, LEVEL_SHARED).await);
+        let mut file = copy_sst(&region, original, LEVEL_SHARED).await;
+        file.dedup_marker_trusted = trusted_inputs && original.dedup_marker_trusted;
+        shared.push(file);
     }
-    engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                files_to_add: shared,
-                files_to_remove: originals,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    let edit = RegionEdit {
+        files_to_add: shared,
+        files_to_remove: originals,
+        ..Default::default()
+    };
+    if trusted_inputs {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request = RegionEditRequest::new(region_id, edit, false, tx).for_copy_region();
+        engine
+            .inner
+            .workers
+            .submit_to_worker(region_id, WorkerRequest::EditRegion(request))
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+    } else {
+        engine.edit_region(region_id, edit).await.unwrap();
+    }
     let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
     assert_eq!(row_ranges.len(), snapshot.inputs.len());
     let mut outputs = Vec::with_capacity(snapshot.inputs.len());
@@ -131,6 +143,41 @@ async fn seed_shared_inputs(
         outputs.push(copy_sst(&region, input, 0).await);
     }
     (snapshot, outputs)
+}
+
+#[rstest::rstest]
+#[case::older_snapshot(true, false, false, PublicationOutcome::Applied)]
+#[case::unproven_manifest(false, true, false, PublicationOutcome::StaleInputs)]
+#[case::changed_rows(true, false, true, PublicationOutcome::StaleInputs)]
+#[tokio::test]
+async fn test_table_compaction_snapshot_dedup_marker_compatibility(
+    #[case] manifest_trusted: bool,
+    #[case] snapshot_trusted: bool,
+    #[case] changed_rows: bool,
+    #[case] expected: PublicationOutcome,
+) {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (mut snapshot, outputs) =
+        seed_shared_inputs(&engine, region_id, &[(0, 3)], manifest_trusted).await;
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    let input = &mut snapshot.inputs[0];
+    assert_eq!(input, manifest.files[&input.file_id].as_ref());
+    assert_eq!(input.dedup_marker_trusted, manifest_trusted);
+    input.dedup_marker_trusted = snapshot_trusted;
+    if changed_rows {
+        input.num_rows += 1;
+    }
+    assert_eq!(
+        engine
+            .publish_table_compaction(region_id, snapshot, outputs)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(row_count(&engine, region_id).await, 3);
 }
 
 async fn row_count(engine: &MitoEngine, region_id: RegionId) -> usize {
@@ -402,6 +449,13 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
         (
             FileMeta {
                 sequence: None,
+                ..output.clone()
+            },
+            invalid_output,
+        ),
+        (
+            FileMeta {
+                dedup_marker_trusted: true,
                 ..output.clone()
             },
             invalid_output,
@@ -1069,7 +1123,8 @@ async fn test_multiple_outputs_verify_notify_once_and_release_footers(#[case] wi
         env.create_engine(config()).await
     };
     let region_id = RegionId::new(1, 1);
-    let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
+    let (snapshot, outputs) =
+        seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)], false).await;
     assert_eq!(
         PublicationOutcome::Applied,
         engine
@@ -1120,7 +1175,8 @@ async fn test_failed_verification_does_not_notify_hook() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine_with_plugins(config(), plugins).await;
     let region_id = RegionId::new(1, 1);
-    let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
+    let (snapshot, outputs) =
+        seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)], false).await;
     let region = engine.get_region(region_id).unwrap();
     let version = region.manifest_ctx.manifest_version().await;
     let invalid = FileMeta {

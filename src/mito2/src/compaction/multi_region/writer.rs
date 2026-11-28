@@ -209,6 +209,7 @@ impl<'a> TargetWriter<'a> {
             primary_key_min: range.as_ref().map(|(min, _)| min.clone()),
             primary_key_max: range.map(|(_, max)| max),
             preserve_row_sequence: self.preserve_row_sequence,
+            dedup_marker_trusted: false,
             format: info.format.clone(),
         })
     }

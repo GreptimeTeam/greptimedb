@@ -67,6 +67,7 @@ use crate::manifest::action::{
     PendingTail, RegionChange, RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
+use crate::memtable::MemtableId;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
@@ -354,6 +355,50 @@ impl MitoRegion {
     pub(crate) fn version(&self) -> VersionRef {
         let version_data = self.version_control.current();
         version_data.version
+    }
+
+    /// Installs an edit reported by a completed manifest publication. Callers
+    /// must be outside the manifest lock.
+    pub(crate) async fn apply_published_edit(
+        &self,
+        mut edit: RegionEdit,
+        memtables_to_remove: &[MemtableId],
+    ) {
+        let ssts = self.version().ssts.clone();
+        let conflicts = |file: &FileMeta| {
+            ssts.levels()
+                .iter()
+                .filter_map(|level| level.files.get(&file.file_id))
+                .any(|visible| {
+                    visible.file_id() == file.file_id()
+                        && visible.dedup_marker_trusted() != file.dedup_marker_trusted
+                })
+        };
+        // An edit can publish while an earlier writer is still firing its manifest hook.
+        // When their proof differs, install the current metadata under the manifest lock.
+        let manifest_guard = if edit.files_to_add.iter().any(&conflicts) {
+            Some(self.manifest_ctx.manifest_manager.read().await)
+        } else {
+            None
+        };
+        if let Some(manager) = &manifest_guard {
+            let manifest = manager.manifest();
+            edit.files_to_add.retain_mut(|file| {
+                if !conflicts(file) {
+                    return true;
+                }
+                let Some(current) = manifest.files.get(&file.file_id) else {
+                    return false;
+                };
+                if current.file_id() != file.file_id() || current.level != file.level {
+                    return false;
+                }
+                *file = current.as_ref().clone();
+                true
+            });
+        }
+        self.version_control
+            .apply_edit(Some(edit), memtables_to_remove, self.file_purger.clone());
     }
 
     /// Returns whether writes to this region should skip WAL.

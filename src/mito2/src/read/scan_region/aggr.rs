@@ -141,8 +141,8 @@ struct Classification {
 ///   all of its rows (see [`AggrFilters`]).
 /// - Its manifest row count is known.
 /// - In a deduplicating region, no other file or memtable may hold a row with
-///   the same primary key and timestamp. The footer must still prove
-///   uniqueness within the file and that it holds only puts.
+///   the same primary key and timestamp. A multi-row file needs a trusted
+///   dedup marker. The footer must still prove uniqueness and all-Put rows.
 ///
 /// Returns `None` for scans whose visible rows can differ from the sources'
 /// rows for reasons other than the files themselves.
@@ -169,6 +169,7 @@ fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> 
             && range.contains(&end)
             // Zero is unknown in legacy manifests.
             && file.num_rows() > 0
+            && (input.append_mode || file.num_rows() == 1 || file.dedup_marker_trusted())
             && input.file_time_bounds_fit(file)
             && (input.region_partition_expr.is_none() || input.should_skip_region_partition(file))
             && filters.covers(file);
@@ -361,6 +362,7 @@ mod tests {
                 region_id: RegionId::new(123, 456),
                 file_id,
                 num_rows: rows,
+                dedup_marker_trusted: true,
                 time_range: (
                     Timestamp::new_millisecond(start),
                     Timestamp::new_millisecond(end),
@@ -392,6 +394,7 @@ mod tests {
                 region_id: RegionId::new(123, 456),
                 file_id: FileId::random(),
                 num_rows: rows,
+                dedup_marker_trusted: true,
                 time_range: (
                     Timestamp::new_millisecond(start),
                     Timestamp::new_millisecond(end),
@@ -427,6 +430,25 @@ mod tests {
                 filters,
             )))
             .build()
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_requires_trusted_marker_for_non_append_multi_row_files() {
+        for (num_rows, append_mode, expected) in
+            [(2, false, None), (1, false, Some(1)), (2, true, Some(2))]
+        {
+            let file = FileHandle::new(
+                FileMeta {
+                    num_rows,
+                    dedup_marker_trusted: false,
+                    ..file(0, 0, num_rows, true).meta_ref().clone()
+                },
+                new_noop_file_purger(),
+            );
+            let mut input = input(vec![file], &[]).await;
+            input.append_mode = append_mode;
+            assert_eq!(exact_count(&input, &ScanRequest::default()), expected);
+        }
     }
 
     #[tokio::test]

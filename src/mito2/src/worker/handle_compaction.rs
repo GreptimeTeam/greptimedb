@@ -61,11 +61,7 @@ impl<S> RegionWorkerLoop<S> {
                         }
                         let progress =
                             made_progress(edit.files_to_add.len(), edit.files_to_remove.len());
-                        region.version_control.apply_edit(
-                            Some(edit.clone()),
-                            &[],
-                            region.file_purger.clone(),
-                        );
+                        region.apply_published_edit(edit.clone(), &[]).await;
                         self.listener.on_compaction_unit_applied(region_id, plan_id);
                         self.compaction_scheduler.on_unit_finished(
                             region_id,
@@ -231,11 +227,7 @@ impl<S> RegionWorkerLoop<S> {
             request.edit.files_to_remove.len(),
         );
 
-        region.version_control.apply_edit(
-            Some(request.edit.clone()),
-            &[],
-            region.file_purger.clone(),
-        );
+        region.apply_published_edit(request.edit.clone(), &[]).await;
 
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add)
             .into_iter()

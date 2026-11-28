@@ -166,7 +166,8 @@ impl<S> RegionWorkerLoop<S> {
                                 region_edit,
                                 false,
                                 tx,
-                            ),
+                            )
+                            .for_copy_region(),
                         )))
                         .await
                         .is_err()
@@ -217,7 +218,10 @@ impl<S> RegionWorkerLoop<S> {
         });
     }
 
-    pub(crate) fn handle_copy_region_from_finished(&mut self, request: CopyRegionFromFinished) {
+    pub(crate) async fn handle_copy_region_from_finished(
+        &mut self,
+        request: CopyRegionFromFinished,
+    ) {
         let region_id = request.region_id;
         let sender = request.sender;
         let region = match self.regions.writable_region(region_id) {
@@ -235,9 +239,7 @@ impl<S> RegionWorkerLoop<S> {
             .map(|file_meta| file_meta.file_id)
             .collect();
 
-        region
-            .version_control
-            .apply_edit(Some(request.edit), &[], region.file_purger.clone());
+        region.apply_published_edit(request.edit, &[]).await;
 
         let _ = sender.send(Ok(MitoCopyRegionFromResponse { copied_file_ids }));
     }

@@ -68,7 +68,7 @@ use crate::request::{
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileMeta, UncommittedSsts};
-use crate::sst::parquet::metadata::extract_primary_key_range;
+use crate::sst::parquet::metadata::{extract_primary_key_range, has_deduped_sst_marker};
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
     row_group_size_for,
@@ -846,6 +846,11 @@ impl MemtableSstWriter {
                         .file_metadata
                         .as_ref()
                         .and_then(|meta| extract_primary_key_range(meta, &version.metadata));
+                    let dedup_marker_trusted = matches!(self.kind, MemtableWriteKind::Flush(_))
+                        && sst_info
+                            .file_metadata
+                            .as_deref()
+                            .is_some_and(has_deduped_sst_marker);
                     file_metas.push(Self::new_file_meta(
                         self.region_id,
                         max_sequence,
@@ -854,6 +859,7 @@ impl MemtableSstWriter {
                         pk_range,
                         version.options.preserve_row_sequence
                             || version.options.sst_format == Some(FormatType::Narthex),
+                        dedup_marker_trusted,
                     )?);
                 }
                 if self.hook.is_some() {
@@ -1011,6 +1017,7 @@ impl MemtableSstWriter {
         partition_expr: Option<PartitionExpr>,
         primary_key_range: Option<(Bytes, Bytes)>,
         preserve_row_sequence: bool,
+        dedup_marker_trusted: bool,
     ) -> Result<FileMeta> {
         let (primary_key_min, primary_key_max) = match primary_key_range {
             Some((min, max)) => (Some(min), Some(max)),
@@ -1036,6 +1043,7 @@ impl MemtableSstWriter {
             primary_key_min,
             primary_key_max,
             preserve_row_sequence,
+            dedup_marker_trusted,
             format: sst_info.format.clone(),
         })
     }
@@ -2605,6 +2613,84 @@ mod tests {
             }
             assert_eq!(2, total_rows, "append_mode should preserve duplicates");
         }
+    }
+
+    #[tokio::test]
+    async fn test_tail_replay_does_not_trust_a_preencoded_bulk_marker() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::test_util::{
+            CreateRequestBuilder, TestEnv, build_rows_for_key, put_rows, rows_schema,
+        };
+
+        let mut env = TestEnv::new().await;
+        let config = Arc::new(MitoConfig::default());
+        let engine = env.create_engine(config.as_ref().clone()).await;
+        let region_id = RegionId::new(1, 1);
+        let create = CreateRequestBuilder::new()
+            .insert_option("memtable.type", "bulk")
+            .insert_option("memtable.bulk.merge_threshold", "2")
+            .insert_option("memtable.bulk.encode_row_threshold", "1")
+            .insert_option("memtable.bulk.encode_bytes_threshold", "1")
+            .build();
+        let schema = rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        for (start, end) in [(0, 3), (3, 6)] {
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows: build_rows_for_key("a", start, end, 0),
+                },
+            )
+            .await;
+        }
+        let region = engine.get_region(region_id).unwrap();
+        for memtable in region.version().memtables.list_memtables() {
+            memtable.compact(false).unwrap();
+        }
+        region.version_control.freeze_mutable().unwrap();
+
+        let cache = Arc::new(CacheManager::default());
+        let writer = MemtableSstWriter::new_tail_replay(
+            &region,
+            config,
+            cache.clone(),
+            Arc::new(Semaphore::new(1)),
+        );
+        let uncommitted = UncommittedSsts::new(region_id, region.access_layer.clone(), Some(cache));
+        let written = writer
+            .do_flush_memtables(
+                &region.version(),
+                WriteOptions::default(),
+                &CancellableTaskState::new(),
+                &uncommitted,
+            )
+            .await
+            .unwrap();
+        assert_eq!(written.encoded_part_count, 1);
+        let [file] = written.file_metas.as_slice() else {
+            panic!("expected one SST");
+        };
+        assert_eq!(file.num_rows, 6);
+        assert!(!file.dedup_marker_trusted);
+        let bytes = region
+            .access_layer
+            .object_store()
+            .read(&file.file_path(region.table_dir(), region.path_type()))
+            .await
+            .unwrap()
+            .to_bytes();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        assert!(has_deduped_sst_marker(reader.metadata()));
+        uncommitted.cleanup().await;
+        engine.stop().await.unwrap();
     }
 
     #[test]

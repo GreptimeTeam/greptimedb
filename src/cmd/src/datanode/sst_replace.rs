@@ -239,6 +239,7 @@ impl SstReplaceCommand {
             extract_primary_key_range(parquet_meta, &source).unzip();
         // A new identity isolates data, index and footer caches, including on restart.
         // A replacement has no index sidecar, series count or proven partition scope.
+        // It has no trusted dedup marker, regardless of the old file's metadata.
         let new_file = FileMeta {
             file_id: FileId::random(),
             region_id: old_file.region_id,

@@ -127,23 +127,37 @@ impl SstVersion {
             let Some(slot) = file::level_slot(level) else {
                 panic!("Unsupported SST level {level}");
             };
-            // If the file already exists, then we should only replace the handle when the index is outdated.
             levels[slot]
                 .files
                 .entry(file.file_id)
                 .and_modify(|f| {
-                    if f.meta_ref() == file.as_ref() || f.meta_ref().is_index_up_to_date(&file) {
-                        // same file meta or current file handle's index is up-to-date, skip adding
+                    if f.meta_ref() == file.as_ref() {
+                        return;
+                    }
+                    if f.meta_ref().is_index_up_to_date(&file) {
                         if f.index_id().version > new_index_version {
-                            // what does it mean for us to see older index version?
                             common_telemetry::warn!(
-                                "Adding file with older index version, existing: {:?}, new: {:?}, ignoring new file",
+                                "Adding file with older index version, existing: {:?}, new: {:?}, retaining current index",
                                 f.meta_ref(),
                                 file
                             );
                         }
+                        let current = f.meta_ref();
+                        if current.file_id() == file.file_id()
+                            && current.dedup_marker_trusted != file.dedup_marker_trusted
+                        {
+                            // Adopt the committed provenance with its file bounds and partition
+                            // scope while keeping the current index generation.
+                            let meta = FileMeta {
+                                available_indexes: current.available_indexes.clone(),
+                                indexes: current.indexes.clone(),
+                                index_file_size: current.index_file_size,
+                                index_version: current.index_version,
+                                ..file.as_ref().clone()
+                            };
+                            *f = f.with_updated_index(meta);
+                        }
                     } else {
-                        // include case like old file have no index or index is outdated
                         *f = f.with_updated_index(file.clone());
                     }
                 })
@@ -434,6 +448,39 @@ mod tests {
         assert!(!independent.is_deleted());
         drop(version);
         assert!(old_snapshot.levels()[0].files[&meta.file_id].is_deleted());
+    }
+
+    #[rstest::rstest]
+    fn test_file_meta_dedup_trust_update_retains_a_newer_index(
+        #[values(false, true)] trusted: bool,
+    ) {
+        let purger = new_noop_file_purger();
+        let indexed = FileMeta {
+            file_id: FileId::random(),
+            index_version: 2,
+            available_indexes: smallvec::smallvec![crate::sst::file::IndexType::InvertedIndex],
+            dedup_marker_trusted: trusted,
+            ..Default::default()
+        };
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger.clone(), [indexed.clone()].into_iter());
+        let old_reader = version.levels()[0].files[&indexed.file_id].clone();
+        version.add_files(
+            purger,
+            [FileMeta {
+                index_version: 1,
+                dedup_marker_trusted: !trusted,
+                num_rows: 3,
+                ..indexed.clone()
+            }]
+            .into_iter(),
+        );
+
+        let current = &version.levels()[0].files[&indexed.file_id];
+        assert_eq!(trusted, old_reader.dedup_marker_trusted());
+        assert_eq!(!trusted, current.dedup_marker_trusted());
+        assert_eq!(3, current.num_rows());
+        assert_eq!(current.index_id(), old_reader.index_id());
     }
 
     #[test]

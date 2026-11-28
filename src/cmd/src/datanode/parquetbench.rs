@@ -358,6 +358,7 @@ impl ParquetbenchCommand {
                 primary_key_min: None,
                 primary_key_max: None,
                 preserve_row_sequence: false,
+                dedup_marker_trusted: false,
                 format: Default::default(),
             },
             Arc::new(NoopFilePurger),

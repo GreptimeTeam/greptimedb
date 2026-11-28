@@ -632,6 +632,13 @@ async fn test_replays_own_tail_after_reopen() {
 
     let version = region.version();
     assert_eq!(1, version.ssts.levels()[0].files.len());
+    assert!(
+        !version.ssts.levels()[0]
+            .files()
+            .next()
+            .unwrap()
+            .dedup_marker_trusted()
+    );
     assert_eq!(region.entries[1], version.flushed_entry_id);
     assert_eq!(6, count_rows(&region.engine, region.region_id).await);
     // The commit released the replayed WAL.

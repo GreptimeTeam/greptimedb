@@ -90,10 +90,20 @@ fn is_current(
     context.metadata == manifest.metadata
         && context.options == current.version.options
         && !edit.files_to_remove.is_empty()
-        && edit
-            .files_to_remove
-            .iter()
-            .all(|file| manifest.files.get(&file.file_id).map(AsRef::as_ref) == Some(file))
+        && edit.files_to_remove.iter().all(|file| {
+            let Some(current) = manifest.files.get(&file.file_id) else {
+                return false;
+            };
+            let current = current.as_ref();
+            if current.dedup_marker_trusted && !file.dedup_marker_trusted {
+                // An older compactor drops this field when it decodes the snapshot.
+                let mut aligned = file.clone();
+                aligned.dedup_marker_trusted = true;
+                &aligned == current
+            } else {
+                file == current
+            }
+        })
 }
 
 fn validate_files(
@@ -141,6 +151,7 @@ fn validate_files(
                 && !manifest.files.contains_key(&file.file_id)
                 && file.partition_expr.as_deref() == partition.as_ref()
                 && file.preserve_row_sequence == trusted
+                && !file.dedup_marker_trusted
                 && file.sequence == sequence),
         InvalidRequestSnafu {
             region_id,

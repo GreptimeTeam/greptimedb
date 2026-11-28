@@ -238,9 +238,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region.version_control.set_entry_id(flushed_entry_id);
         }
         let file_metas = edit.files_to_add.clone();
-        region
-            .version_control
-            .apply_edit(Some(edit), &[], region.file_purger.clone());
+        region.apply_published_edit(edit, &[]).await;
         if self.config.index.build_mode == IndexBuildMode::Async && !file_metas.is_empty() {
             self.handle_rebuild_index(
                 BuildIndexRequest {

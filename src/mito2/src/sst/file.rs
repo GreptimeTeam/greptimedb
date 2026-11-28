@@ -436,6 +436,11 @@ pub struct FileMeta {
     /// restore this capability for untrusted inputs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
+    /// Whether `greptimedb.deduped` in this file's Parquet footer was emitted
+    /// by an engine writer that folded row versions. Defaults to `false` so
+    /// legacy manifests and checkpoints rewritten across a downgrade fail closed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dedup_marker_trusted: bool,
     /// Physical encoding, omitted for legacy Parquet files.
     #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
     pub format: FileFormat,
@@ -517,6 +522,9 @@ impl Debug for FileMeta {
             )
             .field("partition_expr", &self.partition_expr)
             .field("num_series", &self.num_series);
+        if self.dedup_marker_trusted {
+            debug_struct.field("dedup_marker_trusted", &self.dedup_marker_trusted);
+        }
         if self.primary_key_min.is_some() || self.primary_key_max.is_some() {
             debug_struct
                 .field(
@@ -944,6 +952,10 @@ impl FileHandle {
 
     pub fn num_rows(&self) -> usize {
         self.inner.meta.num_rows as usize
+    }
+
+    pub fn dedup_marker_trusted(&self) -> bool {
+        self.inner.meta.dedup_marker_trusted
     }
 
     pub fn level(&self) -> Level {

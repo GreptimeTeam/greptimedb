@@ -54,6 +54,135 @@ fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
         .and(col(col_name).lt(Value::Int64(end)))
 }
 
+#[rstest::rstest]
+#[case::matching(10.0, Some(3), 3, false)]
+#[case::narrowed(2.0, None, 2, false)]
+#[case::matching_existing_index(10.0, Some(3), 3, true)]
+#[case::narrowed_existing_index(2.0, None, 2, true)]
+#[tokio::test]
+async fn test_apply_staging_manifest_preserves_metadata_aggr_evidence(
+    #[case] target_upper_bound: f64,
+    #[case] expected_exact: Option<usize>,
+    #[case] expected_rows: usize,
+    #[case] existing_index: bool,
+) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_metadata_aggr: true,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(1, 1);
+    let target = RegionId::new(1, 2);
+    let source_expr = col("field_0").lt(Value::from(10.0));
+    let create = CreateRequestBuilder::new()
+        .partition_expr_json(Some(source_expr.as_json_str().unwrap()))
+        .build_with_index();
+    let schema = rows_schema(&create);
+    engine
+        .handle_request(source, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    super::compaction_test::put_and_flush(&engine, source, &schema, 0..3).await;
+    let source_manifest = engine
+        .get_region(source)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    let source_file = source_manifest.files.values().next().unwrap();
+    assert!(source_file.dedup_marker_trusted);
+
+    engine
+        .set_region_role_state_gracefully(source, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let target_partition = col("field_0").lt(Value::from(target_upper_bound));
+    let target_expr = target_partition.as_json_str().unwrap();
+    let remapped = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source,
+            input_regions: vec![source],
+            region_mapping: [(source, vec![target])].into_iter().collect(),
+            new_partition_exprs: [(target, target_expr.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target,
+            RegionRequest::Create(CreateRequestBuilder::new().build_with_index()),
+        )
+        .await
+        .unwrap();
+    if existing_index {
+        assert!(source_file.exists_index());
+        engine
+            .edit_region(
+                target,
+                RegionEdit {
+                    files_to_add: vec![FileMeta {
+                        partition_expr: Some(target_partition.into()),
+                        ..source_file.as_ref().clone()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let target_version = engine.get_region(target).unwrap().version();
+        let handle = &target_version.ssts.levels()[0].files[&source_file.file_id];
+        assert!(!handle.dedup_marker_trusted());
+        assert_eq!(handle.index_id(), source_file.index_id());
+    }
+    engine
+        .handle_request(
+            target,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    target_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: target_expr,
+                central_region_id: source,
+                manifest_path: remapped.manifest_paths[&target].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(target).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    let imported = &manifest.files[&source_file.file_id];
+    assert!(imported.dedup_marker_trusted);
+    assert_eq!(imported.partition_expr.as_deref(), Some(&source_expr));
+    let version = region.version();
+    let handle = &version.ssts.levels()[0].files[&source_file.file_id];
+    assert_eq!(imported.as_ref(), handle.meta_ref());
+    let request = ScanRequest {
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    let scan = engine.handle_query(target, request.clone()).await.unwrap();
+    assert_eq!(scan.properties().exact_num_rows(), expected_exact);
+    let rows = RecordBatches::try_collect(engine.scan_to_stream(target, request).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        expected_rows
+    );
+}
+
 #[tokio::test]
 async fn test_apply_staging_manifest_sequence_domain() {
     common_telemetry::init_default_ut_logging();

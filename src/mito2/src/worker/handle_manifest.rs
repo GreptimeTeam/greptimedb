@@ -101,10 +101,12 @@ impl RegionEditQueue {
     }
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
-        fn can_merge(request: &RegionEditRequest) -> bool {
-            if !matches!(request.kind, RegionEditKind::Import) {
-                return false;
-            }
+        fn mergeable_import(request: &RegionEditRequest) -> Option<bool> {
+            let external = match request.kind {
+                RegionEditKind::Import { external } => external,
+                #[cfg(feature = "enterprise")]
+                RegionEditKind::Compaction(_) => return None,
+            };
             let edit = &request.edit;
             // Only the `RegionEdit`:
             // 1. contains the "raw" (file without a sequence) files to add,
@@ -115,7 +117,7 @@ impl RegionEditQueue {
             // However, merging them means they will all share a same sequence, and if there are
             // overlapping data in the files, the dedup is uncertain. This is a caution that must
             // be noticed for editing region.
-            edit.files_to_add.iter().all(|f| f.sequence.is_none())
+            (edit.files_to_add.iter().all(|f| f.sequence.is_none())
                 && edit.files_to_remove.is_empty()
                 && edit.series_indexes_to_add.is_empty()
                 && edit.series_indexes_to_remove.is_empty()
@@ -124,17 +126,19 @@ impl RegionEditQueue {
                 && edit.flushed_entry_id.is_none()
                 && edit.flushed_sequence.is_none()
                 && edit.committed_sequence.is_none()
-                && edit.wal_recovery == WalRecoveryEdit::default()
+                && edit.wal_recovery == WalRecoveryEdit::default())
+            .then_some(external)
         }
 
         let mut merged = self.requests.pop_front()?;
-        if !can_merge(&merged) {
+        let Some(external) = mergeable_import(&merged) else {
             return Some(merged);
-        }
+        };
 
-        // Merging must preserve the staging binding of every waiter.
+        // Merging must preserve the source and staging binding of every import.
         while let Some(request) = self.requests.pop_front_if(|request| {
-            can_merge(request) && request.staging_partition_expr == merged.staging_partition_expr
+            mergeable_import(request) == Some(external)
+                && request.staging_partition_expr == merged.staging_partition_expr
         }) {
             merged.edit.files_to_add.extend(request.edit.files_to_add);
             merged.waiters.merge(request.waiters);
@@ -323,7 +327,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     fn is_import_without_staging_binding(request: &RegionEditRequest) -> bool {
-        matches!(request.kind, RegionEditKind::Import) && request.staging_partition_expr.is_none()
+        matches!(request.kind, RegionEditKind::Import { .. })
+            && request.staging_partition_expr.is_none()
     }
 
     /// Whether EnterStaging is pending in the worker, flush, or compaction queue.
@@ -433,9 +438,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
             return RegionEditDispatch::Rejected;
         }
-        if matches!(kind, RegionEditKind::Import)
-            && let Err(error) = prepare_region_edit(&region, &mut edit)
-        {
+        let preparation = match kind {
+            RegionEditKind::Import { external } => {
+                prepare_region_edit(&region, &mut edit, external)
+            }
+            #[cfg(feature = "enterprise")]
+            RegionEditKind::Compaction(_) => Ok(()),
+        };
+        if let Err(error) = preparation {
             let error = Arc::new(error);
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
             return RegionEditDispatch::Rejected;
@@ -465,7 +475,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = match kind {
-                RegionEditKind::Import => {
+                RegionEditKind::Import { .. } => {
                     // Removing one contributor invalidates the collective watermark.
                     // Editing excludes new native publications while the import is committed.
                     if !edit.series_indexes_to_remove.is_empty() {
@@ -634,10 +644,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     });
                     edit.series_indexes_to_remove
                         .retain(|id| !manifest.series_indexes.contains_key(&id.file_id()));
+                    region
+                        .version_control
+                        .apply_edit(Some(edit), &[], region.file_purger.clone());
+                } else {
+                    region.apply_published_edit(edit, &[]).await;
                 }
-                region
-                    .version_control
-                    .apply_edit(Some(edit), &[], region.file_purger.clone());
             }
             if edit_result.update_region_state {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
@@ -1027,7 +1039,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
-fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
+fn prepare_region_edit(
+    region: &MitoRegionRef,
+    edit: &mut RegionEdit,
+    external: bool,
+) -> Result<()> {
     let region_id = region.region_id;
     region.version().options.validate_file_formats(
         region_id,
@@ -1075,11 +1091,13 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
     );
     for file in &edit.files_to_add {
         if let Some(existing) = shared.get(&file.file_id) {
+            let existing = existing.meta_ref();
             let mut imported = file.clone();
-            imported.sequence = existing.meta_ref().sequence;
+            imported.sequence = existing.sequence;
             imported.preserve_row_sequence = false;
+            imported.dedup_marker_trusted = existing.dedup_marker_trusted;
             snafu::ensure!(
-                &imported == existing.meta_ref(),
+                &imported == existing,
                 crate::error::InvalidRequestSnafu {
                     region_id,
                     reason: "Shared SST import conflicts with a visible reference",
@@ -1114,8 +1132,12 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
             NonZeroU64::new(sequence)
         };
     for file in &mut edit.files_to_add {
-        file.sequence = existing_sequence(file).or(sequence);
+        let existing_shared = shared.get(&file.file_id).map(|handle| handle.meta_ref());
+        file.sequence = existing_shared.and_then(|meta| meta.sequence).or(sequence);
         file.preserve_row_sequence = false;
+        let trusted = !external && file.dedup_marker_trusted;
+        file.dedup_marker_trusted =
+            existing_shared.map_or(trusted, |meta| meta.dedup_marker_trusted);
     }
     Ok(())
 }
@@ -1252,42 +1274,51 @@ mod tests {
     use crate::test_util::{CreateRequestBuilder, TestEnv};
 
     #[test]
-    fn test_edit_queue_preserves_staging_bindings() {
-        for (left, right, merge) in [
-            (None, None, true),
-            (Some("a"), Some("a"), true),
-            (None, Some("a"), false),
-            (Some("a"), None, false),
-            (Some("a"), Some("b"), false),
+    fn test_edit_queue_preserves_staging_bindings_and_import_source() {
+        for (left, right) in [
+            (None, None),
+            (Some("a"), Some("a")),
+            (None, Some("a")),
+            (Some("a"), None),
+            (Some("a"), Some("b")),
         ] {
-            let region_id = RegionId::new(1, 1);
-            let mut queue = RegionEditQueue::new(region_id);
-            let mut receivers = Vec::new();
-            for binding in [left, right] {
-                let (sender, receiver) = tokio::sync::oneshot::channel();
-                let mut request =
-                    RegionEditRequest::new(region_id, RegionEdit::default(), false, sender);
-                request.staging_partition_expr = binding.map(str::to_string);
-                assert!(matches!(queue.enqueue(request), RegionEditDispatch::Queued));
-                receivers.push(receiver);
-            }
-            let first = queue.dequeue().unwrap();
-            assert_eq!(left, first.staging_partition_expr.as_deref());
-            first.waiters.reply_with(|| Ok(()));
-            assert!(receivers[0].try_recv().unwrap().is_ok());
-            if merge {
+            for (left_external, right_external) in
+                [(true, true), (false, false), (true, false), (false, true)]
+            {
+                let region_id = RegionId::new(1, 1);
+                let mut queue = RegionEditQueue::new(region_id);
+                let mut receivers = Vec::new();
+                for (binding, external) in [(left, left_external), (right, right_external)] {
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    let mut request =
+                        RegionEditRequest::new(region_id, RegionEdit::default(), false, sender);
+                    request.kind = RegionEditKind::Import { external };
+                    request.staging_partition_expr = binding.map(str::to_string);
+                    assert!(matches!(queue.enqueue(request), RegionEditDispatch::Queued));
+                    receivers.push(receiver);
+                }
+                let first = queue.dequeue().unwrap();
+                assert_eq!(left, first.staging_partition_expr.as_deref());
+                assert!(
+                    matches!(first.kind, RegionEditKind::Import { external } if external == left_external)
+                );
+                first.waiters.reply_with(|| Ok(()));
+                assert!(receivers[0].try_recv().unwrap().is_ok());
+                if left != right || left_external != right_external {
+                    assert!(matches!(
+                        receivers[1].try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                    ));
+                    let second = queue.dequeue().unwrap();
+                    assert_eq!(right, second.staging_partition_expr.as_deref());
+                    assert!(
+                        matches!(second.kind, RegionEditKind::Import { external } if external == right_external)
+                    );
+                    second.waiters.reply_with(|| Ok(()));
+                }
                 assert!(receivers[1].try_recv().unwrap().is_ok());
-            } else {
-                assert!(matches!(
-                    receivers[1].try_recv(),
-                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                ));
-                let second = queue.dequeue().unwrap();
-                assert_eq!(right, second.staging_partition_expr.as_deref());
-                second.waiters.reply_with(|| Ok(()));
-                assert!(receivers[1].try_recv().unwrap().is_ok());
+                assert!(queue.is_empty());
             }
-            assert!(queue.is_empty());
         }
     }
 

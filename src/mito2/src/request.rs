@@ -1531,7 +1531,9 @@ impl Waiters {
 /// Transient execution semantics; this is never serialized into the manifest.
 #[derive(Debug)]
 pub(crate) enum RegionEditKind {
-    Import,
+    Import {
+        external: bool,
+    },
     #[cfg(feature = "enterprise")]
     Compaction(Box<crate::engine::table_compaction::PublicationContext>),
 }
@@ -1562,7 +1564,7 @@ impl RegionEditRequest {
             region_id,
             edit,
             preload_sst_cache,
-            kind: RegionEditKind::Import,
+            kind: RegionEditKind::Import { external: true },
             waiters: Waiters::one(waiter),
             staging_partition_expr: None,
         }
@@ -1570,7 +1572,14 @@ impl RegionEditRequest {
 
     /// Binds the edit to the staging for `partition_expr`.
     pub(crate) fn for_staging(mut self, partition_expr: String) -> Self {
+        self.kind = RegionEditKind::Import { external: false };
         self.staging_partition_expr = Some(partition_expr);
+        self
+    }
+
+    /// Preserves the provenance of SSTs copied from a source region's manifest.
+    pub(crate) fn for_copy_region(mut self) -> Self {
+        self.kind = RegionEditKind::Import { external: false };
         self
     }
 }

@@ -65,7 +65,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::registry::{IndexBuildPlan, IndexRegistry};
 use crate::sst::location::region_dir_from_table_dir;
-use crate::sst::parquet::metadata::extract_primary_key_range;
+use crate::sst::parquet::metadata::{extract_primary_key_range, has_deduped_sst_marker};
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::writer::SstWriteContext;
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -941,6 +941,10 @@ impl DefaultSstMerger {
                     primary_key_min,
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
+                    dedup_marker_trusted: sst_info
+                        .file_metadata
+                        .as_deref()
+                        .is_some_and(has_deduped_sst_marker),
                     format: sst_info.format.clone(),
                 })
             })
