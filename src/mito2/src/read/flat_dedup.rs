@@ -484,7 +484,10 @@ impl FlatLastNonNull {
         filter_deleted: bool,
     ) -> Result<(RecordBatch, bool)> {
         let mut ranges = partitions.ranges();
-        let contains_delete = filter_deleted && Self::last_range_has_delete(&ranges, op_types);
+        // With one range, the last range is the first range, so it keeps the previous batch's delete.
+        let contains_delete = filter_deleted
+            && (Self::last_range_has_delete(&ranges, op_types)
+                || (ranges.len() == 1 && first_range_contains_delete));
         if !filter_deleted && op_types.values().contains(&(OpType::Delete as u8)) {
             let mut segments = Vec::with_capacity(ranges.len());
             for range in ranges {
