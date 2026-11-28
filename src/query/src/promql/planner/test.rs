@@ -2610,60 +2610,37 @@ async fn native_empty_discovery_declares_the_field_its_matcher_names() {
     }
 }
 
-/// The zero-match answer of a `__field__` operator this route cannot apply keeps the existing plan.
+/// The zero-match answer of a `__field__` operator this route cannot apply is a refusal that names
+/// the cause.
 ///
 /// The field operators other than `=` keep or drop columns by a rule over every field a table
-/// carries, and an input that reads no table has none: there is no layout to state, so the
-/// selection is not one this route answers and the statement is planned the way it was without the
-/// route - the existing planner's own answer, including the refusal it raises when it has no table
-/// to bind.
+/// carries, and an input that reads no table has none: the empty frame declares the one field the
+/// matcher names, and a rule that reads the table's fields has nothing to read it over. The route
+/// does not answer that shape, and a statement that asked for this route is not answered by another
+/// plan in its place, so the refusal is the answer - it names the layout nothing decided.
 #[tokio::test]
-async fn native_empty_discovery_keeps_a_field_operator_it_cannot_apply() {
+async fn native_empty_discovery_refuses_a_field_operator_it_cannot_apply() {
     for query in [
         r#"{__field__=~"field.*", job="api"}"#,
         r#"{__field__!="field_0", job="api"}"#,
     ] {
-        let native = PromPlanner::stmt_to_plan_with_annotations(
+        let error = PromPlanner::stmt_to_plan_with_annotations(
             metric_discovery_provider(&["alpha_total", "beta_total"]).await,
             &build_eval_stmt(query),
             &build_query_engine_state(),
             None,
             true,
         )
-        .await;
-        let without_flag = PromPlanner::stmt_to_plan_with_annotations(
-            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
-            &build_eval_stmt(query),
-            &build_query_engine_state(),
-            None,
-            false,
-        )
-        .await;
-        match (native, without_flag) {
-            (Ok(native), Ok(without_flag)) => {
-                assert!(
-                    find_fused_series(&native).is_none(),
-                    "`{query}` claimed a field layout nothing decided: {}",
-                    native.display_indent()
-                );
-                assert_eq!(
-                    without_flag.display_indent().to_string(),
-                    native.display_indent().to_string(),
-                    "`{query}` must keep the existing plan"
-                );
-            }
-            // The existing planner has no table to bind, which is the answer this route leaves it.
-            (Err(native), Err(without_flag)) => assert_eq!(
-                without_flag.to_string(),
-                native.to_string(),
-                "`{query}` reports the existing planner's own refusal"
+        .await
+        .expect_err("a set-shaped `__field__` operator over no table has no layout to state");
+        assert!(
+            matches!(
+                &error,
+                crate::promql::error::Error::UnsupportedNativeShape { reason, .. }
+                    if reason.as_str() == "field_matcher_has_no_empty_layout"
             ),
-            (native, without_flag) => panic!(
-                "`{query}`: the route answered {} where the existing planner answered {}",
-                native.is_ok(),
-                without_flag.is_ok()
-            ),
-        }
+            "`{query}` reports the layout nothing decided: {error}"
+        );
     }
 }
 
@@ -3600,9 +3577,18 @@ async fn native_fused_timestamp_admits_raw_and_evaluated_vectors() {
     }
 }
 
+/// A `timestamp` over a selection of several value columns is timestamped column by column.
+///
+/// Each value column holds its own sample per point, so `timestamp` reports the time that sample
+/// was taken at for that column, and none where the column holds none. Over a computed vector it
+/// reports the evaluation time in seconds instead (`abs` makes a new sample at the evaluation
+/// instant). The selection's fields name the columns, as any multi-field answer does.
 #[tokio::test]
-async fn native_fused_timestamp_with_multiple_fields_keeps_legacy_plan() {
-    for query in ["timestamp(some_metric)", "timestamp(abs(some_metric))"] {
+async fn native_fused_timestamp_over_a_multi_field_selection() {
+    for (query, raw_selector) in [
+        ("timestamp(some_metric)", true),
+        ("timestamp(abs(some_metric))", false),
+    ] {
         let provider = build_test_table_provider_with_options(
             &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
             1,
@@ -3615,13 +3601,46 @@ async fn native_fused_timestamp_with_multiple_fields_keeps_legacy_plan() {
         )
         .await;
         let plan = build_native_fused_plan_with_provider(query, true, provider).await;
-        assert!(find_fused_series(&plan).is_none(), "{query}");
-        assert!(
-            plan.display_indent()
-                .to_string()
-                .contains("PromInstantManipulate"),
-            "{query}"
-        );
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        if raw_selector {
+            assert!(
+                matches!(
+                    &fused.tree().root().expr,
+                    NativeExpr::Instant { op, .. }
+                        if op.value == promql::native::plan::InstantValue::Timestamp
+                ),
+                "{query}: a raw selection reports each selected sample's own time: {display}"
+            );
+        } else {
+            assert!(
+                matches!(&fused.tree().root().expr, NativeExpr::Timestamp { .. }),
+                "{query}: an evaluated vector reports the evaluation time: {display}"
+            );
+        }
+        let expression = parser::parse(query).unwrap().to_string();
+        let values = vec![
+            format!("{expression}.field_0"),
+            format!("{expression}.field_1"),
+        ];
+        let mut expected = values.clone();
+        expected.extend(["tag_0".to_string(), "timestamp".to_string()]);
+        expected.push(METRIC_NAME.to_string());
+        expected.sort();
+        assert_eq!(expected, sorted_column_names(&plan), "{query}: {display}");
+        for value in values {
+            let field = plan
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.name() == &value)
+                .unwrap_or_else(|| panic!("{query}: `{value}` is one of the value columns"));
+            assert_eq!(
+                field.data_type(),
+                &ArrowDataType::Float64,
+                "{query}: a timestamp is reported in seconds: {display}"
+            );
+        }
     }
 }
 
@@ -4945,27 +4964,6 @@ async fn native_fused_engine_without_raw_series_falls_back() {
     );
 }
 
-/// The plan `query` gets, or `None` when the planner refuses it.
-///
-/// A field the raw series scan cannot read must not change what the statement answers, and some of
-/// these statements the existing planner refuses outright: that refusal is its answer, so a test has
-/// to be able to hold the route to it instead of unwrapping a plan.
-async fn plan_or_refusal(
-    query: &str,
-    native_fused: bool,
-    table_provider: DfTableSourceProvider,
-) -> Option<LogicalPlan> {
-    PromPlanner::stmt_to_plan_with_annotations(
-        table_provider,
-        &build_eval_stmt(query),
-        &build_query_engine_state(),
-        None,
-        native_fused,
-    )
-    .await
-    .ok()
-}
-
 /// A shape the native route does not answer is that error, naming the cause the walk recorded.
 #[tokio::test]
 async fn a_shape_the_route_does_not_answer_names_its_cause() {
@@ -5017,61 +5015,54 @@ async fn a_shape_the_route_does_not_answer_names_its_cause() {
     );
 }
 
-/// A value field the raw-series readers cannot serve keeps the existing plan.
+/// A value field the raw-series readers cannot serve is refused, naming the cause.
 ///
 /// The route admits two kinds: a `Float64`, which every reader serves, and the canonical native
 /// histogram struct, which the ordinary scan reads while the columnar samples - `Float64` only -
 /// are skipped for that selection. Everything else - a string, a boolean, a decimal - has no raw
-/// representation and keeps the existing plan whatever the shape of the statement, including the
-/// shapes that publish a `Float64` for a numeric field: `some_metric * 2` casts a string as readily
-/// as an integer, and the route still refuses it because no raw frame can hold the values.
+/// representation, and a statement that asked for this route is not answered by another plan in its
+/// place, so the refusal is the answer whatever the shape of the statement, including the shapes
+/// that publish a `Float64` for a numeric field: `some_metric * 2` casts a string as readily as an
+/// integer, and the route still refuses it because no raw frame can hold the values.
+///
+/// Which stage names the cause depends on the shape, and each reason is the one that shape's
+/// refusal carries: a selection, an aggregate over one and a window over one reach the selector's
+/// own admission and name the mixed field kinds, while a binary is composed from two planned
+/// frames, so the operand that could not be planned as a frame is what its refusal names.
 #[tokio::test]
-async fn native_fused_unsupported_field_type_falls_back() {
-    for field_type in [
-        ConcreteDataType::string_datatype(),
-        ConcreteDataType::boolean_datatype(),
-        // Arrow's `is_numeric` includes the decimals, so a decimal field only stays out because
-        // the route's own numeric set leaves the decimals out; asking Arrow would let it through.
-        ConcreteDataType::decimal128_datatype(10, 2),
+async fn native_fused_unsupported_field_type_is_refused() {
+    for (query, reason) in [
+        ("some_metric", "mixed_field_kinds"),
+        ("sum(some_metric)", "mixed_field_kinds"),
+        ("min(some_metric)", "mixed_field_kinds"),
+        ("rate(some_metric[5m])", "mixed_field_kinds"),
+        ("some_metric * 2", "left_operand_is_not_a_frame"),
     ] {
-        for query in [
-            "some_metric",
-            "some_metric * 2",
-            "sum(some_metric)",
-            "min(some_metric)",
-            "rate(some_metric[5m])",
+        for field_type in [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::boolean_datatype(),
+            // Arrow's `is_numeric` includes the decimals, so a decimal field only stays out
+            // because the route's own numeric set leaves the decimals out; asking Arrow would let
+            // it through.
+            ConcreteDataType::decimal128_datatype(10, 2),
         ] {
-            let native = plan_or_refusal(
-                query,
+            let error = PromPlanner::stmt_to_plan_with_annotations(
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+                &build_eval_stmt(query),
+                &build_query_engine_state(),
+                None,
                 true,
-                build_test_table_provider_with_field_type(field_type.clone()).await,
             )
-            .await;
-            let without_flag = plan_or_refusal(
-                query,
-                false,
-                build_test_table_provider_with_field_type(field_type.clone()).await,
-            )
-            .await;
-            match (&native, &without_flag) {
-                (Some(native_plan), Some(legacy_plan)) => {
-                    assert!(
-                        find_fused_series(native_plan).is_none(),
-                        "{field_type} must not reach the native route: {query}"
-                    );
-                    assert_eq!(
-                        native_plan.display_indent().to_string(),
-                        legacy_plan.display_indent().to_string(),
-                        "{field_type} must keep the existing plan: {query}"
-                    );
-                }
-                _ => assert_eq!(
-                    native.is_some(),
-                    without_flag.is_some(),
-                    "{field_type}: the route must answer what the existing planner answers for \
-                     {query}"
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    crate::promql::error::Error::UnsupportedNativeShape { reason: actual, .. }
+                        if actual.as_str() == reason
                 ),
-            }
+                "{field_type} has no raw representation, so `{query}` is refused as `{reason}`: {error}"
+            );
         }
     }
 }
@@ -6300,9 +6291,14 @@ async fn native_histogram_binary_fill_declares_possible_payload_kind() {
     }
 }
 
-/// A legacy-only outer function reaches a composed native binary, including statement anchors.
+/// A pointwise outer function reaches a composed native binary, including statement anchors.
+///
+/// The two operands carry different field kinds - a native histogram counted into a float, and a
+/// float column - so they cannot be compiled as one tree; each is planned as its own frame and the
+/// addition answers over both. `ceil` then applies to that answer as one more pointwise function
+/// over it, so the statement is still one node, over the two operand frames.
 #[tokio::test]
-async fn native_fused_binary_inside_legacy_math_preserves_anchors() {
+async fn native_fused_binary_inside_a_pointwise_wrapper_preserves_anchors() {
     for query in [
         "ceil(clamp(histogram_count(hist), 1, 2) + on(tag_0) floats)",
         "ceil((clamp(histogram_count(hist @ end() offset 1m), 1, 2) + on(tag_0) floats @ start()))",
@@ -6312,8 +6308,13 @@ async fn native_fused_binary_inside_legacy_math_preserves_anchors() {
                 .await;
         let display = plan.display_indent().to_string();
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
-        let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
-            panic!("expected composed Binary for {query}: {display}");
+        // The wrapper is one pointwise map over the composed addition; the addition reads one bound
+        // source per operand.
+        let NativeExpr::Map { input, .. } = &fused.tree().root().expr else {
+            panic!("expected the wrapper's map at the root for {query}: {display}");
+        };
+        let NativeExpr::Binary { left, right, .. } = &input.expr else {
+            panic!("expected composed Binary below the wrapper for {query}: {display}");
         };
         assert!(
             matches!(left.expr, NativeExpr::Input(_)) && matches!(right.expr, NativeExpr::Input(_)),
@@ -6321,19 +6322,10 @@ async fn native_fused_binary_inside_legacy_math_preserves_anchors() {
         );
         assert_eq!(2, fused.children().len(), "{display}");
         assert!(!display.contains("Join:"), "{display}");
-        let expected_value = match query {
-            "ceil(clamp(histogram_count(hist), 1, 2) + on(tag_0) floats)" => {
-                "ceil(clamp(histogram_count(hist), 1, 2) + on (tag_0) floats)"
-            }
-            "ceil((clamp(histogram_count(hist @ end() offset 1m), 1, 2) + on(tag_0) floats @ start()))" => {
-                "ceil(clamp(histogram_count(hist @ end() offset 1m), 1, 2) + on (tag_0) floats @ start())"
-            }
-            _ => unreachable!("the test lists every query"),
-        };
-        // The value is named after the statement, and the rows layout declares the per-row name
-        // column last.
+        // The value is named after the statement, as the statement is written, and the rows layout
+        // declares the per-row name column last.
         let mut expected = vec![
-            expected_value.to_string(),
+            parser::parse(query).unwrap().to_string(),
             "tag_0".to_string(),
             "timestamp".to_string(),
             "__name__".to_string(),
@@ -8453,41 +8445,58 @@ async fn native_fused_binary_inside_scalar_and_quantile() {
     }
 }
 
-/// A shape neither the split nor the node can keep correct keeps the existing plan: a group by a
-/// value field cannot be named by the state rows.
+/// A group by a value column folds one group, because a value column is not a label.
 ///
-/// `sum(m) / m` and `m + sum(m)` are not on this list. The fold and the plain selector are two
-/// occurrences, so each reads its own source and the operation above them answers over both; the
-/// split is only the optimization the one-input shapes keep.
+/// `field_0` names the selection's value column, not a label of any series, so `sum by (field_0)`
+/// groups by a label the series do not carry: Prometheus answers one group for it, and so does this
+/// route. The tree is therefore the tree `sum(some_metric)` compiles to. The existing planner
+/// instead carries the value column into the group key (`PromPlannerContext::aggregation_field_labels`
+/// records it, `#9242`), which no row of the native state can name per label set.
 ///
-/// `timestamp(sum(m))` and `sum(timestamp(abs(m)))` are not on this list. `timestamp` over a
+/// `sum(m) / m` and `m + sum(m)` are not shapes this route refuses. The fold and the plain selector
+/// are two occurrences, so each reads its own source and the operation above them answers over both;
+/// the split is only the optimization the one-input shapes keep.
+///
+/// `timestamp(sum(m))` and `sum(timestamp(abs(m)))` are not refused either. `timestamp` over a
 /// computed vector reports the evaluation time, which is what Prometheus reports too - an aggregate
 /// makes a new sample at the evaluation instant rather than inheriting a stored one's time - and
 /// `instant_eval.rs` says so where it projects the grid's own timestamps. The segmentation route
 /// answers those, and `native_promql_timestamp_over_a_computed_vector` pins the values.
-///
-/// `quantile` is not on this list either: it has no mergeable state, so it cannot be split, but a
-/// `Complete` one is a node this runtime computes - the names in this list are the shapes even that
-/// node cannot answer.
 #[tokio::test]
-async fn native_fused_unsplittable_aggregate_falls_back() {
+async fn native_fused_group_by_a_value_column_folds_one_group() {
     for query in ["sum by (field_0) (some_metric)"] {
         let native = build_native_fused_plan(query, true).await;
-        let without_flag = build_native_fused_plan(query, false).await;
+        let display = native.display_indent().to_string();
+        let fused = find_final_split(&native).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        let NativeExpr::Aggregate { op, .. } = &fused.tree().root().expr else {
+            panic!("`{query}`: the fold is the node's root: {display}");
+        };
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}`: {}",
-            native.display_indent()
+            matches!(op.kind, AggregateKind::Sum),
+            "`{query}`: {display}"
         );
         assert!(
-            find_final_split(&native).is_none(),
-            "`{query}`: {}",
-            native.display_indent()
+            matches!(&op.group, Grouping::By(labels) if labels.is_empty()),
+            "`{query}`: a value column is no label to group by: {display}"
         );
+        // The answer is the answer of the statement that groups by nothing: the fold names the same
+        // grouping, and the state it merges is over the same one value column.
+        let plain = build_native_fused_plan("sum(some_metric)", true).await;
+        let plain_display = plain.display_indent().to_string();
         assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan"
+            find_final_split(&plain)
+                .unwrap_or_else(|| panic!("`sum(some_metric)`: {plain_display}"))
+                .tree(),
+            fused.tree(),
+            "`{query}` folds the same one group: {display}"
+        );
+        let expression = parser::parse(query).unwrap().to_string();
+        let mut expected = vec![expression, METRIC_NAME.to_string(), "timestamp".to_string()];
+        expected.sort();
+        assert_eq!(
+            expected,
+            sorted_column_names(&native),
+            "`{query}`: {display}"
         );
     }
 }

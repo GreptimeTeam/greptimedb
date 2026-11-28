@@ -81,8 +81,9 @@ use crate::promql::error::{
     UnsupportedNativeShapeSnafu,
 };
 use crate::promql::native_compile::{
-    InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
-    info_input, statement_grid, subquery_child_grid,
+    InfoInput, Substitution, bind_evaluated_binary, compile_selectors_with_grid,
+    compile_selectors_with_grid_and_substitution, compile_statement_with_grid, info_input,
+    pointwise_vector_argument, statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{
     DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, GrownStack, PromPlanner,
@@ -531,11 +532,19 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        let mut inner = expr;
-        while let PromExpr::Paren(paren) = inner {
-            inner = &paren.expr;
-        }
-        let PromExpr::Binary(binary) = inner else {
+        // The statement whose own AST the wrappers and the binary are read from. A compile below
+        // substitutes the composed node for one node of this AST, so the node it names must be the
+        // node that compile walks.
+        let Some(stmt) = self.native_statement(expr) else {
+            return Ok(None);
+        };
+        // A function this compiler binds pointwise over its one vector - `ceil(x + y)` - applies to
+        // the composition's answer, so the binary is composed and the functions above it are
+        // compiled once more over that answer.
+        let Some((wrapped, wrappers)) = wrapped_binary(&stmt.expr) else {
+            return Ok(None);
+        };
+        let PromExpr::Binary(binary) = wrapped else {
             return Ok(None);
         };
         let saved = self.ctx.clone();
@@ -616,7 +625,7 @@ impl PromPlanner {
         let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
             return unsupported("bound_root_is_not_the_binary");
         };
-        let Some(root_kind) = binary_output_field_kind(
+        let Some(binary_kind) = binary_output_field_kind(
             left_kind,
             right_kind,
             matching.op,
@@ -627,6 +636,41 @@ impl PromPlanner {
                 name: "PromQL fill modifiers",
             }
             .fail();
+        };
+        // The functions above the binary apply to the answer it decides, so they are compiled once
+        // more with that answer in the binary's place.
+        let (tree, root_kind) = if wrappers == 0 {
+            (tree, binary_kind)
+        } else {
+            let substitution = Substitution {
+                target: wrapped,
+                node: tree.root().clone(),
+            };
+            let compiled = match compile_selectors_with_grid_and_substitution(
+                &stmt,
+                // Every function above the binary reads the vector it wraps and nothing else, so a
+                // selector of its own is a shape this composition does not answer.
+                &|requirement| {
+                    Err(DataFusionError::NotImplemented(format!(
+                        "the selector `{}` beside the composed operands of `{expr}`",
+                        requirement.metric.clone().unwrap_or_default()
+                    )))
+                },
+                NATIVE_ORDERING,
+                Arc::clone(&left_grid),
+                Some(binary_kind),
+                &substitution,
+            ) {
+                Ok(compiled) => compiled.tree,
+                Err(DataFusionError::NotImplemented(_)) => {
+                    return unsupported("wrapped_binary_is_not_pointwise");
+                }
+                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+            };
+            let Some(root_kind) = compiled.root().output_field_kind(Some(binary_kind)) else {
+                return unsupported("wrapped_binary_has_no_output_kind");
+            };
+            (compiled, root_kind)
         };
         if !native_tree_supported(&tree) {
             return unsupported("runtime_refuses_the_composed_tree");
@@ -1854,6 +1898,31 @@ fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
         PromExpr::Subquery(subquery) => Some(subquery),
         PromExpr::Paren(paren) => root_subquery(&paren.expr),
         _ => None,
+    }
+}
+
+/// The binary a chain of pointwise functions wraps, and how many functions wrap it.
+///
+/// Only the calls this compiler binds as one map over the vector they read - a math function, a
+/// native histogram function, a label function, `round`/`clamp` with a parameter that is read per
+/// point, or `timestamp` - are looked through: each answers its one vector point by point, so the
+/// tree compiled over the answer of a composed binary is the tree the whole expression means. A
+/// call that reads its vector some other way - an aggregate folds a group, a vector operation
+/// reorders or drops series, a window rewinds time - stops the walk, and the statement is offered
+/// to the whole-expression compile alone.
+fn wrapped_binary(expr: &PromExpr) -> Option<(&PromExpr, usize)> {
+    let mut inner = expr;
+    let mut wrappers = 0;
+    loop {
+        inner = match inner {
+            PromExpr::Paren(paren) => &paren.expr,
+            PromExpr::Binary(_) => return Some((inner, wrappers)),
+            PromExpr::Call(call) => {
+                wrappers += 1;
+                pointwise_vector_argument(call)?
+            }
+            _ => return None,
+        };
     }
 }
 
