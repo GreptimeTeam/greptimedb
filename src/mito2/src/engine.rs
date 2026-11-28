@@ -98,6 +98,16 @@ mod truncate_test;
 mod copy_region_from_test;
 #[cfg(test)]
 mod remap_manifests_test;
+#[cfg(test)]
+mod repartition_chaos_test;
+#[cfg(test)]
+mod repartition_mbt_model;
+#[cfg(test)]
+mod repartition_mbt_oracle;
+#[cfg(test)]
+mod repartition_mbt_test;
+#[cfg(test)]
+mod repartition_merge_matrix_test;
 
 #[cfg(test)]
 mod apply_staging_manifest_test;
