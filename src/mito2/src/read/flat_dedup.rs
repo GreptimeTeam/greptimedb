@@ -303,8 +303,8 @@ pub struct FlatLastNonNull {
     /// Fields in the last row of this batch may be updated by the next batch.
     /// In preserve mode, duplicate keys may be separated by delete markers.
     buffer: Option<BatchLastRow>,
-    /// Whether the last row range contains a delete operation.
-    /// If so, we don't need to update null fields.
+    /// Whether the last row range contains a delete operation, either in its own rows
+    /// or in earlier batches of the same key. If so, we don't need to update null fields.
     contains_delete: bool,
 }
 
@@ -416,7 +416,8 @@ impl FlatLastNonNull {
     }
 
     /// Remove duplications from the batch without considering the previous and next rows.
-    /// Returns a tuple containing the deduplicated batch and a boolean indicating whether the last range contains deleted rows.
+    /// Returns a tuple containing the deduplicated batch and a boolean indicating whether the last range contains deleted rows,
+    /// including a delete inherited from the previous batch.
     fn dedup_one_batch(
         batch: RecordBatch,
         field_column_start: usize,
@@ -474,7 +475,8 @@ impl FlatLastNonNull {
     }
 
     /// Remove depulications for each partition.
-    /// Returns a tuple containing the deduplicated batch and a boolean indicating whether the last range contains deleted rows.
+    /// Returns a tuple containing the deduplicated batch and a boolean indicating whether the last range contains deleted rows,
+    /// including a delete inherited from the previous batch.
     fn dedup_by_partitions(
         batch: RecordBatch,
         partitions: &Partitions,
