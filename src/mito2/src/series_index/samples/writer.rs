@@ -39,7 +39,7 @@ use crate::series_index::format::FormatWriter;
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, decode_series_id};
 use crate::series_index::samples::histogram::ChunkBound;
 use crate::series_index::samples::metadata::{
-    self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
+    self, Block, Column, KeyRef, Page, PageReference, pack,
 };
 use crate::series_index::samples::{
     ColumnarSamplesFormat, FLOAT64_ENCODING, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part,
@@ -112,83 +112,11 @@ enum FieldInput<'a> {
     Float(&'a Float64Array),
     Histogram(&'a ArrayRef, &'a StructArray),
 }
-/// A block descriptor whose exact key has not been placed in the part's key area yet.
-///
-/// The key bytes are held here until the part ends, when they are written to their own area
-/// and replaced by a fixed-size [`KeyRef`]. That is why no descriptor — and therefore no
-/// metadata page — ever has to fit a key.
-struct PendingBlock {
-    key: ExactSeriesKey,
-    min: i64,
-    max: i64,
-    ordinal: u64,
-    rows: u32,
-    columns: Vec<Column>,
-}
-
-impl PendingBlock {
-    /// Descriptor bytes once the key reference replaces the key bytes.
-    fn size(&self) -> usize {
-        metadata::descriptor_bytes(self.columns.len())
-    }
-}
-
-/// Places one copy of each series key in the part's key area and turns pending blocks into
-/// descriptors that reference it.
-///
-/// Blocks are ordered by exact key, so every block of one series is adjacent and shares one
-/// copy of the key. Consecutive equal keys therefore reuse the previous reference, while every
-/// new series appends its bytes after the previous copy: references are ordered, disjoint, and
-/// unique per series, which is what lets a reader treat an equal reference as the same series
-/// without reading the bytes. Each copy is followed by its XXH64, which the reference does not
-/// count: a reader verifies the bytes before they can name a series.
-fn place_keys(leaves: Vec<Vec<PendingBlock>>, start: u64) -> Result<(Vec<Vec<Block>>, Vec<u8>)> {
-    let mut area: Vec<u8> = Vec::new();
-    let mut previous: Option<(Vec<u8>, KeyRef)> = None;
-    let mut placed = Vec::with_capacity(leaves.len());
-    for pending in leaves {
-        let mut blocks = Vec::with_capacity(pending.len());
-        for block in pending {
-            let reuse = previous
-                .as_ref()
-                .filter(|(key, _)| key.as_slice() == block.key.bytes())
-                .map(|(_, reference)| *reference);
-            let reference = match reuse {
-                Some(reference) => reference,
-                None => {
-                    let length = u32::try_from(block.key.bytes().len())
-                        .map_err(|_| invalid("sample series key exceeds 4 GiB"))?;
-                    let offset = start
-                        .checked_add(
-                            u64::try_from(area.len())
-                                .map_err(|_| invalid("sample key area overflow"))?,
-                        )
-                        .ok_or_else(|| invalid("sample key offset overflow"))?;
-                    area.extend_from_slice(block.key.bytes());
-                    area.extend_from_slice(&codec::checksum(block.key.bytes()).to_le_bytes());
-                    let reference = KeyRef { offset, length };
-                    previous = Some((block.key.bytes().to_vec(), reference));
-                    reference
-                }
-            };
-            blocks.push(Block {
-                id: block.key.id(),
-                key: reference,
-                min: block.min,
-                max: block.max,
-                ordinal: block.ordinal,
-                rows: block.rows,
-                columns: block.columns,
-            });
-        }
-        placed.push(blocks);
-    }
-    Ok((placed, area))
-}
 pub(super) struct SamplesWriter {
     options: ColumnarSamplesFormat,
     manifest: Manifest,
     outputs: Outputs,
+    compressor: zstd::bulk::Compressor<'static>,
     output_buffer: SampleBuffer,
     offsets: SparseOffsetsCache,
     /// Canonical sparse key of the series that owns `rows` and `last`.
@@ -198,17 +126,16 @@ pub(super) struct SamplesWriter {
     fields: Vec<PendingField>,
     last: Option<(MetricSeriesId, i64, u64)>,
     ordinal: u64,
-    leaves: Vec<Vec<PendingBlock>>,
+    leaves: Vec<Vec<Block>>,
     leaf_bytes: usize,
     descriptor_bytes: usize,
     position: u64,
-    part_rows: u64,
-    part_blocks: u64,
-    /// Bytes this part's key area is charged, one copy per series with its checksum, counted
-    /// before they are written.
-    part_key_bytes: u64,
-    /// The last series whose key this part already counts, to charge one copy per series.
-    part_last_key: Option<ExactSeriesKey>,
+    groups: Vec<metadata::Group>,
+    group_rows: u64,
+    group_blocks: u64,
+    /// Keys and their checksums for the active group. Pending blocks reference offsets
+    /// within this buffer until the final payload position is known.
+    keys: Vec<u8>,
     manifest_bytes: usize,
     failed: bool,
 }
@@ -275,6 +202,8 @@ impl SamplesWriter {
                 paths: Vec::new(),
                 committed: false,
             },
+            compressor: zstd::bulk::Compressor::new(3)
+                .map_err(|e| invalid(format!("sample compression: {e}")))?,
             output_buffer: SampleBuffer::default(),
             offsets: SparseOffsetsCache::new(),
             series_key: None,
@@ -286,10 +215,10 @@ impl SamplesWriter {
             leaf_bytes: 12,
             descriptor_bytes: 0,
             position: 0,
-            part_rows: 0,
-            part_blocks: 0,
-            part_key_bytes: 0,
-            part_last_key: None,
+            groups: Vec::new(),
+            group_rows: 0,
+            group_blocks: 0,
+            keys: Vec::new(),
             manifest_bytes,
             failed: false,
         })
@@ -471,7 +400,14 @@ impl SamplesWriter {
             .series_key
             .as_ref()
             .ok_or_else(|| invalid("sample block has no series key"))?;
-        let (mut block, chunks) = encode_block(&rows, fields, key, &self.manifest, self.ordinal)?;
+        let (mut block, chunks) = encode_block(
+            &rows,
+            fields,
+            key,
+            &self.manifest,
+            self.ordinal,
+            &mut self.compressor,
+        )?;
         // Bytes one copy of this series' key costs in a part's key area: the key and its stored
         // checksum.
         let key_len = key.bytes().len() as u64 + metadata::KEY_CHECKSUM_BYTES;
@@ -479,7 +415,7 @@ impl SamplesWriter {
             .ordinal
             .checked_add(1)
             .ok_or_else(|| invalid("sample ordinal overflow"))?;
-        let size = block.size();
+        let size = metadata::descriptor_bytes(block.columns.len());
         // The descriptor carries a fixed-size key reference, not the key, so this bound is a
         // function of the field count only: a key longer than a whole metadata page is no
         // longer a build failure, and only a narrower configured page can reject a descriptor.
@@ -487,11 +423,22 @@ impl SamplesWriter {
             size + 12 <= self.options.page_bytes,
             "sample descriptor exceeds leaf limit",
         )?;
+        let budget = self.options.metadata_bytes as u64;
+        let new_series = block.ordinal == 0;
+        let pending = self.descriptor_bytes as u64 + self.keys.len() as u64;
+        // Prefer a series boundary after three quarters of the budget; a long series
+        // may continue into the next group when the hard budget or leaf fanout is reached.
+        let projected = pending + size as u64 + if new_series { key_len } else { 0 };
         if !self.leaves.is_empty()
-            && self.leaf_bytes + size > self.options.page_bytes
-            && self.leaves.len() == self.options.root_capacity
+            && ((new_series && pending >= budget - budget / 4)
+                || projected > budget
+                || (self.leaf_bytes + size > self.options.page_bytes
+                    && self.leaves.len() == self.options.root_capacity))
         {
-            self.finish_part().await?;
+            self.finish_group().await?;
+            if self.groups.len() == metadata::MAX_GROUPS {
+                self.finish_part().await?;
+            }
         }
         if self.outputs.active.is_none() {
             let id = u32::try_from(self.manifest.files.len())
@@ -507,69 +454,64 @@ impl SamplesWriter {
             self.position = column.payload.end()?;
             self.output_buffer.write(&mut self.outputs, &chunk).await?;
         }
+        if !new_series && let Some(previous) = self.leaves.last().and_then(|leaf| leaf.last()) {
+            block.key = previous.key;
+        } else {
+            let key = self
+                .series_key
+                .as_ref()
+                .ok_or_else(|| invalid("sample block has no series key"))?
+                .bytes();
+            block.key.offset = self.keys.len() as u64;
+            self.keys.extend_from_slice(key);
+            self.keys
+                .extend_from_slice(&codec::checksum(key).to_le_bytes());
+        }
         if self.leaves.is_empty() || self.leaf_bytes + size > self.options.page_bytes {
             self.leaves.push(Vec::new());
             self.leaf_bytes = 12;
         }
         self.leaf_bytes += size;
         self.descriptor_bytes += size;
-        self.part_rows = self
-            .part_rows
+        self.group_rows = self
+            .group_rows
             .checked_add(u64::from(block.rows))
             .ok_or_else(|| invalid("sample row count overflow"))?;
-        self.part_blocks += 1;
+        self.group_blocks += 1;
         self.leaves
             .last_mut()
             .ok_or_else(|| invalid("missing sample leaf"))?
             .push(block);
-        // Keys live in their own area but are still bytes of this part: count one copy per
-        // series so the part target covers them too, and a key-heavy part still rolls over.
-        // This is decided after the rollover above, which cleared the part's accounting: a series
-        // that starts a new part still needs its copy counted in that part.
-        if self.part_last_key.as_ref() != self.series_key.as_ref() {
-            self.part_key_bytes = self
-                .part_key_bytes
-                .checked_add(key_len)
-                .ok_or_else(|| invalid("sample key area overflow"))?;
-            self.part_last_key = self.series_key.clone();
-        }
-        if self.position.saturating_add(self.part_key_bytes) >= self.options.part_bytes
-            || self.descriptor_bytes >= self.options.metadata_bytes
-        {
+        if self.position.saturating_add(self.keys.len() as u64) >= self.options.part_bytes {
             self.finish_part().await?;
         }
         Ok(())
     }
     async fn write_page(&mut self, page: Page) -> Result<PageReference> {
         let bounds = page.bounds()?;
-        let (payload, bytes) = pack(&page.encode(), self.position, 1, true)?;
+        let (payload, bytes) = pack(&mut self.compressor, &page.encode(), self.position, 1, true)?;
         self.position = payload.end()?;
         self.output_buffer.write(&mut self.outputs, &bytes).await?;
         Ok(PageReference { bounds, payload })
     }
-    async fn finish_part(&mut self) -> Result<()> {
+    async fn finish_group(&mut self) -> Result<()> {
         if self.leaves.is_empty() {
             return Ok(());
         }
         let payload_end = self.position;
-        // Keys go to their own area after the payload. Every block of one series shares one
-        // copy, so the area holds one key per distinct series of this part.
-        let (leaves, key_area) = place_keys(std::mem::take(&mut self.leaves), payload_end)?;
-        if !key_area.is_empty() {
-            self.position = self
-                .position
-                .checked_add(
-                    u64::try_from(key_area.len())
-                        .map_err(|_| invalid("sample key area overflow"))?,
-                )
-                .ok_or_else(|| invalid("sample file length overflow"))?;
-            self.output_buffer
-                .write(&mut self.outputs, &key_area)
-                .await?;
-        }
-        let key_end = self.position;
-        let mut children = Vec::new();
-        for leaf in leaves {
+        let key_end = payload_end
+            .checked_add(self.keys.len() as u64)
+            .ok_or_else(|| invalid("sample key area overflow"))?;
+        self.output_buffer
+            .write(&mut self.outputs, &std::mem::take(&mut self.keys))
+            .await?;
+        self.position = key_end;
+        let mut children = Vec::with_capacity(self.leaves.len());
+        for mut leaf in std::mem::take(&mut self.leaves) {
+            for block in &mut leaf {
+                // All relative offsets lie within the key buffer whose end was checked above.
+                block.key.offset += payload_end;
+            }
             children.push(self.write_page(Page::Leaf(leaf)).await?);
         }
         let depth = if children.len() == 1 { 1 } else { 2 };
@@ -578,37 +520,42 @@ impl SamplesWriter {
         } else {
             self.write_page(Page::Internal(children)).await?
         };
-        let bounds = root.bounds;
+        let start = match self.groups.last() {
+            Some(group) => group.root.payload.end()?,
+            None => metadata::HEADER_SIZE,
+        };
+        self.groups.push(metadata::Group {
+            start,
+            rows: self.group_rows,
+            blocks: self.group_blocks,
+            root,
+            depth,
+            payload_end,
+            key_end,
+        });
+        self.group_rows = 0;
+        self.group_blocks = 0;
+        self.descriptor_bytes = 0;
+        self.leaf_bytes = 12;
+        Ok(())
+    }
+    async fn finish_part(&mut self) -> Result<()> {
+        self.finish_group().await?;
+        let groups = std::mem::take(&mut self.groups);
+        if groups.is_empty() {
+            return Ok(());
+        }
+        let bytes = metadata::encode_directory(&groups);
         let file_length = self
             .position
-            .checked_add(metadata::TRAILER_SIZE)
-            .ok_or_else(|| invalid("sample file length overflow"))?;
-        self.output_buffer
-            .write(
-                &mut self.outputs,
-                &Trailer {
-                    root,
-                    depth,
-                    file_length,
-                    payload_end,
-                    key_end,
-                }
-                .encode(),
-            )
-            .await?;
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("sample part length overflow"))?;
+        self.output_buffer.write(&mut self.outputs, &bytes).await?;
         self.output_buffer.flush(&mut self.outputs).await?;
         self.outputs.close().await?;
-        let part = Part {
-            part_id: u32::try_from(self.manifest.files.len())
-                .map_err(|_| invalid("too many sample parts"))?,
-            file_size: file_length,
-            num_rows: self.part_rows,
-            num_blocks: self.part_blocks,
-            first: bounds.first,
-            last: bounds.last,
-            min_timestamp: bounds.min,
-            max_timestamp: bounds.max,
-        };
+        let part_id = u32::try_from(self.manifest.files.len())
+            .map_err(|_| invalid("too many sample parts"))?;
+        let part = Part::from_groups(part_id, file_length, &groups)?;
         self.manifest_bytes += serde_json::to_vec(&part).context(SerdeJsonSnafu)?.len()
             + usize::from(!self.manifest.files.is_empty());
         require(
@@ -617,12 +564,6 @@ impl SamplesWriter {
         )?;
         self.manifest.files.push(part);
         self.position = 0;
-        self.part_rows = 0;
-        self.part_blocks = 0;
-        self.part_key_bytes = 0;
-        self.part_last_key = None;
-        self.descriptor_bytes = 0;
-        self.leaf_bytes = 12;
         Ok(())
     }
     async fn complete(&mut self) -> Result<ArtifactMetadata> {
@@ -664,15 +605,15 @@ impl SamplesWriter {
 #[cfg(test)]
 impl SamplesWriter {
     /// The current part's accounting, for the rollover tests: `(position, counted key bytes,
-    /// blocks in the current part, finished parts)`.
+    /// blocks in the current group, finished parts)`.
     ///
     /// A key copy that is not counted defers the part boundary silently, and the parts it makes
     /// are still readable, so only the accounting itself shows the difference.
     pub(super) fn part_accounting(&self) -> (u64, u64, u64, usize) {
         (
             self.position,
-            self.part_key_bytes,
-            self.part_blocks,
+            self.keys.len() as u64,
+            self.group_blocks,
             self.manifest.files.len(),
         )
     }
@@ -707,15 +648,21 @@ fn encode_block(
     key: &ExactSeriesKey,
     manifest: &Manifest,
     ordinal: u64,
-) -> Result<(PendingBlock, Vec<Vec<u8>>)> {
+    compressor: &mut zstd::bulk::Compressor<'_>,
+) -> Result<(Block, Vec<Vec<u8>>)> {
     let first = rows.first().ok_or_else(|| invalid("empty sample block"))?;
     let last = rows.last().ok_or_else(|| invalid("empty sample block"))?;
     require(
         rows.iter().all(|row| row.id == key.id()),
         "sample block mixes series",
     )?;
-    let mut block = PendingBlock {
-        key: key.clone(),
+    let mut block = Block {
+        id: key.id(),
+        key: KeyRef {
+            offset: 0,
+            length: u32::try_from(key.bytes().len())
+                .map_err(|_| invalid("sample series key exceeds 4 GiB"))?,
+        },
         min: first.time,
         max: last.time,
         ordinal,
@@ -724,7 +671,7 @@ fn encode_block(
     };
     let mut chunks = Vec::new();
     let mut push = |role, id, encoding, bytes: Vec<u8>, nulls| -> Result<()> {
-        let (payload, bytes) = pack(&bytes, 0, encoding, false)?;
+        let (payload, bytes) = pack(compressor, &bytes, 0, encoding, false)?;
         block.columns.push(Column {
             role,
             id,

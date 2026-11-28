@@ -19,24 +19,10 @@ order. Each part record contains its encoded `file_size` in bytes. The
 
 ## Wire specification
 
-This document specifies the version 1 on-disk layout, encodings, ordering rules,
-and validation limits for samples artifacts. The version number stays 1: the
-exact-identity change is enforced by the mandatory `identity_encoding` manifest
-discriminator, not by a version bump.
-
-Every block names the exact series identity (the canonical sparse primary key), which
-the part stores once per series in its [key area](#key-area), followed by that copy's
-checksum.
-An artifact written before exact identity has the same version number and recorded
-only `(table_id, tsid)`, a hash; it can be structurally valid and perfectly ordered
-while two distinct series were merged. Nothing in such an artifact proves
-otherwise, so a manifest without the `identity_encoding` discriminator is
-rejected, and its artifact rebuilt from SSTs; there is no dual reader. The same
-applies to an artifact of the earlier layout of this format, whose keys sat inside
-the block descriptors: its `identity_encoding` value is the older
-`exact-sparse-key`, so it is refused when the manifest is opened rather than when a
-part is first read. It shares artifact conventions with
-[Narthex series-index format](mito-series.md).
+The samples format stores ordered groups of single-series blocks in each sample part.
+Every group owns its column chunks, exact sparse primary keys, and descriptor
+pages. The part directory locates the groups and records their ID and time bounds.
+The manifest and part header both retain version 1. Existing embedded-layout artifacts must be rebuilt.
 
 Samples store nullable Float64 and native histogram fields, timestamps, sequences,
 and operation types in single-series blocks bounded by rows and decoded bytes.
@@ -144,21 +130,14 @@ the manifest.
 ## Part file
 
 ```text
-┌──────────────────────────────────────────────┐
-│ Header                              16 bytes │
-├──────────────────────────────────────────────┤
-│ Independently encoded/compressed chunks      │
-│   Block 0: time, sequence, operation, fields  │
-│   Block 1: ...                               │
-├──────────────────────────────────────────────┤ ← payload_end
-│ Key area: one exact series key per series,   │
-│   back to back, not page bounded             │
-├──────────────────────────────────────────────┤ ← key_end
-│ Leaf pages (one is the root at depth 1)       │
-│ Optional internal root (depth 2)              │
-├──────────────────────────────────────────────┤
-│ Trailer                            120 bytes │
-└──────────────────────────────────────────────┘
+16-byte header
+group 0:
+  column chunks in block order
+  exact keys with checksums
+  descriptor leaves and optional internal root
+group 1 ... group N-1 (same layout)
+directory (108 bytes per group, in file order)
+24-byte footer
 ```
 
 All fixed-width numbers are little-endian, without alignment padding. Byte ranges
@@ -177,7 +156,7 @@ Reserved fields must be zero, and decoded structures must have no trailing bytes
 ### Column payloads and row semantics
 
 Each block contains exactly one series and names it by that series' exact canonical
-sparse primary key, which is stored once per series in the part's [key area](#key-area)
+sparse primary key, which is stored once per series in the group's [key area](#key-area)
 and referenced by the block descriptor. The key is the SST's own encoding of
 `(table_id, tsid, label column-id/value pairs sorted by name, non-null only)`, and
 `(table_id, tsid)` is only its order-preserving prefix. Two distinct series may
@@ -194,11 +173,11 @@ nondecreasing within one exact key, and sequences are nonincreasing within equal
 timestamps, including across parts. A change of exact key restarts timestamps and
 ordinals, even when the coarse `(table_id, tsid)` prefix is unchanged. Equal
 ordering keys retain input order; operation type is not a sorting key. The key area
-follows the same order, one copy per series. Block keys never decrease, so a key that
+follows the same order, one copy per series in each group. Block keys never decrease, so a key that
 is read must not sort before the key read before it; a repeated key must continue its
 timestamps and ordinals rather than restart them. Because key bytes are read lazily,
 the descriptor-only checks use the `(table_id, tsid)` prefix and the order, disjointness,
-and reuse of key references inside one part, and only the keys a request actually loads
+and reuse of key references inside one group, and only the keys a request actually loads
 are checked for byte order and continuation.
 
 Blocks split on an identity change or before the next row would exceed a packing
@@ -256,7 +235,7 @@ The exact series keys occupy their own region between the column payloads and th
 metadata pages: `[payload_end, key_end)`. Keys are written back to back with no
 padding and no alignment, in block order, and every block of one series shares one
 copy of that series' key. The area therefore holds exactly one key per distinct
-series of the part, ordered by exact key. A descriptor's key reference is unique per
+series of the group, ordered by exact key. A descriptor's key reference is unique per
 series, ordered, and disjoint from every other series' copy, which is why an equal
 reference means "the same exact series" without reading the bytes.
 
@@ -278,17 +257,17 @@ without a per-key checksum, flipping one label byte would keep the framing and t
 series.
 
 Reading stays lazy. A reader reads only the byte ranges of the keys of the blocks a
-request selects, at most once per series, and validates a fetched key's checksum, its
+request selects, at most once per series in each group, and validates a fetched key's checksum, its
 framing, and its `(table_id, tsid)` prefix against the descriptor that referenced it. A
 reference is rejected as soon as its descriptor is decoded — before any row is emitted
 — when it starts before `payload_end`, when `offset + length + 8` exceeds `key_end`,
-when the length is zero, or when two consecutive descriptors of one part that do not
+when the length is zero, or when two consecutive descriptors of one group that do not
 name one series overlap.
 
-A key reference is an offset into one part's key area, so the references of two parts
+A key reference is an offset into one group's key area, so the references of two groups
 are unrelated numbers and are never compared. Whether one exact series continues in
-another part is decided on the exact key bytes: the last key a request loaded from one
-part is compared with the first it loads from the next, and an equal key must continue
+another group is decided on the exact key bytes: the last key a request loaded from one
+group is compared with the first it loads from the next, and an equal key must continue
 timestamps and ordinals, while a greater key starts a new series at ordinal zero.
 
 Because keys are only read for blocks a request selects, this content check covers the
@@ -304,10 +283,10 @@ new series at ordinal zero, so no ordering between the two series' ordinals is r
 
 A leaf describes blocks. An internal page references leaves. The root is either
 the only leaf (depth 1) or an internal page (depth 2). Other depths are unsupported
-in version 1; roll parts before a third level would be needed.
+in version 1; finish the current group before a third level would be needed.
 
 As in the series format, the entire page, including its kind and count, is encoded
-and independently compressed. The reference in the parent or trailer supplies
+and independently compressed. The reference in the parent or group directory entry supplies
 its storage location, lengths, checksum, and codecs. There is no separate stored
 page header. Decoded pages begin with `kind: u32` and `entry_count: u64`:
 
@@ -333,7 +312,7 @@ descriptors only: it no longer bounds the length of a series key.
 | --- | ---: | --- |
 | Table ID | 4 | Coarse prefix of the constant key in this block |
 | TSID | 8 | Coarse prefix of the constant key in this block |
-| Key offset | 8 | Absolute offset of the block's exact key in the part's key area |
+| Key offset | 8 | Absolute offset of the block's exact key in the group's key area |
 | Key length | 4 | Nonzero; the key's `(table_id, tsid)` prefix must equal the two fields above |
 | Minimum timestamp | 8 | Signed i64, first row's timestamp |
 | Maximum timestamp | 8 | Signed i64, last row's timestamp |
@@ -403,17 +382,17 @@ series, just like part bounds. Do not require strict disjointness or use an
 exclusive next-child lower bound. Validate each loaded page's derived identifier
 and time bounds against its reference. At depth 2 all children must be leaves;
 reject an internal child. Child byte ranges are ordered, disjoint, within the
-metadata area, and precede the parent. The root ends immediately before the trailer.
+metadata area, and precede the parent. The root ends at the boundary with the next group or the directory.
 
 An internal root has `12 + 72 * N` decoded bytes, so it holds at most
 `floor((65536 - 12) / 72) = 910` leaf references. The writer must account for the
 next descriptor's leaf placement before writing its block. If the descriptor
-would require a 911th leaf, finish this part and start the block in a new part.
+would require a 911th leaf, finish this group and start the block in a new group.
 
 #### Navigation and equal-timestamp example
 
 For a requested qualified identity and optional half-open interval `[start, end)`,
-select every part/page whose identifier interval contains the identity and whose
+select every part, group and page whose identifier interval contains the identity and whose
 time envelope overlaps the request:
 
 ```text
@@ -429,7 +408,7 @@ No predecessor-only or unique-child lookup is used: a shared identity or timesta
 can require several adjacent children, and even several parts.
 
 ```text
-Part 0, depth 2:
+Part 0, group 0, depth 2:
   Root R
     ├─ Leaf A: IDs [(7,42),(7,42)], times [0,100]
     │    block ordinal 0: (7,42), times [0,100]
@@ -437,7 +416,7 @@ Part 0, depth 2:
          block ordinal 1: (7,42), times [100,200]
          block ordinal 0: (7,43), times [0,50]
 
-Part 1:
+Part 1, group 0:
   Leaf/root C: IDs [(7,43),(7,43)], times [50,80]
     block ordinal 1: (7,43), times [50,80]
 ```
@@ -452,25 +431,35 @@ the first and last blocks: B's range is `[0,200]`, not `[100,50]`.
 
 The series-index format has no sample timestamps or time bounds.
 
-### Trailer
+### Group directory and footer
+
+Every group has one fixed-width directory entry. Its ID and timestamp bounds
+are those of its root. Exact keys stay within the group.
 
 | Field | Bytes | Meaning |
 | --- | ---: | --- |
-| Root page reference | 72 | Inclusive ID/time bounds and payload reference |
-| Index depth | 4 | 1 or 2 |
-| File version | 4 | 1 |
-| File length | 8 | Includes header and trailer |
-| `payload_end` | 8 | End of column area, start of key area |
-| `key_end` | 8 | End of key area, start of metadata area |
-| Magic | 8 | ASCII `GTSAMPLE` |
-| Trailer checksum | 8 | XXH64 of the preceding 112 trailer bytes (the 104-byte body and the magic), seed zero |
+| Root page reference | 72 | Inclusive coarse ID and timestamp bounds, location, lengths, checksum and codecs |
+| Index depth | 4 | 1 for a leaf root, 2 for an internal root |
+| `payload_end` | 8 | End of column chunks and start of exact keys |
+| `key_end` | 8 | End of exact keys and start of pages |
+| Row count | 8 | Total rows in the group |
+| Block count | 8 | Total blocks in the group |
 
-The trailer is 120 bytes. Locate it using the recorded object size without a stat
-request. Validate the checksum, magic, version, length, depth, area boundaries,
-root bounds against the manifest part descriptor, and root end position before
-traversal. Column references must lie in `[16, payload_end)`; key references must lie
-in `[payload_end, key_end)`; page references lie in `[key_end, file_length - 120)`.
-The header and trailer versions must agree.
+The footer contains the eight ASCII bytes `NARTGRP1`, directory length (u64),
+and XXH64 of the directory bytes (u64, seed zero). The object size locates the
+footer. The directory is nonempty, a multiple of 108 bytes and at most 8 MiB.
+The first group starts at offset 16. Each root ends at the start of the next
+group, or the directory for the final group. Each group's column, key and page
+references must fall within its respective area. The reader checks the combined
+group counts and bounds against the part inventory before using the directory.
+
+The default writer uses a 4 MiB budget for pending descriptors and distinct
+key bytes (including key checksums). After 3 MiB it prefers to finish at the next
+series boundary. A continuing series can span groups at the hard threshold.
+A single key and descriptor larger than the budget occupy a group on their own.
+Only directory entries survive group finalization. Parts roll at a 512 MiB
+encoded-byte target or the directory limit. The last group's metadata and the
+directory can take the final size above the target.
 
 ## Encodings and compression
 
@@ -638,7 +627,7 @@ references must not be interpreted as omitted all-null columns.
 New column encodings or compression methods receive new IDs. Structural changes,
 changed field meanings, or incompatible limits require a new version. Deeper
 metadata trees require an explicit reader-support and rollout decision; an
-unchanged layout alone does not make them readable by version-1 implementations.
+unchanged layout alone does not make them readable by implementations of this version.
 
 The local cache root contains a layout-version marker. Startup clears the entire
 series-index cache when this marker is absent or incompatible, then rebuilds
@@ -652,21 +641,8 @@ contain several generations with disjoint source sets (at most 64 SSTs per merge
 and each generation may contain multiple bounded part files. Source Parquet files
 are never rewritten.
 
-This branch has no deployments, so the local series-index cache token is pinned to
-`1`: a cache written by any other build is discarded on startup and rebuilt from
-the SSTs before regions open, and ordinary SST reads remain available meanwhile.
-That is the only cache migration this layout has. An artifact written by an earlier
-build of this branch — keys inside the block descriptors, a key area without stored
-checksums, a 112-byte trailer without `key_end` — carries a different
-`identity_encoding` value, `exact-sparse-key` instead of `exact-sparse-key-area`, so
-it is refused when its manifest is opened. Maintenance treats that refusal as "not
-reusable" and rebuilds the artifact, so an old artifact is never marked reusable and
-then fails on the first part read. A part reached without that check would also be
-rejected: the reader locates a trailer from the recorded object size, reads the last
-120 bytes of such a part, and refuses the shifted frame instead of decoding it.
-Allow for rebuild time and I/O in either direction; do not reuse daily catalogs with
-an older reader outside this startup check. Existing per-SST catalog entries remain
-readable by the new reader.
+The samples manifest version identifies this grouped layout. Earlier sample
+parts require rebuilding or rewriting before use with this reader.
 
 A prepared scan uses a grouped artifact only when all of its sources belong to
 that scan's assignment or were excluded solely by its time filter. Partial coverage

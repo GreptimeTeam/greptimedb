@@ -141,7 +141,7 @@ impl Default for ColumnarSamplesFormat {
         Self {
             block_rows: MAX_ROWS,
             part_bytes: 512 * 1024 * 1024,
-            metadata_bytes: 8 * 1024 * 1024,
+            metadata_bytes: 4 * 1024 * 1024,
             page_bytes: metadata::PAGE_LIMIT,
             root_capacity: metadata::ROOT_CAPACITY,
         }
@@ -263,7 +263,7 @@ impl ValueColumn {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Part {
     part_id: u32,
     file_size: u64,
@@ -273,6 +273,36 @@ struct Part {
     last: MetricSeriesId,
     min_timestamp: i64,
     max_timestamp: i64,
+}
+impl Part {
+    fn from_groups(part_id: u32, file_size: u64, groups: &[metadata::Group]) -> Result<Self> {
+        let mut bounds = groups
+            .first()
+            .ok_or_else(|| invalid("empty sample part"))?
+            .root
+            .bounds;
+        let mut rows = 0u64;
+        let mut blocks = 0u64;
+        for group in groups {
+            bounds.extend(group.root.bounds);
+            rows = rows
+                .checked_add(group.rows)
+                .ok_or_else(|| invalid("sample part row count overflow"))?;
+            blocks = blocks
+                .checked_add(group.blocks)
+                .ok_or_else(|| invalid("sample part block count overflow"))?;
+        }
+        Ok(Self {
+            part_id,
+            file_size,
+            num_rows: rows,
+            num_blocks: blocks,
+            first: bounds.first,
+            last: bounds.last,
+            min_timestamp: bounds.min,
+            max_timestamp: bounds.max,
+        })
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
