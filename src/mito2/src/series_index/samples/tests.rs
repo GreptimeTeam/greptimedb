@@ -38,7 +38,7 @@ use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::columnar::codec as columnar_codec;
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
+use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, SERIES_KEY_PREFIX_LEN};
 use crate::series_index::purger::series_index_channel;
 use crate::sst::file::RegionFileId;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -501,7 +501,7 @@ async fn equal_timestamps_cross_leaves_and_parts() {
     assert_eq!(out[0].column(0).null_count(), 1);
 }
 /// Wraps one encoded primary key in the canonical exact identity.
-fn exact(meta: &RegionMetadataRef, tags: &[&str; 2], table_id: u32, tsid: u64) -> ExactSeriesKey {
+fn exact(meta: &RegionMetadataRef, tags: &[&str], table_id: u32, tsid: u64) -> ExactSeriesKey {
     let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
     ExactSeriesKey::from_sparse_key(
         &new_sparse_primary_key(tags, meta, table_id, tsid),
@@ -552,8 +552,8 @@ async fn long_keys_round_trip() {
         read_key(reader.as_ref(), selection).await,
         vec![(1, 7, 100, 1, 0, Some(0)), (1, 7, 200, 1, 0, Some(0)),]
     );
-    // The key area keeps the key byte for byte, so a read returns the same bytes the writer
-    // received; the descriptor only references it.
+    // The key area keeps the key's bytes after its reserved prefix, which the descriptor names,
+    // so a read returns the same key the writer received; the descriptor only references it.
     let (_, trailer, page, bytes) = root_page(&store, &handle).await;
     let Page::Leaf(blocks) = page else {
         panic!("one leaf page holds the fixture")
@@ -562,8 +562,9 @@ async fn long_keys_round_trip() {
     let reference = blocks[0].key;
     reference.validate(trailer.keys()).unwrap();
     let end = reference.offset + u64::from(reference.length);
+    assert_eq!(key.len() - SERIES_KEY_PREFIX_LEN, reference.length as usize);
     assert_eq!(
-        key.as_slice(),
+        &key[SERIES_KEY_PREFIX_LEN..],
         &bytes[reference.offset as usize..end as usize]
     );
 }
@@ -1531,6 +1532,166 @@ async fn frozen_v1_samples_fixture_is_rejected() {
     assert!(message.contains("rebuild"), "{message}");
 }
 
+/// Fields this frozen suffix fixture manifest records that a test has to install.
+#[derive(serde::Deserialize)]
+struct FrozenSuffixManifest {
+    region_id: u64,
+    source_file_id: FileId,
+    generation: FileId,
+    files: Vec<Part>,
+}
+
+/// Installs the frozen v2 fixture - part and manifest - as one artifact in `store`.
+async fn frozen_suffix_handle(store: &ObjectStore) -> (SamplesFileHandle, FrozenSuffixManifest) {
+    let bytes = include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/suffix-v1-part.hex"
+    )
+    .split_whitespace()
+    .collect::<String>();
+    let bytes = (0..bytes.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&bytes[i..i + 2], 16).unwrap())
+        .collect::<Vec<_>>();
+    let json = include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/suffix-v1-manifest.json"
+    );
+    let frozen: FrozenSuffixManifest = serde_json::from_str(json).unwrap();
+    assert_eq!(1, frozen.files.len(), "the fixture holds one part");
+    assert_eq!(
+        frozen.files[0].file_size,
+        bytes.len() as u64,
+        "the hex fixture and the recorded part size disagree"
+    );
+    let prefix = crate::series_index::samples::samples_prefix(frozen.region_id, frozen.generation);
+    let manifest_path = format!("{prefix}manifest.json");
+    let part_path = format!("{prefix}part-0.samples");
+    store.write(&part_path, bytes.clone()).await.unwrap();
+    store.write(&manifest_path, json).await.unwrap();
+    let objects = vec![
+        crate::series_index::artifact::ArtifactObject {
+            path: manifest_path,
+            file_size: json.len() as u64,
+        },
+        crate::series_index::artifact::ArtifactObject {
+            path: part_path,
+            file_size: bytes.len() as u64,
+        },
+    ];
+    let artifact = crate::series_index::artifact::ArtifactMetadata {
+        format: ArtifactFormat::ColumnarSamples,
+        generation: frozen.generation,
+        file_size: (json.len() + bytes.len()) as u64,
+        objects,
+    };
+    let (purger, _) = series_index_channel(store.clone());
+    let handle = SamplesFileHandle::new(
+        RegionFileId::new(
+            store_api::storage::RegionId::from_u64(frozen.region_id),
+            frozen.source_file_id,
+        ),
+        SamplesEntry {
+            source_file_ids: Vec::new(),
+            window: None,
+            source_windows: Default::default(),
+            file_id: frozen.source_file_id,
+            artifact,
+        },
+        purger,
+    );
+    (handle, frozen)
+}
+
+/// The frozen suffix fixture pins the suffix key area at manifest version 1: one part with two leaves, three one-row series,
+/// one stored suffix of length zero, and two series that share one `(table_id, tsid)`.
+///
+/// It was assembled from the wire specification, not by the writer, so it is what a third
+/// implementation of this version must read. Nothing here may be regenerated to make a change
+/// pass: the version-1 fixture stays a rejection test, and a future layout gets its own fixture.
+#[tokio::test]
+async fn frozen_suffix_samples_fixture_is_readable() {
+    let store = store();
+    let (handle, frozen) = frozen_suffix_handle(&store).await;
+    let format = ColumnarSamplesFormat::default();
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(
+        IdentityEncoding::CURRENT_SAMPLES,
+        manifest.identity_encoding,
+        "the fixture must name the layout this build writes"
+    );
+    assert_eq!(
+        VERSION, manifest.version,
+        "the fixture predates compact internal pages"
+    );
+    assert_eq!(3, manifest.files[0].num_blocks);
+    assert_eq!(3, manifest.files[0].num_rows);
+    assert_eq!(frozen.files[0].file_size, manifest.files[0].file_size);
+    let reader = format.reader(store.clone(), handle).await.unwrap();
+    // Every row survives decoding: the first series' put, the colliding partner's delete, and
+    // the field-less row of the series whose key is the reserved prefix alone.
+    assert_eq!(
+        vec![
+            (7, 42, 100, 9, 1, Some(1.5_f64.to_bits())),
+            (7, 42, 200, 8, 0, Some(2.5_f64.to_bits())),
+            (7, 43, 300, 7, 1, None),
+        ],
+        collect_rows(
+            &reader
+                .read(full_request())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+        )
+    );
+    // The reconstructed keys are the keys the labels encode, so the two series under one
+    // identifier stay distinct and the bare series carries an empty suffix.
+    let meta = metadata();
+    let first = exact(&meta, &["a"], 7, 42);
+    let partner = exact(&meta, &["b"], 7, 42);
+    let bare = exact(&meta, &[], 7, 43);
+    assert_eq!(first.id(), partner.id());
+    assert_eq!(bare.bytes().len(), SERIES_KEY_PREFIX_LEN);
+    assert_eq!(
+        vec![first.clone(), partner.clone(), bare.clone()],
+        reader
+            .read(full_request())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .iter()
+            .map(|batch| batch.key.clone())
+            .collect::<Vec<_>>()
+    );
+    // Selecting one owner of the shared identifier reads only its own block.
+    let mut query = full_request();
+    query.keys = Some(BTreeSet::from([partner]));
+    assert_eq!(
+        vec![(7, 42, 200, 8, 0, Some(2.5_f64.to_bits()))],
+        collect_rows(
+            &reader
+                .read(query)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+        )
+    );
+    let mut query = full_request();
+    query.keys = Some(BTreeSet::from([bare]));
+    assert_eq!(
+        vec![(7, 43, 300, 7, 1, None)],
+        collect_rows(
+            &reader
+                .read(query)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+        )
+    );
+}
+
 /// Rewrites the stored root page so every field column carries an unknown codec, and returns a
 /// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
 async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
@@ -2183,12 +2344,14 @@ async fn keys_are_kept_out_of_metadata_pages() {
         "retained size {} still stores the keys in the page",
         page.retained_size()
     );
+    // One copy per series, holding the key's bytes after the fixed prefix its descriptor names
+    // and its checksum: the prefix is stored once in the descriptor, not once per key.
     assert_eq!(
         keys.iter()
-            .map(|key| key.len() as u64 + KEY_CHECKSUM_BYTES)
+            .map(|key| { (key.len() - SERIES_KEY_PREFIX_LEN) as u64 + KEY_CHECKSUM_BYTES })
             .sum::<u64>(),
         trailer.key_end - trailer.payload_end,
-        "the key area holds one copy of each key and its checksum"
+        "the key area holds one suffix per series and its checksum"
     );
 }
 
@@ -2901,3 +3064,68 @@ async fn histogram_reservation_releases_read_ahead() {
     drop(batches);
     assert_eq!(0, pool.reserved());
 }
+
+/// Discovery selects no key at all, so every block's identity comes from its stored key entry.
+///
+/// The key area stores only the bytes after each series' fixed `(table_id, tsid)` prefix, which
+/// the descriptor rebuilds from the block's identifier. Discovery therefore returns labels only if
+/// the reconstructed key is the whole key the writer was given: the batches must carry those keys
+/// with their labels, including the empty one, and the series under one identifier must stay apart.
+#[tokio::test]
+async fn discovery_returns_reconstructed_labels_without_a_key_selection() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let keys = vec![
+        new_sparse_primary_key(&[], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000002", "z"], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000003", "z"], &meta, 8, 7),
+    ];
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(&meta, &keys, &[100, 200, 300, 400], false)],
+    )
+    .await;
+    let reader = format.reader(store, handle).await.unwrap();
+    let discovered = reader
+        .read(SamplesReadRequest::default())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        4,
+        discovered
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>()
+    );
+    // The reconstructed key is the whole key, so the labels a query can key on are all there:
+    // the bare series first, then the labelled ones, with the colliding identifiers kept apart.
+    let expected = vec![
+        exact(&meta, &[], 1, 7),
+        exact(&meta, &["host-000001", "z"], 1, 7),
+        exact(&meta, &["host-000002", "z"], 1, 7),
+        exact(&meta, &["host-000003", "z"], 8, 7),
+    ];
+    assert_eq!(
+        expected,
+        discovered
+            .iter()
+            .map(|batch| batch.key.clone())
+            .collect::<Vec<_>>()
+    );
+    for batch in &discovered {
+        // The discovery read projects nothing, so the key is the only identity it carries.
+        assert_eq!(0, batch.batch.num_columns());
+        assert!(
+            keys.iter()
+                .any(|given| given.as_slice() == batch.key.bytes())
+        );
+    }
+}
+
+mod compact_page;

@@ -36,13 +36,16 @@ use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result}
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesReadRequest};
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
+use crate::series_index::identity::{
+    ExactSeriesKey, IdentityEncoding, SERIES_KEY_PREFIX_LEN, series_key_bytes,
+};
+use crate::series_index::samples::compact;
 use crate::series_index::samples::metadata::{
     self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
 };
 use crate::series_index::samples::{
-    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, codec, histogram, invalid,
-    require, unsupported,
+    COMPACT_VERSION, MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, codec,
+    histogram, invalid, require, unsupported,
 };
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
@@ -136,12 +139,17 @@ impl SamplesReader {
                 .ok_or_else(|| invalid("invalid narthex manifest path"))?
                 .to_string(),
         );
-        if manifest.version != VERSION {
+        if !(VERSION..=COMPACT_VERSION).contains(&manifest.version) {
             return Err(unsupported("samples manifest version"));
         }
         // Old artifacts can be structurally valid and perfectly ordered, so identity
-        // encoding is the only thing that keeps their lost labels out of reads.
-        if manifest.identity_encoding != IdentityEncoding::CURRENT_SAMPLES {
+        // encoding is the only thing that keeps their lost labels out of reads. Two layouts store
+        // an exact key in a key area and both decode here; the retired inline-key layout is not
+        // one of them, and a future layout is refused rather than guessed at.
+        if !matches!(
+            manifest.identity_encoding,
+            IdentityEncoding::ExactSparseKeyAreaSuffix | IdentityEncoding::ExactSparseKeyArea
+        ) {
             return Err(unsupported(
                 "samples manifest identity encoding; rebuild the samples artifact",
             ));
@@ -314,8 +322,20 @@ impl SamplesFormatReader for SamplesReader {
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
-                let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
-                let mut children = children.into_iter(); let mut row_count = 0u64; let mut block_count = 0u64;
+                let mut active = None;
+                let mut children = match root.as_ref() {
+                    Page::Leaf(_) => {
+                        active = Some(root.clone());
+                        None
+                    }
+                    Page::Internal(children) => Some(ChildCursor::Fixed(children.clone().into_iter())),
+                    Page::Compact(page) => Some(ChildCursor::Compact(CompactChildren::new(
+                        page.clone(),
+                        &request,
+                        ids.as_ref(),
+                    )?)),
+                };
+                let mut row_count = 0u64; let mut block_count = 0u64;
                 let mut payload_position = metadata::HEADER_SIZE;
                 // Exact keys live in the part's key area, outside every metadata page. Every
                 // block of one series references the same copy, so one load serves them all.
@@ -327,14 +347,20 @@ impl SamplesFormatReader for SamplesReader {
                 let mut key_offsets = mito_codec::row_converter::SparseOffsetsCache::new();
                 loop {
                     let page = if let Some(page) = active.take() { page } else {
-                        let Some(child) = children.next() else { break; };
+                        // A depth-one part has no children: its root is the only page.
+                        let Some(cursor) = children.as_mut() else { break };
+                        let Some((child, contiguous)) = cursor.next(&request, ids.as_ref())? else { break; };
+                        // A child that is not the immediate successor of the previous visited one
+                        // - pruned, or outside a candidate range - relaxes the adjacency checks
+                        // exactly as a skipped page does.
+                        if !contiguous { adjacent = false; }
                         if !matches(child.bounds, &request, ids.as_ref()) { adjacent = false; continue; }
                         let started = Instant::now();
                         let page = load_metadata_page(cache.as_ref(), reader, (&path, size), &child, 1, trailer.areas(), &manifest).await?;
                         metrics.add_elapsed("columnar_metadata_wall", started.elapsed());
                         page
                     };
-                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))? };
+                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, _ => Err(unsupported("internal child in sample depth-two tree"))? };
                     // One merged read for the keys of this page's selected blocks: a page can
                     // hold hundreds of short series, and one read per series would multiply
                     // this scan's I/O by the number of series it touches.
@@ -344,6 +370,7 @@ impl SamplesFormatReader for SamplesReader {
                         blocks,
                         &request,
                         ids.as_ref(),
+                        manifest.identity_encoding,
                         &mut part_keys,
                         keys_reservation.as_ref(),
                         &mut key_offsets,
@@ -387,6 +414,7 @@ impl SamplesFormatReader for SamplesReader {
                                     reader,
                                     trailer.areas(),
                                     block,
+                                    manifest.identity_encoding,
                                     keys_reservation.as_ref(),
                                     &mut key_offsets,
                                     &mut metrics,
@@ -503,12 +531,16 @@ fn owns(key: &[u8], request: &SamplesReadRequest) -> bool {
 /// per-block identity allowance, so a page of short keys still fits a small scan pool.
 const KEY_ENTRY_BYTES: usize = std::mem::size_of::<ExactSeriesKey>() + BUFFER_ALIGNMENT;
 
-/// Bytes of the checksum stored after each key in the key area.
+/// Bytes of the checksum stored after each key entry in the key area.
 const KEY_CHECKSUM_BYTES: usize = metadata::KEY_CHECKSUM_BYTES as usize;
 
-/// Retained bytes of one cached key: its bytes, the boxed key, and the allocator's rounding.
-fn retained_key_bytes(length: u32) -> usize {
-    length as usize + KEY_ENTRY_BYTES
+/// Retained bytes of one cached key: the whole key it rebuilds, the boxed key, and the
+/// allocator's rounding.
+///
+/// The reference counts only the stored suffix, so the fixed prefix every key starts with is
+/// added here: the cache holds the reconstructed key, which is what a batch hands out.
+fn retained_key_bytes(stored_length: u32) -> usize {
+    SERIES_KEY_PREFIX_LEN + stored_length as usize + KEY_ENTRY_BYTES
 }
 
 /// Replaces the exact key that carries one series across a part boundary.
@@ -576,23 +608,40 @@ impl Drop for KeyPeak<'_> {
     }
 }
 
-/// Splits one stored key entry into its key bytes after verifying the stored checksum.
+/// Rebuilds one stored key entry into the block's exact key, verifying the stored checksum.
 ///
-/// The reference's length covers the key only, so the entry is exactly one key followed by
-/// [`KEY_CHECKSUM_BYTES`]. A flipped label byte keeps the key's framing and identifier valid, so
-/// this is the only place that notices it before the bytes attribute rows to a series.
-fn verified_key(entry: &[u8], length: u32) -> Result<&[u8]> {
-    let length = length as usize;
+/// The reference's length covers the stored key bytes only, so the entry is exactly those bytes
+/// followed by [`KEY_CHECKSUM_BYTES`]. What they are depends on the layout the manifest names:
+///
+/// * [`IdentityEncoding::ExactSparseKeyAreaSuffix`] stores only the bytes after the fixed
+///   `(table_id, tsid)` prefix, which the block descriptor carries as [`Block::id`]; the prefix is
+///   rebuilt from it exactly as the key codec encodes it. A zero length is a real series whose key
+///   is that prefix alone.
+/// * [`IdentityEncoding::ExactSparseKeyArea`] stores the whole key.
+///
+/// Either way the checksum is verified over the whole reconstructed key, so a flipped label byte
+/// keeps the key's framing and identifier valid but still fails here, and so does a stored suffix
+/// recombined under the wrong identifier.
+fn verified_key(entry: &[u8], block: &Block, encoding: IdentityEncoding) -> Result<Vec<u8>> {
+    let length = block.key.length as usize;
     require(
         entry.len() == length + KEY_CHECKSUM_BYTES,
         "sample key entry length mismatch",
     )?;
-    let (key, stored) = entry.split_at(length);
-    let stored: [u8; KEY_CHECKSUM_BYTES] = stored
+    let (stored, checksum) = entry.split_at(length);
+    let checksum: [u8; KEY_CHECKSUM_BYTES] = checksum
         .try_into()
         .map_err(|_| invalid("sample key checksum framing"))?;
+    let key = match encoding {
+        IdentityEncoding::ExactSparseKeyAreaSuffix => series_key_bytes(block.id, stored)?,
+        IdentityEncoding::ExactSparseKeyArea => stored.to_vec(),
+        // A manifest of any other layout is refused when it is opened, so no block reaches here.
+        IdentityEncoding::ExactSparseKey => {
+            return Err(unsupported("samples key area encoding"));
+        }
+    };
     require(
-        codec::checksum(key) == u64::from_le_bytes(stored),
+        codec::checksum(&key) == u64::from_le_bytes(checksum),
         "sample key checksum mismatch",
     )?;
     Ok(key)
@@ -609,6 +658,7 @@ async fn load_block_key(
     reader: &Reader,
     areas: Areas,
     block: &Block,
+    encoding: IdentityEncoding,
     reservation: Option<&MemoryReservation>,
     offsets: &mut mito_codec::row_converter::SparseOffsetsCache,
     metrics: &mut ColumnarReadMetrics,
@@ -627,9 +677,10 @@ async fn load_block_key(
     let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;
-    let key = ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
+    let key = ExactSeriesKey::from_sparse_key(&verified_key(&entry, block, encoding)?, offsets)?;
     // A key that parses but claims another identifier is a malformed reference: ownership would
-    // silently point at the wrong series.
+    // silently point at the wrong series. The suffix layout rebuilds the prefix from the
+    // descriptor, so this only catches a whole-key copy; there the check is the whole guard.
     require(
         key.id() == block.id,
         "sample block series key disagrees with its identifier",
@@ -669,6 +720,7 @@ async fn load_page_keys(
     blocks: &[Block],
     request: &SamplesReadRequest,
     ids: Option<&BTreeSet<MetricSeriesId>>,
+    encoding: IdentityEncoding,
     keys: &mut HashMap<(u64, u32), ExactSeriesKey>,
     reservation: Option<&MemoryReservation>,
     offsets: &mut mito_codec::row_converter::SparseOffsetsCache,
@@ -723,9 +775,10 @@ async fn load_page_keys(
     let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (block, entry) in wanted.iter().take(window).zip(fetched) {
         let key =
-            ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
+            ExactSeriesKey::from_sparse_key(&verified_key(&entry, block, encoding)?, offsets)?;
         // A key that parses but claims another identifier is a malformed reference: ownership
-        // would silently point at the wrong series.
+        // would silently point at the wrong series. The suffix layout rebuilds the prefix from
+        // the descriptor, so only a stored whole key can disagree with it.
         require(
             key.id() == block.id,
             "sample block series key disagrees with its identifier",
@@ -736,7 +789,7 @@ async fn load_page_keys(
 }
 
 /// Bounds-only pruning. Selection itself is exact and decided by [`owns`].
-fn matches(
+pub(super) fn matches(
     bounds: Bounds,
     request: &SamplesReadRequest,
     ids: Option<&BTreeSet<MetricSeriesId>>,
@@ -756,6 +809,115 @@ fn matches(
         });
     }
     first <= last && ids.is_none_or(|ids| ids.range(first..=last).next().is_some())
+}
+
+/// The children of one part's root internal page, in file order.
+enum ChildCursor {
+    /// A fixed-width page: every child is decoded, and this request prunes what it can.
+    Fixed(std::vec::IntoIter<PageReference>),
+    /// A compact page: only the candidates of this request are decoded.
+    Compact(CompactChildren),
+}
+
+impl ChildCursor {
+    /// The next child to visit, with whether it directly follows the previous visited one.
+    fn next(
+        &mut self,
+        request: &SamplesReadRequest,
+        ids: Option<&BTreeSet<MetricSeriesId>>,
+    ) -> Result<Option<(PageReference, bool)>> {
+        Ok(match self {
+            Self::Fixed(children) => children.next().map(|child| (child, true)),
+            Self::Compact(children) => children.next(request, ids)?,
+        })
+    }
+}
+
+/// Candidate traversal of one compact internal page.
+///
+/// The page is searched by identifier, so a request decodes only the entries its targets can
+/// occupy, and several targets are merged into one pass so no child is visited twice. A scan that
+/// selects no identifier iterates the page: a child's minimum timestamp is not ordered across
+/// children, so time alone cannot skip one.
+struct CompactChildren {
+    page: Arc<compact::CompactPage>,
+    windows: std::vec::IntoIter<std::ops::Range<u64>>,
+    active: Option<(compact::Entries, std::ops::Range<u64>)>,
+    /// Index of the last child this request visited.
+    last: Option<u64>,
+}
+
+impl CompactChildren {
+    fn new(
+        page: Arc<compact::CompactPage>,
+        request: &SamplesReadRequest,
+        ids: Option<&BTreeSet<MetricSeriesId>>,
+    ) -> Result<Self> {
+        let whole = |table_id: u32| {
+            (
+                MetricSeriesId { table_id, tsid: 0 },
+                MetricSeriesId {
+                    table_id,
+                    tsid: u64::MAX,
+                },
+            )
+        };
+        let windows = match (ids, request.table_id) {
+            // Identifiers are hash prefixes, not intervals: each one is its own target, and two
+            // distinct targets may share a child without it being visited twice.
+            (Some(ids), _) => page.windows(ids.iter().map(|id| (*id, *id)))?,
+            (None, Some(table_id)) => page.windows(std::iter::once(whole(table_id)))?,
+            // A scan that selects no identifier visits every child: a child's minimum timestamp is
+            // not ordered across children, so time alone cannot skip one.
+            (None, None) => page.windows(std::iter::once((
+                MetricSeriesId {
+                    table_id: 0,
+                    tsid: 0,
+                },
+                MetricSeriesId {
+                    table_id: u32::MAX,
+                    tsid: u64::MAX,
+                },
+            )))?,
+        };
+        Ok(Self {
+            page,
+            windows: windows.into_iter(),
+            active: None,
+            last: None,
+        })
+    }
+
+    fn next(
+        &mut self,
+        request: &SamplesReadRequest,
+        ids: Option<&BTreeSet<MetricSeriesId>>,
+    ) -> Result<Option<(PageReference, bool)>> {
+        loop {
+            let mut exhausted = false;
+            if let Some((entries, window)) = self.active.as_mut() {
+                while let Some((index, reference)) = entries.next()? {
+                    if index >= window.end {
+                        break;
+                    }
+                    if !matches(reference.bounds, request, ids) {
+                        continue;
+                    }
+                    let contiguous = self.last.map_or(index == 0, |last| last + 1 == index);
+                    self.last = Some(index);
+                    return Ok(Some((reference, contiguous)));
+                }
+                exhausted = true;
+            }
+            if exhausted {
+                self.active = None;
+            }
+            let Some(window) = self.windows.next() else {
+                return Ok(None);
+            };
+            self.active = Some((compact::Entries::start(&self.page, window.start)?, window));
+        }
+    }
 }
 async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Result<bytes::Bytes> {
     require(start <= end, "reversed sample byte range")?;
@@ -787,8 +949,15 @@ async fn load_metadata_page(
         format!("{path}/{size}/{reference:?}/{depth}/{}", areas.payload_end),
         Page::retained_size,
         async {
-            if reference.payload.encoding != 1 {
+            if !matches!(reference.payload.encoding, 1 | compact::ENCODING) {
                 return Err(unsupported("sample metadata codec"));
+            }
+            // A compact page is what the newer manifest version announces; a version-1 artifact
+            // never holds one, so its presence there is corrupt metadata rather than a layout this
+            // reader should interpret.
+            if reference.payload.encoding == compact::ENCODING && manifest.version < COMPACT_VERSION
+            {
+                return Err(unsupported("samples compact metadata page"));
             }
             let bytes =
                 read_part_range(reader, reference.payload.offset, reference.payload.end()?).await?;
@@ -946,9 +1115,12 @@ async fn read_block(
         - scratch.ranges.iter().map(|r| r.end - r.start).sum::<u64>();
     // The block's exact key is returned with the batch, once per block rather than once per
     // row, so it costs one key regardless of how many rows the block holds. Time pruning
-    // cannot add output rows, so no per-row term is needed for identity at all.
-    let key_bytes =
-        std::mem::size_of::<ExactSeriesKey>() + block.key.length as usize + BUFFER_ALIGNMENT;
+    // cannot add output rows, so no per-row term is needed for identity at all. The key is the
+    // whole reconstructed one, so the prefix the key area leaves out is charged here.
+    let key_bytes = std::mem::size_of::<ExactSeriesKey>()
+        + SERIES_KEY_PREFIX_LEN
+        + block.key.length as usize
+        + BUFFER_ALIGNMENT;
     let bytes = 2 * gap_bytes as usize
         + columns
             .iter()

@@ -36,15 +36,18 @@ use crate::error::{ComputeArrowSnafu, Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::artifact_writer::Outputs;
 use crate::series_index::format::FormatWriter;
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, decode_series_id};
+use crate::series_index::identity::{
+    ExactSeriesKey, IdentityEncoding, decode_series_id, series_key_suffix,
+};
+use crate::series_index::samples::compact::{self, ChildEntry, LeafPlan};
 use crate::series_index::samples::histogram::ChunkBound;
 use crate::series_index::samples::metadata::{
     self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
 };
 use crate::series_index::samples::{
-    ColumnarSamplesFormat, FLOAT64_ENCODING, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part,
-    TimestampColumn, TimestampUnit, VERSION, ValueColumn, codec, histogram, invalid, require,
-    valid_rows,
+    COMPACT_VERSION, ColumnarSamplesFormat, FLOAT64_ENCODING, MANIFEST_LIMIT, Manifest,
+    MetricSeriesId, Part, TimestampColumn, TimestampUnit, VERSION, ValueColumn, codec, histogram,
+    invalid, require, valid_rows,
 };
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -112,78 +115,72 @@ enum FieldInput<'a> {
     Float(&'a Float64Array),
     Histogram(&'a ArrayRef, &'a StructArray),
 }
-/// A block descriptor whose exact key has not been placed in the part's key area yet.
+/// A block of a part that is still pending: a descriptor and the columns it holds.
 ///
-/// The key bytes are held here until the part ends, when they are written to their own area
-/// and replaced by a fixed-size [`KeyRef`]. That is why no descriptor — and therefore no
-/// metadata page — ever has to fit a key.
+/// The exact key is not stored here. A block names its series with an index into the part's key
+/// table, and that series' bytes are written once, when the part ends: no descriptor — and
+/// therefore no metadata page — ever has to fit a key, and a block costs no key bytes of its own.
+/// The columns are the block's own vector, which its leaf moves into the rendered descriptor
+/// instead of copying, so a block owns exactly the descriptors it is written with.
 struct PendingBlock {
-    key: ExactSeriesKey,
     min: i64,
     max: i64,
     ordinal: u64,
+    /// Index of this block's series in the part's key table.
+    key_id: u32,
     rows: u32,
+    /// This block's column descriptors, in the order the encoder pushed them.
     columns: Vec<Column>,
 }
 
 impl PendingBlock {
-    /// Descriptor bytes once the key reference replaces the key bytes.
-    fn size(&self) -> usize {
-        metadata::descriptor_bytes(self.columns.len())
+    /// The bounds this block contributes to its leaf and to the internal page above it.
+    ///
+    /// A block names its series by table index, so the identifier comes from the part's table
+    /// rather than from a copy of the key: the same 22-byte prefix the finished descriptor
+    /// carries, which is what a leaf's bounds are made of.
+    fn bounds(&self, keys: &[ExactSeriesKey]) -> Result<metadata::Bounds> {
+        let key = keys
+            .get(self.key_id as usize)
+            .ok_or_else(|| invalid("sample block key outside its part"))?;
+        Ok(metadata::Bounds {
+            first: key.id(),
+            last: key.id(),
+            min: self.min,
+            max: self.max,
+        })
     }
 }
 
-/// Places one copy of each series key in the part's key area and turns pending blocks into
-/// descriptors that reference it.
+/// Turns one leaf's pending blocks into the descriptors its metadata page stores.
 ///
-/// Blocks are ordered by exact key, so every block of one series is adjacent and shares one
-/// copy of the key. Consecutive equal keys therefore reuse the previous reference, while every
-/// new series appends its bytes after the previous copy: references are ordered, disjoint, and
-/// unique per series, which is what lets a reader treat an equal reference as the same series
-/// without reading the bytes. Each copy is followed by its XXH64, which the reference does not
-/// count: a reader verifies the bytes before they can name a series.
-fn place_keys(leaves: Vec<Vec<PendingBlock>>, start: u64) -> Result<(Vec<Vec<Block>>, Vec<u8>)> {
-    let mut area: Vec<u8> = Vec::new();
-    let mut previous: Option<(Vec<u8>, KeyRef)> = None;
-    let mut placed = Vec::with_capacity(leaves.len());
-    for pending in leaves {
-        let mut blocks = Vec::with_capacity(pending.len());
-        for block in pending {
-            let reuse = previous
-                .as_ref()
-                .filter(|(key, _)| key.as_slice() == block.key.bytes())
-                .map(|(_, reference)| *reference);
-            let reference = match reuse {
-                Some(reference) => reference,
-                None => {
-                    let length = u32::try_from(block.key.bytes().len())
-                        .map_err(|_| invalid("sample series key exceeds 4 GiB"))?;
-                    let offset = start
-                        .checked_add(
-                            u64::try_from(area.len())
-                                .map_err(|_| invalid("sample key area overflow"))?,
-                        )
-                        .ok_or_else(|| invalid("sample key offset overflow"))?;
-                    area.extend_from_slice(block.key.bytes());
-                    area.extend_from_slice(&codec::checksum(block.key.bytes()).to_le_bytes());
-                    let reference = KeyRef { offset, length };
-                    previous = Some((block.key.bytes().to_vec(), reference));
-                    reference
-                }
-            };
-            blocks.push(Block {
-                id: block.key.id(),
-                key: reference,
-                min: block.min,
-                max: block.max,
-                ordinal: block.ordinal,
-                rows: block.rows,
-                columns: block.columns,
-            });
-        }
-        placed.push(blocks);
+/// Only the leaf being written is rendered: the part's other leaves stay pending, so a part never
+/// holds a second copy of every descriptor while its pages are written.
+fn render_leaf(
+    leaf: Vec<PendingBlock>,
+    keys: &[ExactSeriesKey],
+    references: &[KeyRef],
+) -> Result<Vec<Block>> {
+    let mut rendered = Vec::with_capacity(leaf.len());
+    for block in leaf {
+        let key_id = block.key_id as usize;
+        let key = keys
+            .get(key_id)
+            .ok_or_else(|| invalid("sample block key outside its part"))?;
+        let reference = references
+            .get(key_id)
+            .ok_or_else(|| invalid("sample block key outside its part"))?;
+        rendered.push(Block {
+            id: key.id(),
+            key: *reference,
+            min: block.min,
+            max: block.max,
+            ordinal: block.ordinal,
+            rows: block.rows,
+            columns: block.columns,
+        });
     }
-    Ok((placed, area))
+    Ok(rendered)
 }
 pub(super) struct SamplesWriter {
     options: ColumnarSamplesFormat,
@@ -198,7 +195,27 @@ pub(super) struct SamplesWriter {
     fields: Vec<PendingField>,
     last: Option<(MetricSeriesId, i64, u64)>,
     ordinal: u64,
+    /// One metadata page's worth of pending blocks per leaf, in the order they were flushed.
+    ///
+    /// A part renders one leaf at a time, so the rest of its blocks stay pending until their page
+    /// is written.
     leaves: Vec<Vec<PendingBlock>>,
+    /// One entry per distinct series of the current part, in the order the series first appear.
+    ///
+    /// Pending blocks hold an index into this table instead of a copy of their key, so the part
+    /// keeps one copy of a key however many blocks the series fills, and the key area is written
+    /// from here without comparing keys block by block.
+    keys: Vec<ExactSeriesKey>,
+    /// Table entry of the series of the last block pushed into this part.
+    ///
+    /// Blocks arrive sorted by exact key, so a series is already in this part's table exactly
+    /// when the previous block of the part belongs to it: no key bytes are compared, and a part
+    /// boundary clears the entry because the new part starts its own table.
+    last_key_id: Option<u32>,
+    /// What the internal page knows about each leaf before the leaf page is encoded: its bounds
+    /// so far and its exact decoded length. The page is split by encoded bytes, so the writer has
+    /// to measure the candidates, not just count them.
+    leaf_plans: Vec<LeafPlan>,
     leaf_bytes: usize,
     descriptor_bytes: usize,
     position: u64,
@@ -210,6 +227,9 @@ pub(super) struct SamplesWriter {
     /// The last series whose key this part already counts, to charge one copy per series.
     part_last_key: Option<ExactSeriesKey>,
     manifest_bytes: usize,
+    /// Whether any part of this artifact holds a compact internal page, which the manifest
+    /// version records so a reader that predates it refuses the artifact at open.
+    compact_pages: bool,
     failed: bool,
 }
 impl SamplesWriter {
@@ -224,7 +244,7 @@ impl SamplesWriter {
         super::validate_narthex_metadata(&metadata)?;
         require(
             (1..=super::MAX_ROWS).contains(&options.block_rows)
-                && (1..=metadata::ROOT_CAPACITY).contains(&options.root_capacity)
+                && (1..=compact::CAPACITY).contains(&options.root_capacity)
                 && (188..=metadata::PAGE_LIMIT).contains(&options.page_bytes)
                 && options.part_bytes > 0
                 && options.metadata_bytes > 0,
@@ -283,6 +303,9 @@ impl SamplesWriter {
             last: None,
             ordinal: 0,
             leaves: Vec::new(),
+            keys: Vec::new(),
+            last_key_id: None,
+            leaf_plans: Vec::new(),
             leaf_bytes: 12,
             descriptor_bytes: 0,
             position: 0,
@@ -291,6 +314,7 @@ impl SamplesWriter {
             part_key_bytes: 0,
             part_last_key: None,
             manifest_bytes,
+            compact_pages: false,
             failed: false,
         })
     }
@@ -390,6 +414,8 @@ impl SamplesWriter {
                     self.ordinal = 0;
                 }
                 self.series_key = Some(exact);
+                // A series a part has not seen yet: its first block there adds its key.
+                self.last_key_id = None;
             }
             let id = match self.last {
                 Some((id, last_time, last_seq)) if !new_series => {
@@ -458,6 +484,25 @@ impl SamplesWriter {
             })
             .collect()
     }
+    /// Index of the current series' key in the part's key table, adding it on first use.
+    ///
+    /// Entries are appended in the order their series first appear, which is block order, so
+    /// writing the table in order reproduces the key area a per-block key comparison would
+    /// place. Two blocks share a key reference exactly when they share a table entry.
+    fn intern_key(&mut self) -> Result<u32> {
+        if let Some(id) = self.last_key_id {
+            return Ok(id);
+        }
+        let key = self
+            .series_key
+            .as_ref()
+            .ok_or_else(|| invalid("sample block has no series key"))?;
+        let id = u32::try_from(self.keys.len())
+            .map_err(|_| invalid("too many sample series in a part"))?;
+        self.keys.push(key.clone());
+        self.last_key_id = Some(id);
+        Ok(id)
+    }
     async fn flush_block(&mut self) -> Result<()> {
         if self.rows.is_empty() {
             return Ok(());
@@ -471,15 +516,29 @@ impl SamplesWriter {
             .series_key
             .as_ref()
             .ok_or_else(|| invalid("sample block has no series key"))?;
-        let (mut block, chunks) = encode_block(&rows, fields, key, &self.manifest, self.ordinal)?;
-        // Bytes one copy of this series' key costs in a part's key area: the key and its stored
-        // checksum.
-        let key_len = key.bytes().len() as u64 + metadata::KEY_CHECKSUM_BYTES;
-        self.ordinal = self
-            .ordinal
+        // The block's fields are fixed by the rows it holds: its span is their first and last
+        // time, and its ordinal is the order it was flushed in.
+        let min = rows
+            .first()
+            .ok_or_else(|| invalid("empty sample block"))?
+            .time;
+        let max = rows
+            .last()
+            .ok_or_else(|| invalid("empty sample block"))?
+            .time;
+        // The encoder consumes this block's field values, so a histogram field hands its runs over
+        // here and the writer starts the next block's values empty.
+        let (mut columns, chunks) = encode_block(&rows, fields, key.id(), &self.manifest)?;
+        let ordinal = self.ordinal;
+        // Bytes one copy of this series' key costs in a part's key area: the stored suffix and
+        // its stored checksum. Splitting here also refuses a key whose prefix disagrees with the
+        // identifier it is about to be stored under, before any of its bytes are written.
+        let key_len =
+            series_key_suffix(key.bytes(), key.id())?.len() as u64 + metadata::KEY_CHECKSUM_BYTES;
+        self.ordinal = ordinal
             .checked_add(1)
             .ok_or_else(|| invalid("sample ordinal overflow"))?;
-        let size = block.size();
+        let size = metadata::descriptor_bytes(columns.len());
         // The descriptor carries a fixed-size key reference, not the key, so this bound is a
         // function of the field count only: a key longer than a whole metadata page is no
         // longer a build failure, and only a narrower configured page can reject a descriptor.
@@ -489,7 +548,7 @@ impl SamplesWriter {
         )?;
         if !self.leaves.is_empty()
             && self.leaf_bytes + size > self.options.page_bytes
-            && self.leaves.len() == self.options.root_capacity
+            && !self.root_admits_another_leaf()?
         {
             self.finish_part().await?;
         }
@@ -502,20 +561,47 @@ impl SamplesWriter {
                 .await?;
             self.position = metadata::HEADER_SIZE;
         }
-        for (column, chunk) in block.columns.iter_mut().zip(chunks) {
+        for (column, chunk) in columns.iter_mut().zip(chunks) {
             column.payload.offset = self.position;
             self.position = column.payload.end()?;
             self.output_buffer.write(&mut self.outputs, &chunk).await?;
         }
+        // The key table belongs to the part, and the rollover above emptied it: a series that
+        // starts a new part names its key in that part's table instead of the one just closed.
+        let key_id = self.intern_key()?;
+        let block = PendingBlock {
+            min,
+            max,
+            ordinal,
+            key_id,
+            rows: rows.len() as u32,
+            columns,
+        };
+        // The leaf plan and the pending list below must agree on the leaf this block joins and on
+        // what it charges: the plan is the leaf's entry in the internal page's byte estimate.
+        let bounds = block.bounds(&self.keys)?;
         if self.leaves.is_empty() || self.leaf_bytes + size > self.options.page_bytes {
             self.leaves.push(Vec::new());
+            self.leaf_plans.push(LeafPlan {
+                bounds,
+                decoded: 12,
+            });
             self.leaf_bytes = 12;
         }
         self.leaf_bytes += size;
         self.descriptor_bytes += size;
+        let plan = self
+            .leaf_plans
+            .last_mut()
+            .ok_or_else(|| invalid("missing sample leaf plan"))?;
+        plan.bounds.extend(bounds);
+        plan.decoded = plan
+            .decoded
+            .checked_add(size)
+            .ok_or_else(|| invalid("sample leaf plan overflow"))?;
         self.part_rows = self
             .part_rows
-            .checked_add(u64::from(block.rows))
+            .checked_add(rows.len() as u64)
             .ok_or_else(|| invalid("sample row count overflow"))?;
         self.part_blocks += 1;
         self.leaves
@@ -547,36 +633,70 @@ impl SamplesWriter {
         self.output_buffer.write(&mut self.outputs, &bytes).await?;
         Ok(PageReference { bounds, payload })
     }
+    /// Writes one copy of each key of the part's table to the part's key area.
+    ///
+    /// Copies are written in table order, which is the order their series appear in the blocks,
+    /// so every block of one series is adjacent and shares one copy. Consecutive blocks of one
+    /// series therefore reuse the same [`KeyRef`], while every new series appends its bytes after
+    /// the previous copy, exactly as a per-block key comparison would: references are ordered,
+    /// disjoint, and unique per series, which is what lets a reader treat an equal reference as
+    /// the same series without reading the bytes.
+    ///
+    /// Each copy holds the key's bytes after its fixed `(table_id, tsid)` prefix, which the block
+    /// descriptor already carries, and is followed by the XXH64 of the *whole* key. The reference
+    /// counts the stored suffix only; a series whose key is the prefix alone stores no key bytes
+    /// and is referenced with length zero.
+    async fn write_key_area(&mut self, keys: &[ExactSeriesKey]) -> Result<Vec<KeyRef>> {
+        let mut references = Vec::with_capacity(keys.len());
+        for key in keys {
+            // The descriptor rebuilds this series' prefix from its identifier, so the stored bytes
+            // must really follow that prefix: a key that does not is refused, never truncated.
+            let suffix = series_key_suffix(key.bytes(), key.id())?;
+            let length = u32::try_from(suffix.len())
+                .map_err(|_| invalid("sample series key exceeds 4 GiB"))?;
+            references.push(KeyRef {
+                offset: self.position,
+                length,
+            });
+            self.output_buffer.write(&mut self.outputs, suffix).await?;
+            self.output_buffer
+                .write(
+                    &mut self.outputs,
+                    &codec::checksum(key.bytes()).to_le_bytes(),
+                )
+                .await?;
+            self.position = self
+                .position
+                .checked_add(u64::from(length) + metadata::KEY_CHECKSUM_BYTES)
+                .ok_or_else(|| invalid("sample file length overflow"))?;
+        }
+        Ok(references)
+    }
     async fn finish_part(&mut self) -> Result<()> {
         if self.leaves.is_empty() {
             return Ok(());
         }
         let payload_end = self.position;
-        // Keys go to their own area after the payload. Every block of one series shares one
-        // copy, so the area holds one key per distinct series of this part.
-        let (leaves, key_area) = place_keys(std::mem::take(&mut self.leaves), payload_end)?;
-        if !key_area.is_empty() {
-            self.position = self
-                .position
-                .checked_add(
-                    u64::try_from(key_area.len())
-                        .map_err(|_| invalid("sample key area overflow"))?,
-                )
-                .ok_or_else(|| invalid("sample file length overflow"))?;
-            self.output_buffer
-                .write(&mut self.outputs, &key_area)
-                .await?;
-        }
+        // Keys go to their own area after the payload. The part's table holds one entry per
+        // series it uses, so the area holds one copy per distinct series of this part.
+        let keys = std::mem::take(&mut self.keys);
+        self.last_key_id = None;
+        let references = self.write_key_area(&keys).await?;
         let key_end = self.position;
         let mut children = Vec::new();
-        for leaf in leaves {
-            children.push(self.write_page(Page::Leaf(leaf)).await?);
+        // One leaf at a time: the rest stay pending until their turn, so rendering a part never
+        // holds a second copy of every descriptor it is writing.
+        for leaf in std::mem::take(&mut self.leaves) {
+            children.push(
+                self.write_page(Page::Leaf(render_leaf(leaf, &keys, &references)?))
+                    .await?,
+            );
         }
         let depth = if children.len() == 1 { 1 } else { 2 };
         let root = if depth == 1 {
             children.remove(0)
         } else {
-            self.write_page(Page::Internal(children)).await?
+            self.write_compact_page(&children).await?
         };
         let bounds = root.bounds;
         let file_length = self
@@ -622,13 +742,58 @@ impl SamplesWriter {
         self.part_key_bytes = 0;
         self.part_last_key = None;
         self.descriptor_bytes = 0;
+        self.leaf_plans.clear();
         self.leaf_bytes = 12;
         Ok(())
+    }
+    /// Whether the internal page could reference one more leaf page.
+    ///
+    /// The page is split by encoded bytes rather than by a fixed count: an entry's width depends on
+    /// the identifiers, time bounds, and lengths it names, so a page of short series holds several
+    /// times the children a 72-byte descriptor count would. Everything the estimate needs is known
+    /// before the leaf page is written - its decoded length is exact and its stored length cannot
+    /// exceed it - and the pages are emitted back to back, so no offset gap can appear. The leaf
+    /// this block would open is charged its worst case, which the finished part is then checked
+    /// against exactly.
+    fn root_admits_another_leaf(&self) -> Result<bool> {
+        if self.leaves.len() >= self.options.root_capacity {
+            return Ok(false);
+        }
+        Ok(
+            compact::planned_bytes(&self.leaf_plans, compact::MAX_ENTRY_BYTES)?
+                <= self.options.page_bytes,
+        )
+    }
+    /// Writes the internal page that references `children` in the compact encoding.
+    async fn write_compact_page(&mut self, children: &[PageReference]) -> Result<PageReference> {
+        let entries = children.iter().map(ChildEntry::from).collect::<Vec<_>>();
+        let mut bounds = children
+            .first()
+            .ok_or_else(|| invalid("empty sample internal page"))?
+            .bounds;
+        for child in &children[1..] {
+            bounds.extend(child.bounds);
+        }
+        let bytes = compact::encode(&entries, compact::CHILD_LEAF)?;
+        require(
+            bytes.len() <= self.options.page_bytes,
+            "sample compact page exceeds limit",
+        )?;
+        let (payload, stored) = pack(&bytes, self.position, compact::ENCODING, true)?;
+        self.position = payload.end()?;
+        self.output_buffer.write(&mut self.outputs, &stored).await?;
+        self.compact_pages = true;
+        Ok(PageReference { bounds, payload })
     }
     async fn complete(&mut self) -> Result<ArtifactMetadata> {
         require(!self.failed, "sample writer failed previously")?;
         self.flush_block().await?;
         self.finish_part().await?;
+        // A compact internal page changes what a reader has to understand, while every other
+        // artifact stays on version 1 and byte-compatible with what earlier builds wrote.
+        if self.compact_pages {
+            self.manifest.version = COMPACT_VERSION;
+        }
         let bytes = serde_json::to_vec(&self.manifest).context(SerdeJsonSnafu)?;
         require(
             bytes.len() <= MANIFEST_LIMIT,
@@ -663,6 +828,29 @@ impl SamplesWriter {
 
 #[cfg(test)]
 impl SamplesWriter {
+    /// Bytes this part's pending containers hold: the leaf lists, the blocks with their column
+    /// descriptors, the key table and one copy of each table key's bytes.
+    ///
+    /// Spare capacity is counted, because a part holds its containers for its whole life. Leaf
+    /// headers, the output buffer, the buffered row and allocator overhead are not, so this is
+    /// the writer's own containers and nothing else.
+    pub(super) fn pending_container_bytes(&self) -> usize {
+        self.leaves.capacity() * std::mem::size_of::<Vec<PendingBlock>>()
+            + self
+                .leaves
+                .iter()
+                .map(|leaf| {
+                    leaf.capacity() * std::mem::size_of::<PendingBlock>()
+                        + leaf
+                            .iter()
+                            .map(|block| block.columns.capacity() * std::mem::size_of::<Column>())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.keys.capacity() * std::mem::size_of::<ExactSeriesKey>()
+            + self.keys.iter().map(|key| key.bytes().len()).sum::<usize>()
+    }
+
     /// The current part's accounting, for the rollover tests: `(position, counted key bytes,
     /// blocks in the current part, finished parts)`.
     ///
@@ -701,31 +889,22 @@ impl FormatWriter for SamplesWriter {
         self.outputs.cleanup().await
     }
 }
+/// Encodes one block's columns and returns its descriptors with the encoded chunks to write.
 fn encode_block(
     rows: &[Row],
     fields: Vec<PendingField>,
-    key: &ExactSeriesKey,
+    id: MetricSeriesId,
     manifest: &Manifest,
-    ordinal: u64,
-) -> Result<(PendingBlock, Vec<Vec<u8>>)> {
-    let first = rows.first().ok_or_else(|| invalid("empty sample block"))?;
-    let last = rows.last().ok_or_else(|| invalid("empty sample block"))?;
+) -> Result<(Vec<Column>, Vec<Vec<u8>>)> {
     require(
-        rows.iter().all(|row| row.id == key.id()),
+        rows.iter().all(|row| row.id == id),
         "sample block mixes series",
     )?;
-    let mut block = PendingBlock {
-        key: key.clone(),
-        min: first.time,
-        max: last.time,
-        ordinal,
-        rows: rows.len() as u32,
-        columns: Vec::new(),
-    };
+    let mut columns = Vec::new();
     let mut chunks = Vec::new();
     let mut push = |role, id, encoding, bytes: Vec<u8>, nulls| -> Result<()> {
         let (payload, bytes) = pack(&bytes, 0, encoding, false)?;
-        block.columns.push(Column {
+        columns.push(Column {
             role,
             id,
             payload,
@@ -784,12 +963,21 @@ fn encode_block(
             }
         }
     }
-    Ok((block, chunks))
+    Ok((columns, chunks))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use datatypes::arrow::array::ArrayRef;
+    use datatypes::arrow::datatypes::{Field, Schema};
+    use datatypes::prelude::ConcreteDataType;
+    use store_api::codec::PrimaryKeyEncoding;
+
     use super::*;
+    use crate::series_index::identity::SERIES_KEY_PREFIX_LEN;
+    use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn outputs() -> Outputs {
         Outputs {
@@ -868,5 +1056,416 @@ mod tests {
             );
             outputs.cleanup().await.unwrap();
         }
+    }
+
+    /// The region metadata the sample fixtures are built for, with one nullable `f64` field.
+    fn metadata() -> RegionMetadataRef {
+        let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+        metadata
+            .column_metadatas
+            .iter_mut()
+            .find(|column| column.column_id == 2)
+            .unwrap()
+            .column_schema
+            .data_type = ConcreteDataType::float64_datatype();
+        Arc::new(metadata)
+    }
+
+    /// Builds one batch from explicit sparse keys and times, one row per key.
+    fn sparse_batch(metadata: &RegionMetadataRef, keys: &[Vec<u8>], times: &[i64]) -> RecordBatch {
+        let count = keys.len();
+        let keys: ArrayRef = Arc::new(BinaryArray::from_iter_values(
+            keys.iter().map(Vec::as_slice),
+        ));
+        let unit = metadata
+            .time_index_column()
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .unwrap()
+            .unit();
+        let ts: ArrayRef = match unit {
+            common_time::timestamp::TimeUnit::Second => Arc::new(
+                datatypes::arrow::array::TimestampSecondArray::from_iter_values(
+                    times.iter().copied(),
+                ),
+            ),
+            common_time::timestamp::TimeUnit::Millisecond => Arc::new(
+                datatypes::arrow::array::TimestampMillisecondArray::from_iter_values(
+                    times.iter().copied(),
+                ),
+            ),
+            common_time::timestamp::TimeUnit::Microsecond => Arc::new(
+                datatypes::arrow::array::TimestampMicrosecondArray::from_iter_values(
+                    times.iter().copied(),
+                ),
+            ),
+            common_time::timestamp::TimeUnit::Nanosecond => Arc::new(
+                datatypes::arrow::array::TimestampNanosecondArray::from_iter_values(
+                    times.iter().copied(),
+                ),
+            ),
+        };
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("field_0", DataType::Float64, true),
+                Field::new("ts", ts.data_type().clone(), false),
+                Field::new(
+                    consts::PRIMARY_KEY_COLUMN_NAME,
+                    keys.data_type().clone(),
+                    false,
+                ),
+                Field::new(consts::SEQUENCE_COLUMN_NAME, DataType::UInt64, false),
+                Field::new(consts::OP_TYPE_COLUMN_NAME, DataType::UInt8, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from_iter_values(vec![0.0; count])),
+                ts,
+                keys,
+                Arc::new(UInt64Array::from_iter_values(vec![1; count])),
+                Arc::new(UInt8Array::from_iter_values(vec![0; count])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A filesystem store in the system temporary directory.
+    ///
+    /// The writer's memory is what these tests measure, so a written part must not stay in
+    /// memory the way a memory store would keep it.
+    fn fs_store(name: &str) -> (ObjectStore, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("samples-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let store =
+            ObjectStore::new(object_store::services::Fs::default().root(root.to_str().unwrap()))
+                .unwrap();
+        (store, root)
+    }
+
+    /// One resident-memory field of `/proc/self/status`, in KiB.
+    fn rss_kib(field: &str) -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix(field)?.trim().strip_suffix("kB"))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Reports the sizes of the in-flight block representation and how many series one part's
+    /// key table holds. Run with `--nocapture` to see the numbers.
+    #[allow(clippy::print_stdout)] // The sizes exist to be read off stdout.
+    #[tokio::test]
+    async fn block_representation_footprint() {
+        let metadata = metadata();
+        let options = ColumnarSamplesFormat {
+            block_rows: 1,
+            page_bytes: 1868,
+            ..Default::default()
+        };
+        let (store, root) = fs_store("footprint");
+        let mut writer = SamplesWriter::new(
+            options,
+            metadata.clone(),
+            store.clone(),
+            "footprint/",
+            FileId::random(),
+            FileId::random(),
+        )
+        .unwrap();
+        // Two series, two blocks each: a key table holds one entry per series, not per block.
+        let keys = vec![
+            new_sparse_primary_key(&["a", "b"], &metadata, 1, 7),
+            new_sparse_primary_key(&["a", "b"], &metadata, 1, 7),
+            new_sparse_primary_key(&["a", "b"], &metadata, 1, 8),
+            new_sparse_primary_key(&["a", "b"], &metadata, 1, 8),
+        ];
+        let batch = sparse_batch(&metadata, &keys, &[1, 2, 3, 4]);
+        writer.write(&batch).await.unwrap();
+        let blocks: usize = writer.leaves.iter().map(Vec::len).sum();
+        println!(
+            "size_of::<PendingBlock>()={} size_of::<Block>()={} size_of::<Column>()={} \
+             key_table_entries={} key_bytes={} blocks={} columns={} descriptor_bytes={}",
+            std::mem::size_of::<PendingBlock>(),
+            std::mem::size_of::<Block>(),
+            std::mem::size_of::<Column>(),
+            writer.keys.len(),
+            keys[0].len(),
+            blocks,
+            writer
+                .leaves
+                .iter()
+                .flatten()
+                .map(|block| block.columns.len())
+                .sum::<usize>(),
+            metadata::descriptor_bytes(4),
+        );
+        assert_eq!(
+            2,
+            writer.keys.len(),
+            "one key table entry per series, not per block"
+        );
+        assert_eq!(3, blocks, "the last row is still buffered");
+        assert_eq!(1, writer.leaves.len());
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Memory benchmark for the acceptance configuration: 270k one-row blocks.
+    ///
+    /// A part holds [`metadata::ROOT_CAPACITY`] leaves of eight blocks each at this page size, so
+    /// the blocks span several parts and the pending containers are sampled after every batch:
+    /// the largest sample, one nearly full part, is where the bytes per block are read off.
+    ///
+    /// Run with `--ignored --nocapture`, ideally under `/usr/bin/time -v` for the kernel's own
+    /// `Maximum resident set size`; the test also prints `VmHWM` and the bytes per block it
+    /// implies over the residency it started with.
+    #[allow(clippy::print_stdout)] // The peak exists to be read off stdout at the end of a run.
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_block_memory() {
+        common_telemetry::init_default_ut_logging();
+        const BLOCKS: usize = 270_000;
+        const SERIES_PER_BATCH: usize = 1000;
+        let metadata = metadata();
+        let options = ColumnarSamplesFormat {
+            block_rows: 1,
+            page_bytes: 1868,
+            metadata_bytes: 96 << 20,
+            ..Default::default()
+        };
+        let (store, root) = fs_store("block-memory");
+        let mut writer = SamplesWriter::new(
+            options,
+            metadata.clone(),
+            store.clone(),
+            "bench/",
+            FileId::random(),
+            FileId::random(),
+        )
+        .unwrap();
+        // Readers of one series must see increasing times; one row per series sidesteps it.
+        let start_kib = rss_kib("VmRSS:");
+        let started = std::time::Instant::now();
+        // `(bytes, blocks)` of the largest fill the pending containers reached: a part is
+        // rendered only once it is full, so this is the most a part ever holds.
+        let mut peak_pending = (0, 0);
+        let mut written = 0;
+        while written < BLOCKS {
+            let count = SERIES_PER_BATCH.min(BLOCKS - written);
+            let keys: Vec<_> = (written..written + count)
+                .map(|series| new_sparse_primary_key(&["a", "b"], &metadata, 1, series as u64))
+                .collect();
+            let times: Vec<_> = (written..written + count).map(|row| row as i64).collect();
+            let batch = sparse_batch(&metadata, &keys, &times);
+            writer.write(&batch).await.unwrap();
+            written += count;
+            let bytes = writer.pending_container_bytes();
+            if bytes > peak_pending.0 {
+                peak_pending = (bytes, writer.part_blocks);
+            }
+        }
+        let write_elapsed = started.elapsed();
+        // Flush the buffered block first, so the part counters cover every block written.
+        writer.flush_block().await.unwrap();
+        let pending_blocks = writer.part_blocks;
+        let blocks: usize = writer.leaves.iter().map(Vec::len).sum();
+        // The peak is reached while every block of the part is still pending, before the part
+        // is rendered, so it is read before `finish` starts freeing the pending blocks.
+        let peak_kib = rss_kib("VmHWM:");
+        let artifact = writer.complete().await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(
+            BLOCKS as u64,
+            writer
+                .manifest
+                .files
+                .iter()
+                .map(|part| part.num_blocks)
+                .sum::<u64>(),
+            "every block is written once"
+        );
+        assert_eq!(
+            pending_blocks as usize, blocks,
+            "every part block is pending"
+        );
+        println!(
+            "blocks={BLOCKS} parts={} peak_pending_bytes={} peak_pending_blocks={} \
+             peak_container_bytes_per_block={} peak_rss={:.1}MiB start_rss={:.1}MiB \
+             rss_bytes_per_block={} write={write_elapsed:?} total={elapsed:?}",
+            artifact.objects.len() - 1,
+            peak_pending.0,
+            peak_pending.1,
+            peak_pending.0 as u64 / peak_pending.1.max(1),
+            peak_kib as f64 / 1024.0,
+            start_kib as f64 / 1024.0,
+            peak_kib.saturating_sub(start_kib) * 1024 / BLOCKS as u64,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Memory benchmark for the shape the key table is for: series that outlive one block.
+    ///
+    /// Ten thousand series with eight one-row blocks each, so a part's key table holds one entry
+    /// per eight blocks. Run with `--ignored --nocapture`; it prints the bytes the pending
+    /// containers hold per block for the last part, which `root_capacity` fills to nearly the
+    /// same fraction as the one-block-per-series shape above.
+    #[allow(clippy::print_stdout)] // The ratio exists to be read off stdout.
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_block_memory_shared_keys() {
+        common_telemetry::init_default_ut_logging();
+        const SERIES: usize = 10_000;
+        const POINTS: usize = 8;
+        const SERIES_PER_BATCH: usize = 1000;
+        let metadata = metadata();
+        let options = ColumnarSamplesFormat {
+            block_rows: 1,
+            page_bytes: 1868,
+            metadata_bytes: 96 << 20,
+            ..Default::default()
+        };
+        let (store, root) = fs_store("block-memory-shared");
+        let mut writer = SamplesWriter::new(
+            options,
+            metadata.clone(),
+            store.clone(),
+            "bench/",
+            FileId::random(),
+            FileId::random(),
+        )
+        .unwrap();
+        // Rows arrive in primary-key order, so one series' points are adjacent and its blocks
+        // are too: they share a key reference.
+        let mut written = 0;
+        while written < SERIES {
+            let count = SERIES_PER_BATCH.min(SERIES - written);
+            let mut keys = Vec::with_capacity(count * POINTS);
+            let mut times = Vec::with_capacity(count * POINTS);
+            for series in written..written + count {
+                let key = new_sparse_primary_key(&["a", "b"], &metadata, 1, series as u64);
+                for point in 0..POINTS {
+                    keys.push(key.clone());
+                    times.push(point as i64);
+                }
+            }
+            let batch = sparse_batch(&metadata, &keys, &times);
+            writer.write(&batch).await.unwrap();
+            written += count;
+        }
+        writer.flush_block().await.unwrap();
+        let container_bytes = writer.pending_container_bytes();
+        let blocks: usize = writer.leaves.iter().map(Vec::len).sum();
+        let part_keys = writer.keys.len();
+        let part_blocks = writer.part_blocks;
+        let artifact = writer.complete().await.unwrap();
+        assert_eq!(blocks, part_blocks as usize, "every part block is pending");
+        assert_eq!(
+            SERIES,
+            writer
+                .manifest
+                .files
+                .iter()
+                .map(|part| part.num_rows as usize / POINTS)
+                .sum::<usize>(),
+            "every series is written"
+        );
+        println!(
+            "series={SERIES} points={POINTS} blocks={blocks} parts={} part_keys={part_keys} \
+             container_bytes={container_bytes} container_bytes_per_block={} \
+             key_table_entries_per_block={:.2}",
+            artifact.objects.len() - 1,
+            container_bytes / blocks,
+            part_keys as f64 / blocks as f64,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Key-area and total bytes for the shape the key area dominates: 10M series, one row each.
+    ///
+    /// The part limits are lifted so the only boundary is the root page's child capacity, which
+    /// keeps the shape independent of the options: every part holds one key-area copy per series
+    /// and nothing else, and the sums below are the artifact's. The stored copy is the key without
+    /// its fixed `(table_id, tsid)` prefix, which the block descriptor already carries as the
+    /// block's identifier, so the line prints both the stored suffix length and the whole key
+    /// length: a part written by the whole-key layout keeps `22` more bytes per series, and that
+    /// difference times `series` is exactly what the suffix layout saves.
+    ///
+    /// Run with `--ignored --nocapture`; it prints one `key=value` line.
+    #[allow(clippy::print_stdout)] // The sizes exist to be read off stdout.
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_key_area_suffix() {
+        common_telemetry::init_default_ut_logging();
+        const SERIES: usize = 10_000_000;
+        const SERIES_PER_BATCH: usize = 1000;
+        let metadata = metadata();
+        // Column limits roll the part instead of the byte target, so the shape does not depend on
+        // the packing options: no boundary comes from `part_bytes` or `metadata_bytes`.
+        let options = ColumnarSamplesFormat {
+            block_rows: 1,
+            part_bytes: u64::MAX,
+            metadata_bytes: usize::MAX,
+            ..Default::default()
+        };
+        let (store, root) = fs_store("key-area");
+        let mut writer = SamplesWriter::new(
+            options,
+            metadata.clone(),
+            store.clone(),
+            "bench/",
+            FileId::random(),
+            FileId::random(),
+        )
+        .unwrap();
+        let key_len = new_sparse_primary_key(&["a", "b"], &metadata, 1, 0).len();
+        let started = std::time::Instant::now();
+        let mut written = 0;
+        while written < SERIES {
+            let count = SERIES_PER_BATCH.min(SERIES - written);
+            let keys: Vec<_> = (written..written + count)
+                .map(|series| new_sparse_primary_key(&["a", "b"], &metadata, 1, series as u64))
+                .collect();
+            let times: Vec<_> = (written..written + count).map(|row| row as i64).collect();
+            writer
+                .write(&sparse_batch(&metadata, &keys, &times))
+                .await
+                .unwrap();
+            written += count;
+        }
+        writer.flush_block().await.unwrap();
+        let artifact = writer.complete().await.unwrap();
+        let elapsed = started.elapsed();
+        let mut key_area = 0u64;
+        let mut part_bytes = 0u64;
+        for part in &writer.manifest.files {
+            part_bytes += part.file_size;
+            // The trailer records where the key area starts and ends; the rest of the part is
+            // payload and pages, which the suffix layout does not change.
+            let tail = store
+                .read_with(&writer.manifest.part_path(part.part_id))
+                .range(part.file_size - metadata::TRAILER_SIZE..part.file_size)
+                .await
+                .unwrap()
+                .to_bytes();
+            let trailer = Trailer::decode(&tail, part.file_size).unwrap();
+            key_area += trailer.key_end - trailer.payload_end;
+        }
+        let series = writer
+            .manifest
+            .files
+            .iter()
+            .map(|part| part.num_rows)
+            .sum::<u64>();
+        println!(
+            "series={series} key_len={key_len} suffix_len={} key_area_bytes={key_area} \
+             part_bytes={part_bytes} artifact_bytes={} parts={} elapsed={elapsed:?}",
+            key_len - SERIES_KEY_PREFIX_LEN,
+            artifact.file_size,
+            writer.manifest.files.len(),
+        );
+        assert_eq!(SERIES as u64, series, "every series is written");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

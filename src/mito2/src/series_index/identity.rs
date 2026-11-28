@@ -21,14 +21,16 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
 use mito_codec::row_converter::SparseOffsetsCache;
-use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
+use mito_codec::row_converter::sparse::{SparsePrimaryKeyCodec, SparsePrimaryKeyView};
 use snafu::ResultExt;
 use store_api::storage::ColumnId;
 
 use crate::error::{DecodeSnafu, Result};
 use crate::series_index::MetricSeriesId;
+use crate::series_index::columnar::invalid;
 
 /// The identity semantics *and storage layout* an artifact was written with.
 ///
@@ -43,6 +45,10 @@ use crate::series_index::MetricSeriesId;
 /// inside its pages, then moved to one copy per series in a dedicated key area with a stored
 /// checksum. An artifact of the older layout is structurally valid and ordered too, so without
 /// the layout in this value maintenance would mark it reusable and only a part read would fail.
+// Every variant starts with `ExactSparseKey` because that is the identity they all store; the
+// suffix names the *layout* that stores it, and the name is also the serialized value every
+// artifact manifest carries, so a shorter variant name would rename the wire contract.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum IdentityEncoding {
     /// Identity is [`ExactSeriesKey`], stored inside the artifact's own pages: the
@@ -51,20 +57,82 @@ pub(crate) enum IdentityEncoding {
     #[serde(rename = "exact-sparse-key")]
     ExactSparseKey,
     /// Identity is [`ExactSeriesKey`], stored once per series in a part-level key area after
-    /// the column payloads, each copy followed by its checksum.
+    /// the column payloads, each whole key followed by its checksum.
     #[serde(rename = "exact-sparse-key-area")]
     ExactSparseKeyArea,
+    /// Identity is [`ExactSeriesKey`], stored once per series in a part-level key area that
+    /// keeps only the bytes after the key's fixed [`SERIES_KEY_PREFIX_LEN`]-byte
+    /// `(table_id, tsid)` prefix, followed by the checksum of the whole reconstructed key.
+    ///
+    /// The prefix is not lost: every block descriptor carries its series' `(table_id, tsid)` as
+    /// the block's identifier, and the sparse key codec rebuilds the exact prefix from it. An
+    /// artifact of this layout is therefore indistinguishable, byte for byte, from one of
+    /// [`Self::ExactSparseKeyArea`] once its keys are reconstructed, but it is much smaller: those
+    /// 22 bytes are stored once per series in the descriptor instead of once per key copy.
+    #[serde(rename = "exact-sparse-key-area-suffix")]
+    ExactSparseKeyAreaSuffix,
 }
 
 impl IdentityEncoding {
     /// The encoding new samples artifacts are written with; their readers require exactly this.
     ///
     /// Distinct from the series-index encoding on purpose: it names the key-area layout, so an
-    /// artifact written before the key area cannot be taken for a current one.
-    pub(crate) const CURRENT_SAMPLES: Self = Self::ExactSparseKeyArea;
+    /// artifact written before the key area cannot be taken for a current one, and an artifact
+    /// written before the suffix layout keeps naming the whole-key layout it really has.
+    pub(crate) const CURRENT_SAMPLES: Self = Self::ExactSparseKeyAreaSuffix;
 
     /// The encoding new series-index artifacts are written with; their readers require this.
     pub(crate) const CURRENT_SERIES_INDEX: Self = Self::ExactSparseKey;
+}
+
+/// Length of the reserved `(table_id, tsid)` prefix every sparse primary key starts with.
+///
+/// It is the codec's encoding of `(table_id, tsid)` itself — two reserved column ids, two non-null
+/// markers, a u32 table id, and a u64 tsid — and it is fixed width, which is why it can be left
+/// out of the key area and rebuilt from a block descriptor's identifier.
+pub(crate) const SERIES_KEY_PREFIX_LEN: usize = 22;
+
+/// The exact prefix [`SparsePrimaryKeyCodec::encode_internal`] writes for `id`.
+///
+/// Taken from the codec rather than re-spelled here, so a key rebuilt from a stored suffix is
+/// byte-identical to the key the SST wrote: identity, ordering, and checksums all compare these
+/// bytes.
+pub(crate) fn series_key_prefix(id: MetricSeriesId) -> Result<[u8; SERIES_KEY_PREFIX_LEN]> {
+    // The reserved prefix does not depend on the codec's labels, so one instance serves every
+    // identifier and a part write does not build one per series.
+    static CODEC: OnceLock<SparsePrimaryKeyCodec> = OnceLock::new();
+    let mut prefix = Vec::with_capacity(SERIES_KEY_PREFIX_LEN);
+    CODEC
+        .get_or_init(SparsePrimaryKeyCodec::schemaless)
+        .encode_internal(id.table_id, id.tsid, &mut prefix)
+        .context(DecodeSnafu)?;
+    prefix
+        .try_into()
+        .map_err(|_| invalid("sparse primary key prefix length"))
+}
+
+/// Splits `key` into the bytes the samples key area stores for `id`.
+///
+/// Refuses a key that does not start with `id`'s prefix instead of stripping whatever its first
+/// twenty-two bytes are: the stored suffix is recombined under the descriptor's identifier, so a
+/// key that belongs to another identifier would silently be read back as a series the writer never
+/// wrote.
+pub(crate) fn series_key_suffix(key: &[u8], id: MetricSeriesId) -> Result<&[u8]> {
+    let prefix = series_key_prefix(id)?;
+    key.strip_prefix(prefix.as_slice())
+        .ok_or_else(|| invalid("sample series key does not start with its identifier's prefix"))
+}
+
+/// Rebuilds one exact key from a block descriptor's identifier and the stored suffix.
+///
+/// The inverse of [`series_key_suffix`]; the suffix may be empty, which is the key of a series
+/// whose labels are all null and whose identity is the reserved prefix alone.
+pub(crate) fn series_key_bytes(id: MetricSeriesId, suffix: &[u8]) -> Result<Vec<u8>> {
+    let prefix = series_key_prefix(id)?;
+    let mut key = Vec::with_capacity(SERIES_KEY_PREFIX_LEN + suffix.len());
+    key.extend_from_slice(&prefix);
+    key.extend_from_slice(suffix);
+    Ok(key)
 }
 
 /// The exact identity of one series: its canonical sparse primary-key bytes.
@@ -346,6 +414,50 @@ mod tests {
             assert_eq!(pair[0].cmp(&pair[1]), pair[0].bytes().cmp(pair[1].bytes()));
         }
         assert!(sorted.is_sorted());
+    }
+
+    #[test]
+    fn prefix_is_the_codec_prefix_and_suffixes_rebuild_the_key() {
+        let mut offsets = SparseOffsetsCache::new();
+        let id = MetricSeriesId {
+            table_id: 9,
+            tsid: 0x0102_0304_0506_0708,
+        };
+        let mut expected = Vec::new();
+        SparsePrimaryKeyCodec::schemaless()
+            .encode_internal(id.table_id, id.tsid, &mut expected)
+            .unwrap();
+        assert_eq!(SERIES_KEY_PREFIX_LEN, expected.len());
+        assert_eq!(
+            expected.as_slice(),
+            series_key_prefix(id).unwrap().as_slice()
+        );
+        // A key with no labels is exactly the prefix, so its stored suffix is empty and the
+        // rebuilt key is still a valid identity.
+        let bare = ExactSeriesKey::from_sparse_key(&expected, &mut offsets).unwrap();
+        assert_eq!(id, bare.id());
+        assert_eq!(b"".as_slice(), series_key_suffix(bare.bytes(), id).unwrap());
+        assert_eq!(expected, series_key_bytes(id, b"").unwrap());
+        // A labelled key splits into exactly its label bytes and rebuilds byte for byte.
+        let encoded = key(&["host-020078", "z"], id.table_id, id.tsid);
+        let labelled = ExactSeriesKey::from_sparse_key(&encoded, &mut offsets).unwrap();
+        let suffix = series_key_suffix(&encoded, id).unwrap();
+        assert_eq!(&encoded[SERIES_KEY_PREFIX_LEN..], suffix);
+        assert_eq!(encoded, series_key_bytes(id, suffix).unwrap());
+        assert_eq!(bare.id(), labelled.id());
+        assert_ne!(bare, labelled);
+        // The same suffix under another identifier is a different key, which is why the split
+        // refuses a key whose prefix belongs to someone else.
+        let other = MetricSeriesId {
+            table_id: 9,
+            tsid: 8,
+        };
+        assert!(series_key_suffix(&encoded, other).is_err());
+        assert_ne!(
+            encoded,
+            series_key_bytes(other, suffix).unwrap(),
+            "the suffix alone does not name a series"
+        );
     }
 
     #[test]

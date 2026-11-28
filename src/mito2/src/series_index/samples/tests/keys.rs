@@ -33,17 +33,22 @@ use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataR
 
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::format::{SamplesBatch, SamplesFormat, SamplesReadRequest};
-use crate::series_index::identity::ExactSeriesKey;
+use crate::series_index::identity::{
+    ExactSeriesKey, IdentityEncoding, SERIES_KEY_PREFIX_LEN, series_key_bytes, series_key_prefix,
+    series_key_suffix,
+};
 use crate::series_index::purger::series_index_channel;
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, KeyRef, MAGIC, Page, PayloadReference, TRAILER_SIZE, Trailer,
 };
 use crate::series_index::samples::{ColumnarSamplesFormat, Manifest};
-use crate::series_index::{TABLE_ID_COLUMN, TSID_COLUMN};
+use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
 use crate::test_util::sst_util::new_sparse_primary_key;
 
-use super::{RecordingRead, build, exact, keyed_batch, request, root_page, sample_batch, store};
+use super::{
+    RecordingRead, build, exact, full_request, keyed_batch, request, root_page, sample_batch, store,
+};
 
 /// `(table_id, tsid, timestamp)` of every returned row, in output order.
 fn collect_times(batches: &[SamplesBatch]) -> Vec<(u32, u64, i64)> {
@@ -71,6 +76,14 @@ fn collect_times(batches: &[SamplesBatch]) -> Vec<(u32, u64, i64)> {
 
 fn exact_keys(batches: &[SamplesBatch]) -> Vec<ExactSeriesKey> {
     batches.iter().map(|batch| batch.key.clone()).collect()
+}
+
+/// Bytes one series costs in a part's key area: the stored suffix and its checksum.
+///
+/// The area leaves out the fixed `(table_id, tsid)` prefix every key starts with, because the
+/// block descriptor already carries it as the block's identifier.
+fn entry_bytes(key: &[u8]) -> u64 {
+    (key.len() - SERIES_KEY_PREFIX_LEN) as u64 + metadata::KEY_CHECKSUM_BYTES
 }
 
 /// A region with the 1,024 fields the manifest allows, so the widest possible descriptor and
@@ -141,6 +154,203 @@ async fn rewrite_part(
     SamplesFileHandle::new(handle.file_id(), entry, purger)
 }
 
+/// Rewrites a one-part artifact from the suffix key area into the whole-key area it replaced.
+///
+/// The reader accepts both layouts, and this is how a test reaches the older one: the same
+/// descriptors, the same pages, and the same rows, with each stored suffix turned back into the
+/// whole key and the manifest naming `exact-sparse-key-area` again. `edit` sees the rewritten part
+/// and the absolute byte range of every rewritten entry, which is where a test can make a stored
+/// key disagree with the descriptor that references it.
+async fn rewrite_as_whole_key_area(
+    store: &ObjectStore,
+    handle: SamplesFileHandle,
+    edit: impl FnOnce(&mut Vec<u8>, &[std::ops::Range<usize>]),
+) -> SamplesFileHandle {
+    let (mut manifest, trailer, page, bytes) = root_page(store, &handle).await;
+    let Page::Leaf(blocks) = page else {
+        panic!("one leaf page holds the fixture")
+    };
+    // One whole key per distinct series, in block order, which is also reference order.
+    let mut rewritten = bytes[..trailer.payload_end as usize].to_vec();
+    let mut moved: Vec<(KeyRef, KeyRef)> = Vec::new();
+    for block in &blocks {
+        if moved.iter().any(|(from, _)| *from == block.key) {
+            continue;
+        }
+        // Every block of one series shares its copy, so the first one that names the reference
+        // is the one that holds the suffix; the rest only reuse it.
+        let suffix = &bytes[block.key.offset as usize..block.key.end().unwrap() as usize];
+        let whole = series_key_bytes(block.id, suffix).unwrap();
+        moved.push((
+            block.key,
+            KeyRef {
+                offset: rewritten.len() as u64,
+                length: whole.len() as u32,
+            },
+        ));
+        rewritten.extend_from_slice(&whole);
+        rewritten.extend_from_slice(&codec::checksum(&whole).to_le_bytes());
+    }
+    let ranges = moved
+        .iter()
+        .map(|(_, to)| to.offset as usize..to.checksum_end().unwrap() as usize)
+        .collect::<Vec<_>>();
+    edit(&mut rewritten, &ranges);
+    let key_end = rewritten.len() as u64;
+    // The descriptors keep every field but their reference, so the pages and the recorded bounds
+    // stay the same size.
+    let mut whole_blocks = blocks.clone();
+    for block in &mut whole_blocks {
+        block.key = moved
+            .iter()
+            .find(|(from, _)| *from == block.key)
+            .map(|(_, to)| *to)
+            .expect("every block references a rewritten entry");
+    }
+    let encoded = Page::Leaf(whole_blocks).encode();
+    let page_start = rewritten.len() as u64;
+    rewritten.extend_from_slice(&encoded);
+    let mut trailer = trailer;
+    trailer.root.payload = PayloadReference {
+        offset: page_start,
+        stored: encoded.len() as u32,
+        decoded: encoded.len() as u32,
+        checksum: codec::checksum(&encoded),
+        encoding: 1,
+        compression: 0,
+    };
+    trailer.key_end = key_end;
+    trailer.file_length = rewritten.len() as u64 + TRAILER_SIZE;
+    rewritten.extend_from_slice(&trailer.encode());
+    manifest.identity_encoding = IdentityEncoding::ExactSparseKeyArea;
+    rewrite_part(store, handle, manifest, rewritten).await
+}
+
+/// Keys round-trip byte for byte whatever their label count, and one identifier stays several
+/// series.
+///
+/// The key area stores a suffix, so the cases that can go wrong are the ends of it: a series whose
+/// key is the reserved prefix alone stores nothing at all, one label stores only that label, and N
+/// labels store all of them. Two series under one `(table_id, tsid)` must stay distinct even
+/// though their prefixes are the same bytes. The same fixture is written once as a single part and
+/// once as one part per block, because a series that starts a new part rebuilds its prefix from
+/// that part's descriptor instead of the previous one's.
+#[tokio::test]
+async fn keys_round_trip_byte_for_byte_for_every_label_count() {
+    let store = store();
+    let meta = super::metadata();
+    let keys = vec![
+        new_sparse_primary_key(&[], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000001"], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000002", "z"], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000002", "z"], &meta, 1, 8),
+    ];
+    let expected = vec![
+        exact(&meta, &[], 1, 7),
+        exact(&meta, &["host-000001"], 1, 7),
+        exact(&meta, &["host-000002", "z"], 1, 7),
+        exact(&meta, &["host-000002", "z"], 1, 8),
+    ];
+    // The writer receives these bytes and the reader must hand back exactly these bytes, so the
+    // reconstructed identity is the key the SST wrote, not an approximation of it.
+    for (key, expected) in keys.iter().zip(&expected) {
+        assert_eq!(key.as_slice(), expected.bytes());
+    }
+    for part_bytes in [u64::MAX, 1] {
+        let format = ColumnarSamplesFormat {
+            block_rows: 1,
+            part_bytes,
+            ..Default::default()
+        };
+        let handle = build(
+            &format,
+            &store,
+            meta.clone(),
+            &[keyed_batch(&meta, &keys, &[100, 200, 300, 400], false)],
+        )
+        .await;
+        let manifest = super::manifest(&store, &handle).await;
+        let parts = manifest.files.len();
+        assert_eq!(if part_bytes == 1 { 4 } else { 1 }, parts);
+        let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
+        let batches = reader
+            .read(full_request())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            vec![(1, 7, 100), (1, 7, 200), (1, 7, 300), (1, 8, 400)],
+            collect_times(&batches)
+        );
+        assert_eq!(expected, exact_keys(&batches));
+        // What each part stores is exactly the bytes after each key's prefix, and nothing else.
+        let mut next = 0;
+        for part in 0..parts as u32 {
+            let (trailer, page, bytes) = part_root(&store, &handle, part).await;
+            let Page::Leaf(blocks) = page else {
+                panic!("one leaf page holds each part")
+            };
+            let mut stored = 0usize;
+            for block in &blocks {
+                let key = &expected[next];
+                let bytes = &bytes[block.key.offset as usize..block.key.end().unwrap() as usize];
+                assert_eq!(key.id(), block.id);
+                assert_eq!(
+                    key.bytes().len() - SERIES_KEY_PREFIX_LEN,
+                    block.key.length as usize,
+                    "the reference counts the stored suffix only"
+                );
+                assert_eq!(&key.bytes()[SERIES_KEY_PREFIX_LEN..], bytes);
+                stored += bytes.len() + metadata::KEY_CHECKSUM_BYTES as usize;
+                next += 1;
+            }
+            assert_eq!(
+                (trailer.key_end - trailer.payload_end) as usize,
+                stored,
+                "the key area holds one copy per series"
+            );
+        }
+        assert_eq!(expected.len(), next, "every block was inspected");
+    }
+}
+
+/// The writer stores a key only after proving it starts with the prefix its descriptor names.
+///
+/// A descriptor's identifier is where the reader rebuilds its key's prefix from, so a key stored
+/// under the wrong one would come back as a series the writer never wrote. The split refuses that
+/// instead of stripping whatever the key's first twenty-two bytes happen to be, and it accepts an
+/// empty suffix, which is the key of a series whose labels are all null.
+#[test]
+fn writer_stores_a_key_only_under_its_own_prefix() {
+    let meta = super::metadata();
+    let own = MetricSeriesId {
+        table_id: 1,
+        tsid: 7,
+    };
+    let key = new_sparse_primary_key(&["a", "b"], &meta, 1, 7);
+    assert_eq!(
+        &key[SERIES_KEY_PREFIX_LEN..],
+        series_key_suffix(&key, own).unwrap()
+    );
+    let bare = new_sparse_primary_key(&[], &meta, 1, 7);
+    assert_eq!(SERIES_KEY_PREFIX_LEN, bare.len());
+    assert_eq!(b"".as_slice(), series_key_suffix(&bare, own).unwrap());
+    // The same suffix under another identifier is another series, so the split refuses it.
+    let foreign = MetricSeriesId {
+        table_id: 1,
+        tsid: 8,
+    };
+    let error = series_key_suffix(&key, foreign).expect_err("a foreign prefix must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("does not start with its identifier's prefix"),
+        "unexpected error: {error}"
+    );
+    assert!(series_key_suffix(&bare, foreign).is_err());
+}
+
 /// A single label this long encodes to a key well past the 65,536-byte page limit. The old
 /// descriptor had to fit `48 + 44 * C + key_length` bytes plus the leaf prefix in one page,
 /// so this build failed with "sample descriptor exceeds leaf limit"; the key now lives in its
@@ -187,15 +397,18 @@ async fn key_longer_than_one_page_round_trips() {
     assert_eq!(1, blocks.len());
     let reference = blocks[0].key;
     assert_eq!(reference.offset, trailer.payload_end);
-    assert_eq!(reference.length as usize, key.len());
-    // One copy is the key plus its stored checksum, which the reference does not count.
+    // The reference counts the stored suffix, not the whole key.
+    assert_eq!(reference.length as usize, key.len() - SERIES_KEY_PREFIX_LEN);
+    // One copy is that suffix plus its stored checksum, which the reference does not count.
+    assert_eq!(trailer.key_end - trailer.payload_end, entry_bytes(&key));
     assert_eq!(
-        trailer.key_end - trailer.payload_end,
-        key.len() as u64 + metadata::KEY_CHECKSUM_BYTES
-    );
-    assert_eq!(
-        key.as_slice(),
+        &key[SERIES_KEY_PREFIX_LEN..],
         &bytes[reference.offset as usize..reference.end().unwrap() as usize]
+    );
+    // The checksum still covers the whole key, prefix included.
+    assert_eq!(
+        &key[..SERIES_KEY_PREFIX_LEN],
+        &series_key_prefix(blocks[0].id).unwrap()[..]
     );
     assert_eq!(
         codec::checksum(key.as_slice()),
@@ -256,10 +469,7 @@ async fn many_fields_round_trip_a_key_past_the_old_ceiling() {
         metadata::descriptor_bytes(blocks[0].columns.len())
     );
     assert_eq!(3 + 1024, blocks[0].columns.len());
-    assert_eq!(
-        trailer.key_end - trailer.payload_end,
-        key.len() as u64 + metadata::KEY_CHECKSUM_BYTES
-    );
+    assert_eq!(trailer.key_end - trailer.payload_end, entry_bytes(&key));
 }
 
 /// A reference that points outside the key area is a corrupt artifact, not a reason to read
@@ -289,8 +499,10 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
         panic!("one leaf page holds the fixture")
     };
     let area = trailer.keys();
-    // Past the end of the area, before its start, and a zero length: each one addresses
-    // descriptor bytes that cannot be a key of this part.
+    // Past the end of the area and before its start: each one addresses bytes that cannot be a
+    // key of this part. A zero length is not one of them - the area stores a suffix, so a series
+    // whose key is the reserved prefix alone stores nothing - but a zero length whose checksum
+    // would not fit is still rejected.
     let corrupt = [
         KeyRef {
             offset: area.end - 1,
@@ -301,7 +513,7 @@ async fn corrupt_key_reference_is_rejected_before_rows() {
             length: 4,
         },
         KeyRef {
-            offset: area.start,
+            offset: area.end - 4,
             length: 0,
         },
     ];
@@ -409,16 +621,22 @@ async fn colliding_series_keep_their_own_exact_keys() {
     assert!(blocks[0].key.end().unwrap() <= blocks[1].key.offset);
     assert_eq!(trailer.payload_end, blocks[0].key.offset);
     assert_eq!(
-        first.len() + partner.len() + 2 * metadata::KEY_CHECKSUM_BYTES as usize,
+        (entry_bytes(&first) + entry_bytes(&partner)) as usize,
         (trailer.key_end - trailer.payload_end) as usize
     );
+    // Both series share one identifier, so both stored suffixes start after the same prefix and
+    // are still different bytes: the labels are what tells them apart.
     assert_eq!(
-        first.as_slice(),
+        &first[SERIES_KEY_PREFIX_LEN..],
         &bytes[blocks[0].key.offset as usize..blocks[0].key.end().unwrap() as usize]
     );
     assert_eq!(
-        partner.as_slice(),
+        &partner[SERIES_KEY_PREFIX_LEN..],
         &bytes[blocks[1].key.offset as usize..blocks[1].key.end().unwrap() as usize]
+    );
+    assert_ne!(
+        first[SERIES_KEY_PREFIX_LEN..],
+        partner[SERIES_KEY_PREFIX_LEN..]
     );
 }
 
@@ -536,8 +754,8 @@ async fn key_reads_are_merged_per_page() {
         &[super::batch(&meta, &input, false)],
     )
     .await;
-    let key_len = new_sparse_primary_key(&["a", "b"], &meta, 1, 0).len() as u64
-        + metadata::KEY_CHECKSUM_BYTES;
+    // One stored entry: the key's suffix and its checksum, not the whole key.
+    let key_len = entry_bytes(&new_sparse_primary_key(&["a", "b"], &meta, 1, 0));
     let (reads, bytes, rows) =
         key_area_traffic(&store, &format, &handle, request(&[TABLE_ID_COLUMN])).await;
     assert_eq!(260, rows);
@@ -570,38 +788,35 @@ async fn key_reads_are_merged_per_page() {
 
 /// A key area whose bytes disagree with the descriptor that references them is a corrupt part.
 ///
-/// The reserved `(table_id, tsid)` prefix is the first 12 bytes of a canonical sparse key, so
-/// flipping one byte there keeps the key parseable while it names another series.
+/// The suffix layout cannot express this: a descriptor's identifier *is* where its key's reserved
+/// `(table_id, tsid)` prefix comes from, so the bytes are recombined under it by construction. The
+/// whole-key layout the reader still accepts can store any key, so this rewrites the fixture into
+/// it and swaps two whole keys - each with its own valid checksum - between two blocks whose
+/// identifiers differ. Only the identifier check can notice.
 #[tokio::test]
 async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
     let store = store();
     let meta = super::metadata();
     let format = ColumnarSamplesFormat::default();
-    let key = new_sparse_primary_key(&["a", "b"], &meta, 1, 7);
+    // Same labels, different identifiers, so the two stored keys have one length and swapping
+    // whole entries keeps every reference, length, and checksum valid.
+    let first = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7);
+    let partner = new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 8);
+    assert_eq!(first.len(), partner.len());
     let handle = build(
         &format,
         &store,
         meta.clone(),
-        &[keyed_batch(&meta, &[key], &[100], false)],
+        &[keyed_batch(&meta, &[first, partner], &[100, 200], false)],
     )
     .await;
-    let (manifest, trailer, page, mut bytes) = root_page(&store, &handle).await;
-    let Page::Leaf(blocks) = page else {
-        panic!("one leaf page holds the fixture")
-    };
-    let reference = blocks[0].key;
-    assert_eq!(reference.offset, trailer.payload_end);
-    // The canonical sparse prefix is `[column id 0..4][table_id marker 4][table_id 5..9]`
-    // `[tsid column id 9..13][tsid marker 13][tsid 14..22]`, then the labels. Byte 16 is in the
-    // middle of the tsid value, so the framing still parses and only the identifier changes.
-    bytes[reference.offset as usize + 16] ^= 1;
-    // Repair the stored checksum: this test is about the key disagreeing with its descriptor, not
-    // about the bytes being corrupted, so the checksum must not be what rejects the part.
-    let sum = codec::checksum(&bytes[reference.offset as usize..reference.end().unwrap() as usize]);
-    let checksum_start = reference.end().unwrap() as usize;
-    bytes[checksum_start..reference.checksum_end().unwrap() as usize]
-        .copy_from_slice(&sum.to_le_bytes());
-    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    let handle = rewrite_as_whole_key_area(&store, handle, |bytes, entries| {
+        let [left, right] = [entries[0].clone(), entries[1].clone()];
+        let entry = bytes[left.clone()].to_vec();
+        bytes.copy_within(right.clone(), left.start);
+        bytes[right].copy_from_slice(&entry);
+    })
+    .await;
     let reader = format.reader(store, handle).await.unwrap();
     let mut stream = reader.read(request(&[TABLE_ID_COLUMN])).unwrap();
     let error = stream
@@ -611,6 +826,70 @@ async fn key_bytes_that_disagree_with_the_descriptor_are_rejected() {
     assert!(
         error.to_string().contains("disagrees with its identifier"),
         "unexpected error: {error}"
+    );
+}
+
+/// Both key-area layouts are readable: an artifact of the whole-key layout returns exactly the
+/// rows and the exact keys its suffix copy returns.
+///
+/// Nothing else in the part tells the layouts apart, so this rewrites one fixture into the other
+/// layout and reads it back through the same reader. The whole-key area must be larger by exactly
+/// the prefix of every stored series, which is the saving the suffix layout buys.
+#[tokio::test]
+async fn whole_key_area_artifact_is_still_readable() {
+    let store = store();
+    let meta = super::metadata();
+    let format = ColumnarSamplesFormat::default();
+    let keys = vec![
+        new_sparse_primary_key(&[], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000001", "z"], &meta, 1, 7),
+        new_sparse_primary_key(&["host-000002", "z"], &meta, 1, 8),
+    ];
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(&meta, &keys, &[100, 200, 300], false)],
+    )
+    .await;
+    let (_, suffix_trailer, _, _) = root_page(&store, &handle).await;
+    let suffix_area = suffix_trailer.key_end - suffix_trailer.payload_end;
+    let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
+    let before = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let handle = rewrite_as_whole_key_area(&store, handle, |_, _| {}).await;
+    assert_eq!(
+        IdentityEncoding::ExactSparseKeyArea,
+        super::manifest(&store, &handle).await.identity_encoding
+    );
+    let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
+    let after = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(super::collect_rows(&before), super::collect_rows(&after));
+    assert_eq!(exact_keys(&before), exact_keys(&after));
+    // Same rows, same keys, same descriptors: only the key area grew, by one prefix per series.
+    assert_eq!(
+        vec![
+            exact(&meta, &[], 1, 7),
+            exact(&meta, &["host-000001", "z"], 1, 7),
+            exact(&meta, &["host-000002", "z"], 1, 8),
+        ],
+        exact_keys(&after)
+    );
+    let (_, whole_trailer, _, _) = root_page(&store, &handle).await;
+    let whole_area = whole_trailer.key_end - whole_trailer.payload_end;
+    assert_eq!(
+        (keys.len() * SERIES_KEY_PREFIX_LEN) as u64,
+        whole_area - suffix_area,
+        "the whole-key area stores each series' 22-byte prefix"
     );
 }
 
@@ -862,6 +1141,7 @@ async fn corrupted_label_byte_is_rejected() {
     };
     let reference = blocks[0].key;
     assert_eq!(reference.offset, trailer.payload_end);
+    assert_eq!(reference.length as usize, key.len() - SERIES_KEY_PREFIX_LEN);
     // Find a label byte whose flip keeps the key well framed and under the same identifier.
     let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
     let position = (22..key.len())
@@ -873,7 +1153,8 @@ async fn corrupted_label_byte_is_rejected() {
                 .is_ok_and(|decoded| decoded.id() == blocks[0].id)
         })
         .expect("a label byte whose flip keeps the key valid");
-    bytes[reference.offset as usize + position] ^= 1;
+    // The stored copy starts at the first label byte, so the prefix is not part of the offset.
+    bytes[reference.offset as usize + position - SERIES_KEY_PREFIX_LEN] ^= 1;
     store.write(&manifest.part_path(0), bytes).await.unwrap();
     let reader = format.reader(store, handle).await.unwrap();
     let error = reader
@@ -963,12 +1244,11 @@ async fn repeated_exact_key_under_new_reference_must_continue() {
     )
     .await;
     // The second entry becomes a second copy of the first series' key, with a valid checksum.
+    // Both series share one identifier, so copying the stored suffix and its checksum is copying
+    // the whole key: the descriptor rebuilds the same prefix for both.
     rewrite_entries(&store, handle.clone(), |bytes, [left, right]| {
-        let key = bytes[left.start..left.end - metadata::KEY_CHECKSUM_BYTES as usize].to_vec();
-        let sum = codec::checksum(&key);
-        bytes[right.start..right.end - metadata::KEY_CHECKSUM_BYTES as usize].copy_from_slice(&key);
-        bytes[right.end - metadata::KEY_CHECKSUM_BYTES as usize..right.end]
-            .copy_from_slice(&sum.to_le_bytes());
+        let entry = bytes[left.clone()].to_vec();
+        bytes[right].copy_from_slice(&entry);
     })
     .await;
     let reader = format.reader(store, handle).await.unwrap();
@@ -1040,7 +1320,7 @@ async fn cross_rollover_accounting(part_bytes: u64) -> ((u64, u64, u64, usize), 
     let meta = super::metadata();
     let label = "x".repeat(512);
     let key = new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, 7);
-    let copy_bytes = key.len() as u64 + metadata::KEY_CHECKSUM_BYTES;
+    let copy_bytes = entry_bytes(&key);
     let format = ColumnarSamplesFormat {
         block_rows: 1,
         part_bytes,
@@ -1547,9 +1827,13 @@ async fn pruned_block_does_not_hide_the_boundary_key() {
     };
     let reference = blocks[0].key;
     let start = reference.offset as usize;
-    bytes[start..start + smaller.len()].copy_from_slice(&smaller);
+    // Only the suffix is stored, and the checksum still covers the whole key the descriptor's
+    // identifier rebuilds.
+    let suffix = &smaller[SERIES_KEY_PREFIX_LEN..];
+    assert_eq!(suffix.len(), reference.length as usize);
+    bytes[start..start + suffix.len()].copy_from_slice(suffix);
     let sum = codec::checksum(&smaller);
-    bytes[start + smaller.len()..reference.checksum_end().unwrap() as usize]
+    bytes[start + suffix.len()..reference.checksum_end().unwrap() as usize]
         .copy_from_slice(&sum.to_le_bytes());
     store.write(&manifest.part_path(1), bytes).await.unwrap();
     let reader = format.reader(store, handle).await.unwrap();
