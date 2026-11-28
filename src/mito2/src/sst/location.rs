@@ -49,6 +49,13 @@ pub(crate) fn narthex_file_dir(region_dir: &str, file_id: FileId) -> String {
     util::join_dir(region_dir, &file_id.to_string())
 }
 
+pub(crate) const NARTHEX_MANIFEST_NAME: &str = "manifest.json";
+
+/// Object-store path of the manifest in a Narthex file directory.
+pub(crate) fn narthex_manifest_path(file_dir: &str) -> String {
+    util::join_path(file_dir, NARTHEX_MANIFEST_NAME)
+}
+
 /// Parent directory of an object-store key, including the trailing separator.
 pub(crate) fn parent_dir(path: &str) -> Option<&str> {
     path.rfind('/').map(|index| &path[..=index])
@@ -179,6 +186,10 @@ mod tests {
         let id = FileId::random();
         let dir = narthex_file_dir("table/region/", id);
         assert_eq!(dir, format!("table/region/{id}/"));
+        assert_eq!(
+            narthex_manifest_path(&dir),
+            format!("table/region/{id}/manifest.json")
+        );
         {
             assert!(is_narthex_file_dir(&dir));
             for name in ["manifest.json", "part-0.samples", "part-0.series"] {

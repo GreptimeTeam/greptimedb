@@ -593,10 +593,8 @@ impl FileMeta {
             _ => {
                 let region_dir =
                     location::region_dir_from_table_dir(table_dir, self.region_id, path_type);
-                format!(
-                    "{}manifest.json",
-                    location::narthex_file_dir(&region_dir, self.file_id)
-                )
+                let file_dir = location::narthex_file_dir(&region_dir, self.file_id);
+                location::narthex_manifest_path(&file_dir)
             }
         }
     }
@@ -621,7 +619,7 @@ impl FileMeta {
             });
         }
         objects.push(ArtifactObject {
-            path: format!("{dir}manifest.json"),
+            path: location::narthex_manifest_path(&dir),
             file_size: manifest,
         });
         Some(objects)

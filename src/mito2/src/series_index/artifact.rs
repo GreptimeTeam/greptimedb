@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::FileId;
 
 use crate::sst::file::RegionFileId;
+use crate::sst::location;
 
 /// Persisted artifact identifiers. Concrete codecs are added with their implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,13 +65,11 @@ struct SamplesFileInner {
 impl SamplesFileHandle {
     #[cfg(test)]
     pub(crate) fn new(file_id: RegionFileId, entry: SamplesEntry) -> Self {
-        let manifest_path = format!(
-            "{}manifest.json",
-            crate::series_index::samples::samples_prefix(
-                file_id.region_id().as_u64(),
-                entry.artifact.generation
-            )
+        let dir = crate::series_index::samples::samples_prefix(
+            file_id.region_id().as_u64(),
+            entry.artifact.generation,
         );
+        let manifest_path = location::narthex_manifest_path(&dir);
         let file = crate::sst::file::FileHandle::new(
             crate::sst::file::FileMeta {
                 region_id: file_id.region_id(),
@@ -102,11 +101,9 @@ impl SamplesFileHandle {
             .expect("matched Narthex samples");
         let file_size = file.meta_ref().file_size;
         let file_id = file.file_id();
+        let dir = location::narthex_file_dir(region_dir, file_id.file_id());
         Ok(Self(Arc::new(SamplesFileInner {
-            manifest_path: format!(
-                "{}manifest.json",
-                crate::sst::location::narthex_file_dir(region_dir, file_id.file_id())
-            ),
+            manifest_path: location::narthex_manifest_path(&dir),
             file,
             entry: SamplesEntry {
                 file_id: file_id.file_id(),

@@ -46,6 +46,7 @@ use crate::series_index::format::FormatWriter;
 use crate::series_index::format::SamplesFormatReader;
 use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
+use crate::sst::location;
 
 /// Reject unsupported narthex schemas before accepting mutations that cannot flush.
 pub(crate) fn validate_narthex_metadata(
@@ -305,7 +306,7 @@ impl Manifest {
     }
 
     fn path(&self) -> String {
-        format!("{}manifest.json", self.prefix)
+        location::narthex_manifest_path(&self.prefix)
     }
     fn part_path(&self, id: u32) -> String {
         format!("{}part-{id}.samples", self.prefix)

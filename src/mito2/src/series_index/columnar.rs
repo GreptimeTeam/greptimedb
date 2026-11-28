@@ -24,6 +24,7 @@ mod writer;
 use std::sync::Arc;
 
 use crate::sst::file::{FileMeta, WindowSequence};
+use crate::sst::location;
 use common_time::Timestamp;
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use object_store::ObjectStore;
@@ -163,7 +164,7 @@ impl Manifest {
         format!("{}part-{id}.series", self.prefix)
     }
     pub(crate) fn path(&self) -> String {
-        format!("{}manifest.json", self.prefix)
+        location::narthex_manifest_path(&self.prefix)
     }
     pub(crate) fn schema(&self) -> SchemaRef {
         let mut fields = vec![

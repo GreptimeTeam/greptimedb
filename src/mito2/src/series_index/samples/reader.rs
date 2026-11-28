@@ -132,7 +132,7 @@ impl SamplesReader {
             ))
         })?;
         manifest.prefix = path
-            .strip_suffix("manifest.json")
+            .strip_suffix(crate::sst::location::NARTHEX_MANIFEST_NAME)
             .ok_or_else(|| invalid("invalid narthex manifest path"))?
             .to_string();
         if manifest.version != VERSION {

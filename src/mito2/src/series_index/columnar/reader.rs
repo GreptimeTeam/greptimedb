@@ -42,6 +42,7 @@ use crate::series_index::format::{FormatReader, SeriesReadRequest};
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TABLE_ID_COLUMN, TSID_COLUMN};
 use crate::sst::file::{FileFormat, FileHandle};
+use crate::sst::location;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(crate) struct ColumnarReader {
@@ -131,8 +132,8 @@ impl ColumnarReader {
         let FileFormat::NarthexSeriesIndex(index) = &file.format else {
             return Err(invalid("expected Narthex series file"));
         };
-        let prefix = crate::sst::location::narthex_file_dir(region_dir, file.file_id);
-        let path = format!("{prefix}manifest.json");
+        let prefix = location::narthex_file_dir(region_dir, file.file_id);
+        let path = location::narthex_manifest_path(&prefix);
         let length = index.manifest_size;
         require(
             length <= MANIFEST_LIMIT as u64,
