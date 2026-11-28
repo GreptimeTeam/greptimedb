@@ -71,6 +71,35 @@ SELECT * FROM `delete_between`;
 
 DROP TABLE `delete_between`;
 
+CREATE TABLE IF NOT EXISTS `delete_reinsert` (
+  `host` STRING,
+  `ts` TIMESTAMP TIME INDEX,
+  `cpu` DOUBLE NULL,
+  `mem` BIGINT NULL,
+  PRIMARY KEY (`host`)
+) ENGINE=mito WITH(
+  merge_mode = 'last_non_null'
+);
+
+INSERT INTO `delete_reinsert` VALUES ('h2', 2000, 1.0, NULL);
+
+ADMIN FLUSH_TABLE('delete_reinsert');
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 1000, 1.0, NULL);
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 1000, NULL, 20);
+
+DELETE FROM `delete_reinsert` WHERE `host` = 'h1' AND `ts` = 1000;
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 2000, NULL, NULL);
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 1000, NULL, 10);
+
+-- Values written before the delete must not fill the NULL fields.
+SELECT * FROM `delete_reinsert` ORDER BY `host`, `ts`;
+
+DROP TABLE `delete_reinsert`;
+
 -- SQLNESS REPLACE (\sat\sline\s\d+\scolumn\s\d+)
 create table if not exists invalid_merge_mode(
     host string,

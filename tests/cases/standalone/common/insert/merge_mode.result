@@ -157,6 +157,65 @@ DROP TABLE `delete_between`;
 
 Affected Rows: 0
 
+CREATE TABLE IF NOT EXISTS `delete_reinsert` (
+  `host` STRING,
+  `ts` TIMESTAMP TIME INDEX,
+  `cpu` DOUBLE NULL,
+  `mem` BIGINT NULL,
+  PRIMARY KEY (`host`)
+) ENGINE=mito WITH(
+  merge_mode = 'last_non_null'
+);
+
+Affected Rows: 0
+
+INSERT INTO `delete_reinsert` VALUES ('h2', 2000, 1.0, NULL);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('delete_reinsert');
+
++--------------------------------------+
+| ADMIN FLUSH_TABLE('delete_reinsert') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 1000, 1.0, NULL);
+
+Affected Rows: 1
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 1000, NULL, 20);
+
+Affected Rows: 1
+
+DELETE FROM `delete_reinsert` WHERE `host` = 'h1' AND `ts` = 1000;
+
+Affected Rows: 1
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 2000, NULL, NULL);
+
+Affected Rows: 1
+
+INSERT INTO `delete_reinsert` VALUES ('h1', 1000, NULL, 10);
+
+Affected Rows: 1
+
+-- Values written before the delete must not fill the NULL fields.
+SELECT * FROM `delete_reinsert` ORDER BY `host`, `ts`;
+
++------+---------------------+-----+-----+
+| host | ts                  | cpu | mem |
++------+---------------------+-----+-----+
+| h1   | 1970-01-01T00:00:01 |     | 10  |
+| h1   | 1970-01-01T00:00:02 |     |     |
+| h2   | 1970-01-01T00:00:02 | 1.0 |     |
++------+---------------------+-----+-----+
+
+DROP TABLE `delete_reinsert`;
+
+Affected Rows: 0
+
 -- SQLNESS REPLACE (\sat\sline\s\d+\scolumn\s\d+)
 create table if not exists invalid_merge_mode(
     host string,

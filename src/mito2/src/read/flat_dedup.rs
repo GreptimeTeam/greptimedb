@@ -1683,6 +1683,13 @@ mod tests {
                 &[OpType::Put],
                 &[(Some(32), Some(3))],
             ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[3],
+                &[0],
+                &[OpType::Put],
+                &[(Some(33), Some(33))],
+            ),
         ];
 
         let mut strategy = FlatLastNonNull::new(1, true);
