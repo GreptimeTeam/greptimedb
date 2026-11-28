@@ -160,7 +160,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_fulltext_bloom WHERE matches_term(a
 |_|_|_|
 | 1_| 0_|_FilterExec: matches_term(json_get(attrs@1, $.nested.message, NULL), absenttoken), projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches_term(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches_term(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":0,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -192,7 +192,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_fulltext_bloom WHERE matches_term(a
 |_|_|_|
 | 1_| 0_|_FilterExec: matches_term(json_get(attrs@1, $.nested.message, NULL), absenttoken), projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches_term(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches_term(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":0,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -253,7 +253,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_fulltext_bloom WHERE matches_term(a
 |_|_|_|
 | 1_| 0_|_FilterExec: matches_term(json_get(attrs@1, $.nested.message, NULL), absenttoken), projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches_term(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":7,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":7,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":7} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches_term(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":7,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":1,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":7,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":7} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -412,7 +412,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_fulltext_tantivy WHERE matches(attr
 |_|_|_|
 | 1_| 0_|_FilterExec: matches(json_get(attrs@1, $.nested.message, NULL), absenttoken), projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":0,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -444,7 +444,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_fulltext_tantivy WHERE matches(attr
 |_|_|_|
 | 1_| 0_|_FilterExec: matches(json_get(attrs@1, $.nested.message, NULL), absenttoken), projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":6,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":0,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":6,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":6} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -505,7 +505,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_fulltext_tantivy WHERE matches(attr
 |_|_|_|
 | 1_| 0_|_FilterExec: matches(json_get(attrs@1, $.nested.message, NULL), absenttoken), projection=[ts@0] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":7,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":7,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":7} metrics=REDACTED |
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["matches(json_get(attrs, Utf8(\"$.nested.message\"), Utf8View(NULL)), Utf8View(\"absenttoken\"))"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":7,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","level":1,"time_range_start":"REDACTED","time_range_end":"REDACTED","rows":7,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_fulltext_filtered":7} metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
