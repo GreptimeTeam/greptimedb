@@ -28,7 +28,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
     RemapManifestsResponse, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
-    SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
+    SettableRegionRoleState, SinglePartitionScanner, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -74,12 +74,30 @@ impl RegionEngine for RelationalEngine {
 
     async fn handle_query(
         &self,
-        _region_id: RegionId,
-        _request: ScanRequest,
+        region_id: RegionId,
+        request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        Err(BoxedError::new(
-            UnsupportedSnafu { operation: "scan" }.build(),
-        ))
+        let region = self
+            .inner
+            .get_region(region_id)
+            .await
+            .context(RegionNotFoundSnafu { region_id })
+            .map_err(BoxedError::new)?;
+        let plan = region
+            .prepare_scan(request)
+            .await
+            .map_err(BoxedError::new)?;
+        // The relational scan is a single remote full-table query with no local
+        // data to partition. Wrap it in `SinglePartitionScanner` so the query
+        // optimizer's `parallelize_scan` rule leaves it at one partition instead
+        // of splitting it into `target_partitions` copies of the same full scan.
+        let stream = plan.create_stream();
+        Ok(Box::new(SinglePartitionScanner::new(
+            stream,
+            false,
+            region.metadata(),
+            None,
+        )))
     }
 
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {

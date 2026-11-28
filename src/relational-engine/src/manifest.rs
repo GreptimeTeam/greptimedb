@@ -192,4 +192,22 @@ mod tests {
         assert_eq!(metadata.column_metadatas[1].column_id, 1);
         assert_eq!(metadata.column_metadatas[2].column_id, 2);
     }
+
+    #[test]
+    fn test_old_manifest_without_columns() {
+        // A manifest written before the `columns` field existed decodes to an
+        // empty list (serde default), not an error.
+        let old_json = r#"{"connection":"mysql://user:pw@host/db","remote_table":"t"}"#;
+        let options = std::collections::HashMap::from([(
+            table::requests::RELATIONAL_META_KEY.to_string(),
+            old_json.to_string(),
+        )]);
+        let manifest = RelationalRegionManifest {
+            region_id: RegionId::new(3, 0),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![1],
+            options,
+        };
+        assert!(manifest.relational_options().unwrap().columns.is_empty());
+    }
 }

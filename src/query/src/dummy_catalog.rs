@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
 use catalog::{CatalogManager, CatalogManagerRef};
 use common_catalog::consts::FILE_ENGINE;
+use common_catalog::consts::RELATIONAL_ENGINE;
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
@@ -212,6 +213,15 @@ impl TableProvider for DummyTableProvider {
             return Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()]);
         }
 
+        // The relational engine never evaluates filters (zero pushdown): its
+        // synthetic `greptime_timestamp` time index is always `Timestamp(0)`, so
+        // a `Tag`/`Timestamp` simple predicate must not be declared `Exact` —
+        // that would let DataFusion drop the residual filter while the engine
+        // returns unfiltered rows.
+        if self.is_relational_engine() {
+            return Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()]);
+        }
+
         let supported = filters
             .iter()
             .map(|e| {
@@ -269,6 +279,11 @@ impl DummyTableProvider {
     /// Returns whether this provider scans File Engine regions.
     pub(crate) fn is_file_engine(&self) -> bool {
         self.engine.name() == FILE_ENGINE
+    }
+
+    /// Whether this provider backs a relational (external table) region.
+    pub(crate) fn is_relational_engine(&self) -> bool {
+        self.engine.name() == RELATIONAL_ENGINE
     }
 
     /// Sets the ordering hint of the query to the provider.
@@ -663,6 +678,27 @@ mod tests {
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
         FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
     };
+
+    #[test]
+    fn test_relational_engine_filters_never_exact() {
+        use datafusion_expr::{col, lit};
+
+        let provider =
+            crate::optimizer::test_util::mock_relational_table_provider(RegionId::new(1, 1));
+        // `k0` (Tag) and `ts` (Timestamp) predicates would be declared `Exact`
+        // for a regular engine. The relational engine must never declare
+        // `Exact`: its synthetic time index is always `Timestamp(0)`, so
+        // dropping the residual filter would silently return unfiltered rows.
+        let filters = [
+            col("k0").eq(lit("tag")),
+            col("ts").gt(lit(1_i64)),
+            col("v0").gt(lit(1.0_f64)),
+        ];
+        let result = provider
+            .supports_filters_pushdown(&filters.iter().collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(result, vec![TableProviderFilterPushDown::Inexact; 3]);
+    }
 
     #[test]
     fn test_nullable_label_filter_pushdown() {

@@ -53,22 +53,28 @@ use crate::dummy_catalog::DummyTableProvider;
 /// A mock region engine that can be used for testing the optimizer.
 pub(crate) struct MetaRegionEngine {
     metadatas: HashMap<RegionId, RegionMetadataRef>,
+    name: &'static str,
 }
 
 impl MetaRegionEngine {
     /// Creates a engine with the given metadata.
     pub(crate) fn with_metadata(metadata: RegionMetadataRef) -> Self {
+        Self::with_name_and_metadata("MetaRegionEngine", metadata)
+    }
+
+    /// Creates an engine reporting the given engine name (e.g. `RELATIONAL_ENGINE`).
+    pub(crate) fn with_name_and_metadata(name: &'static str, metadata: RegionMetadataRef) -> Self {
         let mut metadatas = HashMap::new();
         metadatas.insert(metadata.region_id, metadata);
 
-        Self { metadatas }
+        Self { metadatas, name }
     }
 }
 
 #[async_trait]
 impl RegionEngine for MetaRegionEngine {
     fn name(&self) -> &str {
-        "MetaRegionEngine"
+        self.name
     }
 
     async fn handle_request(
@@ -163,6 +169,17 @@ impl RegionEngine for MetaRegionEngine {
 pub(crate) fn mock_table_provider(region_id: RegionId) -> DummyTableProvider {
     let metadata = Arc::new(mock_region_metadata(region_id));
     let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+    DummyTableProvider::new(region_id, engine, metadata)
+}
+
+/// Like [`mock_table_provider`], but backed by a relational (external table)
+/// engine, for exercising `DummyTableProvider::is_relational_engine()`.
+pub(crate) fn mock_relational_table_provider(region_id: RegionId) -> DummyTableProvider {
+    let metadata = Arc::new(mock_region_metadata(region_id));
+    let engine = Arc::new(MetaRegionEngine::with_name_and_metadata(
+        common_catalog::consts::RELATIONAL_ENGINE,
+        metadata.clone(),
+    ));
     DummyTableProvider::new(region_id, engine, metadata)
 }
 

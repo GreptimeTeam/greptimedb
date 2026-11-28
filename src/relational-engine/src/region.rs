@@ -16,12 +16,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use object_store::ObjectStore;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::path_utils::region_name;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
+use table::requests::{RELATIONAL_META_KEY, RelationalOptions};
 
-use crate::error::{RegionExistsSnafu, Result};
+use crate::error::{DecodeJsonSnafu, MissingRequiredFieldSnafu, RegionExistsSnafu, Result};
 use crate::manifest::RelationalRegionManifest;
 
 #[derive(Debug)]
@@ -116,6 +118,18 @@ impl RelationalRegion {
 
     pub fn metadata(&self) -> RegionMetadataRef {
         self.metadata.clone()
+    }
+
+    /// Parses the frozen connection / remote-table options (plus the remote
+    /// column list) from this region's manifest options.
+    pub fn relational_options(&self) -> Result<RelationalOptions> {
+        let encoded = self
+            .options
+            .get(RELATIONAL_META_KEY)
+            .context(MissingRequiredFieldSnafu {
+                name: RELATIONAL_META_KEY,
+            })?;
+        serde_json::from_str(encoded).context(DecodeJsonSnafu)
     }
 
     /// Validates an idempotent `Create` against the already-open region, mirroring

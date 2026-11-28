@@ -12549,12 +12549,16 @@ dependencies = [
  "api",
  "async-trait",
  "common-catalog",
+ "common-decimal",
  "common-error",
  "common-macro",
+ "common-recordbatch",
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "datafusion-physical-plan",
  "datatypes",
+ "mysql_async",
  "object-store",
  "serde",
  "serde_json",
@@ -12562,6 +12566,7 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

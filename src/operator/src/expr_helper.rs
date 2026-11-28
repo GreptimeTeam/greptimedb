@@ -206,6 +206,13 @@ async fn create_relational_expr(
         RelationalOptions {
             connection,
             remote_table,
+            // Freeze the remote column list (in INFORMATION_SCHEMA order) into the
+            // manifest, so the scan can tell a real remote column from a synthetic
+            // one without re-querying the remote schema.
+            columns: remote_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
         },
         &remote_columns,
     )
@@ -243,6 +250,14 @@ fn build_relational_expr(
             .iter()
             .map(|column| column.name.as_str())
             .collect::<HashSet<_>>();
+        let remote_types = remote_columns
+            .iter()
+            .filter(|column| declared_names.contains(column.name.as_str()))
+            .map(|column| {
+                crate::relational::map_mysql_column_type(&column.column_type)
+                    .map(|data_type| (column.name.as_str(), data_type))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         for column in &table_column_schemas {
             let is_synthetic_time_index = column.is_time_index()
                 && column.name == greptime_timestamp()
@@ -250,10 +265,18 @@ fn build_relational_expr(
             if is_synthetic_time_index {
                 continue;
             }
-            ensure!(
-                remote_names.contains(column.name.as_str()),
-                InvalidSqlSnafu {
+            let remote_type = remote_types
+                .get(column.name.as_str())
+                .context(InvalidSqlSnafu {
                     err_msg: format!("column `{}` is not found in the remote table", column.name),
+                })?;
+            ensure!(
+                &column.data_type == remote_type,
+                InvalidSqlSnafu {
+                    err_msg: format!(
+                        "column `{}` has type {}, but the remote column has type {}; relational external tables require an exact type match",
+                        column.name, column.data_type, remote_type
+                    ),
                 }
             );
         }
@@ -2506,6 +2529,7 @@ WITH(
             RelationalOptions {
                 connection: "mysql://root:secret@127.0.0.1:3306/testdb".to_string(),
                 remote_table: "testdb.sample".to_string(),
+                columns: vec![],
             },
             remote_columns,
         )

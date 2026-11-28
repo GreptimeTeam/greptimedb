@@ -91,6 +91,14 @@ impl ScanHintRule {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         }
 
+        // Relational (external table) scans return rows in the remote MySQL
+        // order, not time-ordered, so no time-series row selector or ordering
+        // hint can be applied: `ORDER BY ... LIMIT` / `last_value` would select
+        // the wrong rows.
+        if original.is_relational_engine() {
+            return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
+        }
+
         // Attached scan filters are checked below; residual Filter nodes are
         // rejected by the single-evaluation path allowlist.
         let filters_preserve_last_row = if rewriter.inside_single_evaluation {
