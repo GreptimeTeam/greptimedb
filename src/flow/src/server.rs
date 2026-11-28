@@ -38,7 +38,7 @@ use snafu::ResultExt;
 use tonic::codec::CompressionEncoding;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
+use crate::adapter::flownode_impl::{FlownodeEngine, FlownodeEngineRef};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::error::{
     DatafusionSnafu, ExternalSnafu, ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu,
@@ -47,20 +47,18 @@ use crate::error::{
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{BatchingExecutionFactory, Error, FlownodeOptions, FrontendClient, StreamingEngine};
+use crate::{BatchingExecutionFactory, Error, FlownodeOptions, FrontendClient};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
-    pub dual_engine: FlowDualEngineRef,
+    pub engine: FlownodeEngineRef,
 }
 
 impl FlowService {
-    pub fn new(manager: FlowDualEngineRef) -> Self {
-        Self {
-            dual_engine: manager,
-        }
+    pub fn new(engine: FlownodeEngineRef) -> Self {
+        Self { engine }
     }
 }
 
@@ -75,7 +73,7 @@ impl flow_server::Flow for FlowService {
             .start_timer();
 
         let request = request.into_inner();
-        self.dual_engine
+        self.engine
             .handle(request)
             .await
             .map_err(|err| {
@@ -117,7 +115,7 @@ impl flow_server::Flow for FlowService {
             .with_label_values(&["in"])
             .inc_by(row_count as u64);
 
-        self.dual_engine
+        self.engine
             .handle_inserts(request)
             .await
             .map(Response::new)
@@ -128,7 +126,7 @@ impl flow_server::Flow for FlowService {
         &self,
         reqs: Request<DirtyWindowRequests>,
     ) -> Result<Response<FlowResponse>, Status> {
-        self.dual_engine
+        self.engine
             .handle_mark_window_dirty(reqs.into_inner())
             .await
             .map(Response::new)
@@ -238,8 +236,8 @@ impl FlownodeInstance {
         &self.flownode_server
     }
 
-    pub fn flow_engine(&self) -> FlowDualEngineRef {
-        self.flownode_server.inner.flow_service.dual_engine.clone()
+    pub fn flow_engine(&self) -> FlownodeEngineRef {
+        self.flownode_server.inner.flow_service.engine.clone()
     }
 
     pub fn setup_services(&mut self, services: ServerHandlers) {
@@ -332,7 +330,6 @@ impl FlownodeBuilder {
         .context(DatafusionSnafu {
             context: "Failed to build query engine",
         })?;
-        let manager = Arc::new(self.build_manager(query_engine_factory.query_engine()));
         let batching = Arc::new(BatchingEngine::new_with_execution(
             self.frontend_client.clone(),
             query_engine_factory.query_engine(),
@@ -342,18 +339,18 @@ impl FlownodeBuilder {
             self.opts.flow.batching_mode.clone(),
             self.plugins.get::<Arc<dyn BatchingExecutionFactory>>(),
         ));
-        let dual = Arc::new(FlowDualEngine::new(
-            manager.clone(),
+        let engine = Arc::new(FlownodeEngine::new(
+            self.opts.node_id.map(|id| id as u32),
             batching,
             self.flow_metadata_manager.clone(),
             self.catalog_manager.clone(),
             self.plugins.clone(),
         ));
         if let Some(handler) = self.state_report_handler.take() {
-            dual.set_state_report_handler(handler).await;
+            engine.set_state_report_handler(handler).await;
         }
 
-        let server = FlownodeServer::new(FlowService::new(dual));
+        let server = FlownodeServer::new(FlowService::new(engine));
 
         let heartbeat_task = self.heartbeat_task;
 
@@ -365,15 +362,6 @@ impl FlownodeBuilder {
             consistent_check_task_started: false,
         };
         Ok(instance)
-    }
-
-    fn build_manager(&self, query_engine: Arc<dyn query::QueryEngine>) -> StreamingEngine {
-        StreamingEngine::new(
-            self.opts.node_id.map(|id| id as u32),
-            query_engine,
-            self.table_meta.clone(),
-            self.frontend_client.clone(),
-        )
     }
 }
 
@@ -532,12 +520,6 @@ mod tests {
         let query_engine = crate::test_utils::create_test_query_engine();
 
         let frontend_client = Arc::new(frontend_client);
-        let streaming_engine = Arc::new(StreamingEngine::new(
-            node_id,
-            query_engine.clone(),
-            table_meta.clone(),
-            frontend_client.clone(),
-        ));
         let batching_engine = Arc::new(BatchingEngine::new(
             frontend_client,
             query_engine,
@@ -546,8 +528,8 @@ mod tests {
             catalog_manager.clone(),
             batching_opts,
         ));
-        let dual_engine = Arc::new(FlowDualEngine::new(
-            streaming_engine,
+        let engine = Arc::new(FlownodeEngine::new(
+            node_id,
             batching_engine,
             flow_meta,
             catalog_manager,
@@ -555,9 +537,9 @@ mod tests {
         ));
 
         let (report_sender, report_handler) = SizeReportSender::new();
-        dual_engine.set_state_report_handler(report_handler).await;
+        engine.set_state_report_handler(report_handler).await;
 
-        let server = FlownodeServer::new(FlowService::new(dual_engine));
+        let server = FlownodeServer::new(FlowService::new(engine));
         (server, report_sender)
     }
 }

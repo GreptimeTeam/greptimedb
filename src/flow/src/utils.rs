@@ -13,19 +13,9 @@
 // limitations under the License.
 
 use common_meta::key::flow::flow_state::FlowStat;
-use datatypes::value::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::InternalSnafu;
-
-pub fn get_value_heap_size(value: &Value) -> usize {
-    match value {
-        Value::Binary(v) => v.len(),
-        Value::String(v) => v.len(),
-        Value::List(v) => v.items().iter().map(get_value_heap_size).sum(),
-        _ => 0,
-    }
-}
 
 #[derive(Clone)]
 pub struct SizeReportSender {
