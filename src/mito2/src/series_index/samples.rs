@@ -38,12 +38,8 @@ use store_api::storage::FileId;
 
 use crate::error::Result;
 use crate::series_index::artifact::ArtifactFormat;
-#[cfg(test)]
-use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::{invalid, require, unsupported};
 use crate::series_index::format::FormatWriter;
-#[cfg(test)]
-use crate::series_index::format::SamplesFormatReader;
 use crate::series_index::identity::IdentityEncoding;
 use crate::series_index::{MetricSeriesId, TABLE_ID_COLUMN, TSID_COLUMN};
 use crate::sst::location;
@@ -168,14 +164,6 @@ impl ColumnarSamplesFormat {
             source_file_id,
             generation,
         )?))
-    }
-    #[cfg(test)]
-    async fn reader(
-        &self,
-        store: ObjectStore,
-        handle: SamplesFileHandle,
-    ) -> Result<Box<dyn SamplesFormatReader>> {
-        Ok(Box::new(reader::SamplesReader::open(store, handle).await?))
     }
 }
 
@@ -375,10 +363,4 @@ fn valid_rows(rows: usize, fields: usize) -> bool {
     (1..=MAX_ROWS).contains(&rows)
         && (1..=MAX_FIELDS).contains(&fields)
         && rows * (17 + 8 * fields) + fields * rows.div_ceil(8) <= BLOCK_BYTES
-}
-
-/// Location used by the standalone codec fixtures.
-#[cfg(test)]
-pub(crate) fn samples_prefix(region_id: u64, generation: FileId) -> String {
-    format!("{region_id}/samples/{generation}/")
 }

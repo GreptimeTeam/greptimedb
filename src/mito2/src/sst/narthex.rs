@@ -30,7 +30,6 @@ use store_api::storage::FileId;
 use crate::access_layer::SstInfoArray;
 use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
-use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::reader::ColumnarReader;
 use crate::series_index::columnar::{ColumnarSeriesFormat, invalid, require};
 use crate::series_index::format::{FormatWriter, SamplesFormatReader};
@@ -225,17 +224,15 @@ pub(crate) async fn write_series(
         for source in sources {
             let mut stream = match &source.meta_ref().format {
                 FileFormat::NarthexSeriesIndex(_) => series_keys(layer, source, &metadata).await?,
-                FileFormat::NarthexSamples(_) => {
-                    let handle = SamplesFileHandle::from_narthex(
-                        source.clone(),
-                        &layer.build_region_dir(source.region_id()),
-                    )?;
-                    SamplesReader::open(layer.object_store().clone(), handle)
-                        .await?
-                        .read(Default::default())?
-                        .map_ok(|block| (block.key, block.batch.num_rows() as u64))
-                        .boxed()
-                }
+                FileFormat::NarthexSamples(_) => SamplesReader::open(
+                    layer.object_store().clone(),
+                    source.clone(),
+                    &layer.build_region_dir(source.region_id()),
+                )
+                .await?
+                .read(Default::default())?
+                .map_ok(|block| (block.key, block.batch.num_rows() as u64))
+                .boxed(),
                 FileFormat::Parquet => {
                     return Err(invalid("expected native series or samples"));
                 }

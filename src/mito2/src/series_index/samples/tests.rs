@@ -35,11 +35,13 @@ use super::metadata::{
     Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PayloadReference, TRAILER_SIZE, Trailer,
 };
 use super::*;
-use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
 use crate::series_index::columnar::codec as columnar_codec;
-use crate::series_index::format::{SamplesBatch, SamplesReadRequest};
+use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesReadRequest};
 use crate::series_index::identity::ExactSeriesKey;
-use crate::sst::file::RegionFileId;
+use crate::sst::file::{
+    FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSamplesMeta, RegionFileId,
+};
+use crate::test_util::new_noop_file_purger;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
 type Sample = (u32, u64, i64, u64, u8, Option<u64>);
@@ -194,33 +196,87 @@ fn sample_batch(
     )
     .unwrap()
 }
+const REGION_DIR: &str = "table/region/";
+
+impl ColumnarSamplesFormat {
+    async fn reader(
+        &self,
+        store: ObjectStore,
+        handle: FileHandle,
+    ) -> Result<Box<dyn SamplesFormatReader>> {
+        Ok(Box::new(
+            reader::SamplesReader::open(store, handle, REGION_DIR).await?,
+        ))
+    }
+}
+
+fn samples_handle(
+    id: RegionFileId,
+    manifest_size: u64,
+    parts: impl Iterator<Item = u64>,
+) -> FileHandle {
+    let samples = NarthexSamplesMeta {
+        manifest_size,
+        parts: parts
+            .map(|file_size| NarthexPartMeta { file_size })
+            .collect(),
+    };
+    FileHandle::new(
+        FileMeta {
+            region_id: id.region_id(),
+            file_id: id.file_id(),
+            file_size: manifest_size + samples.parts.iter().map(|p| p.file_size).sum::<u64>(),
+            format: FileFormat::NarthexSamples(Box::new(samples)),
+            ..Default::default()
+        },
+        new_noop_file_purger(),
+    )
+}
+
 async fn build(
     format: &ColumnarSamplesFormat,
     store: &ObjectStore,
     meta: RegionMetadataRef,
     batches: &[RecordBatch],
-) -> SamplesFileHandle {
+) -> FileHandle {
     let file_id = FileId::random();
-    let generation = FileId::random();
-    let prefix = format!("{}/samples/{generation}/", meta.region_id.as_u64());
+    let prefix = location::narthex_file_dir(REGION_DIR, file_id);
     let mut writer = format
-        .writer(meta.clone(), store.clone(), &prefix, file_id, generation)
+        .writer(meta.clone(), store.clone(), &prefix, file_id, file_id)
         .unwrap();
     for batch in batches {
         writer.write(batch).await.unwrap();
     }
     let artifact = writer.finish().await.unwrap();
-    SamplesFileHandle::new(
+    let (manifest, parts) = artifact.objects.split_first().unwrap();
+    samples_handle(
         RegionFileId::new(meta.region_id, file_id),
-        SamplesEntry { file_id, artifact },
+        manifest.file_size,
+        parts.iter().map(|part| part.file_size),
     )
 }
+/// Replaces a single part and updates the manifest and SST sizes to match.
+async fn rewrite_part(
+    store: &ObjectStore,
+    handle: FileHandle,
+    mut manifest: Manifest,
+    bytes: Vec<u8>,
+) -> FileHandle {
+    manifest.files[0].file_size = bytes.len() as u64;
+    store.write(&manifest.part_path(0), bytes).await.unwrap();
+    let json = serde_json::to_vec(&manifest).unwrap();
+    let manifest_size = json.len() as u64;
+    store.write(&manifest.path(), json).await.unwrap();
+    samples_handle(
+        handle.file_id(),
+        manifest_size,
+        manifest.files.iter().map(|part| part.file_size),
+    )
+}
+
 /// Reads the descriptor and root page of a one-part artifact, plus the part's bytes. Tests
 /// use it to inspect what the reader decodes and to rewrite a stored page.
-async fn root_page(
-    store: &ObjectStore,
-    handle: &SamplesFileHandle,
-) -> (Manifest, Trailer, Page, Vec<u8>) {
+async fn root_page(store: &ObjectStore, handle: &FileHandle) -> (Manifest, Trailer, Page, Vec<u8>) {
     let manifest = manifest(store, handle).await;
     assert_eq!(
         1,
@@ -249,11 +305,12 @@ async fn root_page(
     (manifest, trailer, page, bytes)
 }
 
-async fn manifest(store: &ObjectStore, handle: &SamplesFileHandle) -> Manifest {
-    let path = handle.manifest_path();
+async fn manifest(store: &ObjectStore, handle: &FileHandle) -> Manifest {
+    let prefix = location::narthex_file_dir(REGION_DIR, handle.meta_ref().file_id);
+    let path = location::narthex_manifest_path(&prefix);
     let mut manifest: Manifest =
         serde_json::from_slice(&store.read(&path).await.unwrap().to_bytes()).unwrap();
-    manifest.prefix = path.strip_suffix("manifest.json").unwrap().to_owned();
+    manifest.prefix = prefix;
     manifest
 }
 fn request(names: &[&str]) -> SamplesReadRequest {
@@ -419,7 +476,7 @@ async fn lossless_round_trip_all_units_and_input_batches() {
             no_columns.iter().map(|b| b.num_rows()).sum::<usize>(),
             rows.len()
         );
-        for object in &handle.entry().artifact.objects {
+        for object in handle.meta_ref().narthex_objects(REGION_DIR).unwrap() {
             assert_eq!(
                 store.read(&object.path).await.unwrap().len() as u64,
                 object.file_size
@@ -773,7 +830,10 @@ async fn empty_selection_and_validation() {
     let format = ColumnarSamplesFormat::default();
     let handle = build(&format, &store, m, &[]).await;
     assert!(manifest(&store, &handle).await.files.is_empty());
-    assert_eq!(handle.entry().artifact.objects.len(), 1);
+    assert_eq!(
+        handle.meta_ref().narthex_objects(REGION_DIR).unwrap().len(),
+        1
+    );
     let reader = format.reader(store, handle).await.unwrap();
     assert!(
         reader
@@ -885,7 +945,7 @@ async fn selective_reads_pin_the_artifact() {
     let store = store();
     let m = metadata();
     let format = ColumnarSamplesFormat::default();
-    let built = build(
+    let handle = build(
         &format,
         &store,
         m.clone(),
@@ -896,8 +956,6 @@ async fn selective_reads_pin_the_artifact() {
         )],
     )
     .await;
-    let handle = SamplesFileHandle::new(built.file_id(), built.entry().clone());
-    drop(built);
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
     let layer = MockLayerBuilder::default()
@@ -1050,12 +1108,12 @@ async fn malformed_framing_and_payload_corruption() {
             .is_err()
         );
     }
-    let mut entry = handle.entry().clone();
-    entry
-        .artifact
-        .objects
-        .push(entry.artifact.objects[0].clone());
-    let bad = SamplesFileHandle::new(handle.file_id(), entry);
+    let mut file = handle.meta_ref().clone();
+    let FileFormat::NarthexSamples(samples) = &mut file.format else {
+        unreachable!()
+    };
+    samples.parts.clear();
+    let bad = FileHandle::new(file, new_noop_file_purger());
     assert!(format.reader(store, bad).await.is_err());
 }
 
@@ -1063,10 +1121,9 @@ async fn malformed_framing_and_payload_corruption() {
 struct FrozenV1Manifest {
     region_id: u64,
     source_file_id: FileId,
-    generation: FileId,
 }
 
-async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
+async fn frozen_v1_handle(store: &ObjectStore) -> FileHandle {
     let bytes =
         include_str!("../../../../../tests/compatibility/wire/mito_columnar_samples/v1-part.hex")
             .split_whitespace()
@@ -1079,36 +1136,19 @@ async fn frozen_v1_handle(store: &ObjectStore) -> SamplesFileHandle {
         "../../../../../tests/compatibility/wire/mito_columnar_samples/v1-manifest.json"
     );
     let frozen: FrozenV1Manifest = serde_json::from_str(json).unwrap();
-    let prefix = crate::series_index::samples::samples_prefix(frozen.region_id, frozen.generation);
-    let manifest_path = format!("{prefix}manifest.json");
+    let prefix = location::narthex_file_dir(REGION_DIR, frozen.source_file_id);
+    let manifest_path = location::narthex_manifest_path(&prefix);
     let part_path = format!("{prefix}part-0.samples");
-    store.write(&part_path, bytes.clone()).await.unwrap();
+    let part_size = bytes.len() as u64;
+    store.write(&part_path, bytes).await.unwrap();
     store.write(&manifest_path, json).await.unwrap();
-    let objects = vec![
-        crate::series_index::artifact::ArtifactObject {
-            path: manifest_path,
-            file_size: json.len() as u64,
-        },
-        crate::series_index::artifact::ArtifactObject {
-            path: part_path,
-            file_size: bytes.len() as u64,
-        },
-    ];
-    let artifact = crate::series_index::artifact::ArtifactMetadata {
-        format: ArtifactFormat::ColumnarSamples,
-        generation: frozen.generation,
-        file_size: (json.len() + bytes.len()) as u64,
-        objects,
-    };
-    SamplesFileHandle::new(
+    samples_handle(
         RegionFileId::new(
             store_api::storage::RegionId::from_u64(frozen.region_id),
             frozen.source_file_id,
         ),
-        SamplesEntry {
-            file_id: frozen.source_file_id,
-            artifact,
-        },
+        json.len() as u64,
+        std::iter::once(part_size),
     )
 }
 
@@ -1133,8 +1173,8 @@ async fn frozen_v1_samples_fixture_is_rejected() {
 
 /// Rewrites the stored root page so every field column carries an unknown codec, and returns a
 /// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
-async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
-    let (mut manifest, mut trailer, page, mut bytes) = root_page(store, &handle).await;
+async fn unknown_field_codec(store: &ObjectStore, handle: FileHandle) -> FileHandle {
+    let (manifest, mut trailer, page, mut bytes) = root_page(store, &handle).await;
     let Page::Leaf(mut blocks) = page else {
         panic!("the root page must be a leaf")
     };
@@ -1162,24 +1202,7 @@ async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> 
     // file length change.
     trailer.file_length = (bytes.len() + TRAILER_SIZE as usize) as u64;
     bytes.extend_from_slice(&trailer.encode());
-    let part_path = manifest.part_path(0);
-    store.write(&part_path, bytes.clone()).await.unwrap();
-    manifest.files[0].file_size = bytes.len() as u64;
-    let manifest_path = manifest.path();
-    let json = serde_json::to_vec(&manifest).unwrap();
-    store.write(&manifest_path, json.clone()).await.unwrap();
-    let mut entry = handle.entry().clone();
-    for object in &mut entry.artifact.objects {
-        if object.path == part_path {
-            object.file_size = bytes.len() as u64;
-        } else if object.path == manifest_path {
-            object.file_size = json.len() as u64;
-        } else {
-            panic!("unexpected samples object {}", object.path);
-        }
-    }
-    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    SamplesFileHandle::new(handle.file_id(), entry)
+    rewrite_part(store, handle, manifest, bytes).await
 }
 
 /// A column whose codec the format does not know can only be skipped: a query that does not
@@ -1413,14 +1436,10 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
         (1, 1, 30, 1, 1, Some(10)),
     ];
     let handle = build(&format, &store, m.clone(), &[batch(&m, &input, false)]).await;
-    let part_size = handle
-        .entry()
-        .artifact
-        .objects
-        .iter()
-        .find(|object| object.path.ends_with(".samples"))
-        .unwrap()
-        .file_size;
+    let FileFormat::NarthexSamples(samples) = &handle.meta_ref().format else {
+        unreachable!()
+    };
+    let part_size = samples.parts[0].file_size;
     let reads = Arc::new(Mutex::new(Vec::new()));
     let creations = Arc::new(AtomicUsize::new(0));
     let observed = reads.clone();
@@ -2024,7 +2043,9 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
         &[batch(&m, &input, false)],
     )
     .await;
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let reader = reader::SamplesReader::open(store, handle, REGION_DIR)
+        .await
+        .unwrap();
     let pool = Arc::new(GreedyMemoryPool::new(capacity));
     let mut request = full_request();
     request.memory_pool = Some(pool.clone());
@@ -2056,7 +2077,6 @@ mod keys;
 /// Narthex readers pin the samples SST until the stream is dropped.
 #[tokio::test]
 async fn narthex_file_reader_pins_sst_lifetime() {
-    use crate::sst::file::{FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSamplesMeta};
     use crate::sst::file_purger::FilePurger;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2069,53 +2089,34 @@ async fn narthex_file_reader_pins_sst_lifetime() {
     }
     let store = store();
     let meta = metadata();
-    let id = FileId::random();
-    let prefix = format!("table/region/{id}/");
     let rows = vec![
         (1, 2, 100, 7, 0, Some(1.5f64.to_bits())),
         (1, 2, 101, 8, 0, None),
     ];
-    let mut writer = ColumnarSamplesFormat::default()
-        .writer(meta.clone(), store.clone(), &prefix, id, id)
-        .unwrap();
-    writer.write(&batch(&meta, &rows, false)).await.unwrap();
-    let artifact = writer.finish().await.unwrap();
-    let (manifest, parts) = artifact.objects.split_first().unwrap();
-    let narthex = NarthexSamplesMeta {
-        manifest_size: manifest.file_size,
-        parts: parts
-            .iter()
-            .map(|part| NarthexPartMeta {
-                file_size: part.file_size,
-            })
-            .collect(),
-    };
-    let file_meta = FileMeta {
-        region_id: meta.region_id,
-        file_id: id,
-        file_size: artifact.file_size,
-        num_rows: rows.len() as u64,
-        format: FileFormat::NarthexSamples(Box::new(narthex)),
-        ..Default::default()
-    };
+    let built = build(
+        &ColumnarSamplesFormat::default(),
+        &store,
+        meta.clone(),
+        &[batch(&meta, &rows, false)],
+    )
+    .await;
+    let file_meta = built.meta_ref();
     let restored: FileMeta =
-        serde_json::from_str(&serde_json::to_string(&file_meta).unwrap()).unwrap();
-    assert_eq!(file_meta, restored);
+        serde_json::from_str(&serde_json::to_string(file_meta).unwrap()).unwrap();
+    assert_eq!(file_meta, &restored);
+    drop(built);
     let purged = Arc::new(AtomicUsize::new(0));
     let file = FileHandle::new(restored, Arc::new(CountingPurger(purged.clone())));
-    let handle = SamplesFileHandle::from_narthex(file.clone(), "table/region/").unwrap();
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
-    file.mark_deleted();
-    drop(file);
-    assert_eq!(0, purged.load(Ordering::Relaxed));
-    let batches: Vec<_> = reader
-        .read(full_request())
-        .unwrap()
-        .try_collect()
+    let reader = reader::SamplesReader::open(store, file.clone(), REGION_DIR)
         .await
         .unwrap();
-    assert_eq!(rows, collect_rows(&batches));
+    file.mark_deleted();
+    drop(file);
+    let stream = reader.read(full_request()).unwrap();
     drop(reader);
+    assert_eq!(0, purged.load(Ordering::Relaxed));
+    let batches: Vec<_> = stream.try_collect().await.unwrap();
+    assert_eq!(rows, collect_rows(&batches));
     assert_eq!(1, purged.load(Ordering::Relaxed));
 }
 
@@ -2212,7 +2213,9 @@ async fn narthex_prepared_discovery_empty_projection_skips_payload() {
             .build()
             .unwrap(),
     );
-    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let reader = reader::SamplesReader::open(store, handle, REGION_DIR)
+        .await
+        .unwrap();
     let discovered = reader
         .read(SamplesReadRequest::default())
         .unwrap()
@@ -2325,7 +2328,7 @@ async fn native_histogram_fields_round_trip_and_split_by_chunk_limit() {
         &[input.slice(0, 10), input.slice(10, input.num_rows() - 10)],
     )
     .await;
-    let read = |handle: SamplesFileHandle| {
+    let read = |handle: FileHandle| {
         let store = store.clone();
         let format = format.clone();
         async move {
@@ -2357,16 +2360,12 @@ async fn native_histogram_fields_round_trip_and_split_by_chunk_limit() {
     stored.fields[0].data_type = FLOAT64_TYPE.to_string();
     let json = serde_json::to_vec(&stored).unwrap();
     store.write(&stored.path(), json.clone()).await.unwrap();
-    let mut entry = handle.entry().clone();
-    for object in &mut entry.artifact.objects {
-        if object.path == stored.path() {
-            object.file_size = json.len() as u64;
-        }
-    }
-    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
-    let error = read(SamplesFileHandle::new(handle.file_id(), entry))
-        .await
-        .unwrap_err();
+    let handle = samples_handle(
+        handle.file_id(),
+        json.len() as u64,
+        stored.files.iter().map(|part| part.file_size),
+    );
+    let error = read(handle).await.unwrap_err();
     assert!(
         error.to_string().contains("does not match its field type"),
         "{error}"

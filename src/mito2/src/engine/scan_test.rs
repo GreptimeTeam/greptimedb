@@ -1083,10 +1083,8 @@ async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()>
         .clone();
     let samples_reader = crate::series_index::samples::reader::SamplesReader::open(
         region.access_layer.object_store().clone(),
-        crate::series_index::artifact::SamplesFileHandle::from_narthex(
-            old_samples,
-            &region.access_layer.build_region_dir(region_id),
-        )?,
+        old_samples,
+        &region.access_layer.build_region_dir(region_id),
     )
     .await?;
     let inputs: std::collections::HashSet<_> = region
