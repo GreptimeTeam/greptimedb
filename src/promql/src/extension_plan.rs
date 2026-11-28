@@ -21,6 +21,7 @@ mod normalize;
 mod planner;
 mod range_manipulate;
 mod raw_series_source;
+mod row_series_source;
 mod scalar_calculate;
 mod series_divide;
 mod series_execution;
@@ -56,6 +57,7 @@ pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream}
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
 pub use raw_series_source::{RawSeriesSource, RawSeriesSourceExec};
+pub use row_series_source::{RowSeriesSource, RowSeriesSourceExec};
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use series_execution::{

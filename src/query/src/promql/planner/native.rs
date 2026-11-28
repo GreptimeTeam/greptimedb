@@ -28,7 +28,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
@@ -37,7 +37,9 @@ use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::UserDefinedLogicalNode;
-use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
+use datafusion::logical_expr::{
+    EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
@@ -48,7 +50,8 @@ use datatypes::series::time::EvalGrid;
 use futures::future::BoxFuture;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
-    RawSeriesSource, input_locality, keys_survive_metadata_drop, matching_operands_drop_key,
+    RawSeriesSource, RowSeriesSource, input_locality, keys_survive_metadata_drop,
+    matching_operands_drop_key,
 };
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
@@ -354,6 +357,13 @@ impl PromPlanner {
             }
             None => match &input {
                 LogicalPlan::TableScan(scan) => scan.clone(),
+                // A second-precision time index is read through a projection that casts it to
+                // milliseconds. Only a row source reads that projection; the engine check below
+                // declines it for any other engine.
+                LogicalPlan::Projection(projection) => match projection.input.as_ref() {
+                    LogicalPlan::TableScan(scan) => scan.clone(),
+                    _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
+                },
                 _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
             },
         };
@@ -370,12 +380,20 @@ impl PromPlanner {
                 .map(|index| &table_meta.schema.column_schemas()[*index]),
         );
         // Checked here because a physical-planning refusal is an error, not a fallback. A
-        // file-engine table has no raw-series scanner; a metric-engine selector needs its verified
-        // logical rewrite.
-        if !supports_native_raw_series(&table_meta.engine)
-            || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
+        // file-engine table reads through a `RowSeriesSource`, which sorts its rows into series; a
+        // metric-engine selector needs its verified logical rewrite.
+        let reads_rows = table_meta.engine == FILE_ENGINE;
+        if !reads_rows
+            && (!supports_native_raw_series(&table_meta.engine)
+                || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite))
         {
             return Ok(declined("engine_without_raw_series_scanner"));
+        }
+        // A row source names its series by its tag columns and the metric name by the table, so a tag
+        // column named `__name__` has no label to be read as, and dropping it would merge the series
+        // it tells apart.
+        if reads_rows && tags.iter().any(|tag| tag == METRIC_NAME) {
+            return Ok(declined("row_source_tag_named_metric_name"));
         }
         // The region's raw-series preflight refuses these, and the physical layer turns that
         // refusal into an error, so decline this route here instead.
@@ -383,8 +401,13 @@ impl PromPlanner {
             .schema
             .timestamp_column()
             .map(|column| &column.data_type);
-        if time_index_type
-            != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
+        // A row source reads a second-precision time index as the milliseconds it is exactly.
+        let readable_time_index = time_index_type
+            == Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
+            || (reads_rows
+                && time_index_type
+                    == Some(&datatypes::prelude::ConcreteDataType::timestamp_second_datatype()));
+        if !readable_time_index
             || table_meta
                 .options
                 .extra_options
@@ -435,12 +458,32 @@ impl PromPlanner {
             eval_grid: None,
         });
         // The time filter is added after compiling, once the occurrence's window is known.
-        let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
-        if let LogicalPlan::TableScan(table_scan) = &mut input {
-            table_scan.filters.append(&mut filters);
-        } else {
+        if !reads_rows && !matches!(input, LogicalPlan::TableScan(_)) {
             return Ok(declined("selector_plan_is_not_a_table_scan"));
         }
+        if reads_rows {
+            input = row_source_input(input, &tags, &time, &fields, matchers)?;
+            input = LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RowSeriesSource::try_new(
+                        Arc::from(metric.as_str()),
+                        tags.clone(),
+                        time.clone(),
+                        fields.clone(),
+                        input,
+                    )
+                    .context(DataFusionPlanningSnafu)?,
+                ),
+            });
+        } else {
+            let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
+            if let LogicalPlan::TableScan(table_scan) = &mut input {
+                table_scan.filters.append(&mut filters);
+            }
+        }
+        // A row source reads every key column as a label value with no null, so two rows that differ
+        // only by `NULL` against `''` are already one series there.
+        let keys_survive = keys_survive || reads_rows;
         Ok(Some((
             input,
             series_schema,
@@ -1301,6 +1344,11 @@ impl PromPlanner {
                         .context(DataFusionPlanningSnafu)?;
                     *child = Arc::new(LogicalPlan::Extension(Extension { node: replacement }));
                 }
+            } else if let LogicalPlan::Extension(extension) = scan
+                && let Some(source) = extension.node.as_any().downcast_ref::<RowSeriesSource>()
+            {
+                *scan = bind_row_source_filters(source, filter, time)
+                    .context(DataFusionPlanningSnafu)?;
             } else if let LogicalPlan::TableScan(table_scan) = scan {
                 table_scan.filters.push(filter);
             } else if let LogicalPlan::EmptyRelation(_) = scan {
@@ -1815,15 +1863,95 @@ fn reads_presence(expr: &PromExpr) -> bool {
     presence.0
 }
 
-/// Whether a prepared selector is already a discovered [`RawSeriesSource`] or a `Union` of them,
-/// which must not be wrapped in another source.
+/// Whether a prepared selector is already a discovered [`RawSeriesSource`], a `Union` of them, or
+/// a file-engine [`RowSeriesSource`], which must not be wrapped in another source.
 fn is_sourced_plan(plan: &LogicalPlan) -> bool {
     matches!(plan, LogicalPlan::Union(_))
         || matches!(
             plan,
             LogicalPlan::Extension(extension)
                 if extension.node.as_any().is::<RawSeriesSource>()
+                    || extension.node.as_any().is::<RowSeriesSource>()
         )
+}
+
+/// Reads every tag as its text with `NULL` as `''`, since Prometheus treats an empty label as
+/// absent, and applies the matchers above the scan: a file-engine scan uses filters only to prune.
+fn row_source_input(
+    scan: LogicalPlan,
+    tags: &[String],
+    time: &str,
+    fields: &[String],
+    matchers: Matchers,
+) -> Result<LogicalPlan> {
+    let column = |name: &str| DfExpr::Column(datafusion::common::Column::from_name(name));
+    let mut exprs = tags
+        .iter()
+        .map(|tag| {
+            datafusion::functions::core::expr_fn::coalesce(vec![
+                datafusion_expr::cast(column(tag), ArrowDataType::Utf8),
+                datafusion_expr::lit(""),
+            ])
+            .alias(tag)
+        })
+        .collect::<Vec<_>>();
+    exprs.push(column(time));
+    exprs.extend(fields.iter().map(|field| column(field)));
+    let projected = LogicalPlanBuilder::from(scan)
+        .project(exprs)
+        .context(DataFusionPlanningSnafu)?
+        .build()
+        .context(DataFusionPlanningSnafu)?;
+    let filters = PromPlanner::matchers_to_expr(matchers, projected.schema())?;
+    let Some(predicate) = datafusion_expr::utils::conjunction(filters) else {
+        return Ok(projected);
+    };
+    LogicalPlanBuilder::from(projected)
+        .filter(predicate)
+        .context(DataFusionPlanningSnafu)?
+        .build()
+        .context(DataFusionPlanningSnafu)
+}
+
+/// Filters a row source by the selector's time range, also pushed into a scan whose time index is
+/// in milliseconds so the file engine can prune files and row groups.
+fn bind_row_source_filters(
+    source: &RowSeriesSource,
+    time_filter: DfExpr,
+    time: &str,
+) -> std::result::Result<LogicalPlan, DataFusionError> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+
+    let millis =
+        ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None);
+    let input = source
+        .input()
+        .clone()
+        .transform_down(|plan| match plan {
+            LogicalPlan::TableScan(mut scan)
+                if scan
+                    .projected_schema
+                    .field_with_unqualified_name(time)
+                    .is_ok_and(|field| field.data_type() == &millis) =>
+            {
+                scan.filters.push(time_filter.clone());
+                Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+            }
+            other => Ok(Transformed::no(other)),
+        })?
+        .data;
+    let input = LogicalPlanBuilder::from(input)
+        .filter(time_filter)?
+        .build()?;
+    Ok(LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            datafusion::logical_expr::UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+                source,
+                vec![],
+                vec![input],
+            )?,
+        ),
+    }))
 }
 
 /// `millis` from the Unix epoch, negative included; `None` when [`SystemTime`] cannot represent it.

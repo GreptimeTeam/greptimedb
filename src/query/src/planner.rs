@@ -98,7 +98,7 @@ pub trait LogicalPlanner: Send + Sync {
 /// classifies the node as running where its scan is, and a bare scan is never shipped across a
 /// region boundary on its own: nothing below the boundary could read it. So a scan is admitted only
 /// under a node the analyzer would move, and every other input of the plan has to be a raw source
-/// that names the region it reads.
+/// that names the region it reads, or a row source that reads the regions' rows above them.
 ///
 /// A fused node that reads no region is the one exception: it has nothing to place in a region, so
 /// the frontend evaluates it and the transport this gate protects is never used.
@@ -124,6 +124,16 @@ fn remote_native_raw_plan_supported(plan: &LogicalPlan) -> bool {
                         extension.node.inputs().as_slice(),
                         [LogicalPlan::TableScan(_)]
                     );
+                }
+                // A row source reads ordinary rows: the analyzer keeps it above the merge scan
+                // and ships only the scan below it, which every region answers as a plain query.
+                if extension
+                    .node
+                    .as_any()
+                    .is::<promql::extension_plan::RowSeriesSource>()
+                {
+                    *found_raw = true;
+                    return true;
                 }
                 let region_local = extension
                     .node
