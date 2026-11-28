@@ -2822,13 +2822,25 @@ async fn native_named_selector_over_a_missing_table_plans_as_an_empty_input() {
     // carries. That refusal is about the scan, not about the table existing - a missing table has no
     // field set to narrow and is admitted as the empty input, which
     // `native_missing_table_with_a_field_matcher_answers_the_empty_vector` asserts beside its rows.
+    // The refusal is the route's answer, not a plan: it flips once the `__field__` narrowing has a
+    // raw-series equivalent (#10655).
     let query = r#"x{__field__="field_0"}"#;
-    let plan =
-        build_native_fused_plan_with_provider(query, true, named_missing_table_provider().await)
-            .await;
+    let error = PromPlanner::stmt_to_plan_with_annotations(
+        named_missing_table_provider().await,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap_err();
     assert!(
-        find_fused_series(&plan).is_none(),
-        "`{query}` claimed a field layout its scan does not report: {plan:?}"
+        matches!(
+            &error,
+            crate::promql::error::Error::UnsupportedNativeShape { reason, .. }
+                if reason.as_str() == "field_selector_without_raw_series_equivalent"
+        ),
+        "`{query}` narrows a field set its scan does not report: {error}"
     );
 }
 

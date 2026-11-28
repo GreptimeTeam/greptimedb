@@ -158,11 +158,12 @@ const DISTRIBUTION_CANNOT_ROUTE: &str = "the distribution planner cannot route t
 
 /// Whether `plan` is a native fused plan with no region below it.
 ///
-/// Two shapes qualify, and both are already the finished plan: a statement that reads no data -
-/// `time()`, `vector(1)`, a label rewrite over one of them - is one node with no input at all,
-/// and a discovered selector that matched no metric table is planned over the typed empty frame
+/// Three shapes qualify, and every one is already the finished plan: a statement that reads no data
+/// - `time()`, `vector(1)`, a label rewrite over one of them - is one node with no input at all, a
+/// discovered selector that matched no metric table is planned over the typed empty frame
 /// [`is_empty_discovered_input`](crate::promql::planner::native::is_empty_discovered_input)
-/// builds. Neither has a scan to ship, so neither needs the remote transport.
+/// builds, and a statement every one of whose selectors names a table that does not exist is
+/// answered by that frame itself. None has a scan to ship, so none needs the remote transport.
 ///
 /// The route stacks its own nodes above such an input: a split aggregate runs a `Final` half over
 /// the `Partial` half that reads it, and a segmented statement runs its parent over the segment's
@@ -175,9 +176,13 @@ fn is_regionless_fused_plan(plan: &LogicalPlan) -> bool {
     // wrapper is this route's own, so it is read through when it drops exactly that one column.
     if let LogicalPlan::Projection(projection) = plan {
         return strips_only_tsid(plan, projection.input.as_ref())
-            && is_regionless_fused_chain(projection.input.as_ref());
+            && is_regionless_fused_plan(projection.input.as_ref());
     }
-    is_regionless_fused_chain(plan)
+    // A statement that answers the empty vector needs no region either: every selector over a
+    // missing table is the typed empty frame, and a layout no row can carry is answered by that
+    // frame rather than by a node above it.
+    crate::promql::planner::native::is_empty_discovered_input(plan)
+        || is_regionless_fused_chain(plan)
 }
 
 /// Whether `plan` is a fused node whose inputs are fused nodes or the typed empty frame.
@@ -1773,6 +1778,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A statement whose every selector names a table that does not exist reads no region, so a
+    /// deployment that plans regions answers it too.
+    ///
+    /// `__name__` is the shape that states it: the metric names both the value column and the
+    /// row-name column every samples layout publishes, so no row can carry that layout and the plan
+    /// is the typed empty input the selector is planned as. There is nothing to place in a region,
+    /// so the answer is the empty vector rather than a refusal for want of one.
+    #[tokio::test]
+    async fn test_native_promql_answers_an_all_missing_table_statement_over_no_region() {
+        let engine = create_promql_test_engine_with(
+            crate::options::QueryOptions {
+                experimental_native_promql: true,
+                ..Default::default()
+            },
+            true,
+        );
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string())
+                .build(),
+        );
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: "__name__".to_string(),
+                start: "0".to_string(),
+                end: "0".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            &query_ctx,
+        )
+        .unwrap();
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("`__name__` names no table, so it reads no region: {error}")
+            });
+        // The answer is that empty input itself: no node and no scan above it.
+        let LogicalPlan::EmptyRelation(relation) = &plan else {
+            panic!("`__name__` is not answered by its empty input: {plan}");
+        };
+        assert!(!relation.produce_one_row, "`__name__`: {plan}");
+        assert!(
+            crate::promql::planner::native::is_empty_discovered_input(&plan),
+            "`__name__` publishes the raw series frame a missing table is planned as: {plan}"
+        );
+        assert!(
+            remote_native_raw_plan_supported(&plan),
+            "a statement that reads no table has no region to place: {plan}"
+        );
     }
 
     /// A plan whose every read is a bare scan is one no region can be given, and the refusal this
