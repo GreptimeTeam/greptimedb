@@ -72,7 +72,8 @@ pub trait LogicalPlanner: Send + Sync {
 
     /// Plans a statement whose output columns are read by SQL rather than returned to a client, such
     /// as a flow's sink rows. A PromQL statement may still run on the native route, but publishes the
-    /// existing planner's columns on either route, as a TQL CTE does.
+    /// existing planner's columns on either route, as a TQL CTE does. A selector that names no metric
+    /// has no existing columns and publishes the native route's own.
     async fn plan_relation(
         &self,
         stmt: &QueryStatement,
@@ -923,6 +924,12 @@ impl DfLogicalPlanner {
             // this is the existing plan, which already publishes the existing columns.
             return Ok(plan);
         }
+        // The existing planner refuses a selector that names no metric, so the native answer's own
+        // columns are the relation's. A series frame is not a table SQL reads, so it still goes to
+        // the existing planner, which refuses it.
+        if discovers_any_metric(&eval.expr) && !publishes_series_frame(plan.schema()) {
+            return Ok(plan);
+        }
         // The relation's columns are SQL-visible, and this route names and orders its output its own
         // way, so its own schema cannot stand in for the existing planner's: plan the statement for
         // that schema and publish it over the native answer. A statement whose columns that
@@ -964,15 +971,6 @@ impl DfLogicalPlanner {
                 let QueryStatement::Promql(eval, _alias) = &stmt else {
                     unreachable!("a TQL eval parses to a PromQL statement");
                 };
-                // The existing planner refuses a selector that names no metric, so the native
-                // answer's own columns are the CTE's. A series frame is not a table SQL reads, so
-                // it still goes to the existing planner, which refuses it.
-                if discovers_any_metric(&eval.expr) {
-                    let plan = self.plan_pql(eval, query_ctx.clone(), true).await?;
-                    if contains_native_fused(&plan) && !publishes_series_frame(plan.schema()) {
-                        return Ok(plan);
-                    }
-                }
                 self.plan_pql_relation(eval, query_ctx).await
             }
             Tql::Explain(_) => UnimplementedSnafu {
