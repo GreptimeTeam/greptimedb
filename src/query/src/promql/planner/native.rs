@@ -65,7 +65,6 @@ pub(crate) use promql::native::segment::{
     independent_scan_pair, is_empty_discovered_input, pointwise_operand,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, SubqueryExpr, VectorSelector,
@@ -278,8 +277,6 @@ impl PromPlanner {
         &mut self,
         matchers: Matchers,
         under_rate_or_increase: bool,
-        // Decides whether the existing plan reports a numeric field as `Float64`.
-        statement_expr: &PromExpr,
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
@@ -397,24 +394,14 @@ impl PromPlanner {
         let split_series = !table_meta
             .partition_column_names()
             .all(|column| tags.iter().any(|tag| tag == column));
-        // Every field must read as one kind: `Float64` or the native histogram struct. The raw scan
-        // casts numeric fields to `Float64`, but the existing plan keeps a numeric field's own type
-        // for shapes that do not cast (a bare selector, `sum` of integers, `count`); those decline
-        // so the output column type does not change.
-        let mut keeps_its_own_type = false;
+        // Every field must read as one kind: `Float64` or the native histogram struct; any other
+        // type, or a statement whose fields disagree, keeps the existing plan. The raw scan casts
+        // numeric fields to `Float64`, and the answer publishes `Float64` even where the existing
+        // plan keeps the field's own type, as in the Prometheus data model.
         let read_types = fields
             .iter()
-            .map(|field| {
-                Self::field_column_type(input.schema(), field).map(|data_type| {
-                    keeps_its_own_type |= is_raw_numeric(data_type)
-                        && !publishes_float_values(statement_expr, data_type);
-                    read_field_type(data_type, statement_expr)
-                })
-            })
+            .map(|field| Self::field_column_type(input.schema(), field).map(read_field_type))
             .collect::<Vec<_>>();
-        if keeps_its_own_type {
-            return Ok(declined("field_keeps_its_own_type"));
-        }
         let Some(field_kind) =
             uniform_field_kind(read_types.iter().map(|data_type| data_type.as_ref()))
         else {
@@ -963,7 +950,6 @@ impl PromPlanner {
                             .prepare_one_scan(
                                 matchers.clone(),
                                 *under_rate_or_increase,
-                                &stmt.expr,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
@@ -1079,7 +1065,6 @@ impl PromPlanner {
                     .prepare_one_scan(
                         matchers,
                         *under_rate_or_increase,
-                        &stmt.expr,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
                         &mut statement_kind,
@@ -2381,12 +2366,12 @@ fn supports_native_raw_series(engine: &str) -> bool {
     matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
 
-/// The type the raw series scan hands one field of `statement` to the fused node as.
+/// The type the raw series scan hands one field to the fused node as.
 ///
-/// A numeric field reads as `Float64` only where the existing plan also publishes `Float64`
-/// ([`publishes_float_values`]); any other type is returned unchanged for the field-kind guard.
-fn read_field_type(data_type: &ArrowDataType, statement: &PromExpr) -> ArrowDataType {
-    if is_raw_numeric(data_type) && publishes_float_values(statement, data_type) {
+/// The type the raw scan hands over for a field: `Float64` for a numeric one; any other type is
+/// returned unchanged for the field-kind guard.
+fn read_field_type(data_type: &ArrowDataType) -> ArrowDataType {
+    if is_raw_numeric(data_type) {
         ArrowDataType::Float64
     } else {
         data_type.clone()
@@ -2410,157 +2395,6 @@ fn is_raw_numeric(data_type: &ArrowDataType) -> bool {
             | ArrowDataType::Float16
             | ArrowDataType::Float32
     )
-}
-
-/// The range functions whose existing-plan UDF (`promql::functions`) returns `Float64` for any
-/// numeric window, so `rate(integer_field[5m])` publishes `Float64`.
-const FLOAT_ANSWERING_RANGE_FUNCTIONS: &[&str] = &[
-    "avg_over_time",
-    "changes",
-    "count_over_time",
-    "delta",
-    "deriv",
-    "double_exponential_smoothing",
-    "holt_winters",
-    "idelta",
-    "increase",
-    "irate",
-    "last_over_time",
-    "max_over_time",
-    "min_over_time",
-    "predict_linear",
-    "present_over_time",
-    "quantile_over_time",
-    "rate",
-    "resets",
-    "stddev_over_time",
-    "stdvar_over_time",
-    "sum_over_time",
-];
-
-/// The type class the existing planner publishes for one expression over one field. Not a boolean
-/// because `sum` keeps an integer's type but widens `Float32` to `Float64`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PublishedValues {
-    Float64,
-    /// `Float16` or `Float32`.
-    NarrowFloat,
-    /// Any signed or unsigned integer.
-    Integer,
-    /// A type or shape not modeled here; never admitted.
-    Other,
-}
-
-/// Whether the existing planner publishes a `Float64` for `field_type` under `statement`.
-///
-/// Anything not proved is `false`, which declines. Proved, with the existing planner's deciding
-/// site:
-///
-/// - arithmetic: `PromPlanner::prom_token_to_binary_expr_builder` wraps operands in `cast_float`,
-///   unless an operand folds before the cast ([`folds_before_cast`]),
-/// - `min`/`max` (`Extremum`) and `avg`, `stddev`, `stdvar`, `quantile`, `group`
-///   (`PromPlanner::create_numeric_aggregate_expr`) return `Float64`,
-/// - `sum` returns `Float64` for float input and the input type for integers,
-/// - [`FLOAT_ANSWERING_RANGE_FUNCTIONS`].
-///
-/// Parentheses, subqueries and the selecting aggregates publish their input's class; a bare
-/// selector publishes the field's own type. Not proved: `count`/`count_values` (`Int64`), math and
-/// label functions, `-x`, comparisons and set operations.
-fn publishes_float_values(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
-    published_values(statement, field_type) == PublishedValues::Float64
-}
-
-/// The class [`publishes_float_values`] reads: what the existing plan publishes for `statement`.
-fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> PublishedValues {
-    match statement {
-        PromExpr::Paren(ParenExpr { expr }) => published_values(expr, field_type),
-        PromExpr::Subquery(SubqueryExpr { expr, .. }) => published_values(expr, field_type),
-        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => field_values(field_type),
-        // Comparisons and set operations are not modeled.
-        PromExpr::Binary(binary) => {
-            let arithmetic = matches!(
-                binary.op.id(),
-                token::T_ADD
-                    | token::T_SUB
-                    | token::T_MUL
-                    | token::T_DIV
-                    | token::T_MOD
-                    | token::T_POW
-                    | token::T_ATAN2
-            );
-            if !arithmetic
-                || folds_before_cast(&binary.lhs, field_type)
-                || folds_before_cast(&binary.rhs, field_type)
-            {
-                PublishedValues::Other
-            } else {
-                PublishedValues::Float64
-            }
-        }
-        PromExpr::Aggregate(aggregate) => match aggregate.op.id() {
-            token::T_MIN
-            | token::T_MAX
-            | token::T_AVG
-            | token::T_STDDEV
-            | token::T_STDVAR
-            | token::T_QUANTILE
-            | token::T_GROUP => PublishedValues::Float64,
-            token::T_SUM => match published_values(&aggregate.expr, field_type) {
-                PublishedValues::Float64 | PublishedValues::NarrowFloat => PublishedValues::Float64,
-                PublishedValues::Integer => PublishedValues::Integer,
-                PublishedValues::Other => PublishedValues::Other,
-            },
-            token::T_COUNT | token::T_COUNT_VALUES => PublishedValues::Integer,
-            token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO => {
-                published_values(&aggregate.expr, field_type)
-            }
-            _ => PublishedValues::Other,
-        },
-        PromExpr::Call(call) => {
-            if FLOAT_ANSWERING_RANGE_FUNCTIONS.contains(&call.func.name) {
-                PublishedValues::Float64
-            } else {
-                PublishedValues::Other
-            }
-        }
-        _ => PublishedValues::Other,
-    }
-}
-
-/// Whether `statement` folds samples into a non-float before an arithmetic `cast_float` reaches
-/// them.
-///
-/// The existing plan then folds exactly (`sum` of `Int64` adds integers) while the raw scan casts
-/// first; integers above `2^53` can answer differently, so `sum(integer_field) * 1` declines.
-fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
-    match statement {
-        PromExpr::Paren(ParenExpr { expr }) => folds_before_cast(expr, field_type),
-        PromExpr::Subquery(SubqueryExpr { expr, .. }) => folds_before_cast(expr, field_type),
-        PromExpr::Binary(binary) => {
-            folds_before_cast(&binary.lhs, field_type) || folds_before_cast(&binary.rhs, field_type)
-        }
-        PromExpr::Unary(unary) => folds_before_cast(&unary.expr, field_type),
-        PromExpr::Aggregate(_) => !publishes_float_values(statement, field_type),
-        // Selectors, literals and calls hand over single samples; nothing folds before the cast.
-        _ => false,
-    }
-}
-
-/// What a bare selector over a field of this type publishes.
-fn field_values(field_type: &ArrowDataType) -> PublishedValues {
-    match field_type {
-        ArrowDataType::Float64 => PublishedValues::Float64,
-        ArrowDataType::Float16 | ArrowDataType::Float32 => PublishedValues::NarrowFloat,
-        ArrowDataType::Int8
-        | ArrowDataType::Int16
-        | ArrowDataType::Int32
-        | ArrowDataType::Int64
-        | ArrowDataType::UInt8
-        | ArrowDataType::UInt16
-        | ArrowDataType::UInt32
-        | ArrowDataType::UInt64 => PublishedValues::Integer,
-        _ => PublishedValues::Other,
-    }
 }
 
 /// Recognizes the metric logical-table scan emitted by `create_table_scan_plan` and returns the
