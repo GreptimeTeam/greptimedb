@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use common_base::readable_size::ReadableSize;
 use common_runtime::runtime::RuntimeTrait;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
@@ -131,6 +131,16 @@ impl Metrics {
                 .observe(self.compact_memtable.as_secs_f64());
         }
     }
+}
+
+/// How the removal of one narthex artifact directory ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NarthexDirCleanup {
+    /// The judged objects and the artifact directory are gone.
+    Removed,
+    /// The judged objects are gone, but the directory still holds objects this
+    /// pass never judged: a later pass has to finish the cleanup.
+    Pending,
 }
 
 /// A layer to access SST files under the same directory.
@@ -245,6 +255,14 @@ impl AccessLayer {
     }
 
     /// Deletes objects belonging to a fenced artifact in its canonical directory.
+    ///
+    /// Only for a caller that owns the artifact exclusively: an uncommitted write
+    /// being cleaned up, the file purger holding the last reference, or the fast GC
+    /// mode, which removes only artifacts already registered in `removed_files` and
+    /// past their lingering time and therefore races with no writer. A GC pass that
+    /// holds a listing snapshot reclaims the artifact through
+    /// [`Self::delete_narthex_artifact_parts`] instead, so that only the objects it
+    /// judged are removed.
     pub(crate) async fn delete_narthex_artifact(
         &self,
         region_id: RegionId,
@@ -258,6 +276,70 @@ impl AccessLayer {
             .await
             .context(OpenDalSnafu)?;
         Ok(())
+    }
+
+    /// Deletes `parts`, the objects one GC pass listed and judged deletable for
+    /// the artifact `file_id`, then the artifact directory itself.
+    ///
+    /// An object the caller did not observe — in particular a part a concurrent
+    /// writer appended after that listing — is never named here, so it survives.
+    /// The directory is therefore only removed once a fresh listing shows nothing
+    /// left under it; while something is, [`NarthexDirCleanup::Pending`] reports
+    /// the cleanup as unfinished, so the caller keeps the region (and, for a
+    /// dropped region, its tombstone) instead of acknowledging the artifact as
+    /// reclaimed. A failed deletion is an error, never a silent success.
+    pub(crate) async fn delete_narthex_artifact_parts(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+        parts: &[String],
+    ) -> Result<NarthexDirCleanup> {
+        if !parts.is_empty() {
+            // Deleter does not normalize leading slashes like Operator::delete does.
+            // Collect the paths before awaiting, like `delete_ssts` does: a lazy
+            // adapter borrowing `parts` would keep a borrow alive across the awaits
+            // below, and the future then stops being `Send` for every lifetime.
+            let paths: Vec<String> = parts
+                .iter()
+                .map(|path| path.trim_start_matches('/').to_string())
+                .collect();
+            let mut deleter = self.object_store.deleter().await.context(OpenDalSnafu)?;
+            deleter.delete_iter(paths).await.context(OpenDalSnafu)?;
+            deleter.close().await.context(OpenDalSnafu)?;
+        }
+
+        let region_dir = self.build_region_dir(region_id);
+        let dir = location::narthex_file_dir(&region_dir, file_id);
+        // The deletion above is not recursive, and a part written after the
+        // caller's listing is not in `parts`. Never remove, or report the
+        // artifact as reclaimed, while such an object is still here.
+        if let Some(remaining) = self.first_narthex_object(&dir).await? {
+            debug!(
+                "Narthex artifact directory {dir} still holds {remaining}, left for a later GC pass"
+            );
+            return Ok(NarthexDirCleanup::Pending);
+        }
+        self.object_store.delete(&dir).await.context(OpenDalSnafu)?;
+        Ok(NarthexDirCleanup::Removed)
+    }
+
+    /// Returns the path of one object still under `dir`, if any.
+    async fn first_narthex_object(&self, dir: &str) -> Result<Option<String>> {
+        let watched = dir.trim_end_matches('/');
+        let mut lister = match self.object_store.lister_with(dir).recursive(true).await {
+            Ok(lister) => lister,
+            // A directory that is already gone holds no object.
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context(OpenDalSnafu),
+        };
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            // Filesystem listings include the directory itself.
+            if entry.metadata().is_dir() && entry.path().trim_end_matches('/') == watched {
+                continue;
+            }
+            return Ok(Some(entry.path().to_string()));
+        }
+        Ok(None)
     }
 
     pub(crate) async fn delete_ssts(

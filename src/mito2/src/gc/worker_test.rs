@@ -40,7 +40,7 @@ use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
 use crate::engine::pending_tail_test::{set_pending_tails, tail};
 use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef};
 use crate::error::UnexpectedSnafu;
-use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
+use crate::gc::{DeletableFiles, GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList, RemovedFile};
 use crate::manifest::storage::{delta_file, gen_path};
 use crate::metrics::GC_SKIPPED_UNPARSABLE_FILES;
@@ -219,7 +219,7 @@ async fn test_gc_keeps_sst_across_index_versions(
             .into_iter()
             .map(|f| (f.file_id, f.index_version))
             .collect();
-        let (deleted, _deferred_unknown) = env
+        let DeletableFiles { files: deleted, .. } = env
             .worker
             .list_to_be_deleted_files(
                 region_id,
@@ -262,7 +262,7 @@ async fn test_gc_reference_protects_parquet_and_only_its_index(
     } else {
         (HashMap::new(), HashSet::from([(file_id, index_version)]))
     };
-    let (deleted, _deferred_unknown) = env
+    let DeletableFiles { files: deleted, .. } = env
         .worker
         .list_to_be_deleted_files(
             env.meta.region_id,
@@ -1638,6 +1638,97 @@ async fn test_dropped_region_hook_deferral_needs_retry_until_reclaimed() {
     }
 }
 
+/// Appends a narthex part to the artifact `file_id` when a pass reaches its
+/// protection lookup — after that pass took its listing, before it deletes. That
+/// is the deterministic stand-in for a writer appending a part the pass never
+/// listed.
+#[derive(Debug)]
+struct LateNarthexPartHook {
+    region_id: RegionId,
+    file_id: FileId,
+}
+
+#[async_trait]
+impl RegionHook for LateNarthexPartHook {
+    async fn protected_sst_files(
+        &self,
+        access: &crate::access_layer::AccessLayer,
+        _files: &[crate::sst::file::RegionFileId],
+    ) -> crate::error::Result<HashSet<crate::sst::file::RegionFileId>> {
+        let dir =
+            location::narthex_file_dir(&access.build_region_dir(self.region_id), self.file_id);
+        access
+            .object_store()
+            .write(&format!("{dir}part-late"), b"narthex".as_slice())
+            .await
+            .unwrap();
+        Ok(HashSet::new())
+    }
+}
+
+/// A dropped region whose only narthex artifact still holds a part the pass never
+/// listed must not be acknowledged: `need_retry_regions` keeps the meta-srv
+/// tombstone, so a later pass finishes the cleanup instead of leaking the part.
+#[tokio::test]
+async fn test_dropped_region_narthex_part_written_after_listing_needs_retry() {
+    init_default_ut_logging();
+    let expected_region_id = RegionId::new(3, 1);
+    let file_id = FileId::random();
+    let (_env, _engine, worker, region_id, _paths) = dropped_region_gc_env(
+        GcConfig {
+            enable: true,
+            lingering_time: None,
+            unknown_file_lingering_time: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+        Some(Arc::new(LateNarthexPartHook {
+            region_id: expected_region_id,
+            file_id,
+        })),
+    )
+    .await;
+    assert_eq!(expected_region_id, region_id);
+
+    let store = worker.access_layer.object_store().clone();
+    let dir = location::narthex_file_dir(&worker.access_layer.build_region_dir(region_id), file_id);
+    let listed = [format!("{dir}manifest.json"), format!("{dir}part-0")];
+    for path in &listed {
+        store.write(path, b"narthex".as_slice()).await.unwrap();
+    }
+    // The pass deletes only objects older than `unknown_file_lingering_time`
+    // (zero here), so let these objects' mtime fall behind the pass's `now`.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let report = worker.run().await.unwrap();
+
+    assert!(
+        report.need_retry_regions.contains(&region_id),
+        "an artifact directory that still holds an unjudged part must keep the tombstone"
+    );
+    assert!(
+        !report.processed_regions.contains(&region_id),
+        "an unfinished region is not reported as processed"
+    );
+    assert!(
+        !report.deleted_files.contains_key(&region_id),
+        "an unfinished region is not reported as fully deleted"
+    );
+    for path in &listed {
+        assert!(
+            !store.exists(path).await.unwrap(),
+            "the judged object {path} is reclaimed"
+        );
+    }
+    assert!(
+        store.exists(&format!("{dir}part-late")).await.unwrap(),
+        "the part this pass never listed survives"
+    );
+    assert!(
+        store.exists(&dir).await.unwrap(),
+        "the artifact directory stays while it is not empty"
+    );
+}
+
 /// `on_region_gc` **fires** on a full-listing pass even when mito itself deleted
 /// no files, so an extension can reconcile sidecar-only orphans (failed writes,
 /// leftovers from a previous cleanup). Contrast with the fast-mode skip in
@@ -1931,7 +2022,8 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
         (HashMap::from([(id, None)]), HashSet::new()),
         (HashMap::new(), HashSet::from([(id, None)])),
     ] {
-        let (delete, _) = env.worker.filter_deletable_files(
+        let DeletableFiles { files: delete, .. } = env.worker.filter_deletable_files(
+            region_id,
             entries.clone(),
             &manifest,
             &readers,
@@ -1941,7 +2033,8 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
         );
         assert!(delete.is_empty());
     }
-    let (delete, _) = env.worker.filter_deletable_files(
+    let DeletableFiles { files: delete, .. } = env.worker.filter_deletable_files(
+        region_id,
         entries,
         &HashMap::new(),
         &HashSet::new(),
@@ -1950,11 +2043,220 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
         threshold,
     );
     assert_eq!(delete, vec![removed]);
-    env.worker.delete_files(region_id, &delete).await.unwrap();
+    env.worker
+        .delete_files(region_id, &delete, &HashMap::new())
+        .await
+        .unwrap();
     assert!(!layer.object_store().exists(&prefix).await.unwrap());
     for path in paths {
         assert!(!layer.object_store().exists(&path).await.unwrap());
     }
+}
+
+/// A full-listing pass reclaims a narthex artifact through the parts its own
+/// listing judged: a part appended after that listing survives, keeps the artifact
+/// directory, and the next pass, which lists it too, finishes the removal.
+#[tokio::test]
+async fn test_narthex_artifact_gc_deletes_listed_parts_only() {
+    let env = IndexGcTestEnv::new(true).await;
+    let region_id = env.meta.region_id;
+    let store = env.region.access_layer.object_store();
+    let id = FileId::random();
+    let dir = location::narthex_file_dir(&env.region.access_layer.build_region_dir(region_id), id);
+    let listed = [
+        write_and_list_entry(store, &format!("{dir}manifest.json")).await,
+        write_and_list_entry(store, &format!("{dir}part-0")).await,
+    ];
+    // Appended by a concurrent writer after the pass took its listing snapshot.
+    let late = write_and_list_entry(store, &format!("{dir}part-1")).await;
+    let removed = RemovedFile::Narthex(id);
+    // Expelled long ago, so the artifact is well past its lingering time.
+    let removed_files = BTreeMap::from([(
+        Timestamp::new_millisecond(0),
+        HashSet::from([removed.clone()]),
+    )]);
+
+    let DeletableFiles {
+        files,
+        narthex_parts,
+        ..
+    } = env
+        .worker
+        .list_to_be_deleted_files(
+            region_id,
+            &HashMap::new(),
+            &HashSet::new(),
+            removed_files.clone(),
+            listed.to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(files, vec![removed.clone()]);
+    assert_eq!(
+        narthex_parts.get(&id).map(Vec::len),
+        Some(listed.len()),
+        "every part this pass judged is reclaimed"
+    );
+    env.worker
+        .delete_files(region_id, &files, &narthex_parts)
+        .await
+        .unwrap();
+    for entry in &listed {
+        assert!(
+            !store.exists(entry.path()).await.unwrap(),
+            "a judged part is gone: {}",
+            entry.path()
+        );
+    }
+    assert!(
+        store.exists(late.path()).await.unwrap(),
+        "a part this pass never listed survives"
+    );
+    assert!(
+        store.exists(&dir).await.unwrap(),
+        "an artifact directory that is still not empty is left for a later pass"
+    );
+
+    // The next pass lists the late part as well and can finally reclaim the artifact.
+    let DeletableFiles {
+        files,
+        narthex_parts,
+        ..
+    } = env
+        .worker
+        .list_to_be_deleted_files(
+            region_id,
+            &HashMap::new(),
+            &HashSet::new(),
+            removed_files,
+            vec![late.clone()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(files, vec![removed]);
+    env.worker
+        .delete_files(region_id, &files, &narthex_parts)
+        .await
+        .unwrap();
+    assert!(!store.exists(late.path()).await.unwrap());
+    assert!(
+        !store.exists(&dir).await.unwrap(),
+        "the artifact directory goes once it is empty"
+    );
+}
+
+/// An object under a subdirectory of a live artifact — `<live_id>/<uuid>/part-x`,
+/// where nothing references `<uuid>` — is not an object of the artifact `<uuid>`.
+/// Judging it as one would delete it out of the live artifact `<live_id>`, so the
+/// canonical-directory check must leave the whole entry alone: it is never queued,
+/// and the unreferenced `<uuid>` never becomes a deletable artifact, even when the
+/// object is old enough to be deleted.
+#[tokio::test]
+async fn test_narthex_artifact_gc_keeps_unreferenced_subdirectory_of_live_artifact() {
+    let env = IndexGcTestEnv::new(true).await;
+    let region_id = env.meta.region_id;
+    let layer = &env.region.access_layer;
+    let store = layer.object_store();
+    let region_dir = layer.build_region_dir(region_id);
+    let live_id = FileId::random();
+    // A UUID directory nothing references: not an artifact of its own.
+    let nested_id = FileId::random();
+    let live_dir = location::narthex_file_dir(&region_dir, live_id);
+    let live_objects = [
+        format!("{live_dir}manifest.json"),
+        format!("{live_dir}part-0"),
+    ];
+    let nested_part = format!("{live_dir}{nested_id}/part-0");
+    for path in live_objects.iter().chain(std::iter::once(&nested_part)) {
+        store.write(path, b"narthex".as_slice()).await.unwrap();
+    }
+    // The owner parser takes the direct parent directory, so without the
+    // canonical-directory check this object looks like one of `<nested_id>`.
+    assert_eq!(
+        crate::sst::location::parse_narthex_file_id(&nested_part),
+        Some(nested_id)
+    );
+    let entries: Vec<_> = env
+        .worker
+        .list_from_object_store(region_id, 4)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.path().starts_with(&live_dir))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        3,
+        "the pass lists the live artifact's objects and the nested one"
+    );
+    // Old enough to pass the young-object rule, so only the path check can keep it.
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+
+    // `<live_id>` is a live artifact, i.e. it is still in the manifest.
+    let DeletableFiles {
+        files,
+        narthex_parts,
+        deferred_unknown,
+    } = env.worker.filter_deletable_files(
+        region_id,
+        entries.clone(),
+        &HashMap::from([(live_id, None)]),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        threshold,
+    );
+    assert!(
+        narthex_parts.is_empty(),
+        "no object of a live artifact is queued as a deletable part: {narthex_parts:?}"
+    );
+    assert!(
+        files.is_empty(),
+        "neither the live artifact nor the unreferenced directory is deletable: {files:?}"
+    );
+    assert!(
+        !deferred_unknown,
+        "the nested object is withheld by the path check, not by the young-object rule"
+    );
+
+    // Nothing is referenced now, so the live artifact's own objects are deletable
+    // and the nested object above is the only one the path check withholds.
+    let DeletableFiles {
+        files,
+        narthex_parts,
+        ..
+    } = env.worker.filter_deletable_files(
+        region_id,
+        entries,
+        &HashMap::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        threshold,
+    );
+    assert!(
+        files.contains(&RemovedFile::Narthex(live_id)),
+        "the live artifact's own objects stay deletable: {files:?}"
+    );
+    assert!(
+        !narthex_parts.contains_key(&nested_id),
+        "an unreferenced subdirectory of a live artifact is never a deletable artifact"
+    );
+    let mut judged = narthex_parts[&live_id].clone();
+    judged.sort();
+    let mut expected = live_objects.to_vec();
+    expected.sort();
+    assert_eq!(
+        judged, expected,
+        "only the artifact's own canonical objects are judged"
+    );
+    assert!(
+        !narthex_parts
+            .values()
+            .flatten()
+            .any(|part| *part == nested_part),
+        "the nested object is never queued for deletion"
+    );
 }
 
 #[tokio::test]
@@ -1973,7 +2275,12 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
     assert!(should_delete_file(
         false, false, false, false, &old, threshold
     ));
-    let (delete, deferred) = env.worker.filter_deletable_files(
+    let DeletableFiles {
+        files: delete,
+        deferred_unknown: deferred,
+        ..
+    } = env.worker.filter_deletable_files(
+        env.meta.region_id,
         vec![old, unknown],
         &HashMap::new(),
         &HashSet::new(),
