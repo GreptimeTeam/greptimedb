@@ -166,7 +166,7 @@ fn is_json_whitespace(byte: u8) -> bool {
 }
 
 impl RecordParser for JsonlRecordParser {
-    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
+    fn decode(&mut self, data: &[u8]) -> PgWireResult<usize> {
         if !self.started {
             // Report the most likely misuse of the `json` alias — a
             // top-level array — specifically; arrow-json would only say
@@ -178,34 +178,18 @@ impl RecordParser for JsonlRecordParser {
                 }
             }
         }
-        let mut buf = data;
-        let mut rows = Vec::new();
-        while !buf.is_empty() {
-            // `decode` returns once `batch_size` objects have been
-            // parsed since the last flush, leaving the rest of `buf` for
-            // the next call — which then consumes nothing, so the flush
-            // below runs mid-stream and the loop carries on.
-            let consumed = self.decoder.decode(buf).map_err(decode_error)?;
-            if consumed == 0 {
-                while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-                    rows.extend(self.flush_batch(&batch)?);
-                }
-            } else {
-                buf = &buf[consumed..];
-            }
-        }
-        Ok(rows)
+        self.decoder.decode(data).map_err(decode_error)
     }
 
-    fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>> {
-        // A trailing record without its newline is already complete
-        // (its `}` closed it); a truncated one fails in `flush` with
-        // "Truncated record". `Decoder::decode(&[])` would be a no-op.
-        let mut rows = Vec::new();
-        while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-            rows.extend(self.flush_batch(&batch)?);
+    fn is_full(&self) -> bool {
+        self.decoder.len() == COPY_IN_FLUSH_ROWS && !self.decoder.has_partial_record()
+    }
+
+    fn flush(&mut self) -> PgWireResult<Vec<ParsedRow>> {
+        match self.decoder.flush().map_err(decode_error)? {
+            Some(batch) => self.flush_batch(&batch),
+            None => Ok(Vec::new()),
         }
-        Ok(rows)
     }
 }
 
@@ -532,9 +516,8 @@ mod tests {
 
     #[test]
     fn test_jsonl_multi_batch_sweep_flushes_mid_stream() {
-        // More than two full batches, fed in chunks that align with
-        // nothing, so the mid-stream `consumed == 0` flush path in
-        // `feed` is exercised (the records are tiny to keep it quick).
+        // More than two full batches, fed in chunks that can split records,
+        // so batches must be detected and flushed before the stream ends.
         let total = 2 * COPY_IN_FLUSH_ROWS + 137;
         let mut payload = Vec::new();
         for i in 0..total {

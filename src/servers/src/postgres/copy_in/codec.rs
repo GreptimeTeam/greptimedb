@@ -171,14 +171,35 @@ pub(super) type ParsedRow = api::v1::Row;
 /// Incremental parser of one COPY FROM STDIN stream.
 ///
 /// The wire protocol delivers the payload as an arbitrary sequence of
-/// `CopyData` chunks; implementations must keep state across [`feed`]
-/// calls because records (and even single fields) may span chunk
-/// boundaries. [`finish`] is called at `CopyDone`; a final record without
-/// a trailing record separator is accepted.
+/// `CopyData` chunks; implementations keep state across [`Self::decode`]
+/// calls because records (and even single fields) may span chunk boundaries.
+/// The caller reserves memory before decoding and drains each full batch before
+/// supplying more input, even when one CopyData message contains many batches.
 pub(super) trait RecordParser: Send {
-    /// Feeds a chunk of `CopyData` bytes and returns all complete rows.
-    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>>;
-    /// Parses the buffered tail at `CopyDone`; returns no row when the
-    /// stream ended exactly at a record boundary.
-    fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>>;
+    /// Consumes at most one batch, returning the number of input bytes consumed.
+    /// An empty input signals EOF for parsers that need it to finalize a record.
+    fn decode(&mut self, data: &[u8]) -> PgWireResult<usize>;
+    /// Whether a complete batch is ready to flush.
+    fn is_full(&self) -> bool;
+    /// Converts the buffered batch into rows. Only valid at a full batch or EOF.
+    fn flush(&mut self) -> PgWireResult<Vec<ParsedRow>>;
+
+    fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>> {
+        self.decode(&[])?;
+        self.flush()
+    }
+
+    /// Convenience for parser tests. Production drains one batch at a time.
+    #[cfg(test)]
+    fn feed(&mut self, mut data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
+        let mut rows = Vec::new();
+        while !data.is_empty() {
+            let consumed = self.decode(data)?;
+            data = &data[consumed..];
+            if self.is_full() {
+                rows.extend(self.flush()?);
+            }
+        }
+        Ok(rows)
+    }
 }
